@@ -1,0 +1,11 @@
+{
+  "name": "tiny-hermes-workspace",
+  "private": true,
+  "packageManager": "pnpm@10.15.0",
+  "scripts": {
+    "web:dev": "pnpm --filter @tiny-hermes/web dev",
+    "web:test": "pnpm --filter @tiny-hermes/web test",
+    "web:build": "pnpm --filter @tiny-hermes/web build",
+    "web:lint": "pnpm --filter @tiny-hermes/web lint"
+  }
+}
