@@ -10,6 +10,7 @@ from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.identity.presentation.routes import identity_router
 from tiny_hermes.shared.config import Settings
 from tiny_hermes.shared.errors import AppError
+from tiny_hermes.tenancy.presentation.routes import workspace_router
 
 
 async def app_error_handler(request: Request, error: Exception) -> JSONResponse:
@@ -47,6 +48,7 @@ def create_app(
     app.add_exception_handler(AppError, app_error_handler)
     app.include_router(health_router(readiness))
     app.include_router(identity_router(resources))
+    app.include_router(workspace_router(resources))
     return app
 
 

@@ -11,6 +11,8 @@ from tiny_hermes.identity.application.auth_service import AuthService
 from tiny_hermes.identity.infrastructure.sql_store import SqlAuthStore
 from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.errors import AppError
+from tiny_hermes.tenancy.application.workspace_service import WorkspaceService
+from tiny_hermes.tenancy.infrastructure.sql_store import SqlWorkspaceStore
 
 
 class ApplicationResources:
@@ -55,3 +57,13 @@ class ApplicationResources:
     async def close(self) -> None:
         if self._engine is not None:
             await self._engine.dispose()
+
+    async def workspace_service(self) -> AsyncGenerator[WorkspaceService]:
+        async with self.session_factory()() as session:
+            try:
+                yield WorkspaceService(SqlWorkspaceStore(session))
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
