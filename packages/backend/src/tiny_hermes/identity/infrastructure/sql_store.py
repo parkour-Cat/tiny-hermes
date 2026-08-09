@@ -71,7 +71,7 @@ class SqlAuthStore:
         row = result.one_or_none()
         if row is None:
             return None
-        user, identity = row.tuple()
+        user, identity = row[0], row[1]
         return StoredIdentity(self._to_user(user, identity.subject), identity.password_hash)
 
     async def create_session(
@@ -104,7 +104,7 @@ class SqlAuthStore:
         row = result.one_or_none()
         if row is None:
             return None
-        auth_session, user, identity = row.tuple()
+        auth_session, user, identity = row[0], row[1], row[2]
         return StoredSession(
             self._to_user(user, identity.subject),
             auth_session.csrf_digest,
