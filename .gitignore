@@ -21,3 +21,4 @@ test-results/
 .vite/
 data/
 *.log
+tests/e2e/.auth/

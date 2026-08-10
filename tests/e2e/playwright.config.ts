@@ -1,12 +1,35 @@
 import { defineConfig } from "@playwright/test";
 
+import { CONSOLE_STATE } from "./session";
+
 export default defineConfig({
   testDir: ".",
   retries: 0,
   workers: 1,
+  // A Run is executed by a real Worker across real slices, so the console walk
+  // waits on work rather than on rendering. The default thirty seconds is a
+  // budget for a page, not for a platform.
+  timeout: 180_000,
+  expect: { timeout: 60_000 },
   reporter: [["list"], ["html", { open: "never" }]],
   use: {
     baseURL: "http://127.0.0.1:3000",
     trace: "retain-on-failure",
   },
+  projects: [
+    { name: "setup", testMatch: /.*\.setup\.ts$/ },
+    // Signing in is what this one is about, so it starts signed out and does it
+    // through the form; it only needs the account to exist.
+    {
+      name: "foundation",
+      testMatch: /foundation\.spec\.ts$/,
+      dependencies: ["setup"],
+    },
+    {
+      name: "console",
+      testMatch: /(console|stream-contract)\.spec\.ts$/,
+      dependencies: ["setup"],
+      use: { storageState: CONSOLE_STATE },
+    },
+  ],
 });

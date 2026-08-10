@@ -1,24 +1,19 @@
 import { expect, test } from "@playwright/test";
 
-const bootstrapToken =
-  process.env.TINY_HERMES_E2E_BOOTSTRAP_TOKEN ??
-  "local-bootstrap-token-with-32-characters";
+import { ADMIN } from "./session";
 
-test("bootstrap, login, create two workspaces and logout", async ({ page, request }) => {
-  const bootstrap = await request.post("/api/v1/bootstrap", {
-    headers: { "X-Bootstrap-Token": bootstrapToken },
-    data: {
-      subject: "admin@example.com",
-      display_name: "Admin",
-      password: "long-pass-123",
-    },
-  });
-  expect(bootstrap.status()).toBe(201);
-
+test("login, create two workspaces and logout", async ({ page }) => {
   await page.goto("/login");
-  await page.getByLabel("邮箱").fill("admin@example.com");
-  await page.getByLabel("密码").fill("long-pass-123");
+  await page.getByLabel("邮箱").fill(ADMIN.subject);
+  await page.getByLabel("密码").fill(ADMIN.password);
   await page.getByRole("button", { name: "登录" }).click();
+
+  // Counted against what this account already has rather than against zero:
+  // other specs sign in as the same administrator and leave workspaces behind,
+  // and "two more than before" is the fact this test is actually about.
+  await expect(page).toHaveURL(/\/workspaces$/);
+  await expect(page.getByRole("button", { name: "新建工作空间" })).toBeVisible();
+  const before = await page.getByRole("listitem").count();
 
   const suffix = Date.now();
   const firstName = `Workspace-${suffix}-A`;
@@ -33,7 +28,7 @@ test("bootstrap, login, create two workspaces and logout", async ({ page, reques
   await page.getByLabel("名称").fill(secondName);
   await page.getByRole("button", { name: "创建", exact: true }).click();
 
-  await expect(page.getByRole("listitem")).toHaveCount(2);
+  await expect(page.getByRole("listitem")).toHaveCount(before + 2);
   await page.reload();
   await expect(page.getByText(firstName, { exact: true })).toBeVisible();
   await expect(page.getByText(secondName, { exact: true })).toBeVisible();
