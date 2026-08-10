@@ -34,6 +34,7 @@ testpaths = ["packages/backend/tests"]
 addopts = "-ra"
 pythonpath = ["packages/backend/src"]
 asyncio_mode = "auto"
+markers = ["settings: override Settings fields for the live server fixture"]
 
 [tool.ruff]
 line-length = 100
@@ -49,7 +50,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "S"]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 include = ["packages/backend/src", "packages/backend/tests"]
-extraPaths = ["packages/backend/src"]
+extraPaths = ["packages/backend/src", "packages/backend/tests"]
 venvPath = "."
 venv = ".venv"
 

@@ -1,14 +1,21 @@
+import asyncio
+import contextlib
 import os
-from collections.abc import AsyncIterator, Callable
-from typing import Any
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from typing import Any, cast
 
 import httpx2 as httpx
 import pytest
+import uvicorn
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from tiny_hermes.api.app import create_app
 from tiny_hermes.shared.config import Settings
+
+from integration.support import EventsUrl, ReadStream
+
+STREAM_TIMEOUT = 20
 
 TRUNCATE = (
     "TRUNCATE idempotency_records, worker_leases, run_events, run_budget_scopes, "
@@ -228,6 +235,101 @@ async def concurrent_client(
         transport=transport, base_url="http://testserver", cookies=cookies
     ) as value:
         yield value
+
+
+@contextlib.asynccontextmanager
+async def _serving(settings: Settings) -> AsyncGenerator[str]:
+    """Run the real API on a real socket.
+
+    Every ASGI test transport available here buffers the whole response body
+    before returning it, which would make a streaming assertion meaningless and
+    a mid-stream disconnect impossible to express.
+    """
+    config = uvicorn.Config(
+        create_app(settings=settings), host="127.0.0.1", port=0, log_level="warning"
+    )
+    server = uvicorn.Server(config)
+    task = asyncio.create_task(server.serve())
+    try:
+        for _ in range(1_000):
+            if server.started:
+                break
+            await asyncio.sleep(0.01)
+        address: Any = server.servers[0].sockets[0].getsockname()
+        yield f"http://127.0.0.1:{int(address[1])}"
+    finally:
+        server.should_exit = True
+        await task
+
+
+@pytest.fixture
+def server_settings(settings: Settings, request: pytest.FixtureRequest) -> Settings:
+    """Settings for the live server, overridable per test.
+
+    A test that needs a different configuration marks itself with
+    ``@pytest.mark.settings(field=value)`` rather than standing up its own server.
+    """
+    # ``FixtureRequest.node`` carries no annotation upstream, so its type has to
+    # be asserted here rather than inferred.
+    node = cast(pytest.Item, request.node)  # pyright: ignore[reportUnknownMemberType]
+    marker = node.get_closest_marker("settings")
+    if marker is None:
+        return settings
+    return settings.model_copy(update=dict(marker.kwargs))
+
+
+@pytest.fixture
+async def live_server(
+    server_settings: Settings, client: TestClient
+) -> AsyncIterator[str]:
+    del client  # the bootstrap fixtures must prepare the same database first
+    async with _serving(server_settings) as url:
+        yield url
+
+
+@pytest.fixture
+async def browser(
+    live_server: str, client: TestClient, scope: dict[str, str]
+) -> AsyncIterator[httpx.AsyncClient]:
+    """A subscriber carrying the already authenticated browser session."""
+    del scope  # ordering only: the login must happen before the cookies are read
+    cookies = {name: value for name, value in client.cookies.items()}
+    async with httpx.AsyncClient(
+        base_url=live_server, cookies=cookies, timeout=STREAM_TIMEOUT
+    ) as value:
+        yield value
+
+
+@pytest.fixture
+def events_url(scope: dict[str, str]) -> EventsUrl:
+    """Address a Run's event stream the way a browser EventSource must."""
+
+    def build(run_id: Any, cursor: int | None = None, workspace_id: str = "") -> str:
+        selected = workspace_id or scope["X-Workspace-Id"]
+        url = f"/api/v1/runs/{run_id}/events?workspace_id={selected}"
+        return url if cursor is None else f"{url}&last_event_id={cursor}"
+
+    return build
+
+
+@pytest.fixture
+def read_stream(browser: httpx.AsyncClient) -> ReadStream:
+    """Read one event stream to its end, as a browser EventSource would."""
+
+    async def collect(
+        url: str, headers: dict[str, str] | None = None
+    ) -> list[httpx.ServerSentEvent]:
+        async def read() -> list[httpx.ServerSentEvent]:
+            frames: list[httpx.ServerSentEvent] = []
+            async with browser.stream("GET", url, headers=headers or {}) as response:
+                assert response.status_code == 200
+                async for frame in httpx.EventSource(response):
+                    frames.append(frame)
+            return frames
+
+        return await asyncio.wait_for(read(), timeout=STREAM_TIMEOUT)
+
+    return collect
 
 
 @pytest.fixture
