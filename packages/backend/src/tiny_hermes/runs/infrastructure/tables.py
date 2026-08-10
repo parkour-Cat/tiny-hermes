@@ -13,6 +13,7 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -114,6 +115,7 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
             name="ck_runs_checkpoint_effect_status",
         ),
         CheckConstraint("state_version > 0", name="ck_runs_state_version_positive"),
+        CheckConstraint("recovery_attempts >= 0", name="ck_runs_recovery_attempts"),
         CheckConstraint("next_event_sequence > 0", name="ck_runs_next_event_sequence"),
         CheckConstraint("session_sequence > 0", name="ck_runs_session_sequence_positive"),
         ForeignKeyConstraint(
@@ -168,6 +170,12 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    recovery_attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0")
+    )
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class RunBudgetScopeRow(Base):

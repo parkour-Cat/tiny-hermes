@@ -137,6 +137,19 @@ def published_agent(client: TestClient, scope: dict[str, str]) -> str:
 
 
 @pytest.fixture
+def submitted_run(
+    client: TestClient, scope: dict[str, str], session_id: str
+) -> dict[str, Any]:
+    created = client.post(
+        "/api/v1/runs",
+        headers={**scope, "Idempotency-Key": "run-1"},
+        json={"session_id": session_id, "input": "do the thing"},
+    )
+    assert created.status_code == 201
+    return dict(created.json())
+
+
+@pytest.fixture
 async def concurrent_client(
     settings: Settings, client: TestClient, scope: dict[str, str]
 ) -> AsyncIterator[httpx.AsyncClient]:

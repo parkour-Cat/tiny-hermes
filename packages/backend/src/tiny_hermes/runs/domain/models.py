@@ -93,6 +93,12 @@ class RunEventType(StrEnum):
     RUN_RETRY_DERIVED = "run_retry_derived"
     SESSION_HEAD_REPAIRED = "session_head_repaired"
 
+    # The one name that is not derived from a signal: it records the shared
+    # budget safety valve required by product design v2.4 section 12.3, which
+    # is a budget fact rather than a state transition. ``event_type_for`` still
+    # refuses to invent names, so this member must be written explicitly.
+    RUN_LIMIT_REACHED = "run_limit_reached"
+
     RUN_LEASE_ACQUIRED = "run_lease_acquired"
     RUN_SLICE_ENDED = "run_slice_ended"
     RUN_PAUSE_REQUESTED = "run_pause_requested"
