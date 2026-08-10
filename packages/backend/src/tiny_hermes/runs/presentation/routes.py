@@ -267,6 +267,33 @@ def run_router(resources: ApplicationResources) -> APIRouter:
             raise _as_app_error(error) from error
         return RunResponse.from_domain(updated)
 
+    @router.post("/{run_id}/retry", response_model=RunResponse)
+    async def retry_run(  # pyright: ignore[reportUnusedFunction]
+        run_id: UUID,
+        request: Request,
+        response: Response,
+        auth: Annotated[AuthService, Depends(auth_dependency)],
+        runs: Annotated[RunCoordination, Depends(runs_dependency)],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+        idempotency_key: IdempotencyHeader = None,
+    ) -> RunResponse:
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            accepted = await runs.retry_run(
+                workspace_id,
+                _actor(user),
+                run_id,
+                idempotency_key,
+                request.state.request_id,
+            )
+        except RunCoordinationError as error:
+            raise _as_app_error(error) from error
+        _apply_acceptance_headers(response, accepted.replayed, accepted.run_id)
+        return RunResponse.model_validate(accepted.document)
+
     @router.post("/{run_id}/pause", response_model=RunResponse)
     async def pause_run(  # pyright: ignore[reportUnusedFunction]
         run_id: UUID,

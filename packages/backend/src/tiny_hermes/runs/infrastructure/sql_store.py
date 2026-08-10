@@ -17,6 +17,11 @@ from tiny_hermes.runs.application.service import (
     EventSequenceConflict,
     ForbiddenRunAction,
     IdempotencyKeyReused,
+    RetryBudgetExhausted,
+    RetryContextStale,
+    RetryLimitReached,
+    RetryNotSafe,
+    RunCoordinationError,
     SessionAgentNotFound,
     StateVersionConflict,
     UnknownRun,
@@ -81,6 +86,13 @@ RESERVE_SEQUENCES = text(
 )
 
 IDEMPOTENCY_RETENTION = timedelta(hours=24)
+
+RETRY_ERRORS: dict[str, RunCoordinationError] = {
+    "retry_not_safe": RetryNotSafe(),
+    "retry_context_stale": RetryContextStale(),
+    "retry_budget_exhausted": RetryBudgetExhausted(),
+    "retry_limit_reached": RetryLimitReached(),
+}
 
 WAITING_HEAD_STATES = frozenset(
     {RunState.PAUSED, RunState.WAITING_APPROVAL, RunState.WAITING_EXTERNAL}
@@ -609,7 +621,168 @@ class SqlRunStore:
         )
 
     async def derive_retry(self, command: RetryRunCommand) -> AcceptedRun:
-        raise NotImplementedError("derived retries arrive with the shared budget rules")
+        """Create one Derived Retry that shares the failed Run's root budget.
+
+        Idempotency is claimed first, then the source Run, its Session, and the
+        single root budget row are locked in that order so concurrent retries
+        serialize on one counter.
+        """
+        if not command.capabilities.can_retry:
+            raise ForbiddenRunAction
+        replay = await self._claim_idempotency(
+            command.workspace_id,
+            command.caller.caller_type,
+            command.caller.caller_id,
+            command.endpoint,
+            command.idempotency_key,
+            command.request_fingerprint,
+        )
+        if isinstance(replay, AcceptedRun):
+            return replay
+
+        source = await self._lock_run(command.workspace_id, command.source_run_id)
+        if source is None:
+            raise UnknownRun
+        session = await self._lock_session(command.workspace_id, source.session_id)
+        if session is None:
+            raise UnknownSession
+        budget = await self._session.scalar(
+            select(RunBudgetScopeRow)
+            .where(RunBudgetScopeRow.root_run_id == source.budget_root_run_id)
+            .with_for_update()
+        )
+        if budget is None:
+            raise UnknownRun
+
+        blocker = await self._retry_blocker(source, session, _budget_summary(budget))
+        if blocker is not None:
+            raise RETRY_ERRORS[blocker]
+
+        consumed = await self._session.scalar(
+            update(RunBudgetScopeRow)
+            .where(
+                RunBudgetScopeRow.root_run_id == budget.root_run_id,
+                RunBudgetScopeRow.version == budget.version,
+                RunBudgetScopeRow.derived_retry_count < RunBudgetScopeRow.max_derived_retries,
+            )
+            .values(
+                derived_retry_count=RunBudgetScopeRow.derived_retry_count + 1,
+                version=RunBudgetScopeRow.version + 1,
+            )
+            .returning(RunBudgetScopeRow.derived_retry_count)
+            .execution_options(synchronize_session=False)
+        )
+        if consumed is None:
+            raise RetryLimitReached
+        await self._session.refresh(budget, ["derived_retry_count", "version"])
+
+        now = datetime.now(UTC)
+        run_id = uuid4()
+        run = RunRow(
+            id=run_id,
+            workspace_id=command.workspace_id,
+            session_id=session.id,
+            agent_version_id=source.agent_version_id,
+            status=RunState.QUEUED.value,
+            state_version=1,
+            next_event_sequence=1,
+            session_sequence=session.next_run_sequence,
+            blocked_by_run_id=session.head_run_id,
+            retry_of_run_id=source.id,
+            budget_root_run_id=source.budget_root_run_id,
+            checkpoint=source.checkpoint,
+            checkpoint_replay_safe=True,
+            checkpoint_effect_status=CheckpointEffectStatus.NONE.value,
+            checkpoint_workspace_revision_id=session.workspace_revision_id,
+            created_at=now,
+            updated_at=now,
+        )
+        self._session.add(run)
+        await self._session.flush()
+
+        await self._copy_checkpoint_messages(session, source, run_id, now)
+        session.next_run_sequence += 1
+        if session.head_run_id is None:
+            session.head_run_id = run_id
+        await self._session.flush()
+
+        await self.append_events(
+            AppendEventsCommand(
+                workspace_id=command.workspace_id,
+                run_id=source.id,
+                events=(
+                    ReservedEvent(
+                        RunEventType.RUN_RETRY_DERIVED, {"derived_run_id": str(run_id)}
+                    ),
+                ),
+            )
+        )
+        await self.append_events(
+            AppendEventsCommand(
+                workspace_id=command.workspace_id,
+                run_id=run_id,
+                events=(
+                    ReservedEvent(
+                        RunEventType.RUN_CREATED, {"retry_of_run_id": str(source.id)}
+                    ),
+                ),
+            )
+        )
+        self._audit(
+            command.workspace_id,
+            command.caller.caller_id,
+            "run.retry_derived",
+            "run",
+            run_id,
+            command.request_id,
+        )
+
+        document = (await self._snapshot(run, command.capabilities)).document()
+        await self._store_response(
+            command.workspace_id,
+            command.caller.caller_type,
+            command.caller.caller_id,
+            command.endpoint,
+            command.idempotency_key,
+            run_id,
+            document,
+        )
+        return AcceptedRun(run_id=run_id, document=document, replayed=False)
+
+    async def _copy_checkpoint_messages(
+        self, session: SessionRow, source: RunRow, run_id: UUID, now: datetime
+    ) -> None:
+        """Re-point the source Run's authorized messages at the Derived Retry.
+
+        Only references are copied; no message content is rewritten and no
+        redacted message is exposed.
+        """
+        rows = (
+            await self._session.scalars(
+                select(SessionMessageRow)
+                .where(
+                    SessionMessageRow.session_id == session.id,
+                    SessionMessageRow.source_run_id == source.id,
+                    SessionMessageRow.redacted.is_(False),
+                )
+                .order_by(SessionMessageRow.sequence)
+            )
+        ).all()
+        for row in rows:
+            self._session.add(
+                SessionMessageRow(
+                    id=uuid4(),
+                    session_id=session.id,
+                    workspace_id=session.workspace_id,
+                    sequence=session.next_message_sequence,
+                    role=row.role,
+                    content=row.content,
+                    source_run_id=run_id,
+                    redacted=False,
+                    created_at=now,
+                )
+            )
+            session.next_message_sequence += 1
 
     async def _claim_idempotency(
         self,
@@ -789,7 +962,13 @@ class SqlRunStore:
     async def _retry_blocker(
         self, run: RunRow, session: SessionRow, budget: BudgetSummary
     ) -> str | None:
-        """Return the design error code that forbids a retry, or None."""
+        """Return the design error code that forbids a retry, or None.
+
+        Root-budget limits are reported before Session position, because an
+        exhausted shared allowance is the durable reason: once a competing
+        retry wins the last slot, the source is also no longer the latest Run,
+        and the limit is the answer the caller can act on.
+        """
         if RunState(run.status) is not RunState.FAILED:
             return "retry_not_safe"
         if not run.checkpoint_replay_safe:
@@ -797,6 +976,12 @@ class SqlRunStore:
         effect = CheckpointEffectStatus(run.checkpoint_effect_status)
         if effect is CheckpointEffectStatus.UNKNOWN:
             return "retry_not_safe"
+        if budget.derived_retry_count >= budget.max_derived_retries:
+            return "retry_limit_reached"
+        if not budget.allows_execution(datetime.now(UTC)):
+            return "retry_budget_exhausted"
+        if budget.consumed_tool_calls >= budget.max_tool_calls:
+            return "retry_budget_exhausted"
         latest = await self._session.scalar(
             select(RunRow.session_sequence)
             .where(RunRow.session_id == run.session_id)
@@ -807,12 +992,6 @@ class SqlRunStore:
             return "retry_context_stale"
         if session.workspace_revision_id != run.checkpoint_workspace_revision_id:
             return "retry_context_stale"
-        if not budget.allows_execution(datetime.now(UTC)):
-            return "retry_budget_exhausted"
-        if budget.consumed_tool_calls >= budget.max_tool_calls:
-            return "retry_budget_exhausted"
-        if budget.derived_retry_count >= budget.max_derived_retries:
-            return "retry_limit_reached"
         return None
 
     def _audit(
