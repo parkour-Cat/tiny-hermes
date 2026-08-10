@@ -1,4 +1,6 @@
 .git
+.env
+.env.*
 .venv
 .uv-cache
 .pytest_cache

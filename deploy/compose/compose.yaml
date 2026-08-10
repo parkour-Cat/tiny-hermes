@@ -52,8 +52,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       S3_ENDPOINT: http://minio:9000
       S3_BUCKET: tiny-hermes
-      SESSION_COOKIE_SECRET: local-cookie-secret-with-32-characters
-      BOOTSTRAP_TOKEN: local-bootstrap-token-with-32-characters
+      SESSION_COOKIE_SECRET: ${SESSION_COOKIE_SECRET:-local-cookie-secret-with-32-characters}
+      BOOTSTRAP_TOKEN: ${BOOTSTRAP_TOKEN:-local-bootstrap-token-with-32-characters}
     depends_on:
       postgres:
         condition: service_healthy
@@ -80,6 +80,20 @@ services:
       timeout: 3s
       retries: 20
     ports: ["8000:8000"]
+
+  web:
+    build:
+      context: ../..
+      dockerfile: apps/web/Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports: ["3000:3000"]
 
 volumes:
   postgres-data:
