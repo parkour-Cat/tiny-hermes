@@ -15,6 +15,8 @@ const NAMED: Partial<Record<string, MessageKey>> = {
   invalid_agent_name: "invalidAgentName",
   invalid_agent_spec: "invalidAgentSpec",
   draft_revision_conflict: "draftRevisionConflict",
+  agent_not_published: "agentNotPublished",
+  idempotency_key_reused: "idempotencyKeyReused",
   forbidden: "forbidden",
   workspace_scope_mismatch: "forbidden",
 };

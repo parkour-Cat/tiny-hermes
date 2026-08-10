@@ -22,6 +22,9 @@ const BootstrapPage = lazy(() =>
 const LoginPage = lazy(() =>
   import("./pages/LoginPage").then((module) => ({ default: module.LoginPage })),
 );
+const RunsPage = lazy(() =>
+  import("./pages/RunsPage").then((module) => ({ default: module.RunsPage })),
+);
 const WorkspacesPage = lazy(() =>
   import("./pages/WorkspacesPage").then((module) => ({ default: module.WorkspacesPage })),
 );
@@ -65,6 +68,7 @@ function AppRoutes() {
           <Route index element={<Navigate to="agents" replace />} />
           <Route path="agents" element={<AgentsPage />} />
           <Route path="agents/:agentId" element={<AgentDetailPage />} />
+          <Route path="runs" element={<RunsPage />} />
         </Route>
         <Route
           path="*"

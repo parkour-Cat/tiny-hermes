@@ -50,8 +50,11 @@ export type SessionResponse = {
   id: string;
   agent_id: string;
   session_mode: string;
+  caller_type: string;
+  caller_id: string;
   head_run_id: string | null;
   next_run_sequence: number;
+  next_message_sequence: number;
   created_at: string;
 };
 
