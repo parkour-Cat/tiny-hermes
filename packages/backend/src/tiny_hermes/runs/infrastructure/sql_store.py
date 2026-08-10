@@ -1,9 +1,10 @@
+import hashlib
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -752,6 +753,254 @@ class SqlRunStore:
             statement = statement.where(RunRow.session_id == command.session_id)
         return await self._session.scalar(statement)
 
+    async def try_scan_lock(self, name: str) -> bool:
+        """Take the advisory lock for one scan family, or report it is taken.
+
+        The lock is an efficiency measure only: every repair below still uses
+        row locks and version predicates, so a lost lock cannot cause a wrong
+        result, only a skipped cycle.
+        """
+        taken = await self._session.scalar(
+            select(func.pg_try_advisory_xact_lock(_scan_lock_key(name)))
+        )
+        return bool(taken)
+
+    async def expired_lease_runs(self, now: datetime, limit: int) -> Sequence[UUID]:
+        rows = await self._session.scalars(
+            select(RunRow.id)
+            .join(WorkerLeaseRow, WorkerLeaseRow.run_id == RunRow.id)
+            .where(
+                RunRow.status.in_(
+                    [RunState.RUNNING.value, RunState.CANCELLING.value]
+                ),
+                WorkerLeaseRow.released_at.is_(None),
+                WorkerLeaseRow.expires_at <= now,
+            )
+            .order_by(RunRow.updated_at)
+            .limit(limit)
+        )
+        return list(rows.all())
+
+    async def reclaim_expired_lease(self, run_id: UUID, request_id: str) -> None:
+        """Interrupt a Run whose Worker stopped renewing.
+
+        There is no sandbox to stop in phase 2B, so the product's
+        sandbox-stopped precondition is satisfied by construction. Phase 3 adds
+        the real check here rather than pretending one exists now.
+        """
+        run = await self._lock_run_any_workspace(run_id)
+        if run is None or RunState(run.status) in TERMINAL_STATES:
+            return
+        session = await self._lock_session(run.workspace_id, run.session_id)
+        if session is None:
+            return
+        await self._release_lease(run_id)
+        await self._decide_and_write(
+            run,
+            session,
+            RunSignal.INTERRUPTED,
+            pause_reason=None,
+            wait_kind=None,
+            wait_deadline_at=None,
+            request_id=request_id,
+            payload={"reason": "lease_expired"},
+        )
+
+    async def recover_interrupted(
+        self, run_id: UUID, max_attempts: int, request_id: str
+    ) -> RunState | None:
+        """Return an interrupted Run to the queue only when that is safe."""
+        run = await self._lock_run_any_workspace(run_id)
+        if run is None or RunState(run.status) is not RunState.INTERRUPTED:
+            return None
+        session = await self._lock_session(run.workspace_id, run.session_id)
+        budget = await self._session.get(RunBudgetScopeRow, run.budget_root_run_id)
+        if session is None or budget is None:
+            return None
+
+        effect = CheckpointEffectStatus(run.checkpoint_effect_status)
+        safe = (
+            run.checkpoint_replay_safe
+            and effect is not CheckpointEffectStatus.UNKNOWN
+            and _budget_summary(budget).allows_execution(datetime.now(UTC))
+            and run.recovery_attempts < max_attempts
+        )
+        if safe:
+            run.recovery_attempts += 1
+        signal = RunSignal.RECOVERY_APPROVED if safe else RunSignal.RECOVERY_FAILED
+        await self._decide_and_write(
+            run,
+            session,
+            signal,
+            pause_reason=None,
+            wait_kind=None,
+            wait_deadline_at=None,
+            request_id=request_id,
+            payload={"replay_safe": run.checkpoint_replay_safe},
+        )
+        return RunState(run.status)
+
+    async def interrupted_runs(self, limit: int) -> Sequence[UUID]:
+        rows = await self._session.scalars(
+            select(RunRow.id)
+            .where(RunRow.status == RunState.INTERRUPTED.value)
+            .order_by(RunRow.updated_at)
+            .limit(limit)
+        )
+        return list(rows.all())
+
+    async def workspace_of(self, run_id: UUID) -> UUID | None:
+        return await self._session.scalar(
+            select(RunRow.workspace_id).where(RunRow.id == run_id)
+        )
+
+    async def sessions_needing_repair(self, limit: int) -> Sequence[UUID]:
+        """Sessions whose head or blockers disagree with the FIFO invariant."""
+        live = (
+            select(
+                RunRow.session_id.label("session_id"),
+                func.min(RunRow.session_sequence).label("smallest"),
+            )
+            .where(RunRow.status.not_in([state.value for state in TERMINAL_STATES]))
+            .group_by(RunRow.session_id)
+            .subquery()
+        )
+        head = (
+            select(RunRow.session_id, RunRow.session_sequence, RunRow.status)
+            .subquery()
+        )
+        statement = (
+            select(SessionRow.id)
+            .outerjoin(live, live.c.session_id == SessionRow.id)
+            .outerjoin(
+                head,
+                (head.c.session_id == SessionRow.id)
+                & (SessionRow.head_run_id.is_not(None)),
+            )
+            .where(
+                (
+                    (SessionRow.head_run_id.is_(None)) & (live.c.smallest.is_not(None))
+                )
+                | (
+                    (SessionRow.head_run_id.is_not(None)) & (live.c.smallest.is_(None))
+                )
+                | SessionRow.id.in_(
+                    select(RunRow.session_id).where(
+                        RunRow.status.not_in(
+                            [state.value for state in TERMINAL_STATES]
+                        ),
+                        RunRow.id != SessionRow.head_run_id,
+                        RunRow.blocked_by_run_id.is_distinct_from(
+                            SessionRow.head_run_id
+                        ),
+                    )
+                )
+                | SessionRow.id.in_(
+                    select(RunRow.session_id).where(
+                        RunRow.id == SessionRow.head_run_id,
+                        RunRow.session_sequence > live.c.smallest,
+                    )
+                )
+                | SessionRow.head_run_id.in_(
+                    select(RunRow.id).where(
+                        RunRow.status.in_([state.value for state in TERMINAL_STATES])
+                    )
+                )
+            )
+            .distinct()
+            .limit(limit)
+        )
+        rows = await self._session.scalars(statement)
+        return list(rows.all())
+
+    async def expired_wait_runs(self, now: datetime, limit: int) -> Sequence[UUID]:
+        rows = await self._session.scalars(
+            select(RunRow.id)
+            .where(
+                RunRow.status == RunState.WAITING_EXTERNAL.value,
+                RunRow.wait_deadline_at.is_not(None),
+                RunRow.wait_deadline_at <= now,
+            )
+            .order_by(RunRow.wait_deadline_at)
+            .limit(limit)
+        )
+        return list(rows.all())
+
+    async def time_out_external_wait(self, run_id: UUID, request_id: str) -> None:
+        run = await self._lock_run_any_workspace(run_id)
+        if run is None or RunState(run.status) is not RunState.WAITING_EXTERNAL:
+            return
+        session = await self._lock_session(run.workspace_id, run.session_id)
+        if session is None:
+            return
+        await self._decide_and_write(
+            run,
+            session,
+            RunSignal.EXTERNAL_PAUSED,
+            pause_reason=PauseReason.EXTERNAL_TIMEOUT,
+            wait_kind=None,
+            wait_deadline_at=None,
+            request_id=request_id,
+            payload={"reason": "wait_deadline_passed"},
+        )
+
+    async def delete_expired_idempotency_records(
+        self, now: datetime, limit: int
+    ) -> int:
+        doomed = (
+            select(IdempotencyRecordRow.id)
+            .where(
+                IdempotencyRecordRow.expires_at.is_not(None),
+                IdempotencyRecordRow.expires_at <= now,
+            )
+            .limit(limit)
+            .scalar_subquery()
+        )
+        removed = await self._session.scalars(
+            delete(IdempotencyRecordRow)
+            .where(IdempotencyRecordRow.id.in_(doomed))
+            .returning(IdempotencyRecordRow.id)
+            .execution_options(synchronize_session=False)
+        )
+        return len(removed.all())
+
+    async def prune_terminal_run_events(self, before: datetime, limit: int) -> int:
+        """Drop old events for finished Runs only.
+
+        A live subscriber must never lose an event it can still legitimately
+        ask for, so non-terminal Runs keep everything.
+        """
+        doomed = (
+            select(RunEventRow.id)
+            .join(RunRow, RunRow.id == RunEventRow.run_id)
+            .where(
+                RunRow.status.in_([state.value for state in TERMINAL_STATES]),
+                RunEventRow.occurred_at < before,
+            )
+            .limit(limit)
+            .scalar_subquery()
+        )
+        pruned = await self._session.scalars(
+            delete(RunEventRow)
+            .where(RunEventRow.id.in_(doomed))
+            .returning(RunEventRow.id)
+            .execution_options(synchronize_session=False)
+        )
+        return len(pruned.all())
+
+    async def _lock_run_any_workspace(self, run_id: UUID) -> RunRow | None:
+        return await self._session.scalar(
+            select(RunRow).where(RunRow.id == run_id).with_for_update()
+        )
+
+    async def _release_lease(self, run_id: UUID) -> None:
+        await self._session.execute(
+            update(WorkerLeaseRow)
+            .where(WorkerLeaseRow.run_id == run_id, WorkerLeaseRow.released_at.is_(None))
+            .values(released_at=datetime.now(UTC))
+            .execution_options(synchronize_session=False)
+        )
+
     async def repair_session_head(
         self, session_id: UUID, request_id: str
     ) -> RepairResult:
@@ -1336,3 +1585,9 @@ def _message_text(row: SessionMessageRow | None) -> str:
         if fields.get("type") == "text":
             texts.append(str(fields.get("text", "")))
     return "\n".join(texts)
+
+
+def _scan_lock_key(name: str) -> int:
+    """A stable 63-bit advisory lock key for one scan family."""
+    digest = hashlib.sha256(name.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") >> 1

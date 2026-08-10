@@ -20,6 +20,7 @@ dependencies = [
 [project.scripts]
 tiny-hermes-api = "tiny_hermes.api.cli:main"
 tiny-hermes-worker = "tiny_hermes.api.cli:worker_main"
+tiny-hermes-scheduler = "tiny_hermes.api.cli:scheduler_main"
 
 [build-system]
 requires = ["hatchling"]
