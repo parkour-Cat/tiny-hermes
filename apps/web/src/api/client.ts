@@ -3,6 +3,19 @@ import { t } from "../i18n/zh-CN";
 type ProblemDetails = {
   code?: string;
   detail?: string;
+  context?: Record<string, unknown>;
+};
+
+export type ApiInit = RequestInit & {
+  /**
+   * The Workspace this request is scoped to, sent as `X-Workspace-Id`.
+   *
+   * Passed explicitly rather than read from a context or a module-level store:
+   * an ambient workspace makes a wrong-scope call look exactly like a right one
+   * at the call site, and scope is the one thing this console must never get
+   * quietly wrong. The route parameter is the single source (`useWorkspaceId`).
+   */
+  workspace?: string;
 };
 
 export class ApiError extends Error {
@@ -10,6 +23,12 @@ export class ApiError extends Error {
     public readonly status: number,
     public readonly code: string,
     message: string,
+    /**
+     * Problem Details `context`. The event stream's `410` puts
+     * `earliest_available_sequence` here, and without it the console cannot
+     * resynchronize honestly.
+     */
+    public readonly context: Record<string, unknown> = {},
   ) {
     super(message);
     this.name = "ApiError";
@@ -24,19 +43,28 @@ function csrfToken(): string | undefined {
   return value === undefined ? undefined : decodeURIComponent(value);
 }
 
-export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const headers = new Headers(init.headers);
+export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
+  const { workspace, ...request } = init;
+  const headers = new Headers(request.headers);
   headers.set("Content-Type", "application/json");
-  const method = (init.method ?? "GET").toUpperCase();
+  if (workspace !== undefined) {
+    headers.set("X-Workspace-Id", workspace);
+  }
+
+  const method = (request.method ?? "GET").toUpperCase();
   const csrf = csrfToken();
-  if (["POST", "PATCH", "DELETE"].includes(method) && csrf !== undefined) {
+  // Stated by exclusion, not as an allowlist of write methods. The allowlist
+  // this replaces omitted PUT, so saving an agent draft would have failed with
+  // csrf_failed; the backend gates CSRF on the write dependency rather than on
+  // a list of methods, and this now says the same thing.
+  if (method !== "GET" && method !== "HEAD" && csrf !== undefined) {
     headers.set("X-CSRF-Token", csrf);
   }
 
   let response: Response;
   try {
     response = await fetch(path, {
-      ...init,
+      ...request,
       credentials: "include",
       headers,
     });
@@ -45,17 +73,23 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
 
   if (!response.ok) {
-    let problem: ProblemDetails;
-    try {
-      problem = (await response.json()) as ProblemDetails;
-    } catch {
-      problem = {};
-    }
-    throw new ApiError(
-      response.status,
-      problem.code ?? "request_failed",
-      problem.detail ?? t("requestFailed"),
-    );
+    throw await asApiError(response);
   }
   return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
+}
+
+/** Reads a Problem Details body into an `ApiError`, tolerating a missing one. */
+export async function asApiError(response: Response): Promise<ApiError> {
+  let problem: ProblemDetails;
+  try {
+    problem = (await response.json()) as ProblemDetails;
+  } catch {
+    problem = {};
+  }
+  return new ApiError(
+    response.status,
+    problem.code ?? "request_failed",
+    problem.detail ?? t("requestFailed"),
+    problem.context ?? {},
+  );
 }

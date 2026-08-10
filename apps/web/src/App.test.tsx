@@ -1,35 +1,40 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, expect, test, vi } from "vitest";
+import { http, HttpResponse } from "msw";
+import { expect, test } from "vitest";
 
 import { App } from "./App";
+import { server } from "./test/server";
 
-afterEach(() => vi.restoreAllMocks());
+const ADMIN = {
+  id: "u1",
+  subject: "admin@example.com",
+  display_name: "Admin",
+  status: "active",
+  is_platform_admin: true,
+};
 
 test("logs in and creates a workspace through the API", async () => {
-  const fetchMock = vi.spyOn(globalThis, "fetch");
-  fetchMock
-    .mockResolvedValueOnce(
-      new Response(JSON.stringify({ code: "unauthenticated" }), { status: 401 }),
-    )
-    .mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          id: "u1",
-          subject: "admin@example.com",
-          display_name: "Admin",
-          status: "active",
-          is_platform_admin: true,
-        }),
-        { status: 201 },
-      ),
-    )
-    .mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }))
-    .mockResolvedValueOnce(
-      new Response(JSON.stringify({ id: "w1", name: "Acme", status: "active" }), {
-        status: 201,
-      }),
-    );
+  let signedIn = false;
+  const workspaces: { id: string; name: string; status: string }[] = [];
+  const created: string[] = [];
+  server.use(
+    http.get("/api/v1/auth/me", () =>
+      signedIn ? HttpResponse.json(ADMIN) : HttpResponse.json({ code: "unauthenticated" }, { status: 401 }),
+    ),
+    http.post("/api/v1/auth/sessions", () => {
+      signedIn = true;
+      return HttpResponse.json(ADMIN, { status: 201 });
+    }),
+    http.get("/api/v1/workspaces", () => HttpResponse.json(workspaces)),
+    http.post("/api/v1/workspaces", async ({ request }) => {
+      const body = (await request.json()) as { name: string };
+      created.push(body.name);
+      const workspace = { id: "w1", name: body.name, status: "active" };
+      workspaces.push(workspace);
+      return HttpResponse.json(workspace, { status: 201 });
+    }),
+  );
 
   render(<App />);
   await userEvent.type(await screen.findByLabelText("邮箱"), "admin@example.com");
@@ -40,8 +45,5 @@ test("logs in and creates a workspace through the API", async () => {
   await userEvent.click(screen.getByRole("button", { name: "创建" }));
 
   expect(await screen.findByText("Acme")).toBeInTheDocument();
-  expect(fetchMock).toHaveBeenLastCalledWith(
-    "/api/v1/workspaces",
-    expect.objectContaining({ method: "POST" }),
-  );
+  expect(created).toEqual(["Acme"]);
 });
