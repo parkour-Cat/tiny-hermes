@@ -13,6 +13,9 @@ const ConsoleLayout = lazy(() =>
 const AgentsPage = lazy(() =>
   import("./pages/AgentsPage").then((module) => ({ default: module.AgentsPage })),
 );
+const AgentDetailPage = lazy(() =>
+  import("./pages/AgentDetailPage").then((module) => ({ default: module.AgentDetailPage })),
+);
 const BootstrapPage = lazy(() =>
   import("./pages/BootstrapPage").then((module) => ({ default: module.BootstrapPage })),
 );
@@ -61,6 +64,7 @@ function AppRoutes() {
         >
           <Route index element={<Navigate to="agents" replace />} />
           <Route path="agents" element={<AgentsPage />} />
+          <Route path="agents/:agentId" element={<AgentDetailPage />} />
         </Route>
         <Route
           path="*"

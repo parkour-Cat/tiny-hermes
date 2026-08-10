@@ -13,6 +13,8 @@ const NAMED: Partial<Record<string, MessageKey>> = {
   agent_alias_taken: "agentAliasTaken",
   invalid_agent_alias: "invalidAgentAlias",
   invalid_agent_name: "invalidAgentName",
+  invalid_agent_spec: "invalidAgentSpec",
+  draft_revision_conflict: "draftRevisionConflict",
   forbidden: "forbidden",
   workspace_scope_mismatch: "forbidden",
 };

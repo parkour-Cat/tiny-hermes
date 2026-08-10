@@ -158,6 +158,16 @@ body {
   overflow-wrap: anywhere;
 }
 
+.limit-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0 20px;
+}
+
+.fact-note {
+  margin: 8px 0 0;
+}
+
 .centered-state {
   min-height: 100vh;
   display: grid;
