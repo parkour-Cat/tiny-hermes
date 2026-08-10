@@ -12,7 +12,10 @@ from tiny_hermes.agents.infrastructure.sql_store import SqlAgentStore
 from tiny_hermes.identity.application.auth_service import AuthService
 from tiny_hermes.identity.infrastructure.sql_store import SqlAuthStore
 from tiny_hermes.runs.application.service import RunCoordination
+from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
+from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
+from tiny_hermes.runs.ports.notifier import WakeUpNotifier
 from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.errors import AppError, AuditedDenial
 from tiny_hermes.tenancy.application.workspace_service import WorkspaceService
@@ -24,6 +27,7 @@ class ApplicationResources:
         self._settings = settings
         self._engine: AsyncEngine | None = None
         self._session_factory: async_sessionmaker[AsyncSession] | None = None
+        self._notifier: WakeUpNotifier | None = None
 
     @property
     def settings(self) -> Settings:
@@ -66,7 +70,18 @@ class ApplicationResources:
             else:
                 await session.commit()
 
+    def wake_up_notifier(self) -> WakeUpNotifier:
+        """Notifications only; the platform is correct without them."""
+        if self._notifier is None:
+            url = self.settings.redis_url
+            self._notifier = (
+                RedisWakeUpNotifier(url) if url else NullWakeUpNotifier()
+            )
+        return self._notifier
+
     async def close(self) -> None:
+        if self._notifier is not None:
+            await self._notifier.close()
         if self._engine is not None:
             await self._engine.dispose()
 
