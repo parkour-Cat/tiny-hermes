@@ -33,6 +33,7 @@ from tiny_hermes.runs.domain.models import (
     RunCapabilities,
     RunEvent,
     RunEventType,
+    RunSignal,
     RunSnapshot,
     RunState,
     RunStateView,
@@ -55,6 +56,7 @@ from tiny_hermes.runs.infrastructure.tables import (
     RunRow,
     SessionMessageRow,
     SessionRow,
+    WorkerLeaseRow,
 )
 from tiny_hermes.runs.ports.store import (
     AcceptedRun,
@@ -442,12 +444,169 @@ class SqlRunStore:
         await self._session.flush()
 
     async def claim_head(self, command: ClaimRunCommand) -> ClaimedRun | None:
-        raise NotImplementedError("lease claiming arrives with the coordination seam")
+        """Take one queued Head Run and its single lease, or take nothing.
+
+        This slice only fixes the transaction shape; it does not renew, expire,
+        or execute the lease.
+        """
+        now = datetime.now(UTC)
+        candidate = await self._select_claimable(command, now)
+        if candidate is None:
+            return None
+
+        session = await self._lock_session(command.workspace_id, candidate.session_id)
+        if session is None or session.head_run_id != candidate.id:
+            return None
+
+        budget = await self._session.get(RunBudgetScopeRow, candidate.budget_root_run_id)
+        if budget is None:
+            raise UnknownRun
+        decision = self._machine.decide(
+            RunStateView(
+                state=RunState(candidate.status),
+                budget_allows_execution=_budget_summary(budget).allows_execution(now),
+            ),
+            RunSignal.LEASE_ACQUIRED,
+        )
+        _apply_decision(candidate, decision, now)
+        candidate.state_version += 1
+        candidate.updated_at = now
+
+        lease_id = uuid4()
+        expires_at = now + timedelta(seconds=command.lease_seconds)
+        await self._session.execute(
+            pg_insert(WorkerLeaseRow)
+            .values(
+                id=lease_id,
+                run_id=candidate.id,
+                worker_id=command.worker_id,
+                acquired_at=now,
+                expires_at=expires_at,
+                released_at=None,
+                version=1,
+            )
+            .on_conflict_do_update(
+                constraint="uq_worker_leases_run",
+                set_={
+                    "id": lease_id,
+                    "worker_id": command.worker_id,
+                    "acquired_at": now,
+                    "expires_at": expires_at,
+                    "released_at": None,
+                    "version": WorkerLeaseRow.version + 1,
+                },
+            )
+        )
+        await self._session.flush()
+
+        await self.append_events(
+            AppendEventsCommand(
+                workspace_id=command.workspace_id,
+                run_id=candidate.id,
+                events=(
+                    ReservedEvent(
+                        RunEventType.RUN_LEASE_ACQUIRED, {"worker_id": command.worker_id}
+                    ),
+                ),
+            )
+        )
+        self._audit(
+            command.workspace_id,
+            None,
+            "run.lease_acquired",
+            "run",
+            candidate.id,
+            command.request_id,
+        )
+        snapshot = await self._snapshot(candidate, command.capabilities)
+        return ClaimedRun(run=snapshot, lease_id=lease_id, lease_expires_at=expires_at)
+
+    async def _select_claimable(
+        self, command: ClaimRunCommand, now: datetime
+    ) -> RunRow | None:
+        """Queued, Session Head, unblocked, and not already leased."""
+        held = (
+            select(WorkerLeaseRow.run_id)
+            .where(WorkerLeaseRow.released_at.is_(None), WorkerLeaseRow.expires_at > now)
+            .scalar_subquery()
+        )
+        statement = (
+            select(RunRow)
+            .join(SessionRow, SessionRow.id == RunRow.session_id)
+            .where(
+                RunRow.workspace_id == command.workspace_id,
+                RunRow.status == RunState.QUEUED.value,
+                SessionRow.head_run_id == RunRow.id,
+                RunRow.blocked_by_run_id.is_(None),
+                RunRow.id.not_in(held),
+            )
+            .order_by(RunRow.created_at, RunRow.id)
+            .limit(1)
+            .with_for_update(of=RunRow, skip_locked=True)
+        )
+        if command.session_id is not None:
+            statement = statement.where(RunRow.session_id == command.session_id)
+        return await self._session.scalar(statement)
 
     async def repair_session_head(
         self, session_id: UUID, request_id: str
     ) -> RepairResult:
-        raise NotImplementedError("head repair arrives with the coordination seam")
+        """Recompute one Session head; write nothing when nothing was wrong.
+
+        The single-Session lock is the seam a phase-2B Scheduler will wrap in a
+        global advisory lock. This slice starts no loop and takes no such lock.
+        """
+        session = await self._session.scalar(
+            select(SessionRow).where(SessionRow.id == session_id).with_for_update()
+        )
+        if session is None:
+            raise UnknownSession
+
+        candidates = (
+            await self._session.scalars(
+                select(RunRow)
+                .where(
+                    RunRow.session_id == session_id,
+                    RunRow.status.not_in([state.value for state in TERMINAL_STATES]),
+                )
+                .order_by(RunRow.session_sequence)
+                .with_for_update()
+            )
+        ).all()
+        expected_head = candidates[0].id if candidates else None
+
+        now = datetime.now(UTC)
+        changed = session.head_run_id != expected_head
+        for index, run in enumerate(candidates):
+            expected_blocker = None if index == 0 else expected_head
+            if run.blocked_by_run_id != expected_blocker:
+                run.blocked_by_run_id = expected_blocker
+                run.updated_at = now
+                changed = True
+        session.head_run_id = expected_head
+        if not changed:
+            return RepairResult(session_id=session_id, changed=False, head_run_id=None)
+
+        await self._session.flush()
+        if expected_head is not None:
+            await self.append_events(
+                AppendEventsCommand(
+                    workspace_id=session.workspace_id,
+                    run_id=expected_head,
+                    events=(ReservedEvent(RunEventType.SESSION_HEAD_REPAIRED, {}),),
+                )
+            )
+        self._audit(
+            session.workspace_id,
+            None,
+            "session.head_repaired",
+            "session",
+            session_id,
+            request_id,
+        )
+        return RepairResult(
+            session_id=session_id, changed=True, head_run_id=expected_head
+        )
 
     async def derive_retry(self, command: RetryRunCommand) -> AcceptedRun:
         raise NotImplementedError("derived retries arrive with the shared budget rules")
