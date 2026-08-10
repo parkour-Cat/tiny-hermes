@@ -81,6 +81,8 @@ from tiny_hermes.runs.ports.store import (
     RepairResult,
     ReservedEvent,
     RetryRunCommand,
+    RunEventRecord,
+    RunEventWindow,
 )
 from tiny_hermes.tenancy.domain.models import Role
 from tiny_hermes.tenancy.infrastructure.tables import MembershipRow
@@ -334,6 +336,50 @@ class SqlRunStore:
             raise EventSequenceConflict from error
         await self._forget_cached_sequence(command.run_id)
         return tuple(written)
+
+    async def event_window(
+        self, workspace_id: UUID, run_id: UUID
+    ) -> RunEventWindow | None:
+        run = await self._session.scalar(
+            select(RunRow).where(RunRow.id == run_id, RunRow.workspace_id == workspace_id)
+        )
+        if run is None:
+            return None
+        earliest = await self._session.scalar(
+            select(func.min(RunEventRow.sequence)).where(
+                RunEventRow.run_id == run_id, RunEventRow.workspace_id == workspace_id
+            )
+        )
+        return RunEventWindow(
+            earliest_sequence=None if earliest is None else int(earliest),
+            next_sequence=run.next_event_sequence,
+            is_terminal=RunState(run.status) in TERMINAL_STATES,
+        )
+
+    async def list_events_after(
+        self, workspace_id: UUID, run_id: UUID, after_sequence: int, limit: int
+    ) -> Sequence[RunEventRecord]:
+        rows = (
+            await self._session.scalars(
+                select(RunEventRow)
+                .where(
+                    RunEventRow.run_id == run_id,
+                    RunEventRow.workspace_id == workspace_id,
+                    RunEventRow.sequence > after_sequence,
+                )
+                .order_by(RunEventRow.sequence)
+                .limit(limit)
+            )
+        ).all()
+        return [
+            RunEventRecord(
+                sequence=row.sequence,
+                event_type=RunEventType(row.event_type),
+                occurred_at=row.occurred_at,
+                payload=row.payload,
+            )
+            for row in rows
+        ]
 
     async def control_run(self, command: ControlRunCommand) -> RunSnapshot:
         """A user control request; an illegal one is audited before it fails."""

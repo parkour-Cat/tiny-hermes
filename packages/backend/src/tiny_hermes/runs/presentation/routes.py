@@ -7,31 +7,15 @@ from pydantic import BaseModel, Field
 
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.identity.application.auth_service import AuthService
-from tiny_hermes.identity.domain.models import AuthenticatedUser
 from tiny_hermes.identity.presentation.dependencies import (
     SESSION_COOKIE,
     authenticate_browser_user,
-    forbidden,
     require_workspace_id,
     verify_browser_write,
 )
 from tiny_hermes.runs.application.service import (
-    AgentNotPublished,
-    DeniedRunControl,
-    EventSequenceConflict,
-    ForbiddenRunAction,
-    IdempotencyKeyRequired,
-    IdempotencyKeyReused,
-    RetryBudgetExhausted,
-    RetryContextStale,
-    RetryLimitReached,
-    RetryNotSafe,
     RunCoordination,
     RunCoordinationError,
-    SessionAgentNotFound,
-    StateVersionConflict,
-    UnknownRun,
-    UnknownSession,
 )
 from tiny_hermes.runs.domain.models import (
     RunSignal,
@@ -39,8 +23,7 @@ from tiny_hermes.runs.domain.models import (
     SessionMode,
     SessionSnapshot,
 )
-from tiny_hermes.shared.errors import AppError
-from tiny_hermes.tenancy.domain.models import Actor
+from tiny_hermes.runs.presentation.errors import actor_of, as_app_error
 
 WorkspaceHeader = Annotated[str | None, Header(alias="X-Workspace-Id")]
 CsrfHeader = Annotated[str | None, Header(alias="X-CSRF-Token")]
@@ -128,9 +111,9 @@ def session_router(resources: ApplicationResources) -> APIRouter:
         user = await authenticate_browser_user(auth, session_token)
         workspace_id = require_workspace_id(selected_workspace)
         try:
-            sessions = await runs.list_sessions(workspace_id, _actor(user))
+            sessions = await runs.list_sessions(workspace_id, actor_of(user))
         except RunCoordinationError as error:
-            raise _as_app_error(error) from error
+            raise as_app_error(error) from error
         return [SessionResponse.from_domain(item) for item in sessions]
 
     @router.post("", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
@@ -148,13 +131,13 @@ def session_router(resources: ApplicationResources) -> APIRouter:
         try:
             created = await runs.create_session(
                 workspace_id,
-                _actor(user),
+                actor_of(user),
                 payload.agent_id,
                 payload.session_mode,
                 request.state.request_id,
             )
         except RunCoordinationError as error:
-            raise _as_app_error(error) from error
+            raise as_app_error(error) from error
         return SessionResponse.from_domain(created)
 
     @router.get("/{session_id}", response_model=SessionResponse)
@@ -168,9 +151,9 @@ def session_router(resources: ApplicationResources) -> APIRouter:
         user = await authenticate_browser_user(auth, session_token)
         workspace_id = require_workspace_id(selected_workspace)
         try:
-            found = await runs.get_session(workspace_id, _actor(user), session_id)
+            found = await runs.get_session(workspace_id, actor_of(user), session_id)
         except RunCoordinationError as error:
-            raise _as_app_error(error) from error
+            raise as_app_error(error) from error
         return SessionResponse.from_domain(found)
 
     return router
@@ -196,9 +179,9 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         user = await authenticate_browser_user(auth, session_token)
         workspace_id = require_workspace_id(selected_workspace)
         try:
-            found = await runs.list_runs(workspace_id, _actor(user), session_id)
+            found = await runs.list_runs(workspace_id, actor_of(user), session_id)
         except RunCoordinationError as error:
-            raise _as_app_error(error) from error
+            raise as_app_error(error) from error
         return [RunResponse.from_domain(item) for item in found]
 
     @router.post("", response_model=RunResponse, status_code=status.HTTP_201_CREATED)
@@ -218,14 +201,14 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         try:
             accepted = await runs.submit_run(
                 workspace_id,
-                _actor(user),
+                actor_of(user),
                 payload.session_id,
                 payload.input,
                 idempotency_key,
                 request.state.request_id,
             )
         except RunCoordinationError as error:
-            raise _as_app_error(error) from error
+            raise as_app_error(error) from error
         _apply_acceptance_headers(response, accepted.replayed, accepted.run_id)
         if not accepted.replayed:
             await _announce(workspace_id, accepted.run_id)
@@ -242,9 +225,9 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         user = await authenticate_browser_user(auth, session_token)
         workspace_id = require_workspace_id(selected_workspace)
         try:
-            found = await runs.get_run(workspace_id, _actor(user), run_id)
+            found = await runs.get_run(workspace_id, actor_of(user), run_id)
         except RunCoordinationError as error:
-            raise _as_app_error(error) from error
+            raise as_app_error(error) from error
         return RunResponse.from_domain(found)
 
     async def _control(
@@ -263,14 +246,14 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         try:
             updated = await runs.control_run(
                 workspace_id,
-                _actor(user),
+                actor_of(user),
                 run_id,
                 signal,
                 payload.expected_state_version,
                 request.state.request_id,
             )
         except RunCoordinationError as error:
-            raise _as_app_error(error) from error
+            raise as_app_error(error) from error
         return RunResponse.from_domain(updated)
 
     @router.post("/{run_id}/retry", response_model=RunResponse)
@@ -290,13 +273,13 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         try:
             accepted = await runs.retry_run(
                 workspace_id,
-                _actor(user),
+                actor_of(user),
                 run_id,
                 idempotency_key,
                 request.state.request_id,
             )
         except RunCoordinationError as error:
-            raise _as_app_error(error) from error
+            raise as_app_error(error) from error
         _apply_acceptance_headers(response, accepted.replayed, accepted.run_id)
         if not accepted.replayed:
             await _announce(workspace_id, accepted.run_id)
@@ -381,107 +364,3 @@ def _apply_acceptance_headers(response: Response, replayed: bool, run_id: UUID) 
         return
     response.status_code = status.HTTP_201_CREATED
     response.headers["Location"] = f"/api/v1/runs/{run_id}"
-
-
-def _actor(user: AuthenticatedUser) -> Actor:
-    return Actor(user.id, user.is_platform_admin)
-
-
-def _as_app_error(error: RunCoordinationError) -> AppError:
-    """Turn Run Coordination refusals into Problem Details without leaking content."""
-    if isinstance(error, ForbiddenRunAction):
-        return forbidden()
-    if isinstance(error, SessionAgentNotFound):
-        return _not_found("agent_not_found", "Agent not found", "agent")
-    if isinstance(error, UnknownSession):
-        return _not_found("session_not_found", "Session not found", "session")
-    if isinstance(error, UnknownRun):
-        return _not_found("run_not_found", "Run not found", "run")
-    if isinstance(error, AgentNotPublished):
-        return AppError(
-            code="agent_not_published",
-            title="Agent not published",
-            status=409,
-            detail="The agent has no published version to run.",
-        )
-    if isinstance(error, IdempotencyKeyRequired):
-        return AppError(
-            code="idempotency_key_required",
-            title="Idempotency key required",
-            status=400,
-            detail="A non-empty Idempotency-Key header is required.",
-        )
-    if isinstance(error, IdempotencyKeyReused):
-        return AppError(
-            code="idempotency_key_reused",
-            title="Idempotency key reused",
-            status=409,
-            detail="That idempotency key already belongs to a different request.",
-        )
-    if isinstance(error, StateVersionConflict):
-        return AppError(
-            code="state_version_conflict",
-            title="Run state version conflict",
-            status=409,
-            detail="The run changed after it was read.",
-        )
-    if isinstance(error, DeniedRunControl):
-        return AppError(
-            code=error.code,
-            title="Invalid run control",
-            status=409,
-            detail="The run cannot accept that control in its current state.",
-            audited=True,
-        )
-    if isinstance(error, EventSequenceConflict):
-        return AppError(
-            code="event_sequence_conflict",
-            title="Run event sequence conflict",
-            status=409,
-            detail="Concurrent writers could not agree on an event sequence.",
-        )
-    return _retry_error(error)
-
-
-def _retry_error(error: RunCoordinationError) -> AppError:
-    codes: list[tuple[type[RunCoordinationError], str, str]] = [
-        (RetryNotSafe, "retry_not_safe", "The last checkpoint is not safe to replay."),
-        (
-            RetryContextStale,
-            "retry_context_stale",
-            "The session moved on after the source run failed.",
-        ),
-        (
-            RetryBudgetExhausted,
-            "retry_budget_exhausted",
-            "The shared run budget has no remaining capacity.",
-        ),
-        (
-            RetryLimitReached,
-            "retry_limit_reached",
-            "The shared retry limit is already used up.",
-        ),
-    ]
-    for kind, code, detail in codes:
-        if isinstance(error, kind):
-            return AppError(
-                code=code,
-                title=code.replace("_", " ").capitalize(),
-                status=409,
-                detail=detail,
-            )
-    return AppError(
-        code="run_request_rejected",
-        title="Run request rejected",
-        status=422,
-        detail="The run request could not be completed.",
-    )
-
-
-def _not_found(code: str, title: str, noun: str) -> AppError:
-    return AppError(
-        code=code,
-        title=title,
-        status=404,
-        detail=f"No such {noun} exists in the selected workspace.",
-    )

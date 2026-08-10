@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 from uuid import UUID
 
+from tiny_hermes.runs.domain.event_cursor import cursor_is_stale
 from tiny_hermes.runs.domain.models import (
     CallerIdentity,
     CallerType,
@@ -22,6 +23,8 @@ from tiny_hermes.runs.ports.store import (
     CreateSessionCommand,
     RepairResult,
     RetryRunCommand,
+    RunEventRecord,
+    RunEventWindow,
     RunStore,
 )
 from tiny_hermes.shared.errors import AuditedDenial
@@ -72,6 +75,14 @@ class EventSequenceConflict(RunCoordinationError):
 
 class StateVersionConflict(RunCoordinationError):
     pass
+
+
+class RunEventCursorTooOld(RunCoordinationError):
+    """The subscriber's cursor is below the events the platform still retains."""
+
+    def __init__(self, earliest_available_sequence: int) -> None:
+        super().__init__(str(earliest_available_sequence))
+        self.earliest_available_sequence = earliest_available_sequence
 
 
 class LeaseLost(RunCoordinationError):
@@ -211,6 +222,45 @@ class RunCoordination:
     ) -> Sequence[RunSnapshot]:
         role = await self._require_role(workspace_id, actor, READERS)
         return await self._store.list_runs(workspace_id, session_id, _capabilities(role))
+
+    async def open_event_stream(
+        self, workspace_id: UUID, actor: Actor, run_id: UUID, after_sequence: int
+    ) -> RunEventWindow:
+        """Admit a subscriber, or refuse before a single frame is written.
+
+        Refusing here keeps a rejection an ordinary Problem Details response
+        instead of a half-open stream a browser would have to interpret.
+        """
+        window = await self.event_window(workspace_id, actor, run_id)
+        if cursor_is_stale(after_sequence, window.earliest_sequence, window.next_sequence):
+            raise RunEventCursorTooOld(
+                window.earliest_sequence
+                if window.earliest_sequence is not None
+                else window.next_sequence
+            )
+        return window
+
+    async def event_window(
+        self, workspace_id: UUID, actor: Actor, run_id: UUID
+    ) -> RunEventWindow:
+        await self._require_role(workspace_id, actor, READERS)
+        window = await self._store.event_window(workspace_id, run_id)
+        if window is None:
+            raise UnknownRun
+        return window
+
+    async def read_events(
+        self,
+        workspace_id: UUID,
+        actor: Actor,
+        run_id: UUID,
+        after_sequence: int,
+        limit: int,
+    ) -> Sequence[RunEventRecord]:
+        await self._require_role(workspace_id, actor, READERS)
+        return await self._store.list_events_after(
+            workspace_id, run_id, after_sequence, limit
+        )
 
     async def control_run(
         self,

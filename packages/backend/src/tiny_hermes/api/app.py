@@ -11,6 +11,7 @@ from tiny_hermes.api.health import DatabaseReadinessProbe, ReadinessCheck, healt
 from tiny_hermes.api.request_context import RequestIdMiddleware
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.identity.presentation.routes import identity_router
+from tiny_hermes.runs.presentation.events import run_event_router
 from tiny_hermes.runs.presentation.routes import run_router, session_router
 from tiny_hermes.shared.config import Settings
 from tiny_hermes.shared.errors import AppError
@@ -59,6 +60,7 @@ def create_app(
     app.include_router(agent_router(resources))
     app.include_router(session_router(resources))
     app.include_router(run_router(resources))
+    app.include_router(run_event_router(resources))
     return app
 
 

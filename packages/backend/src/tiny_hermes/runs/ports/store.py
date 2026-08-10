@@ -172,6 +172,29 @@ class RenewedLease:
 
 
 @dataclass(frozen=True)
+class RunEventRecord:
+    """One retained Run Event as a subscriber receives it."""
+
+    sequence: int
+    event_type: RunEventType
+    occurred_at: datetime
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class RunEventWindow:
+    """What a subscriber can still be given.
+
+    ``earliest_sequence`` is ``None`` once retention removed every event, so a
+    resynchronization hint has to fall back to ``next_sequence``.
+    """
+
+    earliest_sequence: int | None
+    next_sequence: int
+    is_terminal: bool
+
+
+@dataclass(frozen=True)
 class ClaimRunCommand:
     """A claim attempt.
 
@@ -246,6 +269,14 @@ class RunStore(Protocol):
     async def append_events(
         self, command: AppendEventsCommand
     ) -> tuple[RunEvent, ...]: ...
+
+    async def event_window(
+        self, workspace_id: UUID, run_id: UUID
+    ) -> RunEventWindow | None: ...
+
+    async def list_events_after(
+        self, workspace_id: UUID, run_id: UUID, after_sequence: int, limit: int
+    ) -> Sequence[RunEventRecord]: ...
 
     async def claim_head(self, command: ClaimRunCommand) -> ClaimedRun | None: ...
 
