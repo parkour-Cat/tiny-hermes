@@ -7,6 +7,7 @@ from uuid import UUID
 from tiny_hermes.runs.domain.models import (
     CallerIdentity,
     CanonicalMessage,
+    CheckpointEffectStatus,
     PauseReason,
     RunCapabilities,
     RunEvent,
@@ -106,6 +107,51 @@ class AppendEventsCommand:
 
 
 @dataclass(frozen=True)
+class RenewLeaseCommand:
+    workspace_id: UUID
+    run_id: UUID
+    lease_id: UUID
+    expected_version: int
+    lease_seconds: int
+
+
+@dataclass(frozen=True)
+class RecordSliceCommand:
+    """One checkpoint, its accounting, its state signal, and the lease release.
+
+    These four are one business operation. Splitting them would let a crash
+    leave a released lease beside unaccounted execution time.
+
+    A ``signal`` of ``None`` means the Worker keeps the lease and continues to
+    the next round, so only the checkpoint and the accounting are written.
+    """
+
+    workspace_id: UUID
+    run_id: UUID
+    lease_id: UUID
+    expected_lease_version: int
+    expected_state_version: int
+    signal: RunSignal | None
+    pause_reason: PauseReason | None
+    limit_reached: bool
+    checkpoint: dict[str, Any]
+    checkpoint_replay_safe: bool
+    checkpoint_effect_status: CheckpointEffectStatus
+    executed_ms: int
+    model_calls: int
+    tokens: int
+    request_id: str
+    capabilities: RunCapabilities
+
+
+@dataclass(frozen=True)
+class RenewedLease:
+    lease_id: UUID
+    version: int
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
 class ClaimRunCommand:
     workspace_id: UUID
     worker_id: str
@@ -174,6 +220,10 @@ class RunStore(Protocol):
     ) -> tuple[RunEvent, ...]: ...
 
     async def claim_head(self, command: ClaimRunCommand) -> ClaimedRun | None: ...
+
+    async def renew_lease(self, command: RenewLeaseCommand) -> RenewedLease | None: ...
+
+    async def record_slice(self, command: RecordSliceCommand) -> RunSnapshot: ...
 
     async def repair_session_head(
         self, session_id: UUID, request_id: str

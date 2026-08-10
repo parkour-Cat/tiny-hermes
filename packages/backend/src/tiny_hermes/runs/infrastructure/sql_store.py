@@ -17,6 +17,7 @@ from tiny_hermes.runs.application.service import (
     EventSequenceConflict,
     ForbiddenRunAction,
     IdempotencyKeyReused,
+    LeaseLost,
     RetryBudgetExhausted,
     RetryContextStale,
     RetryLimitReached,
@@ -72,6 +73,9 @@ from tiny_hermes.runs.ports.store import (
     ClaimRunCommand,
     ControlRunCommand,
     CreateSessionCommand,
+    RecordSliceCommand,
+    RenewedLease,
+    RenewLeaseCommand,
     RepairResult,
     ReservedEvent,
     RetryRunCommand,
@@ -372,10 +376,40 @@ class SqlRunStore:
         if session is None:
             raise UnknownSession
 
+        await self._decide_and_write(
+            run,
+            session,
+            command.signal,
+            pause_reason=command.pause_reason,
+            wait_kind=command.wait_kind,
+            wait_deadline_at=command.wait_deadline_at,
+            request_id=command.request_id,
+            payload=dict(command.payload),
+        )
+        return await self._snapshot(run, command.capabilities)
+
+    async def _decide_and_write(
+        self,
+        run: RunRow,
+        session: SessionRow,
+        signal: RunSignal,
+        *,
+        pause_reason: PauseReason | None,
+        wait_kind: str | None,
+        wait_deadline_at: datetime | None,
+        request_id: str,
+        payload: dict[str, Any],
+        extra_events: tuple[ReservedEvent, ...] = (),
+    ) -> None:
+        """Turn one signal into rows.
+
+        This is the only place a ``StateDecision`` becomes a database write.
+        Both ``apply_signal`` and ``record_slice`` route through it so a second
+        interpretation of the state machine cannot appear.
+        """
         budget = await self._session.get(RunBudgetScopeRow, run.budget_root_run_id)
         if budget is None:
             raise UnknownRun
-        summary = _budget_summary(budget)
         now = datetime.now(UTC)
         decision = self._machine.decide(
             RunStateView(
@@ -385,12 +419,12 @@ class SqlRunStore:
                 wait_deadline_at=run.wait_deadline_at,
                 pause_requested=run.pause_requested_at is not None,
                 cancel_requested=run.cancel_requested_at is not None,
-                budget_allows_execution=summary.allows_execution(now),
+                budget_allows_execution=_budget_summary(budget).allows_execution(now),
             ),
-            command.signal,
-            pause_reason=command.pause_reason,
-            wait_kind=command.wait_kind,
-            wait_deadline_at=command.wait_deadline_at,
+            signal,
+            pause_reason=pause_reason,
+            wait_kind=wait_kind,
+            wait_deadline_at=wait_deadline_at,
         )
 
         _apply_decision(run, decision, now)
@@ -403,22 +437,135 @@ class SqlRunStore:
 
         await self.append_events(
             AppendEventsCommand(
-                workspace_id=command.workspace_id,
+                workspace_id=run.workspace_id,
                 run_id=run.id,
-                events=(
-                    ReservedEvent(event_type_for(command.signal), dict(command.payload)),
-                ),
+                events=(ReservedEvent(event_type_for(signal), payload), *extra_events),
             )
         )
         self._audit(
-            command.workspace_id,
+            run.workspace_id,
             None,
-            f"run.{command.signal.value}",
+            f"run.{signal.value}",
             "run",
             run.id,
-            command.request_id,
+            request_id,
         )
+
+    async def renew_lease(self, command: RenewLeaseCommand) -> RenewedLease | None:
+        """Extend a lease this worker still holds, or report that it is gone.
+
+        The predicate is the concurrency control, so no row lock is needed: a
+        renewal that matches nothing means the Scheduler already reclaimed the
+        Run and its decision stands.
+        """
+        now = datetime.now(UTC)
+        expires_at = now + timedelta(seconds=command.lease_seconds)
+        renewed = await self._session.scalar(
+            update(WorkerLeaseRow)
+            .where(
+                WorkerLeaseRow.id == command.lease_id,
+                WorkerLeaseRow.run_id == command.run_id,
+                WorkerLeaseRow.version == command.expected_version,
+                WorkerLeaseRow.released_at.is_(None),
+            )
+            .values(expires_at=expires_at, version=WorkerLeaseRow.version + 1)
+            .returning(WorkerLeaseRow.version)
+            .execution_options(synchronize_session=False)
+        )
+        if renewed is None:
+            return None
+        await self._session.execute(
+            update(RunRow)
+            .where(RunRow.id == command.run_id, RunRow.workspace_id == command.workspace_id)
+            .values(last_heartbeat_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        return RenewedLease(
+            lease_id=command.lease_id, version=renewed, expires_at=expires_at
+        )
+
+    async def record_slice(self, command: RecordSliceCommand) -> RunSnapshot:
+        """Persist one slice's checkpoint, accounting, state change, and lease."""
+        run = await self._lock_run(command.workspace_id, command.run_id)
+        if run is None:
+            raise UnknownRun
+        lease = await self._lock_lease(command.lease_id, command.run_id)
+        if (
+            lease is None
+            or lease.released_at is not None
+            or lease.version != command.expected_lease_version
+        ):
+            raise LeaseLost
+        if run.state_version != command.expected_state_version:
+            raise StateVersionConflict
+        session = await self._lock_session(command.workspace_id, run.session_id)
+        if session is None:
+            raise UnknownSession
+
+        now = datetime.now(UTC)
+        run.checkpoint = command.checkpoint
+        run.checkpoint_replay_safe = command.checkpoint_replay_safe
+        run.checkpoint_effect_status = command.checkpoint_effect_status.value
+        run.updated_at = now
+        await self._consume_budget(
+            run.budget_root_run_id,
+            command.executed_ms,
+            command.model_calls,
+            command.tokens,
+        )
+
+        if command.signal is None:
+            await self._session.flush()
+            return await self._snapshot(run, command.capabilities)
+
+        extra = (
+            (ReservedEvent(RunEventType.RUN_LIMIT_REACHED, {"reason": "budget"}),)
+            if command.limit_reached
+            else ()
+        )
+        await self._decide_and_write(
+            run,
+            session,
+            command.signal,
+            pause_reason=command.pause_reason,
+            wait_kind=None,
+            wait_deadline_at=None,
+            request_id=command.request_id,
+            payload={"executed_ms": command.executed_ms},
+            extra_events=extra,
+        )
+        lease.released_at = now
+        await self._session.flush()
         return await self._snapshot(run, command.capabilities)
+
+    async def _consume_budget(
+        self, root_run_id: UUID, executed_ms: int, model_calls: int, tokens: int
+    ) -> None:
+        """Accumulate one slice's usage on the single root budget row."""
+        consumed = await self._session.scalar(
+            update(RunBudgetScopeRow)
+            .where(RunBudgetScopeRow.root_run_id == root_run_id)
+            .values(
+                consumed_execution_ms=RunBudgetScopeRow.consumed_execution_ms + executed_ms,
+                consumed_model_calls=RunBudgetScopeRow.consumed_model_calls + model_calls,
+                consumed_tokens=RunBudgetScopeRow.consumed_tokens + tokens,
+                version=RunBudgetScopeRow.version + 1,
+            )
+            .returning(RunBudgetScopeRow.version)
+            .execution_options(synchronize_session=False)
+        )
+        if consumed is None:
+            raise UnknownRun
+        budget = await self._session.get(RunBudgetScopeRow, root_run_id)
+        if budget is not None:
+            await self._session.refresh(budget)
+
+    async def _lock_lease(self, lease_id: UUID, run_id: UUID) -> WorkerLeaseRow | None:
+        return await self._session.scalar(
+            select(WorkerLeaseRow)
+            .where(WorkerLeaseRow.id == lease_id, WorkerLeaseRow.run_id == run_id)
+            .with_for_update()
+        )
 
     async def _terminalize(self, run: RunRow, session: SessionRow, now: datetime) -> None:
         """Close a Run out and hand the Session to the next eligible Run."""

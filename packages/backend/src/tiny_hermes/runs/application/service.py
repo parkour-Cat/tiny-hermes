@@ -74,6 +74,10 @@ class StateVersionConflict(RunCoordinationError):
     pass
 
 
+class LeaseLost(RunCoordinationError):
+    """The lease this writer held was released, reclaimed, or superseded."""
+
+
 class DeniedRunControl(RunCoordinationError, AuditedDenial):
     """An illegal control whose audit denial must survive the refusal."""
 
