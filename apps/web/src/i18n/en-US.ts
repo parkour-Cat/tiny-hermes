@@ -73,6 +73,10 @@ export const enUS: Record<MessageKey, string> = {
   draftRevisionConflict:
     "The draft changed elsewhere. Your edits are still here — reload before saving.",
   invalidAgentSpec: "The platform rejected this configuration",
+  publish: "Publish",
+  publishWarningPrefix: "This publishes draft revision ",
+  publishWarningSuffix: " as a new version.",
+  publishUnchanged: "The draft matches the current version, so no new version was created.",
   logout: "Sign out",
   signedInAs: "Signed in as",
   required: "This field is required",

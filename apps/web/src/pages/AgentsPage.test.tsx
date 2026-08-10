@@ -6,7 +6,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { expect, test } from "vitest";
 
 import { AgentsPage } from "./AgentsPage";
-import { ConsoleTheme } from "../layout/ConsoleTheme";
+import { TestTheme } from "../test/TestTheme";
 import { server } from "../test/server";
 
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
@@ -36,7 +36,7 @@ function agent(overrides: Partial<AgentRow> = {}): AgentRow {
 function renderAgents(workspace = WORKSPACE): void {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
-    <ConsoleTheme>
+    <TestTheme>
       <QueryClientProvider client={client}>
         <MemoryRouter initialEntries={[`/workspaces/${workspace}/agents`]}>
           <Routes>
@@ -45,7 +45,7 @@ function renderAgents(workspace = WORKSPACE): void {
           </Routes>
         </MemoryRouter>
       </QueryClientProvider>
-    </ConsoleTheme>,
+    </TestTheme>,
   );
 }
 

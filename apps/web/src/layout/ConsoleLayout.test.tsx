@@ -10,6 +10,7 @@ import { expect, test } from "vitest";
 import { ConsoleLayout } from "./ConsoleLayout";
 import { ConsoleTheme } from "./ConsoleTheme";
 import { AuthProvider } from "../auth/AuthProvider";
+import { TestTheme } from "../test/TestTheme";
 import { mediaMatches } from "../test/setup";
 import { server } from "../test/server";
 
@@ -42,7 +43,7 @@ function renderShell(path: string, hits = { count: 0 }): { hits: { count: number
     // Themed exactly as the app themes it: `autoInsertSpace` off is what keeps
     // 退出 from rendering as 退 出, and a test that skipped it would be asserting
     // against a shell nobody ships.
-    <ConsoleTheme>
+    <TestTheme>
       <QueryClientProvider client={client}>
         <MemoryRouter initialEntries={[path]}>
           <AuthProvider>
@@ -54,7 +55,7 @@ function renderShell(path: string, hits = { count: 0 }): { hits: { count: number
           </AuthProvider>
         </MemoryRouter>
       </QueryClientProvider>
-    </ConsoleTheme>,
+    </TestTheme>,
   );
   return { hits };
 }

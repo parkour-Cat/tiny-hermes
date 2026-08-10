@@ -43,7 +43,23 @@ function csrfToken(): string | undefined {
   return value === undefined ? undefined : decodeURIComponent(value);
 }
 
+export type ApiResult<T> = {
+  data: T;
+  /**
+   * The response status.
+   *
+   * Some routes say something with it that the body does not: publishing
+   * answers `201` for a new version and `200` for content that was already
+   * published, and those are different things to tell the user.
+   */
+  status: number;
+};
+
 export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
+  return (await apiWithStatus<T>(path, init)).data;
+}
+
+export async function apiWithStatus<T>(path: string, init: ApiInit = {}): Promise<ApiResult<T>> {
   const { workspace, ...request } = init;
   const headers = new Headers(request.headers);
   headers.set("Content-Type", "application/json");
@@ -75,7 +91,10 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
   if (!response.ok) {
     throw await asApiError(response);
   }
-  return response.status === 204 ? (undefined as T) : ((await response.json()) as T);
+  return {
+    data: response.status === 204 ? (undefined as T) : ((await response.json()) as T),
+    status: response.status,
+  };
 }
 
 /** Reads a Problem Details body into an `ApiError`, tolerating a missing one. */

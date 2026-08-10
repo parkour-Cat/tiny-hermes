@@ -6,7 +6,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { expect, test } from "vitest";
 
 import { AgentDetailPage } from "./AgentDetailPage";
-import { ConsoleTheme } from "../layout/ConsoleTheme";
+import { TestTheme } from "../test/TestTheme";
 import { server } from "../test/server";
 
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
@@ -56,7 +56,7 @@ function loadedAgent(revision = 3): void {
 function renderDetail(): void {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
-    <ConsoleTheme>
+    <TestTheme>
       <QueryClientProvider client={client}>
         <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE}/agents/${AGENT}`]}>
           <Routes>
@@ -67,7 +67,7 @@ function renderDetail(): void {
           </Routes>
         </MemoryRouter>
       </QueryClientProvider>
-    </ConsoleTheme>,
+    </TestTheme>,
   );
 }
 
@@ -215,6 +215,112 @@ test("the tools gap is stated, not mocked up", async () => {
   // Nothing to press, nothing to fill: an inert control here would promise a
   // capability the platform does not have.
   expect(screen.queryByRole("button", { name: "添加工具" })).not.toBeInTheDocument();
+});
+
+const HASH = "9f2c4b7a1d3e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff";
+
+function version(number: number) {
+  return {
+    id: `v${number}`,
+    agent_id: AGENT,
+    version_number: number,
+    schema_version: 1,
+    content_hash: HASH,
+    created_at: "2026-08-10T02:00:00Z",
+  };
+}
+
+test("publishing asks first, and sends nothing while the question is open", async () => {
+  loadedAgent(3);
+  let attempts = 0;
+  server.use(
+    http.post(`/api/v1/agents/${AGENT}/publish`, () => {
+      attempts += 1;
+      return HttpResponse.json(version(1), { status: 201 });
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByRole("button", { name: "发布" }));
+
+  // The half a confirmation actually protects: the request that was not sent.
+  expect(await screen.findByText("将把草稿修订 3 发布为新版本。")).toBeInTheDocument();
+  expect(attempts).toBe(0);
+});
+
+test("confirming publishes the loaded revision and shows the version it made", async () => {
+  loadedAgent(3);
+  const sent: unknown[] = [];
+  server.use(
+    http.post(`/api/v1/agents/${AGENT}/publish`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(version(1), { status: 201 });
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByRole("button", { name: "发布" }));
+  await userEvent.click(await screen.findByRole("button", { name: "确定" }));
+
+  expect(await screen.findByText(`当前版本 v1`)).toBeInTheDocument();
+  expect(screen.getByText(HASH)).toBeInTheDocument();
+  expect(sent).toEqual([{ expected_revision: 3 }]);
+});
+
+test("re-publishing unchanged content is reported as no new version", async () => {
+  loadedAgent(3);
+  server.use(
+    // 200 rather than 201: the content was already published, which the server
+    // treats as success and so must the console.
+    http.post(`/api/v1/agents/${AGENT}/publish`, () =>
+      HttpResponse.json(version(1), { status: 200 }),
+    ),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByRole("button", { name: "发布" }));
+  await userEvent.click(await screen.findByRole("button", { name: "确定" }));
+
+  expect(await screen.findByText("草稿内容与当前版本相同，没有产生新版本。")).toBeInTheDocument();
+});
+
+test("publishing a stale revision is handed back to the user", async () => {
+  loadedAgent(3);
+  let attempts = 0;
+  server.use(
+    http.post(`/api/v1/agents/${AGENT}/publish`, () => {
+      attempts += 1;
+      return HttpResponse.json(
+        { code: "draft_revision_conflict", detail: "The agent draft changed after it was read." },
+        { status: 409 },
+      );
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByRole("button", { name: "发布" }));
+  await userEvent.click(await screen.findByRole("button", { name: "确定" }));
+
+  expect(
+    await screen.findByText("草稿已被改动，你的修改仍在表单中。请重新载入后再保存。"),
+  ).toBeInTheDocument();
+  await waitFor(() => expect(attempts).toBe(1));
+});
+
+test("escape closes the question and puts focus back on 发布", async () => {
+  loadedAgent(3);
+
+  renderDetail();
+  const publish = await screen.findByRole("button", { name: "发布" });
+  await userEvent.click(publish);
+  await screen.findByRole("button", { name: "确定" });
+
+  await userEvent.keyboard("{Escape}");
+
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: "确定" })).not.toBeInTheDocument(),
+  );
+  expect(publish).toHaveFocus();
 });
 
 test("the draft revision and the published version are two separate facts", async () => {

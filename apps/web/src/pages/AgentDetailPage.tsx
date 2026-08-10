@@ -14,7 +14,7 @@ import {
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 
-import { ApiError, api } from "../api/client";
+import { ApiError, api, apiWithStatus } from "../api/client";
 import { problemMessage } from "../api/messages";
 import type {
   AgentDraftResponse,
@@ -79,11 +79,12 @@ export function AgentDetailPage() {
   const [form] = Form.useForm<DraftValues>();
   const [modal, contextHolder] = Modal.useModal();
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [publishNote, setPublishNote] = useState<string | null>(null);
   const scope = { workspace: workspaceId ?? "" };
   const enabled = workspaceId !== null && agentId !== "";
 
   const agent = useQuery({
-    queryKey: ["agent", workspaceId, agentId],
+    queryKey: ["agent", workspaceId, agentId] as const,
     queryFn: () => api<AgentResponse>(`/api/v1/agents/${agentId}`, scope),
     enabled,
   });
@@ -93,8 +94,10 @@ export function AgentDetailPage() {
     queryFn: () => api<AgentDraftResponse>(`/api/v1/agents/${agentId}/draft`, scope),
     enabled,
   });
+  const agentQuery = ["agent", workspaceId, agentId] as const;
+  const versionsQuery = ["agent-versions", workspaceId, agentId] as const;
   const versions = useQuery({
-    queryKey: ["agent-versions", workspaceId, agentId],
+    queryKey: versionsQuery,
     queryFn: () => api<AgentVersionResponse[]>(`/api/v1/agents/${agentId}/versions`, scope),
     enabled,
   });
@@ -117,6 +120,31 @@ export function AgentDetailPage() {
     // reported would overwrite whatever the other writer stored and report it
     // as a success — a lost update wearing a success message. The conflict is
     // the user's to resolve, and their text stays in the form while they do.
+    onError: (caught) => setSaveError(problemMessage(caught)),
+  });
+
+  const publish = useMutation({
+    mutationFn: (expectedRevision: number) =>
+      apiWithStatus<AgentVersionResponse>(`/api/v1/agents/${agentId}/publish`, {
+        ...scope,
+        method: "POST",
+        body: JSON.stringify({ expected_revision: expectedRevision }),
+      }),
+    onSuccess: ({ data: version, status }) => {
+      queryClient.setQueryData<AgentResponse>(agentQuery, (current) =>
+        current === undefined
+          ? current
+          : { ...current, status: "published", current_version_id: version.id },
+      );
+      queryClient.setQueryData<AgentVersionResponse[]>(versionsQuery, (current = []) =>
+        current.some((entry) => entry.id === version.id) ? current : [...current, version],
+      );
+      // 200 means this content was already published. The server calls that
+      // success, so the console reports what happened rather than dressing it
+      // up as a new version or as a failure.
+      setPublishNote(status === 200 ? t("publishUnchanged") : null);
+      setSaveError(null);
+    },
     onError: (caught) => setSaveError(problemMessage(caught)),
   });
 
@@ -153,9 +181,23 @@ export function AgentDetailPage() {
     });
   }
 
+  function askToPublish(revision: number): void {
+    void modal.confirm({
+      title: t("publish"),
+      content: `${t("publishWarningPrefix")}${revision}${t("publishWarningSuffix")}`,
+      okText: t("confirm"),
+      cancelText: t("cancel"),
+      // The question closes whether or not the publish succeeded: a refusal is
+      // reported on the page, and leaving the dialog open would cover the very
+      // message the user has to read.
+      onOk: () => publish.mutateAsync(revision).catch(() => undefined),
+    });
+  }
+
   const published = versions.data?.find((version) => version.id === agent.data?.current_version_id);
-  const conflicted = saveDraft.error instanceof ApiError
-    && saveDraft.error.code === "draft_revision_conflict";
+  const lastError = saveDraft.error ?? publish.error;
+  const conflicted =
+    lastError instanceof ApiError && lastError.code === "draft_revision_conflict";
 
   return (
     <>
@@ -165,6 +207,13 @@ export function AgentDetailPage() {
           <Typography.Title level={2}>{agent.data.name}</Typography.Title>
           <Typography.Paragraph type="secondary">{agent.data.alias}</Typography.Paragraph>
         </div>
+        <Button
+          type="primary"
+          loading={publish.isPending}
+          onClick={() => askToPublish(draft.data?.revision ?? 0)}
+        >
+          {t("publish")}
+        </Button>
       </div>
       <Card variant="borderless" className="page-alert">
         {/* Two facts, side by side and unrelated. Stated rather than compared:
@@ -174,18 +223,28 @@ export function AgentDetailPage() {
           <Typography.Text strong>
             {`${t("draftRevision")} ${draft.data.revision}`}
           </Typography.Text>
-          <Typography.Text>
-            {agent.data.current_version_id === null
-              ? t("agentUnpublished")
-              : `${t("currentVersion")} v${published?.version_number ?? "?"} · ${
-                  published?.content_hash.slice(0, 12) ?? ""
-                }`}
-          </Typography.Text>
+          {agent.data.current_version_id === null ? (
+            <Typography.Text>{t("agentUnpublished")}</Typography.Text>
+          ) : (
+            <Typography.Text>
+              {`${t("currentVersion")} v${published?.version_number ?? "?"}`}
+            </Typography.Text>
+          )}
         </Space>
+        {published === undefined ? null : (
+          // The whole hash, not a prefix: a truncated one cannot be compared
+          // against anything, which is the only thing a hash is for.
+          <Typography.Paragraph className="fact-note">
+            <Typography.Text code>{published.content_hash}</Typography.Text>
+          </Typography.Paragraph>
+        )}
         <Typography.Paragraph type="secondary" className="fact-note">
           {t("draftComparisonUnavailable")}
         </Typography.Paragraph>
       </Card>
+      {publishNote === null ? null : (
+        <Alert className="page-alert" type="info" title={publishNote} showIcon />
+      )}
       {saveError === null ? null : (
         <Alert
           className="page-alert"
