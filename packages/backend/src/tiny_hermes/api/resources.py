@@ -11,6 +11,8 @@ from tiny_hermes.agents.application.service import AgentCatalog
 from tiny_hermes.agents.infrastructure.sql_store import SqlAgentStore
 from tiny_hermes.identity.application.auth_service import AuthService
 from tiny_hermes.identity.infrastructure.sql_store import SqlAuthStore
+from tiny_hermes.runs.application.service import RunCoordination
+from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.errors import AppError, AuditedDenial
 from tiny_hermes.tenancy.application.workspace_service import WorkspaceService
@@ -82,6 +84,19 @@ class ApplicationResources:
         async with self.session_factory()() as session:
             try:
                 yield AgentCatalog(SqlAgentStore(session))
+            except AuditedDenial:
+                await session.commit()
+                raise
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
+
+    async def run_coordination(self) -> AsyncGenerator[RunCoordination]:
+        async with self.session_factory()() as session:
+            try:
+                yield RunCoordination(SqlRunStore(session))
             except AuditedDenial:
                 await session.commit()
                 raise

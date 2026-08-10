@@ -1,84 +1,15 @@
-from collections.abc import AsyncIterator
 from typing import Any
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
-from tiny_hermes.api.app import create_app
-from tiny_hermes.shared.config import Settings
 
-TRUNCATE = (
-    "TRUNCATE idempotency_records, worker_leases, run_events, run_budget_scopes, "
-    "session_messages, runs, sessions, agent_versions, agent_drafts, agents, "
-    "audit_events, memberships, workspaces, auth_sessions, auth_identities, users CASCADE"
-)
-
-SPEC: dict[str, Any] = {
-    "schema_version": 1,
-    "personality": "You are concise.",
-    "model_policy": {"provider": "deterministic", "scenario": "complete"},
-    "tools": [],
-    "limits": {
-        "max_execution_seconds": 900,
-        "max_elapsed_seconds": 86400,
-        "max_model_calls": 20,
-        "max_tool_calls": 50,
-        "max_derived_retries": 3,
-    },
-}
-
-
-def build_settings(database_url: str) -> Settings:
-    return Settings(
-        database_url=database_url,
-        redis_url="redis://localhost:6379/0",
-        s3_endpoint="http://localhost:9000",
-        s3_bucket="tiny-hermes",
-        session_cookie_secret="test-cookie-secret-with-32-characters",
-        bootstrap_token="a" * 32,
-    )
-
-
-def bootstrap_admin(client: TestClient, subject: str = "admin@example.com") -> str:
-    assert (
-        client.post(
-            "/api/v1/bootstrap",
-            headers={"X-Bootstrap-Token": "a" * 32},
-            json={
-                "subject": subject,
-                "display_name": "Admin",
-                "password": "long-pass-123",
-            },
-        ).status_code
-        == 201
-    )
-    login = client.post(
-        "/api/v1/auth/sessions",
-        json={"subject": subject, "password": "long-pass-123"},
-    )
-    assert login.status_code == 201
-    return login.cookies["tiny_hermes_csrf"]
-
-
-@pytest.fixture
-async def client(engine: AsyncEngine, database_url: str) -> AsyncIterator[TestClient]:
-    async with engine.begin() as connection:
-        await connection.execute(text(TRUNCATE))
-    with TestClient(create_app(settings=build_settings(database_url))) as value:
-        yield value
+from ..conftest import PASSWORD, VALID_SPEC
 
 
 async def test_agent_publication_workflow_keeps_versions_immutable(
-    client: TestClient,
+    client: TestClient, scope: dict[str, str]
 ) -> None:
-    csrf = bootstrap_admin(client)
-    write = {"X-CSRF-Token": csrf}
-    workspace = client.post(
-        "/api/v1/workspaces", headers=write, json={"name": "Primary"}
-    ).json()
-    scope = {"X-Workspace-Id": workspace["id"], **write}
-
     created = client.post(
         "/api/v1/agents", headers=scope, json={"name": "Analyst", "alias": "analyst"}
     )
@@ -90,7 +21,7 @@ async def test_agent_publication_workflow_keeps_versions_immutable(
     draft = client.put(
         f"/api/v1/agents/{agent_id}/draft",
         headers=scope,
-        json={"expected_revision": 1, "spec": SPEC},
+        json={"expected_revision": 1, "spec": VALID_SPEC},
     )
     assert draft.status_code == 200
     assert draft.json()["revision"] == 2
@@ -109,7 +40,7 @@ async def test_agent_publication_workflow_keeps_versions_immutable(
     assert unchanged.status_code == 200
     assert unchanged.json()["id"] == first.json()["id"]
 
-    changed: dict[str, Any] = {**SPEC, "personality": "You are thorough."}
+    changed: dict[str, Any] = {**VALID_SPEC, "personality": "You are thorough."}
     second_draft = client.put(
         f"/api/v1/agents/{agent_id}/draft",
         headers=scope,
@@ -138,14 +69,8 @@ async def test_agent_publication_workflow_keeps_versions_immutable(
 
 
 async def test_stale_draft_revision_conflicts_without_overwriting(
-    client: TestClient,
+    client: TestClient, scope: dict[str, str]
 ) -> None:
-    csrf = bootstrap_admin(client)
-    write = {"X-CSRF-Token": csrf}
-    workspace = client.post(
-        "/api/v1/workspaces", headers=write, json={"name": "Primary"}
-    ).json()
-    scope = {"X-Workspace-Id": workspace["id"], **write}
     agent_id = client.post(
         "/api/v1/agents", headers=scope, json={"name": "Analyst", "alias": "analyst"}
     ).json()["id"]
@@ -153,12 +78,12 @@ async def test_stale_draft_revision_conflicts_without_overwriting(
     client.put(
         f"/api/v1/agents/{agent_id}/draft",
         headers=scope,
-        json={"expected_revision": 1, "spec": SPEC},
+        json={"expected_revision": 1, "spec": VALID_SPEC},
     )
     stale = client.put(
         f"/api/v1/agents/{agent_id}/draft",
         headers=scope,
-        json={"expected_revision": 1, "spec": SPEC},
+        json={"expected_revision": 1, "spec": VALID_SPEC},
     )
     assert stale.status_code == 409
     assert stale.json()["code"] == "draft_revision_conflict"
@@ -168,22 +93,16 @@ async def test_stale_draft_revision_conflicts_without_overwriting(
 
 
 async def test_cross_workspace_agent_identifier_is_a_generic_not_found(
-    client: TestClient,
+    client: TestClient, scope: dict[str, str], admin_csrf: str
 ) -> None:
-    csrf = bootstrap_admin(client)
-    write = {"X-CSRF-Token": csrf}
-    first_workspace = client.post(
-        "/api/v1/workspaces", headers=write, json={"name": "Primary"}
-    ).json()
-    second_workspace = client.post(
-        "/api/v1/workspaces", headers=write, json={"name": "Secondary"}
-    ).json()
-
     agent_id = client.post(
-        "/api/v1/agents",
-        headers={"X-Workspace-Id": first_workspace["id"], **write},
-        json={"name": "Analyst", "alias": "analyst"},
+        "/api/v1/agents", headers=scope, json={"name": "Analyst", "alias": "analyst"}
     ).json()["id"]
+    second_workspace = client.post(
+        "/api/v1/workspaces",
+        headers={"X-CSRF-Token": admin_csrf},
+        json={"name": "Secondary"},
+    ).json()
 
     crossed = client.get(
         f"/api/v1/agents/{agent_id}",
@@ -198,17 +117,10 @@ async def test_cross_workspace_agent_identifier_is_a_generic_not_found(
 
 
 async def test_missing_membership_is_forbidden_before_resource_lookup(
-    client: TestClient, engine: AsyncEngine
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine
 ) -> None:
-    csrf = bootstrap_admin(client)
-    write = {"X-CSRF-Token": csrf}
-    workspace = client.post(
-        "/api/v1/workspaces", headers=write, json={"name": "Primary"}
-    ).json()
     agent_id = client.post(
-        "/api/v1/agents",
-        headers={"X-Workspace-Id": workspace["id"], **write},
-        json={"name": "Analyst", "alias": "analyst"},
+        "/api/v1/agents", headers=scope, json={"name": "Analyst", "alias": "analyst"}
     ).json()["id"]
 
     # No self-service registration exists yet, so the second local account is
@@ -233,13 +145,14 @@ async def test_missing_membership_is_forbidden_before_resource_lookup(
     client.cookies.clear()
     login = client.post(
         "/api/v1/auth/sessions",
-        json={"subject": "outsider@example.com", "password": "long-pass-123"},
+        json={"subject": "outsider@example.com", "password": PASSWORD},
     )
     assert login.status_code == 201
     assert login.json()["is_platform_admin"] is False
 
     denied = client.get(
-        f"/api/v1/agents/{agent_id}", headers={"X-Workspace-Id": workspace["id"]}
+        f"/api/v1/agents/{agent_id}",
+        headers={"X-Workspace-Id": scope["X-Workspace-Id"]},
     )
     assert denied.status_code == 403
     assert denied.json()["code"] == "forbidden"

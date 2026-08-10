@@ -1,8 +1,37 @@
 import os
 from collections.abc import AsyncIterator
+from typing import Any
 
+import httpx2 as httpx
 import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from tiny_hermes.api.app import create_app
+from tiny_hermes.shared.config import Settings
+
+TRUNCATE = (
+    "TRUNCATE idempotency_records, worker_leases, run_events, run_budget_scopes, "
+    "session_messages, runs, sessions, agent_versions, agent_drafts, agents, "
+    "audit_events, memberships, workspaces, auth_sessions, auth_identities, users CASCADE"
+)
+
+VALID_SPEC: dict[str, Any] = {
+    "schema_version": 1,
+    "personality": "You are concise.",
+    "model_policy": {"provider": "deterministic", "scenario": "complete"},
+    "tools": [],
+    "limits": {
+        "max_execution_seconds": 900,
+        "max_elapsed_seconds": 86400,
+        "max_model_calls": 20,
+        "max_tool_calls": 50,
+        "max_derived_retries": 3,
+    },
+}
+
+BOOTSTRAP_TOKEN = "a" * 32
+PASSWORD = "long-pass-123"  # noqa: S105 - fixed local test credential
 
 
 @pytest.fixture(scope="session")
@@ -18,3 +47,117 @@ async def engine(database_url: str) -> AsyncIterator[AsyncEngine]:
     value = create_async_engine(database_url)
     yield value
     await value.dispose()
+
+
+@pytest.fixture
+def settings(database_url: str) -> Settings:
+    return Settings(
+        database_url=database_url,
+        redis_url="redis://localhost:6379/0",
+        s3_endpoint="http://localhost:9000",
+        s3_bucket="tiny-hermes",
+        session_cookie_secret="test-cookie-secret-with-32-characters",
+        bootstrap_token=BOOTSTRAP_TOKEN,
+    )
+
+
+@pytest.fixture
+async def empty_database(engine: AsyncEngine) -> None:
+    async with engine.begin() as connection:
+        await connection.execute(text(TRUNCATE))
+
+
+@pytest.fixture
+async def client(
+    empty_database: None, settings: Settings
+) -> AsyncIterator[TestClient]:
+    del empty_database
+    with TestClient(create_app(settings=settings)) as value:
+        yield value
+
+
+@pytest.fixture
+def admin_csrf(client: TestClient) -> str:
+    """Bootstrap the platform administrator and return their CSRF token."""
+    created = client.post(
+        "/api/v1/bootstrap",
+        headers={"X-Bootstrap-Token": BOOTSTRAP_TOKEN},
+        json={
+            "subject": "admin@example.com",
+            "display_name": "Admin",
+            "password": PASSWORD,
+        },
+    )
+    assert created.status_code == 201
+    login = client.post(
+        "/api/v1/auth/sessions",
+        json={"subject": "admin@example.com", "password": PASSWORD},
+    )
+    assert login.status_code == 201
+    return login.cookies["tiny_hermes_csrf"]
+
+
+@pytest.fixture
+def workspace_id(client: TestClient, admin_csrf: str) -> str:
+    created = client.post(
+        "/api/v1/workspaces",
+        headers={"X-CSRF-Token": admin_csrf},
+        json={"name": "Primary"},
+    )
+    assert created.status_code == 201
+    return str(created.json()["id"])
+
+
+@pytest.fixture
+def scope(workspace_id: str, admin_csrf: str) -> dict[str, str]:
+    """Headers that select a workspace and authorize a write."""
+    return {"X-Workspace-Id": workspace_id, "X-CSRF-Token": admin_csrf}
+
+
+@pytest.fixture
+def published_agent(client: TestClient, scope: dict[str, str]) -> str:
+    agent_id = str(
+        client.post(
+            "/api/v1/agents", headers=scope, json={"name": "Analyst", "alias": "analyst"}
+        ).json()["id"]
+    )
+    draft = client.put(
+        f"/api/v1/agents/{agent_id}/draft",
+        headers=scope,
+        json={"expected_revision": 1, "spec": VALID_SPEC},
+    )
+    assert draft.status_code == 200
+    published = client.post(
+        f"/api/v1/agents/{agent_id}/publish",
+        headers=scope,
+        json={"expected_revision": draft.json()["revision"]},
+    )
+    assert published.status_code == 201
+    return agent_id
+
+
+@pytest.fixture
+async def concurrent_client(
+    settings: Settings, client: TestClient, scope: dict[str, str]
+) -> AsyncIterator[httpx.AsyncClient]:
+    """A second ASGI client that can issue genuinely parallel requests.
+
+    ``TestClient`` is synchronous, so overlapping requests need an async client
+    sharing the already authenticated browser session.
+    """
+    del scope
+    transport = httpx.ASGITransport(app=create_app(settings=settings))
+    cookies = {name: value for name, value in client.cookies.items()}
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver", cookies=cookies
+    ) as value:
+        yield value
+
+
+@pytest.fixture
+def session_id(client: TestClient, scope: dict[str, str], published_agent: str) -> str:
+    created = client.post(
+        "/api/v1/sessions", headers=scope, json={"agent_id": published_agent}
+    )
+    assert created.status_code == 201
+    return str(created.json()["id"])

@@ -1,6 +1,10 @@
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from typing import Any
+from uuid import UUID
 
 
 class RunState(StrEnum):
@@ -145,3 +149,201 @@ class StateDecision:
     @property
     def is_terminal(self) -> bool:
         return self.state in TERMINAL_STATES
+
+
+class QueueStatus(StrEnum):
+    HEAD = "head"
+    PENDING = "pending"
+    SESSION_BLOCKED = "session_blocked"
+    TERMINAL = "terminal"
+
+
+@dataclass(frozen=True)
+class CanonicalMessage:
+    """The one input shape a phase-2A Run accepts."""
+
+    role: str
+    text: str
+
+    def document(self) -> dict[str, Any]:
+        return {"role": self.role, "parts": [{"type": "text", "text": self.text}]}
+
+
+@dataclass(frozen=True)
+class CallerIdentity:
+    """The stable calling subject; never an API key or rotatable credential."""
+
+    caller_type: CallerType
+    caller_id: UUID
+
+
+@dataclass(frozen=True)
+class RunCapabilities:
+    can_control: bool
+    can_retry: bool
+
+
+@dataclass(frozen=True)
+class BudgetSummary:
+    max_execution_seconds: int
+    consumed_execution_ms: int
+    max_elapsed_seconds: int
+    elapsed_deadline_at: datetime
+    max_model_calls: int
+    consumed_model_calls: int
+    max_tool_calls: int
+    consumed_tool_calls: int
+    max_tokens: int | None
+    consumed_tokens: int
+    max_derived_retries: int
+    derived_retry_count: int
+
+    def allows_execution(self, now: datetime) -> bool:
+        if now >= self.elapsed_deadline_at:
+            return False
+        if self.consumed_model_calls >= self.max_model_calls:
+            return False
+        if self.consumed_execution_ms >= self.max_execution_seconds * 1000:
+            return False
+        return not (self.max_tokens is not None and self.consumed_tokens >= self.max_tokens)
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "max_execution_seconds": self.max_execution_seconds,
+            "consumed_execution_ms": self.consumed_execution_ms,
+            "max_elapsed_seconds": self.max_elapsed_seconds,
+            "elapsed_deadline_at": self.elapsed_deadline_at.isoformat(),
+            "max_model_calls": self.max_model_calls,
+            "consumed_model_calls": self.consumed_model_calls,
+            "max_tool_calls": self.max_tool_calls,
+            "consumed_tool_calls": self.consumed_tool_calls,
+            "max_tokens": self.max_tokens,
+            "consumed_tokens": self.consumed_tokens,
+            "max_derived_retries": self.max_derived_retries,
+            "derived_retry_count": self.derived_retry_count,
+        }
+
+
+@dataclass(frozen=True)
+class SessionSnapshot:
+    id: UUID
+    workspace_id: UUID
+    agent_id: UUID
+    session_mode: SessionMode
+    caller: CallerIdentity
+    head_run_id: UUID | None
+    next_run_sequence: int
+    next_message_sequence: int
+    workspace_revision_id: UUID | None
+    created_at: datetime
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "id": str(self.id),
+            "agent_id": str(self.agent_id),
+            "session_mode": self.session_mode.value,
+            "caller_type": self.caller.caller_type.value,
+            "caller_id": str(self.caller.caller_id),
+            "head_run_id": None if self.head_run_id is None else str(self.head_run_id),
+            "next_run_sequence": self.next_run_sequence,
+            "next_message_sequence": self.next_message_sequence,
+            "created_at": self.created_at.isoformat(),
+        }
+
+
+@dataclass(frozen=True)
+class RunSnapshot:
+    """Everything a caller may observe about one Run."""
+
+    id: UUID
+    workspace_id: UUID
+    session_id: UUID
+    agent_version_id: UUID
+    state: RunState
+    state_version: int
+    session_sequence: int
+    blocked_by_run_id: UUID | None
+    pause_reason: PauseReason | None
+    wait_kind: str | None
+    wait_deadline_at: datetime | None
+    retry_of_run_id: UUID | None
+    budget_root_run_id: UUID
+    last_event_sequence: int
+    queue_position: int
+    queue_status: QueueStatus
+    budget: BudgetSummary
+    available_actions: tuple[str, ...]
+    checkpoint_replay_safe: bool
+    checkpoint_effect_status: CheckpointEffectStatus
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "id": str(self.id),
+            "session_id": str(self.session_id),
+            "agent_version_id": str(self.agent_version_id),
+            "status": self.state.value,
+            "state_version": self.state_version,
+            "session_sequence": self.session_sequence,
+            "blocked_by_run_id": _optional_id(self.blocked_by_run_id),
+            "pause_reason": None if self.pause_reason is None else self.pause_reason.value,
+            "wait_kind": self.wait_kind,
+            "wait_deadline_at": _optional_time(self.wait_deadline_at),
+            "retry_of_run_id": _optional_id(self.retry_of_run_id),
+            "budget_root_run_id": str(self.budget_root_run_id),
+            "last_event_sequence": self.last_event_sequence,
+            "queue": {"position": self.queue_position, "status": self.queue_status.value},
+            "budget": self.budget.document(),
+            "available_actions": list(self.available_actions),
+            "checkpoint_replay_safe": self.checkpoint_replay_safe,
+            "checkpoint_effect_status": self.checkpoint_effect_status.value,
+            "created_at": self.created_at.isoformat(),
+            "started_at": _optional_time(self.started_at),
+            "finished_at": _optional_time(self.finished_at),
+        }
+
+
+@dataclass(frozen=True)
+class RunEvent:
+    id: UUID
+    run_id: UUID
+    sequence: int
+    event_type: RunEventType
+    occurred_at: datetime
+
+
+def fingerprint_request(
+    method: str,
+    endpoint: str,
+    workspace_id: UUID,
+    scope_id: UUID,
+    message: CanonicalMessage | None,
+    limit_overrides: dict[str, Any] | None,
+) -> str:
+    """Hash only caller-supplied request identity.
+
+    Server-derived values such as the Agent's current version pointer stay out,
+    so a network retry still replays the original Run after a later publish.
+    """
+    payload = {
+        "method": method.upper(),
+        "endpoint": endpoint,
+        "workspace_id": str(workspace_id),
+        "scope_id": str(scope_id),
+        "message": None if message is None else message.document(),
+        "limit_overrides": limit_overrides or {},
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _optional_id(value: UUID | None) -> str | None:
+    return None if value is None else str(value)
+
+
+def _optional_time(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat()
