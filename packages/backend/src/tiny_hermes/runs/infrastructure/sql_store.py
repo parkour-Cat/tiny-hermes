@@ -3,8 +3,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, text
+from sqlalchemy import select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.agents.domain.models import AgentLimits, AgentSpec
@@ -12,8 +13,13 @@ from tiny_hermes.agents.infrastructure.tables import AgentRow, AgentVersionRow
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
 from tiny_hermes.runs.application.service import (
     AgentNotPublished,
+    DeniedRunControl,
+    EventSequenceConflict,
+    ForbiddenRunAction,
     IdempotencyKeyReused,
     SessionAgentNotFound,
+    StateVersionConflict,
+    UnknownRun,
     UnknownSession,
 )
 from tiny_hermes.runs.domain.models import (
@@ -32,8 +38,16 @@ from tiny_hermes.runs.domain.models import (
     RunStateView,
     SessionMode,
     SessionSnapshot,
+    StateDecision,
+    event_type_for,
 )
-from tiny_hermes.runs.domain.state_machine import RunStateMachine
+from tiny_hermes.runs.domain.state_machine import (
+    InvalidStateMetadata,
+    InvalidStateTransition,
+    RunLimitReached,
+    RunStateError,
+    RunStateMachine,
+)
 from tiny_hermes.runs.infrastructure.tables import (
     IdempotencyRecordRow,
     RunBudgetScopeRow,
@@ -63,6 +77,8 @@ RESERVE_SEQUENCES = text(
     "WHERE id = :run_id AND workspace_id = :workspace_id "
     "RETURNING next_event_sequence - :count AS first_sequence"
 )
+
+IDEMPOTENCY_RETENTION = timedelta(hours=24)
 
 WAITING_HEAD_STATES = frozenset(
     {RunState.PAUSED, RunState.WAITING_APPROVAL, RunState.WAITING_EXTERNAL}
@@ -290,15 +306,140 @@ class SqlRunStore:
             written.append(
                 RunEvent(row.id, command.run_id, row.sequence, event.event_type, occurred_at)
             )
-        await self._session.flush()
+        try:
+            await self._session.flush()
+        except IntegrityError as error:
+            # The allocator hands out disjoint ranges, so a duplicate sequence
+            # means something outside this seam wrote events.
+            raise EventSequenceConflict from error
         await self._forget_cached_sequence(command.run_id)
         return tuple(written)
 
     async def control_run(self, command: ControlRunCommand) -> RunSnapshot:
-        raise NotImplementedError("run control arrives with the control transaction")
+        """A user control request; an illegal one is audited before it fails."""
+        if not command.capabilities.can_control:
+            raise ForbiddenRunAction
+        try:
+            return await self.apply_signal(
+                ApplySignalCommand(
+                    workspace_id=command.workspace_id,
+                    run_id=command.run_id,
+                    signal=command.signal,
+                    request_id=command.request_id,
+                    capabilities=command.capabilities,
+                    expected_state_version=command.expected_state_version,
+                    payload={"requested_by": str(command.caller.caller_id)},
+                )
+            )
+        except RunStateError as error:
+            self._audit(
+                command.workspace_id,
+                command.caller.caller_id,
+                "run.control_denied",
+                "run",
+                command.run_id,
+                command.request_id,
+                result="denied",
+                context={"signal": command.signal.value},
+            )
+            raise DeniedRunControl(_denial_code(error)) from error
 
     async def apply_signal(self, command: ApplySignalCommand) -> RunSnapshot:
-        raise NotImplementedError("signal application arrives with the control transaction")
+        """Apply exactly the mutation ``RunStateMachine`` returns, once."""
+        run = await self._lock_run(command.workspace_id, command.run_id)
+        if run is None:
+            raise UnknownRun
+        if (
+            command.expected_state_version is not None
+            and run.state_version != command.expected_state_version
+        ):
+            raise StateVersionConflict
+        session = await self._lock_session(command.workspace_id, run.session_id)
+        if session is None:
+            raise UnknownSession
+
+        budget = await self._session.get(RunBudgetScopeRow, run.budget_root_run_id)
+        if budget is None:
+            raise UnknownRun
+        summary = _budget_summary(budget)
+        now = datetime.now(UTC)
+        decision = self._machine.decide(
+            RunStateView(
+                state=RunState(run.status),
+                pause_reason=None if run.pause_reason is None else PauseReason(run.pause_reason),
+                wait_kind=run.wait_kind,
+                wait_deadline_at=run.wait_deadline_at,
+                pause_requested=run.pause_requested_at is not None,
+                cancel_requested=run.cancel_requested_at is not None,
+                budget_allows_execution=summary.allows_execution(now),
+            ),
+            command.signal,
+            pause_reason=command.pause_reason,
+            wait_kind=command.wait_kind,
+            wait_deadline_at=command.wait_deadline_at,
+        )
+
+        _apply_decision(run, decision, now)
+        run.state_version += 1
+        run.updated_at = now
+        await self._session.flush()
+
+        if decision.is_terminal:
+            await self._terminalize(run, session, now)
+
+        await self.append_events(
+            AppendEventsCommand(
+                workspace_id=command.workspace_id,
+                run_id=run.id,
+                events=(
+                    ReservedEvent(event_type_for(command.signal), dict(command.payload)),
+                ),
+            )
+        )
+        self._audit(
+            command.workspace_id,
+            None,
+            f"run.{command.signal.value}",
+            "run",
+            run.id,
+            command.request_id,
+        )
+        return await self._snapshot(run, command.capabilities)
+
+    async def _terminalize(self, run: RunRow, session: SessionRow, now: datetime) -> None:
+        """Close a Run out and hand the Session to the next eligible Run."""
+        await self._session.execute(
+            update(IdempotencyRecordRow)
+            .where(IdempotencyRecordRow.run_id == run.id)
+            .values(expires_at=now + IDEMPOTENCY_RETENTION)
+        )
+        if session.head_run_id != run.id:
+            return
+        successor = await self._session.scalar(
+            select(RunRow)
+            .where(
+                RunRow.session_id == session.id,
+                RunRow.id != run.id,
+                RunRow.status.not_in([state.value for state in TERMINAL_STATES]),
+            )
+            .order_by(RunRow.session_sequence)
+            .limit(1)
+            .with_for_update()
+        )
+        session.head_run_id = None if successor is None else successor.id
+        if successor is not None:
+            successor.blocked_by_run_id = None
+            successor.updated_at = now
+        await self._session.execute(
+            update(RunRow)
+            .where(
+                RunRow.session_id == session.id,
+                RunRow.blocked_by_run_id == run.id,
+                RunRow.id != (successor.id if successor is not None else run.id),
+            )
+            .values(blocked_by_run_id=session.head_run_id, updated_at=now)
+        )
+        await self._session.flush()
 
     async def claim_head(self, command: ClaimRunCommand) -> ClaimedRun | None:
         raise NotImplementedError("lease claiming arrives with the coordination seam")
@@ -389,6 +530,13 @@ class SqlRunStore:
         record.run_id = run_id
         record.response_snapshot = document
         await self._session.flush()
+
+    async def _lock_run(self, workspace_id: UUID, run_id: UUID) -> RunRow | None:
+        return await self._session.scalar(
+            select(RunRow)
+            .where(RunRow.id == run_id, RunRow.workspace_id == workspace_id)
+            .with_for_update()
+        )
 
     async def _lock_session(
         self, workspace_id: UUID, session_id: UUID
@@ -612,3 +760,32 @@ def _session_snapshot(row: SessionRow) -> SessionSnapshot:
         workspace_revision_id=row.workspace_revision_id,
         created_at=row.created_at,
     )
+
+
+def _denial_code(error: RunStateError) -> str:
+    if isinstance(error, RunLimitReached):
+        return "retry_budget_exhausted"
+    if isinstance(error, InvalidStateMetadata | InvalidStateTransition):
+        return "invalid_state_transition"
+    return "invalid_state_transition"
+
+
+def _apply_decision(run: RunRow, decision: StateDecision, now: datetime) -> None:
+    """Write exactly what the state machine returned and nothing else."""
+    run.status = decision.state.value
+    run.pause_reason = None if decision.pause_reason is None else decision.pause_reason.value
+    run.wait_kind = decision.wait_kind
+    run.wait_deadline_at = decision.wait_deadline_at
+    if decision.set_pause_requested:
+        run.pause_requested_at = now
+    if decision.clear_pause_request:
+        run.pause_requested_at = None
+    if decision.set_cancel_requested:
+        run.cancel_requested_at = now
+    if decision.clear_cancel_request:
+        run.cancel_requested_at = None
+    if decision.starts_execution and run.started_at is None:
+        run.started_at = now
+    if decision.is_terminal:
+        run.finished_at = now
+        run.blocked_by_run_id = None

@@ -33,7 +33,12 @@ from tiny_hermes.runs.application.service import (
     UnknownRun,
     UnknownSession,
 )
-from tiny_hermes.runs.domain.models import RunSnapshot, SessionMode, SessionSnapshot
+from tiny_hermes.runs.domain.models import (
+    RunSignal,
+    RunSnapshot,
+    SessionMode,
+    SessionSnapshot,
+)
 from tiny_hermes.shared.errors import AppError
 from tiny_hermes.tenancy.domain.models import Actor
 
@@ -53,6 +58,10 @@ class CreateSessionRequest(BaseModel):
 class CreateRunRequest(BaseModel):
     session_id: UUID
     input: str = Field(min_length=1, max_length=32_768)
+
+
+class ControlRunRequest(BaseModel):
+    expected_state_version: int = Field(ge=1)
 
 
 class SessionResponse(BaseModel):
@@ -232,6 +241,101 @@ def run_router(resources: ApplicationResources) -> APIRouter:
             raise _as_app_error(error) from error
         return RunResponse.from_domain(found)
 
+    async def _control(
+        run_id: UUID,
+        payload: ControlRunRequest,
+        request: Request,
+        auth: AuthService,
+        runs: RunCoordination,
+        signal: RunSignal,
+        session_token: str | None,
+        csrf_token: str | None,
+        selected_workspace: str | None,
+    ) -> RunResponse:
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            updated = await runs.control_run(
+                workspace_id,
+                _actor(user),
+                run_id,
+                signal,
+                payload.expected_state_version,
+                request.state.request_id,
+            )
+        except RunCoordinationError as error:
+            raise _as_app_error(error) from error
+        return RunResponse.from_domain(updated)
+
+    @router.post("/{run_id}/pause", response_model=RunResponse)
+    async def pause_run(  # pyright: ignore[reportUnusedFunction]
+        run_id: UUID,
+        payload: ControlRunRequest,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency)],
+        runs: Annotated[RunCoordination, Depends(runs_dependency)],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> RunResponse:
+        return await _control(
+            run_id,
+            payload,
+            request,
+            auth,
+            runs,
+            RunSignal.PAUSE_REQUESTED,
+            session_token,
+            csrf_token,
+            selected_workspace,
+        )
+
+    @router.post("/{run_id}/resume", response_model=RunResponse)
+    async def resume_run(  # pyright: ignore[reportUnusedFunction]
+        run_id: UUID,
+        payload: ControlRunRequest,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency)],
+        runs: Annotated[RunCoordination, Depends(runs_dependency)],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> RunResponse:
+        return await _control(
+            run_id,
+            payload,
+            request,
+            auth,
+            runs,
+            RunSignal.RESUME_REQUESTED,
+            session_token,
+            csrf_token,
+            selected_workspace,
+        )
+
+    @router.post("/{run_id}/cancel", response_model=RunResponse)
+    async def cancel_run(  # pyright: ignore[reportUnusedFunction]
+        run_id: UUID,
+        payload: ControlRunRequest,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency)],
+        runs: Annotated[RunCoordination, Depends(runs_dependency)],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> RunResponse:
+        return await _control(
+            run_id,
+            payload,
+            request,
+            auth,
+            runs,
+            RunSignal.CANCEL_REQUESTED,
+            session_token,
+            csrf_token,
+            selected_workspace,
+        )
+
     return router
 
 
@@ -292,6 +396,7 @@ def _as_app_error(error: RunCoordinationError) -> AppError:
             title="Invalid run control",
             status=409,
             detail="The run cannot accept that control in its current state.",
+            audited=True,
         )
     if isinstance(error, EventSequenceConflict):
         return AppError(

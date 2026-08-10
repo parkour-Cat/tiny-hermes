@@ -18,6 +18,7 @@ class AppError(Exception):
         status: int,
         detail: str,
         context: dict[str, Any] | None = None,
+        audited: bool = False,
     ) -> None:
         super().__init__(detail)
         self.code = code
@@ -25,3 +26,5 @@ class AppError(Exception):
         self.status = status
         self.detail = detail
         self.context = context or {}
+        self.audited = audited
+        """True when a refusal already wrote an audit record worth committing."""

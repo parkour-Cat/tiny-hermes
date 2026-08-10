@@ -100,6 +100,12 @@ class ApplicationResources:
             except AuditedDenial:
                 await session.commit()
                 raise
+            except AppError as error:
+                if error.audited:
+                    await session.commit()
+                else:
+                    await session.rollback()
+                raise
             except BaseException:
                 await session.rollback()
                 raise
