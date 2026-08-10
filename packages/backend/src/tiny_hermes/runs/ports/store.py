@@ -4,7 +4,9 @@ from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
+from tiny_hermes.agents.domain.models import AgentSpec
 from tiny_hermes.runs.domain.models import (
+    BudgetSummary,
     CallerIdentity,
     CanonicalMessage,
     CheckpointEffectStatus,
@@ -145,6 +147,24 @@ class RecordSliceCommand:
 
 
 @dataclass(frozen=True)
+class ExecutionContext:
+    """What a Worker needs to run one round, read through the store.
+
+    The Agent configuration comes from the Version the Run fixed at creation,
+    never from the Agent's current pointer, so publishing mid-flight cannot
+    change how an accepted Run behaves.
+    """
+
+    run_id: UUID
+    state_version: int
+    spec: AgentSpec
+    input_text: str
+    cancel_requested: bool
+    pause_requested: bool
+    budget: BudgetSummary
+
+
+@dataclass(frozen=True)
 class RenewedLease:
     lease_id: UUID
     version: int
@@ -153,7 +173,14 @@ class RenewedLease:
 
 @dataclass(frozen=True)
 class ClaimRunCommand:
-    workspace_id: UUID
+    """A claim attempt.
+
+    ``workspace_id`` of ``None`` means any workspace this Worker serves, which
+    is what a deployed Worker process wants; a concrete value narrows the
+    search for tests and for future per-tenant Workers.
+    """
+
+    workspace_id: UUID | None
     worker_id: str
     lease_seconds: int
     request_id: str
@@ -174,6 +201,7 @@ class AcceptedRun:
 class ClaimedRun:
     run: RunSnapshot
     lease_id: UUID
+    lease_version: int
     lease_expires_at: datetime
 
 
@@ -220,6 +248,10 @@ class RunStore(Protocol):
     ) -> tuple[RunEvent, ...]: ...
 
     async def claim_head(self, command: ClaimRunCommand) -> ClaimedRun | None: ...
+
+    async def execution_context(
+        self, workspace_id: UUID, run_id: UUID
+    ) -> ExecutionContext | None: ...
 
     async def renew_lease(self, command: RenewLeaseCommand) -> RenewedLease | None: ...
 

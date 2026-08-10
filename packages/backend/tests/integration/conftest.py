@@ -1,5 +1,5 @@
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import httpx2 as httpx
@@ -134,6 +134,69 @@ def published_agent(client: TestClient, scope: dict[str, str]) -> str:
     )
     assert published.status_code == 201
     return agent_id
+
+
+@pytest.fixture
+def agent_with_scenario(
+    client: TestClient, scope: dict[str, str]
+) -> Callable[..., str]:
+    """Publish an Agent whose validated policy selects a model scenario."""
+
+    def publish(scenario: str, alias: str = "runner") -> str:
+        agent_id = str(
+            client.post(
+                "/api/v1/agents",
+                headers=scope,
+                json={"name": alias.title(), "alias": alias},
+            ).json()["id"]
+        )
+        spec = {
+            **VALID_SPEC,
+            "model_policy": {"provider": "deterministic", "scenario": scenario},
+        }
+        draft = client.put(
+            f"/api/v1/agents/{agent_id}/draft",
+            headers=scope,
+            json={"expected_revision": 1, "spec": spec},
+        )
+        assert draft.status_code == 200
+        published = client.post(
+            f"/api/v1/agents/{agent_id}/publish",
+            headers=scope,
+            json={"expected_revision": draft.json()["revision"]},
+        )
+        assert published.status_code == 201
+        return agent_id
+
+    return publish
+
+
+@pytest.fixture
+def session_for(client: TestClient, scope: dict[str, str]) -> Callable[[str], str]:
+    def create(agent_id: str) -> str:
+        created = client.post(
+            "/api/v1/sessions", headers=scope, json={"agent_id": agent_id}
+        )
+        assert created.status_code == 201
+        return str(created.json()["id"])
+
+    return create
+
+
+@pytest.fixture
+def submit_run(
+    client: TestClient, scope: dict[str, str]
+) -> Callable[[str, str], dict[str, Any]]:
+    def submit(session_id: str, key: str) -> dict[str, Any]:
+        created = client.post(
+            "/api/v1/runs",
+            headers={**scope, "Idempotency-Key": key},
+            json={"session_id": session_id, "input": f"message {key}"},
+        )
+        assert created.status_code == 201
+        return dict(created.json())
+
+    return submit
 
 
 @pytest.fixture

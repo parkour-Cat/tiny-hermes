@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import select, text, update
@@ -73,6 +73,7 @@ from tiny_hermes.runs.ports.store import (
     ClaimRunCommand,
     ControlRunCommand,
     CreateSessionCommand,
+    ExecutionContext,
     RecordSliceCommand,
     RenewedLease,
     RenewLeaseCommand,
@@ -451,6 +452,38 @@ class SqlRunStore:
             request_id,
         )
 
+    async def execution_context(
+        self, workspace_id: UUID, run_id: UUID
+    ) -> ExecutionContext | None:
+        """Read everything one round needs, and nothing a Worker may write."""
+        run = await self._session.scalar(
+            select(RunRow).where(RunRow.id == run_id, RunRow.workspace_id == workspace_id)
+        )
+        if run is None:
+            return None
+        version = await self._session.get(AgentVersionRow, run.agent_version_id)
+        budget = await self._session.get(RunBudgetScopeRow, run.budget_root_run_id)
+        if version is None or budget is None:
+            return None
+        message = await self._session.scalar(
+            select(SessionMessageRow)
+            .where(
+                SessionMessageRow.source_run_id == run.id,
+                SessionMessageRow.role == "user",
+            )
+            .order_by(SessionMessageRow.sequence.desc())
+            .limit(1)
+        )
+        return ExecutionContext(
+            run_id=run.id,
+            state_version=run.state_version,
+            spec=AgentSpec.model_validate(version.spec),
+            input_text=_message_text(message),
+            cancel_requested=run.cancel_requested_at is not None,
+            pause_requested=run.pause_requested_at is not None,
+            budget=_budget_summary(budget),
+        )
+
     async def renew_lease(self, command: RenewLeaseCommand) -> RenewedLease | None:
         """Extend a lease this worker still holds, or report that it is gone.
 
@@ -613,7 +646,8 @@ class SqlRunStore:
         if candidate is None:
             return None
 
-        session = await self._lock_session(command.workspace_id, candidate.session_id)
+        workspace_id = candidate.workspace_id
+        session = await self._lock_session(workspace_id, candidate.session_id)
         if session is None or session.head_run_id != candidate.id:
             return None
 
@@ -633,7 +667,9 @@ class SqlRunStore:
 
         lease_id = uuid4()
         expires_at = now + timedelta(seconds=command.lease_seconds)
-        await self._session.execute(
+        # A re-claim reuses the one lease row per Run, so the version this
+        # claimer must present is whatever the upsert produced, not always one.
+        lease_version = await self._session.scalar(
             pg_insert(WorkerLeaseRow)
             .values(
                 id=lease_id,
@@ -655,12 +691,15 @@ class SqlRunStore:
                     "version": WorkerLeaseRow.version + 1,
                 },
             )
+            .returning(WorkerLeaseRow.version)
         )
+        if lease_version is None:
+            raise UnknownRun
         await self._session.flush()
 
         await self.append_events(
             AppendEventsCommand(
-                workspace_id=command.workspace_id,
+                workspace_id=workspace_id,
                 run_id=candidate.id,
                 events=(
                     ReservedEvent(
@@ -670,7 +709,7 @@ class SqlRunStore:
             )
         )
         self._audit(
-            command.workspace_id,
+            workspace_id,
             None,
             "run.lease_acquired",
             "run",
@@ -678,7 +717,12 @@ class SqlRunStore:
             command.request_id,
         )
         snapshot = await self._snapshot(candidate, command.capabilities)
-        return ClaimedRun(run=snapshot, lease_id=lease_id, lease_expires_at=expires_at)
+        return ClaimedRun(
+            run=snapshot,
+            lease_id=lease_id,
+            lease_version=lease_version,
+            lease_expires_at=expires_at,
+        )
 
     async def _select_claimable(
         self, command: ClaimRunCommand, now: datetime
@@ -693,7 +737,6 @@ class SqlRunStore:
             select(RunRow)
             .join(SessionRow, SessionRow.id == RunRow.session_id)
             .where(
-                RunRow.workspace_id == command.workspace_id,
                 RunRow.status == RunState.QUEUED.value,
                 SessionRow.head_run_id == RunRow.id,
                 RunRow.blocked_by_run_id.is_(None),
@@ -703,6 +746,8 @@ class SqlRunStore:
             .limit(1)
             .with_for_update(of=RunRow, skip_locked=True)
         )
+        if command.workspace_id is not None:
+            statement = statement.where(RunRow.workspace_id == command.workspace_id)
         if command.session_id is not None:
             statement = statement.where(RunRow.session_id == command.session_id)
         return await self._session.scalar(statement)
@@ -1274,3 +1319,20 @@ def _apply_decision(run: RunRow, decision: StateDecision, now: datetime) -> None
     if decision.is_terminal:
         run.finished_at = now
         run.blocked_by_run_id = None
+
+
+def _message_text(row: SessionMessageRow | None) -> str:
+    """Flatten a canonical message back to the text a phase-2B round needs."""
+    if row is None:
+        return ""
+    parts: Any = row.content.get("parts", [])
+    if not isinstance(parts, list):
+        return ""
+    texts: list[str] = []
+    for part in cast(list[Any], parts):
+        if not isinstance(part, dict):
+            continue
+        fields = cast(dict[str, Any], part)
+        if fields.get("type") == "text":
+            texts.append(str(fields.get("text", "")))
+    return "\n".join(texts)
