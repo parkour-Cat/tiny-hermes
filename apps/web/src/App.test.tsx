@@ -47,3 +47,20 @@ test("logs in and creates a workspace through the API", async () => {
   expect(await screen.findByText("Acme")).toBeInTheDocument();
   expect(created).toEqual(["Acme"]);
 });
+
+test("a session the platform has already ended returns the user to sign-in", async () => {
+  window.history.pushState({}, "", "/workspaces/11111111-2222-4333-8444-555555555555/agents");
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
+    http.get("/api/v1/workspaces", () => HttpResponse.json([])),
+    // The cookie is still in the browser; the session behind it is gone. No
+    // page should have to recognize that on its own.
+    http.get("/api/v1/agents", () =>
+      HttpResponse.json({ code: "unauthenticated" }, { status: 401 }),
+    ),
+  );
+
+  render(<App />);
+
+  expect(await screen.findByRole("button", { name: "登录" })).toBeInTheDocument();
+});

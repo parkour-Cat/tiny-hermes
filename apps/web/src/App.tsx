@@ -1,14 +1,17 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Alert, Button, Spin } from "antd";
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
+import { QueryProvider } from "./api/QueryProvider";
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
 import { t } from "./i18n/zh-CN";
 import { ConsoleTheme } from "./layout/ConsoleTheme";
 
 const ConsoleLayout = lazy(() =>
   import("./layout/ConsoleLayout").then((module) => ({ default: module.ConsoleLayout })),
+);
+const AgentsPage = lazy(() =>
+  import("./pages/AgentsPage").then((module) => ({ default: module.AgentsPage })),
 );
 const BootstrapPage = lazy(() =>
   import("./pages/BootstrapPage").then((module) => ({ default: module.BootstrapPage })),
@@ -57,6 +60,7 @@ function AppRoutes() {
           element={auth.user === null ? <Navigate to="/login" replace /> : <ConsoleLayout />}
         >
           <Route index element={<Navigate to="agents" replace />} />
+          <Route path="agents" element={<AgentsPage />} />
         </Route>
         <Route
           path="*"
@@ -68,21 +72,15 @@ function AppRoutes() {
 }
 
 export function App() {
-  const [queryClient] = useState(
-    () =>
-      new QueryClient({
-        defaultOptions: { queries: { retry: false } },
-      }),
-  );
   return (
     <ConsoleTheme>
-      <QueryClientProvider client={queryClient}>
-        <BrowserRouter>
-          <AuthProvider>
+      <BrowserRouter>
+        <AuthProvider>
+          <QueryProvider>
             <AppRoutes />
-          </AuthProvider>
-        </BrowserRouter>
-      </QueryClientProvider>
+          </QueryProvider>
+        </AuthProvider>
+      </BrowserRouter>
     </ConsoleTheme>
   );
 }

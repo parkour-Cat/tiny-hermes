@@ -21,6 +21,7 @@ type AuthValue = {
   error: string | null;
   login: (input: LoginInput) => Promise<void>;
   logout: () => Promise<void>;
+  forget: () => void;
   refresh: () => Promise<void>;
 };
 
@@ -65,8 +66,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null);
   }
 
+  /**
+   * Drop the signed-in user without asking the platform to end anything.
+   *
+   * For the case where the platform has already ended it: a `401` on any
+   * request means the browser is holding a session that no longer exists, and
+   * calling `DELETE` on it would only produce a second `401`.
+   */
+  function forget(): void {
+    setUser(null);
+  }
+
   const value = useMemo(
-    () => ({ user, loading, error, login, logout, refresh }),
+    () => ({ user, loading, error, login, logout, forget, refresh }),
     [user, loading, error],
   );
 
