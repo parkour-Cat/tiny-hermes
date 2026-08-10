@@ -92,6 +92,50 @@ async def test_stale_draft_revision_conflicts_without_overwriting(
     assert current.json()["revision"] == 2
 
 
+async def test_a_taken_alias_is_refused_by_the_database_adapter_too(
+    client: TestClient, scope: dict[str, str]
+) -> None:
+    """The alias rule has to survive the adapter swap.
+
+    The in-memory adapter checks for a duplicate before inserting, so its unit
+    test passes while PostgreSQL raises ``uq_agents_workspace_alias`` instead.
+    Only an integration test can tell the two apart, and without one the 409
+    branch is dead code and callers get a 500 for a typo.
+    """
+    first = client.post(
+        "/api/v1/agents", headers=scope, json={"name": "Analyst", "alias": "analyst"}
+    )
+    assert first.status_code == 201
+
+    duplicate = client.post(
+        "/api/v1/agents", headers=scope, json={"name": "Second", "alias": "analyst"}
+    )
+
+    assert duplicate.status_code == 409
+    assert duplicate.json()["code"] == "agent_alias_taken"
+    assert len(client.get("/api/v1/agents", headers=scope).json()) == 1
+
+
+async def test_the_same_alias_is_free_in_another_workspace(
+    client: TestClient, scope: dict[str, str], admin_csrf: str
+) -> None:
+    """The uniqueness is per Workspace, so the translation must not overreach."""
+    client.post("/api/v1/agents", headers=scope, json={"name": "A", "alias": "analyst"})
+    second_workspace = client.post(
+        "/api/v1/workspaces",
+        headers={"X-CSRF-Token": admin_csrf},
+        json={"name": "Secondary"},
+    ).json()
+
+    reused = client.post(
+        "/api/v1/agents",
+        headers={**scope, "X-Workspace-Id": second_workspace["id"]},
+        json={"name": "B", "alias": "analyst"},
+    )
+
+    assert reused.status_code == 201
+
+
 async def test_cross_workspace_agent_identifier_is_a_generic_not_found(
     client: TestClient, scope: dict[str, str], admin_csrf: str
 ) -> None:

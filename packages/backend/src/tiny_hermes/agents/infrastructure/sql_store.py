@@ -4,9 +4,13 @@ from typing import cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tiny_hermes.agents.application.service import DraftRevisionConflict
+from tiny_hermes.agents.application.service import (
+    AgentAliasAlreadyUsed,
+    DraftRevisionConflict,
+)
 from tiny_hermes.agents.domain.models import (
     Agent,
     AgentDraft,
@@ -20,6 +24,8 @@ from tiny_hermes.agents.ports.store import PublishResult
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
 from tiny_hermes.tenancy.domain.models import Role
 from tiny_hermes.tenancy.infrastructure.tables import MembershipRow
+
+ALIAS_CONSTRAINT = "uq_agents_workspace_alias"
 
 
 class SqlAgentStore:
@@ -55,7 +61,17 @@ class SqlAgentStore:
             created_at=datetime.now(UTC),
         )
         self._session.add(row)
-        await self._session.flush()
+        try:
+            await self._session.flush()
+        except IntegrityError as error:
+            # The memory adapter looks the alias up before inserting, which is
+            # honest there and racy here: two concurrent requests would both
+            # pass such a check. ``uq_agents_workspace_alias`` is the real
+            # guard, so this translates it into the same failure the other
+            # adapter raises rather than adding a second, weaker one.
+            if ALIAS_CONSTRAINT not in str(error.orig):
+                raise
+            raise AgentAliasAlreadyUsed from error
         self._session.add(
             AgentDraftRow(
                 agent_id=row.id,
