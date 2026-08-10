@@ -12,6 +12,7 @@ pytest-cache-files-*/
 .mypy_cache/
 .pyright/
 *.py[cod]
+*.tsbuildinfo
 node_modules/
 dist/
 coverage/
