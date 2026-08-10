@@ -473,11 +473,22 @@ Two constraints hold throughout, from the project's standing rules:
 - The transcript records IDs, statuses, sequences, and timings. No cookies, no
   bootstrap token, no request bodies carrying personality text, no database URL.
 
-This drill is **not** in CI. CI has GitHub service containers, not a Compose
-stack, and inventing one there would test a different topology than the one
-operators run. It is a documented, repeatable, recorded drill — the same
-standing the phase-2B Compose smoke has. The verification record says so plainly
-rather than implying CI covers it.
+The drill runs **in CI**, in the existing `compose-e2e` job, as a step after the
+Playwright run so the browser tests are not perturbed by a restarting Worker.
+That job already builds and starts the real Compose stack, so the drill executes
+against the same topology an operator runs rather than against GitHub service
+containers.
+
+Running it in CI matters more than convenience: an exit check proven once by a
+transcript decays the moment someone changes lease handling, and the whole point
+of this check is that recovery keeps working. The recorded local transcript
+still goes into the verification record, because CI has never actually run
+(§12.6).
+
+The `down -v` at the end of `compose-e2e` is the CI stack's own ephemeral
+volume and is unaffected by the no-volume-deletion rule, which protects a
+developer's local data. The script itself never deletes a volume, so it is safe
+to run locally.
 
 ## 12. Verification strategy
 
@@ -519,8 +530,8 @@ Coverage:
 
 ### 12.3 Browser acceptance (Playwright)
 
-Runs against the Compose stack, so the Worker and Scheduler are real and the
-Run in the test genuinely executes.
+Runs in the existing `compose-e2e` CI job against the built Compose stack, so
+the Worker and Scheduler are real and the Run in the test genuinely executes.
 
 Bootstrap succeeds once per fresh stack, which today makes spec ordering load
 bearing: `foundation.spec.ts` asserts `201` from `POST /bootstrap` and a second
@@ -544,8 +555,18 @@ and no test.
 
 ### 12.5 Static checks
 
-`ruff`, `pyright`, `eslint --max-warnings 0`, `tsc -b`, `vite build`, the full
-pytest suite, and the degraded-Redis pytest run — all unchanged and all green.
+`ruff check packages/backend`, `pyright`, `eslint --max-warnings 0`, `tsc -b`,
+`vite build`, the full pytest suite, and the degraded-Redis pytest run — all
+unchanged and all green. (`ruff format` is not part of this repository's checks
+and must not be introduced by this slice; it would reformat most of the backend.)
+
+### 12.6 CI still has never run
+
+`git remote -v` is empty. `.github/workflows/ci.yml` has never executed on any
+runner, so every claim it makes rests on the steps having been reproduced
+locally. This slice adds work to two of its jobs and must not treat "CI is
+green" as an existing fact. The verification record states this, as the phase-2B
+record did.
 
 ## 13. Exit criteria and next seams
 
