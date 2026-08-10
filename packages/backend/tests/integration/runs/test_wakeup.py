@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from tiny_hermes.runs.application.worker import WorkerRuntime, WorkerSettings
 from tiny_hermes.runs.infrastructure.deterministic_model import (
@@ -17,6 +18,23 @@ UNREACHABLE = "redis://127.0.0.1:6399/0"
 
 @pytest.fixture
 async def notifier(settings: Any) -> AsyncIterator[RedisWakeUpNotifier]:
+    """A live wake-up channel, or a skip.
+
+    These tests assert the optimization itself, so they need a reachable Redis.
+    The degraded CI run points ``REDIS_URL`` at an unused port deliberately;
+    what has to keep passing there is every other test, not these.
+    """
+    # ``redis.asyncio`` ships no annotations for these two calls, the same gap
+    # ``RedisWakeUpNotifier`` works around.
+    client = Redis.from_url(  # pyright: ignore[reportUnknownMemberType]
+        settings.redis_url, socket_connect_timeout=1
+    )
+    try:
+        await client.ping()  # pyright: ignore[reportUnknownMemberType]
+    except Exception:
+        pytest.skip("no reachable wake-up channel")
+    finally:
+        await client.aclose()
     value = RedisWakeUpNotifier(settings.redis_url)
     yield value
     await value.close()

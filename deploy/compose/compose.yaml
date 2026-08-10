@@ -81,6 +81,48 @@ services:
       retries: 20
     ports: ["8000:8000"]
 
+  # The Worker and the Scheduler run the console script directly rather than
+  # through `uv run`, so PID 1 is the process itself: SIGTERM reaches the loop
+  # that knows how to finish its slice, and the liveness probe has a real
+  # process to look at instead of a wrapper. Neither publishes a port, because
+  # neither accepts a request; work arrives through PostgreSQL and Redis.
+  worker:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    command: ["/app/.venv/bin/tiny-hermes-worker"]
+    environment: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Liveness, not progress: this reports that the process is still there. A
+    # Worker wedged inside a slice still answers healthy, and the Scheduler's
+    # lease expiry is what actually recovers its Run.
+    healthcheck: &process-alive
+      test: ["CMD-SHELL", "grep -q tiny-hermes /proc/1/cmdline"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  scheduler:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    command: ["/app/.venv/bin/tiny-hermes-scheduler"]
+    environment: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck: *process-alive
+
   web:
     build:
       context: ../..

@@ -90,8 +90,8 @@ Remove-Item Env:TEST_DATABASE_URL
 Remove-Item Env:DATABASE_URL
 ```
 
-Repeat the concurrency regressions before merging a change to Run Coordination.
-CI runs the same four files ten times:
+Repeat the concurrency regressions before merging a change to Run Coordination or
+Run Execution. CI runs the same six files ten times:
 
 ```powershell
 1..10 | ForEach-Object {
@@ -99,8 +99,21 @@ CI runs the same four files ten times:
     packages/backend/tests/integration/runs/test_run_creation.py `
     packages/backend/tests/integration/runs/test_run_control.py `
     packages/backend/tests/integration/runs/test_run_coordination.py `
-    packages/backend/tests/integration/runs/test_run_retry.py -q
+    packages/backend/tests/integration/runs/test_run_retry.py `
+    packages/backend/tests/integration/runs/test_scheduler.py `
+    packages/backend/tests/integration/runs/test_execution_flow.py -q
 }
+```
+
+Redis buys latency, never correctness, so the suite must also pass with no
+reachable wake-up channel. Point `REDIS_URL` at a port nothing listens on and run
+it again. The five tests in `test_wakeup.py` that assert the optimization itself
+report as skipped; every other test must still pass, on polling alone:
+
+```powershell
+$env:REDIS_URL = "redis://127.0.0.1:6399/0"
+uv run --no-sync pytest packages/backend/tests/integration -q -rs
+Remove-Item Env:REDIS_URL
 ```
 
 Run the Web checks and the browser acceptance test. The browser test creates the first administrator, so it requires empty local development volumes. If this platform has already been bootstrapped, follow the reset procedure below, then rerun the First start Compose command but do not bootstrap manually.
@@ -187,11 +200,66 @@ Invoke-RestMethod -Uri "$api/runs/$($run.id)/pause" -Method Post -WebSession $br
 shown above, and every Run snapshot reports `queue`, `budget`, and
 server-computed `available_actions`.
 
-**Runs stay `queued` in phase 2A.** There is no Worker process, no Scheduler,
-no Redis wake-up, no SSE stream, no model call, and no sandbox yet; those arrive
-in phase 2B, and the minimum Agent Builder and Run Detail pages arrive in phase
-2C. A queued Run that never starts is the correct observable behavior today, not
-a defect.
+## Executing Runs
+
+Compose starts a Worker and a Scheduler alongside the API, so a submitted Run now
+reaches a terminal state on its own. Neither process accepts a request; work
+arrives through PostgreSQL, and Redis only shortens the wait.
+
+The Agent's published `model_policy.scenario` decides what its Runs do. All three
+scenarios are answered by the deterministic provider, which makes no network
+call:
+
+| Scenario | Behavior |
+| --- | --- |
+| `complete` | One model round, then `completed`. |
+| `continue_once` | Two rounds, then `completed`. |
+| `fail_replay_safe` | Fails at a replay-safe checkpoint, so `retry` is offered. |
+
+Watch a Run as it executes. `GET /runs/{id}/events` is a Server-Sent Events
+stream, and it selects the workspace with a `workspace_id` query parameter rather
+than a header, because a browser `EventSource` cannot set one. Resume an
+interrupted subscription with `Last-Event-ID`; the stream replays from that
+sequence with no gap and no repeat, and closes itself once the Run is terminal.
+
+`Invoke-RestMethod` buffers a whole response, so it cannot show a stream
+arriving. Use `curl.exe`, and pass the session cookie the sign-in above already
+placed in `$browser`:
+
+```powershell
+$sessionCookie = ($browser.Cookies.GetCookies("http://127.0.0.1:8000") |
+  Where-Object Name -eq "tiny_hermes_session").Value
+curl.exe -N -b "tiny_hermes_session=$sessionCookie" `
+  "http://127.0.0.1:8000/api/v1/runs/$($run.id)/events?workspace_id=$workspaceId"
+```
+
+To run either process outside Compose, start it from the repository root in its
+own shell. Both read `.env` the same way the API does, and its `DATABASE_URL` and
+`REDIS_URL` already address the Compose services from the host, so no extra
+configuration is needed. Both stop cleanly on Ctrl+C, finishing the slice in
+flight:
+
+```powershell
+uv run --no-sync tiny-hermes-worker
+```
+
+```powershell
+uv run --no-sync tiny-hermes-scheduler
+```
+
+Running one on the host while the Compose `worker` is also up is fine and is the
+easiest way to watch two Workers compete for the same queue; the losing claim
+simply finds nothing to do.
+
+A Worker executes one Session at a time and returns the Run to `queued` at each
+slice boundary, so a long Run is visibly claimed more than once. The Scheduler
+expires the lease of a Worker that stopped answering and hands the Run back; that
+recovery is what a killed Worker relies on, not any timeout inside the Worker.
+
+**What phase 2B still does not have.** There is no real model provider, no tools,
+no file handling, and no sandbox — the deterministic provider is the only one that
+exists, and a Run's `input` is never sent anywhere. The minimum Agent Builder and
+Run Detail pages arrive in phase 2C, so every command above is still an API call.
 
 ## Database migrations
 
@@ -242,5 +310,7 @@ This permanently deletes the local PostgreSQL and MinIO data in those two volume
 - The first successful bootstrap closes the bootstrap endpoint permanently; changing the token does not reopen it.
 - Local PostgreSQL and MinIO passwords are deliberately development-only and must not be copied into a production manifest.
 - Environment variables can be visible through process and container inspection. Future KEK support will use protected file mounts or an external key manager instead of ordinary environment variables.
-- The M1 foundation provides Agent publication and Run acceptance rules only. Approval, secret management, tools, files, and sandbox features do not exist yet.
+- M1 provides Agent publication, Run acceptance, and deterministic Run execution only. Approval, secret management, tools, files, and sandbox features do not exist yet.
 - Agent personality text is never echoed in an error response, and a resource in another workspace always answers with a generic `404`.
+- A wake-up message carries a workspace ID and a Run ID and nothing else. Redis never sees a Run's input, an Agent's personality, or any other content.
+- The event stream selects its workspace through a query parameter because `EventSource` cannot send a header. Authorization is still the session cookie, and a Run in another workspace answers `404` whatever the parameter says.
