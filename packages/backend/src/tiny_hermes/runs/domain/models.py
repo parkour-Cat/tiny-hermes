@@ -57,6 +57,63 @@ class RunSignal(StrEnum):
     RECOVERY_FAILED = "recovery_failed"
 
 
+class SessionMode(StrEnum):
+    EPHEMERAL = "ephemeral"
+    PERSISTENT = "persistent"
+
+
+class CallerType(StrEnum):
+    USER = "user"
+    SERVICE_ACCOUNT = "service_account"
+
+
+class CheckpointEffectStatus(StrEnum):
+    NONE = "none"
+    CONFIRMED = "confirmed"
+    UNKNOWN = "unknown"
+
+
+class WaitPolicy(StrEnum):
+    ALL = "all"
+    ANY = "any"
+
+
+class RunEventType(StrEnum):
+    """Run Event names.
+
+    Signal-driven names are derived mechanically from ``RunSignal`` so the
+    event vocabulary can never drift away from the state matrix.
+    """
+
+    RUN_CREATED = "run_created"
+    RUN_RETRY_DERIVED = "run_retry_derived"
+    SESSION_HEAD_REPAIRED = "session_head_repaired"
+
+    RUN_LEASE_ACQUIRED = "run_lease_acquired"
+    RUN_SLICE_ENDED = "run_slice_ended"
+    RUN_PAUSE_REQUESTED = "run_pause_requested"
+    RUN_RESUME_REQUESTED = "run_resume_requested"
+    RUN_CANCEL_REQUESTED = "run_cancel_requested"
+    RUN_SAFE_PAUSE_REACHED = "run_safe_pause_reached"
+    RUN_SAFE_CANCEL_STARTED = "run_safe_cancel_started"
+    RUN_SAFE_CANCEL_FINISHED = "run_safe_cancel_finished"
+    RUN_APPROVAL_REQUESTED = "run_approval_requested"
+    RUN_APPROVAL_APPROVED = "run_approval_approved"
+    RUN_APPROVAL_PAUSED = "run_approval_paused"
+    RUN_EXTERNAL_WAIT_STARTED = "run_external_wait_started"
+    RUN_EXTERNAL_READY = "run_external_ready"
+    RUN_EXTERNAL_PAUSED = "run_external_paused"
+    RUN_COMPLETED = "run_completed"
+    RUN_FAILED = "run_failed"
+    RUN_INTERRUPTED = "run_interrupted"
+    RUN_RECOVERY_APPROVED = "run_recovery_approved"
+    RUN_RECOVERY_FAILED = "run_recovery_failed"
+
+
+def event_type_for(signal: RunSignal) -> RunEventType:
+    return RunEventType(f"run_{signal.value}")
+
+
 @dataclass(frozen=True)
 class RunStateView:
     """Everything the state machine is allowed to look at."""

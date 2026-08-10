@@ -4,8 +4,10 @@ import os
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
+from tiny_hermes.agents.infrastructure import tables as agent_tables  # noqa: F401
 from tiny_hermes.audit.infrastructure import tables as audit_tables  # noqa: F401
 from tiny_hermes.identity.infrastructure import tables as identity_tables  # noqa: F401
+from tiny_hermes.runs.infrastructure import tables as run_tables  # noqa: F401
 from tiny_hermes.shared.database import Base
 from tiny_hermes.tenancy.infrastructure import tables as tenancy_tables  # noqa: F401
 
