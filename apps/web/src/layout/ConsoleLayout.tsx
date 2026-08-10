@@ -1,0 +1,94 @@
+import { useQuery } from "@tanstack/react-query";
+import { Alert, Avatar, Button, Layout, Space, Typography } from "antd";
+import { useState } from "react";
+import { Link, NavLink, Outlet } from "react-router-dom";
+
+import { api } from "../api/client";
+import { useAuth } from "../auth/AuthProvider";
+import { t } from "../i18n/zh-CN";
+import { useWorkspaceId } from "../workspace/useWorkspaceId";
+
+type WorkspaceSummary = {
+  id: string;
+  name: string;
+  status: string;
+};
+
+const WORKSPACES_QUERY = ["workspaces"] as const;
+
+export function ConsoleLayout() {
+  const workspaceId = useWorkspaceId();
+  const auth = useAuth();
+  const [actionError, setActionError] = useState<string | null>(null);
+  // Only to put a name on the header. Membership is the server's answer, never
+  // this list's: a Workspace missing from it still gets its requests sent and
+  // its refusal shown, because a console that pre-filters is a console that can
+  // disagree with the platform about who may see what.
+  const workspaces = useQuery({
+    queryKey: WORKSPACES_QUERY,
+    queryFn: () => api<WorkspaceSummary[]>("/api/v1/workspaces"),
+    enabled: workspaceId !== null,
+  });
+
+  if (workspaceId === null) {
+    return (
+      <main className="centered-state">
+        <Alert
+          type="error"
+          title={t("invalidWorkspace")}
+          description={t("invalidWorkspaceDetail")}
+          action={
+            <Link to="/workspaces">
+              <Button>{t("backToWorkspaces")}</Button>
+            </Link>
+          }
+          showIcon
+        />
+      </main>
+    );
+  }
+
+  const current = (workspaces.data ?? []).find((workspace) => workspace.id === workspaceId);
+
+  async function logout(): Promise<void> {
+    setActionError(null);
+    try {
+      await auth.logout();
+    } catch (caught) {
+      setActionError(caught instanceof Error ? caught.message : t("requestFailed"));
+    }
+  }
+
+  return (
+    <Layout className="app-layout">
+      <Layout.Header className="app-header">
+        <div className="console-identity">
+          <Link to="/workspaces" className="header-brand">
+            {t("appName")}
+          </Link>
+          <Typography.Text className="console-workspace" ellipsis>
+            {current?.name ?? workspaceId}
+          </Typography.Text>
+          <nav className="console-nav">
+            <NavLink to={`/workspaces/${workspaceId}/agents`}>{t("agents")}</NavLink>
+            <NavLink to={`/workspaces/${workspaceId}/runs`}>{t("runs")}</NavLink>
+          </nav>
+        </div>
+        <Space>
+          <Avatar>{auth.user?.display_name.slice(0, 1).toUpperCase()}</Avatar>
+          <div className="user-summary">
+            <Typography.Text>{auth.user?.display_name}</Typography.Text>
+            <Typography.Text type="secondary">{auth.user?.subject}</Typography.Text>
+          </div>
+          <Button onClick={() => void logout()}>{t("logout")}</Button>
+        </Space>
+      </Layout.Header>
+      <Layout.Content className="workspace-content">
+        {actionError === null ? null : (
+          <Alert className="page-alert" type="error" title={actionError} showIcon />
+        )}
+        <Outlet />
+      </Layout.Content>
+    </Layout>
+  );
+}

@@ -1,8 +1,14 @@
 import "@testing-library/jest-dom/vitest";
 
+import { cleanup } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll } from "vitest";
 
 import { server } from "./server";
+
+// Testing Library only auto-cleans when vitest runs with globals, which this
+// project does not. Without this, a second test in a file queries the first
+// test's tree as well as its own.
+afterEach(cleanup);
 
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
 afterEach(() => server.resetHandlers());

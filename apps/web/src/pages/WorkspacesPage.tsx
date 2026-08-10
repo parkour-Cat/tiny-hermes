@@ -14,6 +14,7 @@ import {
   Typography,
 } from "antd";
 import { useState } from "react";
+import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
 import { useAuth } from "../auth/AuthProvider";
@@ -113,10 +114,17 @@ export function WorkspacesPage() {
                   <article className="workspace-row" role="listitem" key={workspace.id}>
                     <Avatar shape="square">{workspace.name.slice(0, 1)}</Avatar>
                     <div className="workspace-summary">
-                      <Typography.Title level={4}>{workspace.name}</Typography.Title>
+                      <Typography.Title level={4}>
+                        <Link to={`/workspaces/${workspace.id}/agents`}>{workspace.name}</Link>
+                      </Typography.Title>
                       <Typography.Text type="secondary">{workspace.id}</Typography.Text>
                     </div>
-                  <Tag color="green">{t("workspaceActive")}</Tag>
+                    <Space>
+                      <Tag color="green">{t("workspaceActive")}</Tag>
+                      <Link to={`/workspaces/${workspace.id}/agents`}>
+                        <Button type="link">{t("openWorkspace")}</Button>
+                      </Link>
+                    </Space>
                   </article>
                 ))}
               </div>

@@ -28,6 +28,13 @@ export const enUS: Record<MessageKey, string> = {
   cancel: "Cancel",
   emptyWorkspaces: "No workspaces yet",
   workspaceActive: "Active",
+  openWorkspace: "Open",
+  agents: "Agents",
+  runs: "Runs",
+  backToWorkspaces: "Back to workspaces",
+  invalidWorkspace: "That address does not name a workspace",
+  invalidWorkspaceDetail:
+    "The workspace identifier in the address is not a valid UUID, so the console sends no request.",
   logout: "Sign out",
   signedInAs: "Signed in as",
   required: "This field is required",

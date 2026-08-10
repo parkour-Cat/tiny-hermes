@@ -1,11 +1,15 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { Alert, Button, ConfigProvider, Spin } from "antd";
+import { Alert, Button, Spin } from "antd";
 import { lazy, Suspense, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
 import { t } from "./i18n/zh-CN";
+import { ConsoleTheme } from "./layout/ConsoleTheme";
 
+const ConsoleLayout = lazy(() =>
+  import("./layout/ConsoleLayout").then((module) => ({ default: module.ConsoleLayout })),
+);
 const BootstrapPage = lazy(() =>
   import("./pages/BootstrapPage").then((module) => ({ default: module.BootstrapPage })),
 );
@@ -46,6 +50,14 @@ function AppRoutes() {
           path="/workspaces"
           element={auth.user === null ? <Navigate to="/login" replace /> : <WorkspacesPage />}
         />
+        {/* Scope is a route parameter, so a reload or a shared link reopens the
+            same Workspace and reaching for another one is addressable. */}
+        <Route
+          path="/workspaces/:workspaceId"
+          element={auth.user === null ? <Navigate to="/login" replace /> : <ConsoleLayout />}
+        >
+          <Route index element={<Navigate to="agents" replace />} />
+        </Route>
         <Route
           path="*"
           element={<Navigate to={auth.user === null ? "/login" : "/workspaces"} replace />}
@@ -63,16 +75,7 @@ export function App() {
       }),
   );
   return (
-    <ConfigProvider
-      button={{ autoInsertSpace: false }}
-      theme={{
-        token: {
-          colorPrimary: "#155e75",
-          borderRadius: 10,
-          fontFamily: 'Inter, "Noto Sans SC", system-ui, sans-serif',
-        },
-      }}
-    >
+    <ConsoleTheme>
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>
           <AuthProvider>
@@ -80,6 +83,6 @@ export function App() {
           </AuthProvider>
         </BrowserRouter>
       </QueryClientProvider>
-    </ConfigProvider>
+    </ConsoleTheme>
   );
 }
