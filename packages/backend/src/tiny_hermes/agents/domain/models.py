@@ -1,6 +1,9 @@
 import hashlib
 import json
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -56,3 +59,39 @@ def initial_agent_spec() -> AgentSpec:
         personality="Describe this agent before publishing.",
         model_policy=DeterministicModelPolicy(),
     )
+
+
+AgentStatus = Literal["draft", "published"]
+
+
+@dataclass(frozen=True)
+class Agent:
+    id: UUID
+    workspace_id: UUID
+    name: str
+    alias: str
+    status: AgentStatus
+    current_version_id: UUID | None
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class AgentDraft:
+    agent_id: UUID
+    spec: AgentSpec
+    revision: int
+    updated_by: UUID
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class AgentVersion:
+    id: UUID
+    agent_id: UUID
+    workspace_id: UUID
+    version_number: int
+    schema_version: int
+    spec: dict[str, object]
+    content_hash: str
+    published_by: UUID
+    created_at: datetime
