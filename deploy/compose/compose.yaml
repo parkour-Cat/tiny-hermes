@@ -1,0 +1,86 @@
+name: tiny-hermes
+
+services:
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: tiny_hermes
+      POSTGRES_USER: tiny_hermes
+      POSTGRES_PASSWORD: local-only
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tiny_hermes -d tiny_hermes"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports: ["5432:5432"]
+
+  redis:
+    image: redis:8.2.1-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports: ["6379:6379"]
+
+  minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: tiny-hermes-local
+      MINIO_ROOT_PASSWORD: tiny-hermes-local-password
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports: ["9000:9000", "9001:9001"]
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+    environment: &app-env
+      DATABASE_URL: postgresql+asyncpg://tiny_hermes:local-only@postgres:5432/tiny_hermes
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: tiny-hermes
+      SESSION_COOKIE_SECRET: local-cookie-secret-with-32-characters
+      BOOTSTRAP_TOKEN: local-bootstrap-token-with-32-characters
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    environment: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports: ["8000:8000"]
+
+volumes:
+  postgres-data:
+  minio-data:

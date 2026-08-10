@@ -1,10 +1,12 @@
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from tiny_hermes.api.health import health_router
+from tiny_hermes.api.health import DatabaseReadinessProbe, ReadinessCheck, health_router
 from tiny_hermes.api.request_context import RequestIdMiddleware
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.identity.presentation.routes import identity_router
@@ -32,11 +34,14 @@ async def app_error_handler(request: Request, error: Exception) -> JSONResponse:
 
 
 def create_app(
-    readiness: Callable[[], bool] = lambda: True,
+    readiness: ReadinessCheck | None = None,
     *,
     settings: Settings | None = None,
 ) -> FastAPI:
     resources = ApplicationResources(settings)
+    selected_readiness = readiness or DatabaseReadinessProbe(
+        resources.database_engine, _migration_head()
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
@@ -46,10 +51,17 @@ def create_app(
     app = FastAPI(title="tiny-hermes API", version="0.0.0", lifespan=lifespan)
     app.add_middleware(RequestIdMiddleware)
     app.add_exception_handler(AppError, app_error_handler)
-    app.include_router(health_router(readiness))
+    app.include_router(health_router(selected_readiness))
     app.include_router(identity_router(resources))
     app.include_router(workspace_router(resources))
     return app
+
+
+def _migration_head() -> str:
+    revision = ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
+    if revision is None:
+        raise RuntimeError("The migration history has no head revision")
+    return revision
 
 
 app = create_app()

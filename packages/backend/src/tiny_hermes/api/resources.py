@@ -29,9 +29,17 @@ class ApplicationResources:
 
     def session_factory(self) -> async_sessionmaker[AsyncSession]:
         if self._session_factory is None:
-            self._engine = create_async_engine(self.settings.database_url, pool_pre_ping=True)
-            self._session_factory = async_sessionmaker(self._engine, expire_on_commit=False)
+            self._session_factory = async_sessionmaker(
+                self.database_engine(), expire_on_commit=False
+            )
         return self._session_factory
+
+    def database_engine(self) -> AsyncEngine:
+        if self._engine is None:
+            self._engine = create_async_engine(
+                self.settings.database_url, pool_pre_ping=True
+            )
+        return self._engine
 
     async def auth_service(self) -> AsyncGenerator[AuthService]:
         async with self.session_factory()() as session:
