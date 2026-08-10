@@ -55,7 +55,18 @@ jobs:
       - run: uv sync --frozen
       - run: uv run alembic upgrade head
       - run: uv run pytest packages/backend/tests/integration -v
+      - name: Repeat concurrency regressions
+        run: |
+          for attempt in $(seq 1 10); do
+            uv run pytest \
+              packages/backend/tests/integration/runs/test_run_creation.py \
+              packages/backend/tests/integration/runs/test_run_control.py \
+              packages/backend/tests/integration/runs/test_run_coordination.py \
+              packages/backend/tests/integration/runs/test_run_retry.py -q
+          done
       - run: uv run alembic check
+      - run: uv run alembic downgrade 20260810_0001
+      - run: uv run alembic upgrade head
       - run: uv run alembic downgrade base
       - run: uv run alembic upgrade head
 
