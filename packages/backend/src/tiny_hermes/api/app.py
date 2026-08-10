@@ -6,6 +6,7 @@ from alembic.script import ScriptDirectory
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from tiny_hermes.agents.presentation.routes import agent_router
 from tiny_hermes.api.health import DatabaseReadinessProbe, ReadinessCheck, health_router
 from tiny_hermes.api.request_context import RequestIdMiddleware
 from tiny_hermes.api.resources import ApplicationResources
@@ -54,6 +55,7 @@ def create_app(
     app.include_router(health_router(selected_readiness))
     app.include_router(identity_router(resources))
     app.include_router(workspace_router(resources))
+    app.include_router(agent_router(resources))
     return app
 
 

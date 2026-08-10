@@ -12,10 +12,13 @@ from tiny_hermes.identity.application.auth_service import (
     InvalidCredentials,
 )
 from tiny_hermes.identity.domain.models import AuthenticatedUser, NewLocalUser
+from tiny_hermes.identity.presentation.dependencies import (
+    CSRF_COOKIE,
+    SESSION_COOKIE,
+    csrf_failed,
+    unauthenticated,
+)
 from tiny_hermes.shared.errors import AppError
-
-SESSION_COOKIE = "tiny_hermes_session"
-CSRF_COOKIE = "tiny_hermes_csrf"
 
 
 class BootstrapRequest(BaseModel):
@@ -127,11 +130,11 @@ def identity_router(resources: ApplicationResources) -> APIRouter:
         session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
     ) -> UserResponse:
         if not session_token:
-            raise _unauthenticated()
+            raise unauthenticated()
         try:
             user = await service.authenticate(session_token)
         except InvalidCredentials as error:
-            raise _unauthenticated() from error
+            raise unauthenticated() from error
         return UserResponse.from_domain(user)
 
     @router.delete("/auth/sessions/current", status_code=status.HTTP_204_NO_CONTENT)
@@ -143,33 +146,15 @@ def identity_router(resources: ApplicationResources) -> APIRouter:
         csrf_token: Annotated[str | None, Header(alias="X-CSRF-Token")] = None,
     ) -> None:
         if not session_token:
-            raise _unauthenticated()
+            raise unauthenticated()
         if not csrf_token:
-            raise _csrf_failed()
+            raise csrf_failed()
         try:
             await service.verify_csrf(session_token, csrf_token)
         except InvalidCredentials as error:
-            raise _csrf_failed() from error
+            raise csrf_failed() from error
         await service.logout(session_token, request.state.request_id)
         response.delete_cookie(SESSION_COOKIE, path="/")
         response.delete_cookie(CSRF_COOKIE, path="/")
 
     return router
-
-
-def _unauthenticated() -> AppError:
-    return AppError(
-        code="unauthenticated",
-        title="Authentication required",
-        status=401,
-        detail="A valid browser session is required.",
-    )
-
-
-def _csrf_failed() -> AppError:
-    return AppError(
-        code="csrf_failed",
-        title="Request verification failed",
-        status=403,
-        detail="The request verification token is missing or invalid.",
-    )

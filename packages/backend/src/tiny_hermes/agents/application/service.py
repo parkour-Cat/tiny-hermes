@@ -22,31 +22,35 @@ ALIAS_MAX_LENGTH = 80
 NAME_MAX_LENGTH = 120
 
 
-class ForbiddenAgentAction(Exception):
+class AgentCatalogError(Exception):
+    """Base class for every expected Agent Catalog refusal."""
+
+
+class ForbiddenAgentAction(AgentCatalogError):
     pass
 
 
-class UnknownAgent(Exception):
+class UnknownAgent(AgentCatalogError):
     pass
 
 
-class InvalidAgentAlias(Exception):
+class InvalidAgentAlias(AgentCatalogError):
     pass
 
 
-class InvalidAgentName(Exception):
+class InvalidAgentName(AgentCatalogError):
     pass
 
 
-class InvalidAgentSpec(Exception):
+class InvalidAgentSpec(AgentCatalogError):
     pass
 
 
-class DraftRevisionConflict(Exception):
+class DraftRevisionConflict(AgentCatalogError):
     pass
 
 
-class AgentAliasAlreadyUsed(Exception):
+class AgentAliasAlreadyUsed(AgentCatalogError):
     pass
 
 

@@ -5,9 +5,15 @@ from fastapi import APIRouter, Cookie, Depends, Header, Request, status
 from pydantic import BaseModel, Field
 
 from tiny_hermes.api.resources import ApplicationResources
-from tiny_hermes.identity.application.auth_service import AuthService, InvalidCredentials
+from tiny_hermes.identity.application.auth_service import AuthService
 from tiny_hermes.identity.domain.models import AuthenticatedUser
-from tiny_hermes.identity.presentation.routes import SESSION_COOKIE
+from tiny_hermes.identity.presentation.dependencies import (
+    SESSION_COOKIE,
+    authenticate_browser_user,
+    forbidden,
+    require_workspace_id,
+    verify_browser_write,
+)
 from tiny_hermes.shared.errors import AppError
 from tiny_hermes.tenancy.application.workspace_service import (
     Forbidden,
@@ -52,7 +58,7 @@ def workspace_router(resources: ApplicationResources) -> APIRouter:
         workspaces: Annotated[WorkspaceService, Depends(workspace_dependency)],
         session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
     ) -> list[WorkspaceResponse]:
-        user = await _authenticate(auth, session_token)
+        user = await authenticate_browser_user(auth, session_token)
         values = await workspaces.list_workspaces(_actor(user))
         return [WorkspaceResponse.from_domain(value) for value in values]
 
@@ -65,13 +71,13 @@ def workspace_router(resources: ApplicationResources) -> APIRouter:
         session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
         csrf_token: Annotated[str | None, Header(alias="X-CSRF-Token")] = None,
     ) -> WorkspaceResponse:
-        user = await _verify_write(auth, session_token, csrf_token)
+        user = await verify_browser_write(auth, session_token, csrf_token)
         try:
             workspace = await workspaces.create_workspace(
                 _actor(user), payload.name, request.state.request_id
             )
         except Forbidden as error:
-            raise _forbidden() from error
+            raise forbidden() from error
         except InvalidWorkspaceName as error:
             raise AppError(
                 code="invalid_workspace_name",
@@ -90,23 +96,8 @@ def workspace_router(resources: ApplicationResources) -> APIRouter:
         selected_workspace: Annotated[str | None, Header(alias="X-Workspace-Id")] = None,
         session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
     ) -> list[WorkspaceMemberResponse]:
-        user = await _authenticate(auth, session_token)
-        if selected_workspace is None:
-            raise AppError(
-                code="workspace_required",
-                title="Workspace required",
-                status=400,
-                detail="X-Workspace-Id is required for workspace-scoped requests.",
-            )
-        try:
-            selected_id = UUID(selected_workspace)
-        except ValueError as error:
-            raise AppError(
-                code="invalid_workspace_id",
-                title="Invalid workspace identifier",
-                status=400,
-                detail="X-Workspace-Id must be a UUID.",
-            ) from error
+        user = await authenticate_browser_user(auth, session_token)
+        selected_id = require_workspace_id(selected_workspace)
         if selected_id != workspace_id:
             raise AppError(
                 code="workspace_scope_mismatch",
@@ -119,7 +110,7 @@ def workspace_router(resources: ApplicationResources) -> APIRouter:
                 _actor(user), workspace_id, request.state.request_id
             )
         except Forbidden as error:
-            raise _forbidden() from error
+            raise forbidden() from error
         return [WorkspaceMemberResponse.from_domain(member) for member in members]
 
     return router
@@ -127,52 +118,3 @@ def workspace_router(resources: ApplicationResources) -> APIRouter:
 
 def _actor(user: AuthenticatedUser) -> Actor:
     return Actor(user.id, user.is_platform_admin)
-
-
-async def _authenticate(auth: AuthService, session_token: str | None) -> AuthenticatedUser:
-    if session_token is None:
-        raise _unauthenticated()
-    try:
-        return await auth.authenticate(session_token)
-    except InvalidCredentials as error:
-        raise _unauthenticated() from error
-
-
-async def _verify_write(
-    auth: AuthService, session_token: str | None, csrf_token: str | None
-) -> AuthenticatedUser:
-    if session_token is None:
-        raise _unauthenticated()
-    if csrf_token is None:
-        raise _csrf_failed()
-    try:
-        return await auth.verify_csrf(session_token, csrf_token)
-    except InvalidCredentials as error:
-        raise _csrf_failed() from error
-
-
-def _unauthenticated() -> AppError:
-    return AppError(
-        code="unauthenticated",
-        title="Authentication required",
-        status=401,
-        detail="A valid browser session is required.",
-    )
-
-
-def _csrf_failed() -> AppError:
-    return AppError(
-        code="csrf_failed",
-        title="Request verification failed",
-        status=403,
-        detail="The request verification token is missing or invalid.",
-    )
-
-
-def _forbidden() -> AppError:
-    return AppError(
-        code="forbidden",
-        title="Forbidden",
-        status=403,
-        detail="The current user cannot perform this workspace action.",
-    )

@@ -7,10 +7,12 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from tiny_hermes.agents.application.service import AgentCatalog
+from tiny_hermes.agents.infrastructure.sql_store import SqlAgentStore
 from tiny_hermes.identity.application.auth_service import AuthService
 from tiny_hermes.identity.infrastructure.sql_store import SqlAuthStore
 from tiny_hermes.shared.config import Settings, get_settings
-from tiny_hermes.shared.errors import AppError
+from tiny_hermes.shared.errors import AppError, AuditedDenial
 from tiny_hermes.tenancy.application.workspace_service import WorkspaceService
 from tiny_hermes.tenancy.infrastructure.sql_store import SqlWorkspaceStore
 
@@ -70,6 +72,19 @@ class ApplicationResources:
         async with self.session_factory()() as session:
             try:
                 yield WorkspaceService(SqlWorkspaceStore(session))
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
+
+    async def agent_catalog(self) -> AsyncGenerator[AgentCatalog]:
+        async with self.session_factory()() as session:
+            try:
+                yield AgentCatalog(SqlAgentStore(session))
+            except AuditedDenial:
+                await session.commit()
+                raise
             except BaseException:
                 await session.rollback()
                 raise
