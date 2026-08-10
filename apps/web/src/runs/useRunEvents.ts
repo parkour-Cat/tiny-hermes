@@ -91,6 +91,25 @@ export function useRunEvents({
       }
     };
 
+    /**
+     * Re-reads the snapshot, even while the page is still on its first read.
+     *
+     * TanStack cannot force a refetch of a query that has never resolved: it
+     * hands back the request already in flight, which was sent before this
+     * event existed and may answer with a state older than the event just
+     * shown. When that is what happened, the snapshot is asked for a second
+     * time once the first read has landed.
+     */
+    const refresh = async (): Promise<void> => {
+      const { queryKey } = runQueryOptions(workspaceId, runId);
+      const before = queryClient.getQueryState(queryKey);
+      const joined = before?.fetchStatus === "fetching" && before.dataUpdatedAt === 0;
+      await queryClient.invalidateQueries({ queryKey, exact: true }, { cancelRefetch: true });
+      if (joined && !signal.aborted) {
+        await queryClient.invalidateQueries({ queryKey, exact: true }, { cancelRefetch: true });
+      }
+    };
+
     /** Reads one connection to its end; returns the cursor and what it moved. */
     const readStream = async (response: Response, from: number): Promise<[number, number]> => {
       let cursor = from;
@@ -124,9 +143,7 @@ export function useRunEvents({
         ]);
         // The snapshot is how the state machine speaks, so 概要 and the
         // available actions are re-read rather than guessed at from the event.
-        void queryClient.invalidateQueries({
-          queryKey: runQueryOptions(workspaceId, runId).queryKey,
-        });
+        void refresh();
       }
     };
 
