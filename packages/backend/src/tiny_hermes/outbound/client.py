@@ -89,6 +89,12 @@ class SafeOutboundClient:
         self._resolve = resolve
         self._client = httpx.AsyncClient(  # noqa: TID251 - this is the one place
             follow_redirects=False,
+            # The client connects to the literal address it vetted. An ambient
+            # HTTP proxy would replace that connection with one to the proxy
+            # and make the address check and DNS pinning untrue. A future
+            # enterprise proxy must therefore be explicit platform policy,
+            # never an inherited process setting.
+            trust_env=False,
             timeout=httpx.Timeout(
                 connect=connect_timeout, read=read_timeout, write=read_timeout, pool=connect_timeout
             ),

@@ -324,7 +324,10 @@ async def browser(
     del scope  # ordering only: the login must happen before the cookies are read
     cookies = {name: value for name, value in client.cookies.items()}
     async with httpx.AsyncClient(
-        base_url=live_server, cookies=cookies, timeout=STREAM_TIMEOUT
+        base_url=live_server,
+        cookies=cookies,
+        timeout=STREAM_TIMEOUT,
+        trust_env=False,
     ) as value:
         yield value
 

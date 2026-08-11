@@ -71,7 +71,9 @@ async def _age_events(engine: AsyncEngine, run_id: UUID, upto: int | None) -> No
 async def test_an_unauthenticated_subscriber_is_refused(
     live_server: str, events_url: EventsUrl, submitted_run: dict[str, Any]
 ) -> None:
-    async with httpx.AsyncClient(base_url=live_server, timeout=STREAM_TIMEOUT) as anon:
+    async with httpx.AsyncClient(
+        base_url=live_server, timeout=STREAM_TIMEOUT, trust_env=False
+    ) as anon:
         refused = await anon.get(events_url(submitted_run["id"]))
 
     assert refused.status_code == 401
