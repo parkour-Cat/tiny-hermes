@@ -89,6 +89,23 @@ class VolumeMount:
 
 @dataclass(frozen=True)
 class ContainerConfig:
+    """The container, as Docker will be asked for it.
+
+    ``disk_mb`` is carried and **not passed to Docker**. `storage_opt` was the
+    obvious way to spend it and is the wrong one twice over: Docker only accepts
+    it on overlay-over-xfs with `pquota`, so it fails outright on an ordinary
+    developer machine — and more importantly it limits the container's *writable
+    layer*, which with a read-only root holds almost nothing. Everything a
+    command actually writes goes to the two named volumes or the tmpfs, and
+    `storage_opt` covers neither.
+
+    So the tmpfs is sized and the volumes are not. That is a real, named gap:
+    see `test_the_disk_ceiling_is_declared_but_not_enforced`. Enforcing it needs
+    per-volume quotas, which needs a filesystem the platform does not get to
+    choose, and §11.5's `paused(limit)` needs a measurement that does not exist
+    yet. Both belong to the slice that can do them properly.
+    """
+
     image: str
     user: str
     read_only: bool
@@ -122,7 +139,6 @@ class ContainerConfig:
             "nano_cpus": self.nano_cpus,
             "mem_limit": self.mem_limit,
             "pids_limit": self.pids_limit,
-            "storage_opt": {"size": f"{self.disk_mb}m"},
             "tmpfs": dict(self.tmpfs),
             "mounts": [
                 {"Type": mount.kind, "Source": mount.source, "Target": mount.target}

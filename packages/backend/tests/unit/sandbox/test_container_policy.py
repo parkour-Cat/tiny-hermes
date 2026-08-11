@@ -206,7 +206,6 @@ def test_the_docker_arguments_are_exactly_these_and_no_others() -> None:
         "nano_cpus",
         "mem_limit",
         "pids_limit",
-        "storage_opt",
         "tmpfs",
         "mounts",
         "init",
@@ -216,6 +215,25 @@ def test_the_docker_arguments_are_exactly_these_and_no_others() -> None:
         "detach",
         "auto_remove",
     }
+
+
+def test_the_disk_ceiling_is_declared_but_not_enforced() -> None:
+    """A named gap, pinned so it is not mistaken for a working limit.
+
+    §11.2 lists a 2 GiB writable disk. `storage_opt` is the obvious way to
+    spend it and is wrong twice: Docker accepts it only on overlay-over-xfs
+    with `pquota`, and it limits the container writable layer — which, with a
+    read-only root, holds almost nothing. Every byte a command writes lands in
+    a named volume or the tmpfs, and `storage_opt` covers neither.
+
+    The tmpfs is sized. The volumes are not. This test fails the moment
+    somebody adds a disk argument, which is when the enforcement story has to
+    be written properly.
+    """
+    assert DEFAULT_PROFILE.disk_mb == 2048
+    kwargs = config().as_docker_kwargs()
+    assert "storage_opt" not in kwargs
+    assert not [key for key in kwargs if "disk" in key or "storage" in key]
 
 
 def test_the_container_is_not_removed_when_it_exits() -> None:
