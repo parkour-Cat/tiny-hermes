@@ -61,10 +61,27 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "TID251"]
 "socket.socket".msg = "Outbound requests go through tiny_hermes.outbound.client."
 "socket.create_connection".msg = "Outbound requests go through tiny_hermes.outbound.client."
 "urllib.request.urlopen".msg = "Outbound requests go through tiny_hermes.outbound.client."
+# Product design §16: 沙箱失败时不得回退宿主机执行. Nothing in this platform
+# starts a process on the host — a tool runs in a container or it does not run.
+"subprocess.run".msg = "Commands run in a sandbox container, never on this host."
+"subprocess.Popen".msg = "Commands run in a sandbox container, never on this host."
+"subprocess.call".msg = "Commands run in a sandbox container, never on this host."
+"subprocess.check_call".msg = "Commands run in a sandbox container, never on this host."
+"subprocess.check_output".msg = "Commands run in a sandbox container, never on this host."
+"os.system".msg = "Commands run in a sandbox container, never on this host."
+"os.popen".msg = "Commands run in a sandbox container, never on this host."
+"asyncio.create_subprocess_exec".msg = "Commands run in a sandbox container, never on this host."
+"asyncio.create_subprocess_shell".msg = "Commands run in a sandbox container, never on this host."
+# Exactly one module holds the handle to the daemon.
+"docker.from_env".msg = "Only tiny_hermes.sandbox.infrastructure talks to Docker."
+"docker.DockerClient".msg = "Only tiny_hermes.sandbox.infrastructure talks to Docker."
 
 [tool.ruff.lint.per-file-ignores]
-# The guarded path itself.
+# The two guarded paths themselves. TID251 is a single code, so exempting a
+# module lifts both bans there; `test_process_ban.py` asserts that neither
+# module uses the other's licence.
 "packages/backend/src/tiny_hermes/outbound/**/*.py" = ["TID251"]
+"packages/backend/src/tiny_hermes/sandbox/infrastructure/**/*.py" = ["TID251"]
 # Tests and the restart drill are clients of this platform rather than parts of
 # it, and neither ships.
 "packages/backend/tests/**/*.py" = ["S101", "S104", "S106", "TID251"]
