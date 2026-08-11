@@ -1,6 +1,12 @@
 import asyncio
 
-from tiny_hermes.runs.ports.model import ModelRequest, ModelResponse, StopReason
+from tiny_hermes.agents.domain.models import DeterministicModelPolicy
+from tiny_hermes.runs.ports.model import (
+    ModelRequest,
+    ModelResponse,
+    StopReason,
+    UsageQuality,
+)
 
 MAX_DELAY_MS = 5_000
 TOKENS_PER_ROUND = 32
@@ -23,7 +29,18 @@ class DeterministicModelProvider:
     async def complete(self, request: ModelRequest) -> ModelResponse:
         if self._delay_seconds:
             await asyncio.sleep(self._delay_seconds)
-        scenario = request.policy.scenario
+        policy = request.policy
+        if not isinstance(policy, DeterministicModelPolicy):
+            # Reaching here is a routing mistake, not a user's. It fails the
+            # round rather than raising, because a Worker that crashes on a
+            # misrouted Run loses the whole slice instead of one Run.
+            return ModelResponse(
+                stop_reason=StopReason.FAILED,
+                text="",
+                usage_quality=UsageQuality.UNAVAILABLE,
+                failure="policy_mismatch",
+            )
+        scenario = policy.scenario
         if scenario == "fail_replay_safe":
             return ModelResponse(
                 stop_reason=StopReason.FAILED,

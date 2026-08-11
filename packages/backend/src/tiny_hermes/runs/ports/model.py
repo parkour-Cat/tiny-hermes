@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
-from tiny_hermes.agents.domain.models import DeterministicModelPolicy
+from tiny_hermes.agents.domain.models import ModelPolicy
 from tiny_hermes.runs.domain.models import CanonicalMessage
 
 
@@ -38,7 +38,7 @@ class UsageQuality(StrEnum):
 
 @dataclass(frozen=True)
 class ModelRequest:
-    policy: DeterministicModelPolicy
+    policy: ModelPolicy
     personality: str
     #: The conversation so far, oldest first, ending with what the caller asked.
     messages: tuple[CanonicalMessage, ...]

@@ -7,6 +7,8 @@ import uuid
 
 import uvicorn
 
+from tiny_hermes.outbound.client import SafeOutboundClient
+from tiny_hermes.runs.application.model_router import ModelRouter
 from tiny_hermes.runs.application.scheduler import (
     SchedulerRuntime,
     SchedulerSettings,
@@ -16,6 +18,7 @@ from tiny_hermes.runs.infrastructure.deterministic_model import (
     DeterministicModelProvider,
 )
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
+from tiny_hermes.runs.infrastructure.openai_model import RetryPolicy
 from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
 from tiny_hermes.shared.config import Settings, get_settings
@@ -42,9 +45,27 @@ async def _worker() -> None:
     settings = get_settings()
     worker_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
     notifier = _notifier(settings)
+    sessions = build_session_factory(settings)
+    # One provider port, two providers behind it. Which one answers is decided
+    # per round by the Agent Version the Run fixed at creation, so the Worker
+    # never learns that endpoints exist.
     runtime = WorkerRuntime(
-        session_factory=build_session_factory(settings),
-        model=DeterministicModelProvider(settings.deterministic_model_delay_ms),
+        session_factory=sessions,
+        model=ModelRouter(
+            deterministic=DeterministicModelProvider(settings.deterministic_model_delay_ms),
+            session_factory=sessions,
+            client_factory=lambda: SafeOutboundClient(
+                approved=settings.approved_networks,
+                connect_timeout=settings.outbound_connect_timeout_seconds,
+                read_timeout=settings.outbound_read_timeout_seconds,
+                max_redirects=settings.outbound_max_redirects,
+                max_response_bytes=settings.outbound_max_response_bytes,
+            ),
+            retry=RetryPolicy(
+                max_attempts=settings.model_max_attempts,
+                base_ms=settings.model_retry_base_ms,
+            ),
+        ),
         notifier=notifier,
         settings=WorkerSettings(
             worker_id=worker_id,

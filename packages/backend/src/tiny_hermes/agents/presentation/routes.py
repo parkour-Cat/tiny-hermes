@@ -14,6 +14,8 @@ from tiny_hermes.agents.application.service import (
     InvalidAgentAlias,
     InvalidAgentName,
     InvalidAgentSpec,
+    ModelEndpointUnavailable,
+    ModelOutputLimitTooHigh,
     UnknownAgent,
 )
 from tiny_hermes.agents.domain.models import Agent, AgentDraft, AgentVersion
@@ -340,6 +342,26 @@ def _as_app_error(error: AgentCatalogError) -> AppError:
             title="Invalid agent name",
             status=422,
             detail="The agent name is invalid.",
+        )
+    if isinstance(error, ModelEndpointUnavailable):
+        return AppError(
+            code="model_endpoint_unavailable",
+            title="Model endpoint unavailable",
+            status=422,
+            detail=(
+                "The model endpoint this agent selects does not exist or is no "
+                "longer active."
+            ),
+        )
+    if isinstance(error, ModelOutputLimitTooHigh):
+        return AppError(
+            code="model_output_limit_too_high",
+            title="Output limit too high",
+            status=422,
+            detail=(
+                "The agent asks for more output than the selected endpoint "
+                "produces. Lower it rather than relying on the endpoint to."
+            ),
         )
     if isinstance(error, InvalidAgentSpec):
         return AppError(

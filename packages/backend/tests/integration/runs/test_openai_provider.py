@@ -16,6 +16,10 @@ from typing import Any
 
 import pytest
 import uvicorn
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from tiny_hermes.agents.domain.models import DeterministicModelPolicy
 from tiny_hermes.model_catalog.domain.models import ModelEndpointSpec
 from tiny_hermes.outbound.client import SafeOutboundClient
 from tiny_hermes.outbound.domain.address_policy import (
@@ -24,13 +28,21 @@ from tiny_hermes.outbound.domain.address_policy import (
     Network,
     verdict,
 )
+from tiny_hermes.runs.application.model_router import ModelRouter
+from tiny_hermes.runs.application.worker import WorkerRuntime, WorkerSettings
 from tiny_hermes.runs.domain.models import CanonicalMessage
+from tiny_hermes.runs.infrastructure.deterministic_model import (
+    DeterministicModelProvider,
+)
+from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 from tiny_hermes.runs.infrastructure.openai_model import (
     SAFETY_PREAMBLE,
     OpenAICompatibleProvider,
     RetryPolicy,
 )
 from tiny_hermes.runs.ports.model import ModelRequest, StopReason, UsageQuality
+
+from ..conftest import VALID_SPEC
 
 CREDENTIAL = "TINY_HERMES_TEST_MODEL_KEY"
 
@@ -150,7 +162,7 @@ def spec(base_url: str, **overrides: Any) -> ModelEndpointSpec:
     return ModelEndpointSpec.model_validate(fields)
 
 
-def client() -> SafeOutboundClient:
+def outbound_client() -> SafeOutboundClient:
     return SafeOutboundClient(
         approved=[ip_network("127.0.0.0/8")],
         policy=loopback_is_reachable,
@@ -161,11 +173,9 @@ def client() -> SafeOutboundClient:
 
 def request(*turns: tuple[str, str]) -> ModelRequest:
     messages = tuple(
-        CanonicalMessage(role="user" if role == "user" else "assistant", text=text)
-        for role, text in (turns or (("user", "hello"),))
+        CanonicalMessage(role="user" if role == "user" else "assistant", text=said)
+        for role, said in (turns or (("user", "hello"),))
     )
-    from tiny_hermes.agents.domain.models import DeterministicModelPolicy
-
     return ModelRequest(
         policy=DeterministicModelPolicy(),
         personality="You are a careful assistant.",
@@ -188,7 +198,7 @@ async def test_a_round_completes_against_the_endpoint(
     endpoint: tuple[FakeModel, str]
 ) -> None:
     app, base_url = endpoint
-    async with client() as outbound:
+    async with outbound_client() as outbound:
         response = await OpenAICompatibleProvider(spec(base_url), outbound).complete(request())
 
     assert response.stop_reason is StopReason.COMPLETED
@@ -203,7 +213,7 @@ async def test_the_platforms_rules_precede_the_agents_persona(
 ) -> None:
     """An Agent cannot talk its way past a rule it is placed underneath."""
     app, base_url = endpoint
-    async with client() as outbound:
+    async with outbound_client() as outbound:
         await OpenAICompatibleProvider(spec(base_url), outbound).complete(
             request(("user", "hello"), ("assistant", "hi"), ("user", "again"))
         )
@@ -222,7 +232,7 @@ async def test_the_credential_is_sent_and_appears_nowhere_else(
     endpoint: tuple[FakeModel, str]
 ) -> None:
     app, base_url = endpoint
-    async with client() as outbound:
+    async with outbound_client() as outbound:
         response = await OpenAICompatibleProvider(spec(base_url), outbound).complete(request())
 
     assert app.authorizations == ["Bearer not-a-real-key"]
@@ -236,7 +246,7 @@ async def test_a_rate_limit_is_retried_and_then_succeeds(
     app, base_url = endpoint
     app.failures = [429, 429]
     sleeper = Recorded()
-    async with client() as outbound:
+    async with outbound_client() as outbound:
         response = await OpenAICompatibleProvider(
             spec(base_url), outbound, sleep=sleeper
         ).complete(request())
@@ -255,7 +265,7 @@ async def test_a_persistent_rate_limit_gives_up_after_three_attempts(
     app, base_url = endpoint
     app.failures = [429, 429, 429, 429]
     sleeper = Recorded()
-    async with client() as outbound:
+    async with outbound_client() as outbound:
         response = await OpenAICompatibleProvider(
             spec(base_url), outbound, sleep=sleeper
         ).complete(request())
@@ -277,7 +287,7 @@ async def test_an_unauthorized_endpoint_is_not_retried(
     app, base_url = endpoint
     app.failures = [401, 401, 401]
     sleeper = Recorded()
-    async with client() as outbound:
+    async with outbound_client() as outbound:
         response = await OpenAICompatibleProvider(
             spec(base_url), outbound, sleep=sleeper
         ).complete(request())
@@ -313,7 +323,7 @@ async def test_an_absent_credential_fails_the_round_rather_than_the_worker(
 ) -> None:
     app, base_url = endpoint
     monkeypatch.delenv(CREDENTIAL, raising=False)
-    async with client() as outbound:
+    async with outbound_client() as outbound:
         response = await OpenAICompatibleProvider(spec(base_url), outbound).complete(request())
 
     assert response.failure == "credential_missing"
@@ -325,7 +335,7 @@ async def test_an_endpoint_that_reports_no_usage_is_not_guessed_at(
 ) -> None:
     app, base_url = endpoint
     app.usage = {}
-    async with client() as outbound:
+    async with outbound_client() as outbound:
         response = await OpenAICompatibleProvider(spec(base_url), outbound).complete(request())
 
     assert response.stop_reason is StopReason.COMPLETED
@@ -338,9 +348,116 @@ async def test_the_retry_budget_can_be_lowered_but_the_default_is_three(
 ) -> None:
     app, base_url = endpoint
     app.failures = [503, 503, 503]
-    async with client() as outbound:
+    async with outbound_client() as outbound:
         await OpenAICompatibleProvider(
             spec(base_url), outbound, policy=RetryPolicy(max_attempts=1), sleep=Recorded()
         ).complete(request())
 
     assert len(app.seen) == 1
+
+
+async def test_a_run_reaches_completed_with_text_the_endpoint_produced(
+    endpoint: tuple[FakeModel, str],
+    client: TestClient,
+    scope: dict[str, str],
+    admin_csrf: str,
+    engine: AsyncEngine,
+) -> None:
+    """The whole slice, end to end: register, publish, submit, execute.
+
+    The Worker is handed a `ModelRouter` and nothing else, so which provider
+    answers is decided by the Agent Version the Run fixed at creation — which is
+    how a deployed Worker is wired, and the only way to know that wiring works.
+    """
+    app, base_url = endpoint
+    app.answer = "the model really said this"
+
+    registered = client.post(
+        "/api/v1/model-endpoints",
+        headers={"X-CSRF-Token": admin_csrf},
+        json={
+            "name": "stand-in",
+            "kind": "openai_compatible",
+            "base_url": base_url,
+            "model": "stand-in-large",
+            "context_window": 8_192,
+            "max_output_tokens": 512,
+            "usage_quality": "provider",
+            "credential_ref": CREDENTIAL,
+        },
+    )
+    assert registered.status_code == 201
+    endpoint_id = registered.json()["id"]
+
+    agent_id = client.post(
+        "/api/v1/agents", headers=scope, json={"name": "Real", "alias": "real"}
+    ).json()["id"]
+    assert client.put(
+        f"/api/v1/agents/{agent_id}/draft",
+        headers=scope,
+        json={
+            "expected_revision": 1,
+            "spec": {
+                **VALID_SPEC,
+                "model_policy": {
+                    "provider": "openai_compatible",
+                    "endpoint_id": endpoint_id,
+                },
+            },
+        },
+    ).status_code == 200
+    assert client.post(
+        f"/api/v1/agents/{agent_id}/publish",
+        headers=scope,
+        json={"expected_revision": 2},
+    ).status_code == 201
+
+    session_id = client.post(
+        "/api/v1/sessions",
+        headers=scope,
+        json={"agent_id": agent_id, "session_mode": "persistent"},
+    ).json()["id"]
+    run_id = client.post(
+        "/api/v1/runs",
+        headers={**scope, "Idempotency-Key": "real-endpoint-run"},
+        json={"session_id": session_id, "input": "say something"},
+    ).json()["id"]
+
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    worker = WorkerRuntime(
+        session_factory=sessions,
+        model=ModelRouter(
+            deterministic=DeterministicModelProvider(delay_ms=0),
+            session_factory=sessions,
+            client_factory=outbound_client,
+        ),
+        notifier=NullWakeUpNotifier(),
+        settings=WorkerSettings(
+            worker_id="worker-real",
+            lease_seconds=30,
+            max_slice_seconds=30,
+            idle_poll_seconds=1,
+        ),
+    )
+    await worker.run_once()
+
+    snapshot = client.get(f"/api/v1/runs/{run_id}", headers=scope).json()
+    assert snapshot["status"] == "completed"
+    assert snapshot["budget"]["consumed_tokens"] == 18
+    assert snapshot["checkpoint_usage_quality"] == "provider"
+    # The text the endpoint produced, kept where the next round would read it.
+    async with engine.connect() as connection:
+        rows = await connection.execute(
+            text(
+                "SELECT role, content FROM session_messages "
+                "WHERE session_id = :sid ORDER BY sequence"
+            ),
+            {"sid": session_id},
+        )
+        transcript = [
+            (row.role, row.content["parts"][0]["text"]) for row in rows.all()
+        ]
+    assert transcript == [
+        ("user", "say something"),
+        ("assistant", "the model really said this"),
+    ]

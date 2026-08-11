@@ -2,7 +2,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -19,18 +19,55 @@ class AgentLimits(BaseModel):
 
 
 class DeterministicModelPolicy(BaseModel):
+    """The stand-in. Not a test double: a published Agent may select it.
+
+    It performs no network call, so an air-gapped installation can still prove
+    the platform works, and every test above the provider boundary can have a
+    Run whose outcome is known.
+    """
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     provider: Literal["deterministic"] = "deterministic"
     scenario: Literal["complete", "fail_replay_safe", "continue_once"] = "complete"
 
 
+class EndpointModelPolicy(BaseModel):
+    """A real model, named by the endpoint a platform administrator approved."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider: Literal["openai_compatible"]
+    endpoint_id: UUID
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    max_output_tokens: int | None = Field(default=None, ge=1)
+
+
+#: Discriminated, so a `provider` the platform does not understand is refused
+#: rather than falling through to the stand-in. An Agent that answers from a
+#: `match` statement while its author believes it is talking to a model is the
+#: one failure mode this union exists to make impossible.
+ModelPolicy = Annotated[
+    DeterministicModelPolicy | EndpointModelPolicy, Field(discriminator="provider")
+]
+
+
 class AgentSpec(BaseModel):
+    """A published Agent's whole configuration.
+
+    ``schema_version`` stays 1 through the arrival of ``EndpointModelPolicy``,
+    because adding a union member is a widening: every spec that validated
+    before still validates, and normalizes to the same bytes with the same
+    content hash. No published version is disturbed and no row is migrated. A
+    version bump would be right for a narrowing or a rename; it is not right for
+    accepting more.
+    """
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: Literal[1] = 1
     personality: str = Field(min_length=1, max_length=8192)
-    model_policy: DeterministicModelPolicy
+    model_policy: ModelPolicy
     tools: tuple[()] = ()
     limits: AgentLimits = AgentLimits()
 

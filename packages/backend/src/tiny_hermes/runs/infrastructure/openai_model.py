@@ -19,6 +19,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
+from tiny_hermes.agents.domain.models import EndpointModelPolicy
 from tiny_hermes.model_catalog.domain.models import ModelEndpointSpec
 from tiny_hermes.model_catalog.infrastructure import credentials
 from tiny_hermes.outbound.client import SafeOutboundClient
@@ -132,17 +133,32 @@ def normalize(body: dict[str, Any]) -> ModelResponse:
 
 
 def build_payload(spec: ModelEndpointSpec, request: ModelRequest) -> dict[str, Any]:
-    """The request body, with the platform's rules ahead of the Agent's persona."""
+    """The request body, with the platform's rules ahead of the Agent's persona.
+
+    An Agent placed underneath the preamble cannot talk its way past it.
+
+    The Agent's own output ceiling narrows the endpoint's, never widens it —
+    publishing already refused a policy that asked for more, and taking the
+    minimum here means a later change to that check cannot turn into a request
+    the endpoint was never approved for.
+    """
     messages: list[dict[str, str]] = [
         {"role": "system", "content": SAFETY_PREAMBLE},
         {"role": "system", "content": request.personality},
     ]
     messages.extend(_as_message(entry) for entry in request.messages)
-    return {
+    payload: dict[str, Any] = {
         "model": spec.model,
         "messages": messages,
         "max_tokens": spec.max_output_tokens,
     }
+    policy = request.policy
+    if isinstance(policy, EndpointModelPolicy):
+        if policy.max_output_tokens is not None:
+            payload["max_tokens"] = min(policy.max_output_tokens, spec.max_output_tokens)
+        if policy.temperature is not None:
+            payload["temperature"] = policy.temperature
+    return payload
 
 
 def _as_message(message: CanonicalMessage) -> dict[str, str]:

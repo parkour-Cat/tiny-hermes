@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     #: link-local stay refused however wide the range is.
     outbound_allowed_cidrs: str = ""
 
+    #: Attempts per model round, on the same endpoint. A workspace may lower
+    #: this; nothing may raise it.
+    model_max_attempts: int = Field(default=3, ge=1, le=3)
+    model_retry_base_ms: int = Field(default=250, ge=10, le=5_000)
+
     @field_validator("outbound_allowed_cidrs")
     @classmethod
     def reject_unparseable_cidrs(cls, value: str) -> str:

@@ -9,9 +9,11 @@ from tiny_hermes.agents.domain.models import (
     AgentDraft,
     AgentSpec,
     AgentVersion,
+    EndpointModelPolicy,
     initial_agent_spec,
 )
 from tiny_hermes.agents.ports.store import AgentStore, PublishResult
+from tiny_hermes.model_catalog.ports.store import ModelEndpointStore
 from tiny_hermes.tenancy.domain.models import Actor, Role
 
 WRITERS = {Role.WORKSPACE_ADMIN, Role.DEVELOPER}
@@ -54,6 +56,14 @@ class AgentAliasAlreadyUsed(AgentCatalogError):
     pass
 
 
+class ModelEndpointUnavailable(AgentCatalogError):
+    """The endpoint this draft names does not exist, or is no longer active."""
+
+
+class ModelOutputLimitTooHigh(AgentCatalogError):
+    """The draft asks for more output than the endpoint will produce."""
+
+
 class AgentCatalog:
     """Agent publication rules.
 
@@ -61,8 +71,13 @@ class AgentCatalog:
     delegates one whole business transaction per operation to its store.
     """
 
-    def __init__(self, store: AgentStore) -> None:
+    def __init__(self, store: AgentStore, endpoints: ModelEndpointStore | None = None) -> None:
         self._store = store
+        # Optional so the in-memory adapter and the fast domain tests, which
+        # know nothing about endpoints, keep working. A deterministic Agent
+        # never reaches the check, and an endpoint-backed one cannot be
+        # published without a catalog to check against.
+        self._endpoints = endpoints
 
     async def create_agent(
         self, workspace_id: UUID, actor: Actor, name: str, alias: str, request_id: str
@@ -153,6 +168,13 @@ class AgentCatalog:
         request_id: str,
     ) -> PublishResult:
         platform = await self._require_role(workspace_id, actor, WRITERS)
+        # Checked here rather than when the draft is saved: a draft is a work in
+        # progress and an author is allowed to save one that is not ready. A
+        # version is immutable and a Run will execute it, so this is the last
+        # moment a mistake is still cheap.
+        draft = await self._store.get_draft(workspace_id, agent_id)
+        if draft is not None:
+            await self._check_endpoint(draft.spec)
         result = await self._store.publish_draft(
             workspace_id, agent_id, actor.id, expected_revision
         )
@@ -178,6 +200,23 @@ class AgentCatalog:
             workspace_id, actor, "agent.version_activated", version.id, request_id, platform
         )
         return version
+
+    async def _check_endpoint(self, spec: AgentSpec) -> None:
+        """Refuse a version that names an endpoint it cannot actually use."""
+        policy = spec.model_policy
+        if not isinstance(policy, EndpointModelPolicy):
+            return
+        if self._endpoints is None:
+            raise ModelEndpointUnavailable
+        endpoint = await self._endpoints.read(policy.endpoint_id)
+        if endpoint is None or not endpoint.is_selectable:
+            raise ModelEndpointUnavailable
+        wanted = policy.max_output_tokens
+        if wanted is not None and wanted > endpoint.spec.max_output_tokens:
+            # Refused rather than clamped. An author who asked for 8192 and got
+            # 4096 has an Agent that behaves unlike the one they published, and
+            # nothing anywhere would say so.
+            raise ModelOutputLimitTooHigh
 
     async def _require_role(
         self, workspace_id: UUID, actor: Actor, allowed: set[Role]

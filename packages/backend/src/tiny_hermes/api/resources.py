@@ -127,7 +127,7 @@ class ApplicationResources:
     async def agent_catalog(self) -> AsyncGenerator[AgentCatalog]:
         async with self.session_factory()() as session:
             try:
-                yield AgentCatalog(SqlAgentStore(session))
+                yield AgentCatalog(SqlAgentStore(session), SqlModelEndpointStore(session))
             except AuditedDenial:
                 await session.commit()
                 raise
