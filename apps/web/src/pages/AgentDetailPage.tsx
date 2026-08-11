@@ -21,6 +21,7 @@ import type {
   AgentResponse,
   AgentSpecDocument,
   AgentVersionResponse,
+  ModelEndpointSummary,
 } from "../api/types";
 import { MODEL_SCENARIOS } from "../api/types";
 import { t } from "../i18n/zh-CN";
@@ -28,7 +29,9 @@ import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 type DraftValues = {
   personality: string;
+  provider: "deterministic" | "openai_compatible";
   scenario: string;
+  endpoint_id: string | undefined;
   max_execution_seconds: number;
   max_elapsed_seconds: number;
   max_model_calls: number;
@@ -37,9 +40,14 @@ type DraftValues = {
 };
 
 function valuesOf(draft: AgentDraftResponse): DraftValues {
+  const policy = draft.spec.model_policy;
   return {
     personality: draft.spec.personality,
-    scenario: draft.spec.model_policy.scenario,
+    provider: policy.provider,
+    // Both fields are kept in the form whichever provider is selected, so
+    // switching back and forth does not lose what was already chosen.
+    scenario: policy.provider === "deterministic" ? policy.scenario : "complete",
+    endpoint_id: policy.provider === "openai_compatible" ? policy.endpoint_id : undefined,
     ...draft.spec.limits,
   };
 }
@@ -48,10 +56,12 @@ function specOf(values: DraftValues): AgentSpecDocument {
   return {
     schema_version: 1,
     personality: values.personality,
-    // The only provider phase two has. Naming it here rather than echoing the
-    // loaded spec keeps the console from carrying forward a value it could not
-    // have produced.
-    model_policy: { provider: "deterministic", scenario: values.scenario },
+    // Built from the selection rather than echoed from the loaded spec, so the
+    // console never carries forward a shape it could not have produced.
+    model_policy:
+      values.provider === "openai_compatible"
+        ? { provider: "openai_compatible", endpoint_id: values.endpoint_id ?? "" }
+        : { provider: "deterministic", scenario: values.scenario },
     tools: [],
     limits: {
       max_execution_seconds: values.max_execution_seconds,
@@ -94,6 +104,13 @@ export function AgentDetailPage() {
     queryFn: () => api<AgentDraftResponse>(`/api/v1/agents/${agentId}/draft`, scope),
     enabled,
   });
+  // Platform-wide rather than workspace-scoped: an endpoint is approved by a
+  // platform administrator and every workspace chooses from the same list.
+  const endpoints = useQuery({
+    queryKey: ["model-endpoints"] as const,
+    queryFn: () => api<ModelEndpointSummary[]>("/api/v1/model-endpoints", scope),
+  });
+  const provider = Form.useWatch("provider", form);
   const agentQuery = ["agent", workspaceId, agentId] as const;
   const versionsQuery = ["agent-versions", workspaceId, agentId] as const;
   const versions = useQuery({
@@ -271,11 +288,37 @@ export function AgentDetailPage() {
           >
             <Input.TextArea rows={6} />
           </Form.Item>
-          <Form.Item name="scenario" label={t("modelScenario")} rules={[{ required: true }]}>
+          <Form.Item name="provider" label={t("modelProvider")} rules={[{ required: true }]}>
             <Select
-              options={MODEL_SCENARIOS.map((scenario) => ({ value: scenario, label: scenario }))}
+              options={[
+                { value: "deterministic", label: t("modelProviderDeterministic") },
+                { value: "openai_compatible", label: t("modelProviderEndpoint") },
+              ]}
             />
           </Form.Item>
+          {provider === "openai_compatible" ? (
+            <Form.Item
+              name="endpoint_id"
+              label={t("modelEndpoint")}
+              rules={[{ required: true, message: t("required") }]}
+              // An empty dropdown reads as a loading bug. Saying that nothing is
+              // registered points at the person who can change that.
+              extra={endpoints.data?.length === 0 ? t("modelEndpointsEmpty") : undefined}
+            >
+              <Select
+                options={(endpoints.data ?? [])
+                  .filter((entry) => entry.status === "active")
+                  .map((entry) => ({ value: entry.id, label: entry.name }))}
+                loading={endpoints.isLoading}
+              />
+            </Form.Item>
+          ) : (
+            <Form.Item name="scenario" label={t("modelScenario")} rules={[{ required: true }]}>
+              <Select
+                options={MODEL_SCENARIOS.map((scenario) => ({ value: scenario, label: scenario }))}
+              />
+            </Form.Item>
+          )}
           <Typography.Title level={5}>{t("limitsSection")}</Typography.Title>
           <div className="limit-grid">
             {LIMITS.map((limit) => (

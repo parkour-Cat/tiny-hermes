@@ -16,10 +16,34 @@ export type AgentResponse = {
 };
 
 /** The subset of the agent spec the phase-2C form edits. */
+/**
+ * Discriminated the same way the server discriminates it, so a policy the
+ * console does not understand is a type error here rather than a silently
+ * dropped field on the way back out.
+ */
+export type ModelPolicyDocument =
+  | { provider: "deterministic"; scenario: string }
+  | {
+      provider: "openai_compatible";
+      endpoint_id: string;
+      temperature?: number | null;
+      max_output_tokens?: number | null;
+    };
+
+export type ModelEndpointSummary = {
+  id: string;
+  name: string;
+  model: string;
+  context_window: number;
+  max_output_tokens: number;
+  usage_quality: string;
+  status: string;
+};
+
 export type AgentSpecDocument = {
   schema_version: number;
   personality: string;
-  model_policy: { provider: string; scenario: string };
+  model_policy: ModelPolicyDocument;
   tools: unknown[];
   limits: {
     max_execution_seconds: number;
