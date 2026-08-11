@@ -20,7 +20,8 @@ STREAM_TIMEOUT = 20
 TRUNCATE = (
     "TRUNCATE idempotency_records, worker_leases, run_events, run_budget_scopes, "
     "session_messages, runs, sessions, agent_versions, agent_drafts, agents, "
-    "audit_events, memberships, workspaces, auth_sessions, auth_identities, users CASCADE"
+    "model_endpoints, audit_events, memberships, workspaces, auth_sessions, "
+    "auth_identities, users CASCADE"
 )
 
 VALID_SPEC: dict[str, Any] = {
