@@ -54,8 +54,8 @@ def workspace_router(resources: ApplicationResources) -> APIRouter:
 
     @router.get("", response_model=list[WorkspaceResponse])
     async def list_workspaces(  # pyright: ignore[reportUnusedFunction]
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        workspaces: Annotated[WorkspaceService, Depends(workspace_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        workspaces: Annotated[WorkspaceService, Depends(workspace_dependency, scope="function")],
         session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
     ) -> list[WorkspaceResponse]:
         user = await authenticate_browser_user(auth, session_token)
@@ -66,8 +66,8 @@ def workspace_router(resources: ApplicationResources) -> APIRouter:
     async def create_workspace(  # pyright: ignore[reportUnusedFunction]
         payload: CreateWorkspaceRequest,
         request: Request,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        workspaces: Annotated[WorkspaceService, Depends(workspace_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        workspaces: Annotated[WorkspaceService, Depends(workspace_dependency, scope="function")],
         session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
         csrf_token: Annotated[str | None, Header(alias="X-CSRF-Token")] = None,
     ) -> WorkspaceResponse:
@@ -91,8 +91,8 @@ def workspace_router(resources: ApplicationResources) -> APIRouter:
     async def list_members(  # pyright: ignore[reportUnusedFunction]
         workspace_id: UUID,
         request: Request,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        workspaces: Annotated[WorkspaceService, Depends(workspace_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        workspaces: Annotated[WorkspaceService, Depends(workspace_dependency, scope="function")],
         selected_workspace: Annotated[str | None, Header(alias="X-Workspace-Id")] = None,
         session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
     ) -> list[WorkspaceMemberResponse]:

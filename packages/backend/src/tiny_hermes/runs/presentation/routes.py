@@ -104,8 +104,8 @@ def session_router(resources: ApplicationResources) -> APIRouter:
 
     @router.get("", response_model=list[SessionResponse])
     async def list_sessions(  # pyright: ignore[reportUnusedFunction]
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        runs: Annotated[RunCoordination, Depends(runs_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
     ) -> list[SessionResponse]:
@@ -121,8 +121,8 @@ def session_router(resources: ApplicationResources) -> APIRouter:
     async def create_session(  # pyright: ignore[reportUnusedFunction]
         payload: CreateSessionRequest,
         request: Request,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        runs: Annotated[RunCoordination, Depends(runs_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
@@ -144,8 +144,8 @@ def session_router(resources: ApplicationResources) -> APIRouter:
     @router.get("/{session_id}", response_model=SessionResponse)
     async def get_session(  # pyright: ignore[reportUnusedFunction]
         session_id: UUID,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        runs: Annotated[RunCoordination, Depends(runs_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
     ) -> SessionResponse:
@@ -171,8 +171,8 @@ def run_router(resources: ApplicationResources) -> APIRouter:
 
     @router.get("", response_model=list[RunResponse])
     async def list_runs(  # pyright: ignore[reportUnusedFunction]
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        runs: Annotated[RunCoordination, Depends(runs_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         session_id: UUID | None = None,
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
@@ -190,8 +190,8 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         payload: CreateRunRequest,
         request: Request,
         response: Response,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        runs: Annotated[RunCoordination, Depends(runs_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
@@ -218,8 +218,8 @@ def run_router(resources: ApplicationResources) -> APIRouter:
     @router.get("/{run_id}", response_model=RunResponse)
     async def get_run(  # pyright: ignore[reportUnusedFunction]
         run_id: UUID,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        runs: Annotated[RunCoordination, Depends(runs_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
     ) -> RunResponse:
@@ -262,8 +262,8 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         run_id: UUID,
         request: Request,
         response: Response,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        runs: Annotated[RunCoordination, Depends(runs_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
@@ -291,8 +291,8 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         run_id: UUID,
         payload: ControlRunRequest,
         request: Request,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        runs: Annotated[RunCoordination, Depends(runs_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
@@ -314,8 +314,8 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         run_id: UUID,
         payload: ControlRunRequest,
         request: Request,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        runs: Annotated[RunCoordination, Depends(runs_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
@@ -337,8 +337,8 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         run_id: UUID,
         payload: ControlRunRequest,
         request: Request,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        runs: Annotated[RunCoordination, Depends(runs_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,

@@ -103,8 +103,8 @@ def model_endpoint_router(resources: ApplicationResources) -> APIRouter:
 
     @router.get("", response_model=list[EndpointSummary])
     async def list_endpoints(  # pyright: ignore[reportUnusedFunction]
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        endpoints: Annotated[ModelEndpointService, Depends(endpoints_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        endpoints: Annotated[ModelEndpointService, Depends(endpoints_dependency, scope="function")],
         session_token: SessionCookie = None,
     ) -> list[EndpointSummary]:
         await authenticate_browser_user(auth, session_token)
@@ -115,8 +115,8 @@ def model_endpoint_router(resources: ApplicationResources) -> APIRouter:
     @router.get("/{endpoint_id}", response_model=EndpointDetail)
     async def read_endpoint(  # pyright: ignore[reportUnusedFunction]
         endpoint_id: UUID,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        endpoints: Annotated[ModelEndpointService, Depends(endpoints_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        endpoints: Annotated[ModelEndpointService, Depends(endpoints_dependency, scope="function")],
         session_token: SessionCookie = None,
     ) -> EndpointDetail:
         user = await authenticate_browser_user(auth, session_token)
@@ -125,8 +125,8 @@ def model_endpoint_router(resources: ApplicationResources) -> APIRouter:
     @router.post("", response_model=EndpointDetail, status_code=status.HTTP_201_CREATED)
     async def register_endpoint(  # pyright: ignore[reportUnusedFunction]
         payload: ModelEndpointSpec,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        endpoints: Annotated[ModelEndpointService, Depends(endpoints_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        endpoints: Annotated[ModelEndpointService, Depends(endpoints_dependency, scope="function")],
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
     ) -> EndpointDetail:
@@ -137,8 +137,8 @@ def model_endpoint_router(resources: ApplicationResources) -> APIRouter:
     async def update_status(  # pyright: ignore[reportUnusedFunction]
         endpoint_id: UUID,
         payload: UpdateStatusRequest,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        endpoints: Annotated[ModelEndpointService, Depends(endpoints_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        endpoints: Annotated[ModelEndpointService, Depends(endpoints_dependency, scope="function")],
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
     ) -> EndpointDetail:
@@ -149,8 +149,8 @@ def model_endpoint_router(resources: ApplicationResources) -> APIRouter:
     @router.post("/{endpoint_id}/check", response_model=CheckResponse)
     async def check_endpoint(  # pyright: ignore[reportUnusedFunction]
         endpoint_id: UUID,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        endpoints: Annotated[ModelEndpointService, Depends(endpoints_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        endpoints: Annotated[ModelEndpointService, Depends(endpoints_dependency, scope="function")],
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
     ) -> CheckResponse:

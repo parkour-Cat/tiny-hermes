@@ -59,7 +59,7 @@ def identity_router(resources: ApplicationResources) -> APIRouter:
         payload: BootstrapRequest,
         request: Request,
         bootstrap_token: Annotated[str, Header(alias="X-Bootstrap-Token")],
-        service: Annotated[AuthService, Depends(service_dependency)],
+        service: Annotated[AuthService, Depends(service_dependency, scope="function")],
     ) -> UserResponse:
         try:
             user = await service.bootstrap(
@@ -90,7 +90,7 @@ def identity_router(resources: ApplicationResources) -> APIRouter:
         payload: LoginRequest,
         response: Response,
         request: Request,
-        service: Annotated[AuthService, Depends(service_dependency)],
+        service: Annotated[AuthService, Depends(service_dependency, scope="function")],
     ) -> UserResponse:
         try:
             session_token, csrf_token, user = await service.login(
@@ -126,7 +126,7 @@ def identity_router(resources: ApplicationResources) -> APIRouter:
 
     @router.get("/auth/me", response_model=UserResponse)
     async def me(  # pyright: ignore[reportUnusedFunction]
-        service: Annotated[AuthService, Depends(service_dependency)],
+        service: Annotated[AuthService, Depends(service_dependency, scope="function")],
         session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
     ) -> UserResponse:
         if not session_token:
@@ -141,7 +141,7 @@ def identity_router(resources: ApplicationResources) -> APIRouter:
     async def logout(  # pyright: ignore[reportUnusedFunction]
         response: Response,
         request: Request,
-        service: Annotated[AuthService, Depends(service_dependency)],
+        service: Annotated[AuthService, Depends(service_dependency, scope="function")],
         session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
         csrf_token: Annotated[str | None, Header(alias="X-CSRF-Token")] = None,
     ) -> None:
