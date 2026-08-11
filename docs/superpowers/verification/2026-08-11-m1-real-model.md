@@ -264,21 +264,66 @@ private keys) returned no matches. The only tracked environment file is
   the same steps having been reproduced locally, in the same order, with the
   results above. §7.1 is what that costs.
 
-### The real-endpoint check has not been performed
+### The real-endpoint check, performed
 
-The plan's Task 10 Step 4 is a single manual run against a real
-OpenAI-compatible vendor endpoint — register, check, publish, run, read the
-Token accounting — with the endpoint and credential redacted. **It has not been
-done.** No credential is available in this environment, and obtaining one and
-sending a request to a third-party service is the repository owner's call rather
-than something to arrange unasked.
+The plan's Task 10 Step 4 — one manual run against a real OpenAI-compatible
+endpoint the repository did not write — was carried out on 2026-08-11. The
+endpoint's address and credential are redacted; the operator placed the key in
+`deploy/compose/.env`, which is gitignored, and it was never read, printed, or
+handled by anything but Docker.
 
-Everything the adapter does is proven against a local stand-in that speaks the
-same protocol, and the outbound client is proven against a real socket. What
-remains unproven is the one thing a stand-in cannot establish: that a real
-vendor's responses fit the shapes `normalize` expects. Until that run happens,
-treat the OpenAI-compatible adapter as verified against a specification and not
-against a vendor.
+Because the endpoint runs on the host, `host.docker.internal` was used rather
+than `localhost` — from inside a container `localhost` is the container, and
+loopback is refused unapprovably. It resolves to `192.168.65.254`, which is
+private, so the run also exercised the approval path that until then had only
+unit-test coverage:
+
+```text
+OUTBOUND_ALLOWED_CIDRS=192.168.65.254/32
+base_url = http://host.docker.internal:8317/v1   (plaintext, allowed only
+                                                  because the address is approved)
+
+register  -> 201   credential_available=True
+check     -> 200   reachable=True   elapsed_ms=6150
+
+run 1  "Name one colour."               status=completed  4.6s
+       usage_quality=provider  replay_safe=True
+       model_calls=1  tokens=384  execution_ms=2166
+run 2  "What colour did you just name?" status=completed  5.4s
+       usage_quality=provider  replay_safe=True
+       model_calls=1  tokens=403  execution_ms=3125
+
+session_messages
+  1 user      Name one colour.
+  2 assistant Blue.
+  3 user      What colour did you just name?
+  4 assistant Blue.
+```
+
+Row 4 is the result that a stand-in cannot produce. The second Run was a
+separate Run with a separate budget; it answered "Blue." because the persistent
+Session handed it the first Run's transcript. Without §4's change it would have
+had nothing to answer from.
+
+What this establishes, and what it does not:
+
+- **Established.** A third-party implementation's responses fit the shapes
+  `normalize` expects — `finish_reason`, `message.content`, and a `usage` object
+  with both counts, since `usage_quality` came back `provider` rather than
+  `unavailable`. Plaintext-over-approved-private works. The credential reached
+  the endpoint without appearing anywhere else.
+- **Not established.** This is one implementation. A commercial vendor may name
+  its `usage` fields differently, return `content` as an array of parts, or use a
+  `finish_reason` outside `stop`/`length`/`tool_calls` — all of which the adapter
+  turns into a *failed round* with a named reason rather than a crash, but none
+  of which it currently accommodates. Each new provider deserves this same walk
+  before it is trusted.
+- **Worth noting.** 384 tokens for a one-sentence answer is mostly the safety
+  preamble and the personality. That is the floor for every round, and it will
+  matter when a Token limit exists to be spent.
+
+The endpoint was disabled afterwards, so the console offers nothing that would
+fail once the deployment stops supplying the key.
 
 ## 7. Redacted failure evidence
 
@@ -348,4 +393,5 @@ against a vendor.
       streaming; no tool binding.
 - [x] All phase 1, 2A, 2B, and 2C checks pass unchanged, including the restart
       drill.
-- [ ] One manual run against a real vendor endpoint — **not performed**, see §6.
+- [x] One manual run against a real OpenAI-compatible endpoint the repository
+      did not write, including the approved-private-range path — see §6.
