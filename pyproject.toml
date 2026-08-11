@@ -90,6 +90,12 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "TID251"]
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
+# Checked against the platform this is deployed on, not the one it is written
+# on. `asyncio.open_unix_connection` and friends do not exist in Python on
+# Windows, so checking as Windows would report the Controller's transport as
+# undefined while it is the only supported target. The tests that genuinely
+# branch on the host platform do so at runtime.
+pythonPlatform = "Linux"
 include = ["packages/backend/src", "packages/backend/tests", "scripts"]
 extraPaths = ["packages/backend/src", "packages/backend/tests"]
 venvPath = "."
