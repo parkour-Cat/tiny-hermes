@@ -3,7 +3,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 
 
@@ -165,24 +165,153 @@ class QueueStatus(StrEnum):
 
 
 @dataclass(frozen=True)
-class CanonicalMessage:
-    """One turn of a conversation, in the shape the platform stores and sends.
-
-    Text only. Technical design §9.2 describes tool-call and tool-result blocks
-    too, and neither is declared here: no phase-3A code path produces one, and a
-    block type without a producer is a promise nothing keeps. Phase 3C widens
-    ``text`` into a list of blocks, and every reader of this field will fail
-    typechecking at that point — which is the review the widening deserves.
-
-    The stored document already carries a ``parts`` list, so widening later
-    changes this class and not the rows written before it.
-    """
-
-    role: Literal["user", "assistant"]
+class TextBlock:
     text: str
 
     def document(self) -> dict[str, Any]:
-        return {"role": self.role, "parts": [{"type": "text", "text": self.text}]}
+        return {"type": "text", "text": self.text}
+
+
+@dataclass(frozen=True)
+class ToolCallBlock:
+    """The model asking for a tool, in the platform's own shape.
+
+    ``arguments`` is a decoded object rather than the provider's JSON string:
+    the adapter decodes once, at the edge, and a failure there is a failed
+    round with a named reason. Carrying the string inward would mean every
+    reader had to decode it and each one could decide differently.
+    """
+
+    call_id: str
+    name: str
+    arguments: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if not self.call_id:
+            raise ValueError("a tool call needs a call_id to be answered by")
+        if not self.name:
+            raise ValueError("a tool call needs a name")
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "type": "tool_call",
+            "call_id": self.call_id,
+            "name": self.name,
+            "arguments": dict(self.arguments),
+        }
+
+
+@dataclass(frozen=True)
+class ToolResultBlock:
+    """What came back, tied to the call that asked.
+
+    ``failed`` is separate from ``exit_code`` because they answer different
+    questions. A command that exits non-zero did what it was asked and reported
+    a result; a tool that was refused, or timed out, never ran. Collapsing them
+    would tell the model a refusal was a failing command.
+    """
+
+    call_id: str
+    output: str
+    exit_code: int
+    failed: bool
+
+    def __post_init__(self) -> None:
+        if not self.call_id:
+            raise ValueError("a tool result needs the call_id it answers")
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "type": "tool_result",
+            "call_id": self.call_id,
+            "output": self.output,
+            "exit_code": self.exit_code,
+            "failed": self.failed,
+        }
+
+
+Block = TextBlock | ToolCallBlock | ToolResultBlock
+
+
+@dataclass(frozen=True)
+class CanonicalMessage:
+    """One turn of a conversation, in the shape the platform stores and sends.
+
+    Phase 3A carried a single string and said the widening belonged to the
+    slice that had a producer. Tool calls are that producer.
+
+    The stored document already carried a ``parts`` list, so rows written
+    before this change read back unchanged — asserted against a literal
+    document in `test_message_blocks.py`, because that is a promise about bytes
+    already in a database rather than about a shape today's code round-trips.
+    """
+
+    role: Literal["user", "assistant", "tool"]
+    blocks: tuple[Block, ...]
+
+    def __post_init__(self) -> None:
+        if not self.blocks:
+            # An empty turn is not a turn. Storing one puts a row in the
+            # transcript that means nothing and that every later round skips.
+            raise ValueError("a message needs at least one block")
+
+    @property
+    def text(self) -> str:
+        """The words, for anything showing this to a person.
+
+        Deliberately lossy: it drops calls and results. Anything rebuilding a
+        request walks `blocks` instead, which is why the provider adapter does.
+        """
+        return "".join(block.text for block in self.blocks if isinstance(block, TextBlock))
+
+    def document(self) -> dict[str, Any]:
+        return {"role": self.role, "parts": [block.document() for block in self.blocks]}
+
+
+def message_from_document(document: dict[str, Any]) -> CanonicalMessage:
+    """Read a stored row back, tolerating one written by a later version.
+
+    An unknown block type is dropped rather than guessed at: this version
+    cannot render or replay it honestly, and a placeholder would put words in
+    the Agent's mouth. A row with nothing readable becomes one empty text block
+    rather than raising, because a bad row is a bad row and not a reason to
+    fail a Run that has nothing to do with it.
+    """
+    raw: Any = document.get("parts")
+    blocks: list[Block] = []
+    for entry in cast(list[Any], raw) if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        part = cast(dict[str, Any], entry)
+        kind = part.get("type")
+        if kind == "text":
+            blocks.append(TextBlock(text=str(part.get("text", ""))))
+        elif kind == "tool_call":
+            arguments: Any = part.get("arguments")
+            blocks.append(
+                ToolCallBlock(
+                    call_id=str(part.get("call_id", "")),
+                    name=str(part.get("name", "")),
+                    arguments=cast(dict[str, Any], arguments)
+                    if isinstance(arguments, dict)
+                    else {},
+                )
+            )
+        elif kind == "tool_result":
+            blocks.append(
+                ToolResultBlock(
+                    call_id=str(part.get("call_id", "")),
+                    output=str(part.get("output", "")),
+                    exit_code=int(part.get("exit_code") or 0),
+                    failed=bool(part.get("failed")),
+                )
+            )
+
+    role = str(document.get("role", "user"))
+    return CanonicalMessage(
+        role=role if role in ("user", "assistant", "tool") else "user",  # pyright: ignore[reportArgumentType]
+        blocks=tuple(blocks) or (TextBlock(text=""),),
+    )
 
 
 @dataclass(frozen=True)

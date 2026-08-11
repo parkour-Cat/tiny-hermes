@@ -1,7 +1,7 @@
 import hashlib
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, func, select, text, update
@@ -48,7 +48,9 @@ from tiny_hermes.runs.domain.models import (
     SessionMode,
     SessionSnapshot,
     StateDecision,
+    TextBlock,
     event_type_for,
+    message_from_document,
 )
 from tiny_hermes.runs.domain.state_machine import (
     InvalidStateMetadata,
@@ -605,7 +607,8 @@ class SqlRunStore:
                     sequence=session.next_message_sequence,
                     role="assistant",
                     content=CanonicalMessage(
-                        role="assistant", text=command.assistant_text
+                        role="assistant",
+                        blocks=(TextBlock(text=command.assistant_text),),
                     ).document(),
                     source_run_id=run.id,
                     redacted=False,
@@ -1657,25 +1660,13 @@ def _usage_quality(checkpoint: dict[str, Any] | None) -> str | None:
 
 
 def _to_message(row: SessionMessageRow) -> CanonicalMessage:
-    role = "assistant" if row.role == "assistant" else "user"
-    return CanonicalMessage(role=role, text=_message_text(row))
+    """Through the document reader, so a stored tool block survives the trip.
 
-
-def _message_text(row: SessionMessageRow | None) -> str:
-    """Flatten a stored message back to the text one round is given."""
-    if row is None:
-        return ""
-    parts: Any = row.content.get("parts", [])
-    if not isinstance(parts, list):
-        return ""
-    texts: list[str] = []
-    for part in cast(list[Any], parts):
-        if not isinstance(part, dict):
-            continue
-        fields = cast(dict[str, Any], part)
-        if fields.get("type") == "text":
-            texts.append(str(fields.get("text", "")))
-    return "\n".join(texts)
+    Reconstructing the message here from `row.role` and flattened text would
+    silently drop every block this version does understand, which is worse than
+    the version that could not represent them at all.
+    """
+    return message_from_document({"role": row.role, **row.content})
 
 
 def _scan_lock_key(name: str) -> int:

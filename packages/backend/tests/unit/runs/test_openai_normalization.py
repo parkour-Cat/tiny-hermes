@@ -55,12 +55,17 @@ def test_a_truncated_answer_fails_rather_than_passing_as_finished() -> None:
     assert response.failure == "max_output_reached"
 
 
-def test_a_tool_call_fails_because_no_tool_is_bound() -> None:
-    """Phase 3A binds no tools and tells the model about none.
+def test_parsing_a_tool_call_is_not_authorizing_it() -> None:
+    """Phase 3A refused this outright; that refusal moved rather than vanished.
 
-    A model that asks for one has left the contract, and the honest answer is
-    to stop — not to invent a result, and not to quietly drop the request and
-    return whatever text came with it.
+    Normalization now parses any well-formed call, including one for a tool
+    this Agent never bound — because normalization does not know what was
+    bound, and a layer that guessed would be guessing about authorization. The
+    refusal belongs to the tool registry's second step, which checks the real
+    name against the real binding: `test_registry.py` holds it.
+
+    What is asserted here is that a *malformed* call still fails, so an
+    unparseable request cannot reach that check pretending to be a real one.
     """
     response = normalize(
         body(
@@ -71,7 +76,7 @@ def test_a_tool_call_fails_because_no_tool_is_bound() -> None:
         )
     )
     assert response.stop_reason is StopReason.FAILED
-    assert response.failure == "tool_use_not_supported"
+    assert response.failure == "malformed_tool_call"
 
 
 def test_an_unrecognized_finish_reason_fails_rather_than_being_assumed_good() -> None:

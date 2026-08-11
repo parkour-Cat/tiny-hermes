@@ -10,7 +10,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from tiny_hermes.agents.domain.models import ModelPolicy
-from tiny_hermes.runs.domain.models import CanonicalMessage
+from tiny_hermes.runs.domain.models import CanonicalMessage, ToolCallBlock
 
 
 class StopReason(StrEnum):
@@ -18,6 +18,9 @@ class StopReason(StrEnum):
 
     COMPLETED = "completed"
     CONTINUE = "continue"
+    #: The model asked for a tool. The round produced a request rather than an
+    #: answer, so the loop executes it and comes back rather than finishing.
+    TOOL_CALL = "tool_call"
     FAILED = "failed"
 
 
@@ -65,6 +68,10 @@ class ModelResponse:
     input_tokens: int | None = None
     output_tokens: int | None = None
     usage_quality: UsageQuality = UsageQuality.PROVIDER
+    #: Present only when ``stop_reason`` is ``tool_call``. A tuple rather than
+    #: one call, because a model may ask for two things at once and answering
+    #: only the first leaves a question the model believes it asked.
+    tool_calls: tuple[ToolCallBlock, ...] = ()
     replay_safe: bool = True
     external_effect_unknown: bool = False
     #: A normalized reason when ``stop_reason`` is ``failed``.

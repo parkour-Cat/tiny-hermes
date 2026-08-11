@@ -1,6 +1,6 @@
 import pytest
 from tiny_hermes.agents.domain.models import AgentSpec
-from tiny_hermes.runs.domain.models import CanonicalMessage
+from tiny_hermes.runs.domain.models import CanonicalMessage, TextBlock
 from tiny_hermes.runs.infrastructure.deterministic_model import (
     DeterministicModelProvider,
 )
@@ -18,7 +18,7 @@ def _request(scenario: str, round_index: int) -> ModelRequest:
     return ModelRequest(
         policy=spec.model_policy,
         personality=spec.personality,
-        messages=(CanonicalMessage(role="user", text="do the thing"),),
+        messages=(CanonicalMessage(role="user", blocks=(TextBlock(text="do the thing"),)),),
         round_index=round_index,
     )
 

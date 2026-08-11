@@ -11,6 +11,7 @@ from tiny_hermes.runs.domain.models import (
     RunSnapshot,
     SessionMode,
     SessionSnapshot,
+    TextBlock,
     fingerprint_request,
 )
 from tiny_hermes.runs.ports.store import (
@@ -168,7 +169,7 @@ class RunCoordination:
     ) -> AcceptedRun:
         role = await self._require_role(workspace_id, actor, WRITERS)
         key = _require_idempotency_key(idempotency_key)
-        message = CanonicalMessage("user", text)
+        message = CanonicalMessage("user", (TextBlock(text=text),))
         return await self._store.accept_run(
             AcceptRunCommand(
                 workspace_id=workspace_id,

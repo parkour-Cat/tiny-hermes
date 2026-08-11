@@ -174,8 +174,12 @@ def test_every_combination_returns_a_documented_outcome(
         )
     )
 
+    # A tool call keeps the slice too, and for the reason the whole sandbox
+    # design rests on: the container is warm and the loop is mid-thought.
+    # Ending the slice to run one command would freeze and thaw between every
+    # step, which is the thing §11.4 exists to avoid.
     keeps_going = (
-        stop_reason is StopReason.CONTINUE
+        stop_reason in (StopReason.CONTINUE, StopReason.TOOL_CALL)
         and not cancel
         and not pause
         and budget

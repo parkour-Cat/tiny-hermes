@@ -30,7 +30,7 @@ from tiny_hermes.outbound.domain.address_policy import (
 )
 from tiny_hermes.runs.application.model_router import ModelRouter
 from tiny_hermes.runs.application.worker import WorkerRuntime, WorkerSettings
-from tiny_hermes.runs.domain.models import CanonicalMessage
+from tiny_hermes.runs.domain.models import CanonicalMessage, TextBlock
 from tiny_hermes.runs.infrastructure.deterministic_model import (
     DeterministicModelProvider,
 )
@@ -173,7 +173,10 @@ def outbound_client() -> SafeOutboundClient:
 
 def request(*turns: tuple[str, str]) -> ModelRequest:
     messages = tuple(
-        CanonicalMessage(role="user" if role == "user" else "assistant", text=said)
+        CanonicalMessage(
+            role="user" if role == "user" else "assistant",
+            blocks=(TextBlock(text=said),),
+        )
         for role, said in (turns or (("user", "hello"),))
     )
     return ModelRequest(
