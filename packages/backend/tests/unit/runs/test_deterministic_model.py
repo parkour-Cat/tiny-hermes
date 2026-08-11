@@ -1,5 +1,6 @@
 import pytest
 from tiny_hermes.agents.domain.models import AgentSpec
+from tiny_hermes.runs.domain.models import CanonicalMessage
 from tiny_hermes.runs.infrastructure.deterministic_model import (
     DeterministicModelProvider,
 )
@@ -17,7 +18,7 @@ def _request(scenario: str, round_index: int) -> ModelRequest:
     return ModelRequest(
         policy=spec.model_policy,
         personality=spec.personality,
-        input_text="do the thing",
+        messages=(CanonicalMessage(role="user", text="do the thing"),),
         round_index=round_index,
     )
 
@@ -76,7 +77,7 @@ async def test_every_response_reports_one_model_call_and_some_usage() -> None:
     for scenario in ("complete", "fail_replay_safe", "continue_once"):
         response = await provider.complete(_request(scenario, 1))
         assert response.model_calls == 1
-        assert response.tokens > 0
+        assert response.billable_tokens > 0
 
 
 @pytest.mark.parametrize("delay", [-1, 5001])

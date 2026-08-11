@@ -54,6 +54,7 @@ def _slice(
     model_calls: int = 1,
     tokens: int = 32,
     limit_reached: bool = False,
+    assistant_text: str | None = "the answer",
 ) -> RecordSliceCommand:
     return RecordSliceCommand(
         workspace_id=UUID(workspace_id),
@@ -70,6 +71,7 @@ def _slice(
         executed_ms=executed_ms,
         model_calls=model_calls,
         tokens=tokens,
+        assistant_text=assistant_text,
         request_id="slice-1",
         capabilities=FULL,
     )

@@ -19,7 +19,12 @@ from tiny_hermes.runs.domain.slice_policy import (
     decide_after_round,
 )
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
-from tiny_hermes.runs.ports.model import ModelProvider, ModelRequest, ModelResponse
+from tiny_hermes.runs.ports.model import (
+    ModelProvider,
+    ModelRequest,
+    ModelResponse,
+    StopReason,
+)
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
 from tiny_hermes.runs.ports.store import (
     ApplySignalCommand,
@@ -191,7 +196,14 @@ class WorkerRuntime:
                             ),
                             executed_ms=executed_ms,
                             model_calls=response.model_calls,
-                            tokens=response.tokens,
+                            tokens=response.billable_tokens,
+                            # A failed round said nothing the transcript should
+                            # keep, so nothing is appended for it.
+                            assistant_text=(
+                                None
+                                if response.stop_reason is StopReason.FAILED
+                                else response.text
+                            ),
                             request_id=f"worker-{self._settings.worker_id}",
                             capabilities=PLATFORM,
                         )
@@ -250,7 +262,7 @@ def _request(context: ExecutionContext) -> ModelRequest:
     return ModelRequest(
         policy=context.spec.model_policy,
         personality=context.spec.personality,
-        input_text=context.input_text,
+        messages=context.messages,
         round_index=context.budget.consumed_model_calls + 1,
     )
 
@@ -263,14 +275,22 @@ def _budget_after(
         context.budget,
         consumed_execution_ms=context.budget.consumed_execution_ms + executed_ms,
         consumed_model_calls=context.budget.consumed_model_calls + response.model_calls,
-        consumed_tokens=context.budget.consumed_tokens + response.tokens,
+        consumed_tokens=context.budget.consumed_tokens + response.billable_tokens,
     )
     return projected.allows_execution(datetime.now(UTC))
 
 
 def _checkpoint(response: ModelResponse) -> dict[str, object]:
+    """What the round was, in terms a reader of the Run can act on.
+
+    ``usage_quality`` is recorded rather than merely implied by a zero count:
+    "nothing was used" and "nobody counted" are different facts, and only one of
+    them means the Token limit was meaningfully enforced.
+    """
     return {
         "kind": "model_call",
         "stop_reason": response.stop_reason.value,
-        "tokens": response.tokens,
+        "tokens": response.billable_tokens,
+        "usage_quality": response.usage_quality.value,
+        "failure": response.failure,
     }

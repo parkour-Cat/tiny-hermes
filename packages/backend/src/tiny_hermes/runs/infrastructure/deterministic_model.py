@@ -28,7 +28,8 @@ class DeterministicModelProvider:
             return ModelResponse(
                 stop_reason=StopReason.FAILED,
                 text="The deterministic scenario stopped at a replay-safe checkpoint.",
-                tokens=TOKENS_PER_ROUND,
+                input_tokens=TOKENS_PER_ROUND // 2,
+                output_tokens=TOKENS_PER_ROUND // 2,
                 replay_safe=True,
                 external_effect_unknown=False,
             )
@@ -36,10 +37,12 @@ class DeterministicModelProvider:
             return ModelResponse(
                 stop_reason=StopReason.CONTINUE,
                 text="The deterministic scenario needs one more round.",
-                tokens=TOKENS_PER_ROUND,
+                input_tokens=TOKENS_PER_ROUND // 2,
+                output_tokens=TOKENS_PER_ROUND // 2,
             )
         return ModelResponse(
             stop_reason=StopReason.COMPLETED,
             text="The deterministic scenario finished.",
-            tokens=TOKENS_PER_ROUND,
+            input_tokens=TOKENS_PER_ROUND // 2,
+            output_tokens=TOKENS_PER_ROUND // 2,
         )

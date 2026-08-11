@@ -87,6 +87,7 @@ class RunResponse(BaseModel):
     available_actions: list[str]
     checkpoint_replay_safe: bool
     checkpoint_effect_status: str
+    checkpoint_usage_quality: str | None
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None

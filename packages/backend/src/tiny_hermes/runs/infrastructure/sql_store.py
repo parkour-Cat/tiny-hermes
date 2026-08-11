@@ -34,6 +34,7 @@ from tiny_hermes.runs.domain.models import (
     BudgetSummary,
     CallerIdentity,
     CallerType,
+    CanonicalMessage,
     CheckpointEffectStatus,
     PauseReason,
     QueueStatus,
@@ -512,20 +513,24 @@ class SqlRunStore:
         budget = await self._session.get(RunBudgetScopeRow, run.budget_root_run_id)
         if version is None or budget is None:
             return None
-        message = await self._session.scalar(
-            select(SessionMessageRow)
-            .where(
-                SessionMessageRow.source_run_id == run.id,
-                SessionMessageRow.role == "user",
-            )
-            .order_by(SessionMessageRow.sequence.desc())
-            .limit(1)
+        # A persistent Session hands over everything said in it so far; an
+        # ephemeral one hands over only this Run's own turns. That is the first
+        # behaviour `session_mode` has ever had — it has been stored since phase
+        # 2A and read by nothing, because a stand-in model that branches on a
+        # round counter never needed a conversation.
+        owning = await self._session.get(SessionRow, run.session_id)
+        scoped = select(SessionMessageRow).where(
+            SessionMessageRow.session_id == run.session_id,
+            SessionMessageRow.redacted.is_(False),
         )
+        if owning is None or owning.session_mode == SessionMode.EPHEMERAL.value:
+            scoped = scoped.where(SessionMessageRow.source_run_id == run.id)
+        found = await self._session.scalars(scoped.order_by(SessionMessageRow.sequence))
         return ExecutionContext(
             run_id=run.id,
             state_version=run.state_version,
             spec=AgentSpec.model_validate(version.spec),
-            input_text=_message_text(message),
+            messages=tuple(_to_message(row) for row in found),
             cancel_requested=run.cancel_requested_at is not None,
             pause_requested=run.pause_requested_at is not None,
             budget=_budget_summary(budget),
@@ -587,6 +592,27 @@ class SqlRunStore:
         run.checkpoint_replay_safe = command.checkpoint_replay_safe
         run.checkpoint_effect_status = command.checkpoint_effect_status.value
         run.updated_at = now
+        # In this transaction and not a second one. A round whose text was
+        # produced but not recorded would leave the transcript short, and the
+        # next round would then build a different conversation than the one that
+        # actually happened.
+        if command.assistant_text is not None:
+            self._session.add(
+                SessionMessageRow(
+                    id=uuid4(),
+                    session_id=session.id,
+                    workspace_id=command.workspace_id,
+                    sequence=session.next_message_sequence,
+                    role="assistant",
+                    content=CanonicalMessage(
+                        role="assistant", text=command.assistant_text
+                    ).document(),
+                    source_run_id=run.id,
+                    redacted=False,
+                    created_at=now,
+                )
+            )
+            session.next_message_sequence += 1
         await self._consume_budget(
             run.budget_root_run_id,
             command.executed_ms,
@@ -1441,6 +1467,7 @@ class SqlRunStore:
             ),
             checkpoint_replay_safe=run.checkpoint_replay_safe,
             checkpoint_effect_status=CheckpointEffectStatus(run.checkpoint_effect_status),
+            checkpoint_usage_quality=_usage_quality(run.checkpoint),
             created_at=run.created_at,
             started_at=run.started_at,
             finished_at=run.finished_at,
@@ -1616,8 +1643,26 @@ def _apply_decision(run: RunRow, decision: StateDecision, now: datetime) -> None
         run.blocked_by_run_id = None
 
 
+def _usage_quality(checkpoint: dict[str, Any] | None) -> str | None:
+    """Read the last round's usage quality out of its checkpoint.
+
+    Out of the checkpoint rather than a column of its own: it describes one
+    round, the checkpoint is where a round is described, and a column would
+    have to be kept in step with it.
+    """
+    if not checkpoint:
+        return None
+    value: Any = checkpoint.get("usage_quality")
+    return str(value) if isinstance(value, str) else None
+
+
+def _to_message(row: SessionMessageRow) -> CanonicalMessage:
+    role = "assistant" if row.role == "assistant" else "user"
+    return CanonicalMessage(role=role, text=_message_text(row))
+
+
 def _message_text(row: SessionMessageRow | None) -> str:
-    """Flatten a canonical message back to the text a phase-2B round needs."""
+    """Flatten a stored message back to the text one round is given."""
     if row is None:
         return ""
     parts: Any = row.content.get("parts", [])

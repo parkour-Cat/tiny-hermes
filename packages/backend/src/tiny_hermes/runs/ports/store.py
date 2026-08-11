@@ -142,6 +142,10 @@ class RecordSliceCommand:
     executed_ms: int
     model_calls: int
     tokens: int
+    #: What the Agent said this round, appended to the Session in the same
+    #: transaction. ``None`` for a round that failed: the transcript holds what
+    #: the Agent said, never what it tried to say.
+    assistant_text: str | None
     request_id: str
     capabilities: RunCapabilities
 
@@ -158,7 +162,11 @@ class ExecutionContext:
     run_id: UUID
     state_version: int
     spec: AgentSpec
-    input_text: str
+    #: The conversation this round is given, oldest first. A persistent Session
+    #: hands over everything said in it so far; an ephemeral one hands over only
+    #: this Run's own input, which is the first behaviour `session_mode` has
+    #: ever had.
+    messages: tuple[CanonicalMessage, ...]
     cancel_requested: bool
     pause_requested: bool
     budget: BudgetSummary

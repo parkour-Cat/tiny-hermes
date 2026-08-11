@@ -3,7 +3,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 
@@ -166,9 +166,19 @@ class QueueStatus(StrEnum):
 
 @dataclass(frozen=True)
 class CanonicalMessage:
-    """The one input shape a phase-2A Run accepts."""
+    """One turn of a conversation, in the shape the platform stores and sends.
 
-    role: str
+    Text only. Technical design §9.2 describes tool-call and tool-result blocks
+    too, and neither is declared here: no phase-3A code path produces one, and a
+    block type without a producer is a promise nothing keeps. Phase 3C widens
+    ``text`` into a list of blocks, and every reader of this field will fail
+    typechecking at that point — which is the review the widening deserves.
+
+    The stored document already carries a ``parts`` list, so widening later
+    changes this class and not the rows written before it.
+    """
+
+    role: Literal["user", "assistant"]
     text: str
 
     def document(self) -> dict[str, Any]:
@@ -281,6 +291,11 @@ class RunSnapshot:
     available_actions: tuple[str, ...]
     checkpoint_replay_safe: bool
     checkpoint_effect_status: CheckpointEffectStatus
+    #: How far the last round's Token counts can be trusted. `None` before any
+    #: round has run. Reported rather than left to be inferred from a zero
+    #: count: "nothing was used" and "nobody counted" are different facts, and
+    #: only one of them means a Token limit was meaningfully enforced.
+    checkpoint_usage_quality: str | None
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
@@ -305,6 +320,7 @@ class RunSnapshot:
             "available_actions": list(self.available_actions),
             "checkpoint_replay_safe": self.checkpoint_replay_safe,
             "checkpoint_effect_status": self.checkpoint_effect_status.value,
+            "checkpoint_usage_quality": self.checkpoint_usage_quality,
             "created_at": self.created_at.isoformat(),
             "started_at": _optional_time(self.started_at),
             "finished_at": _optional_time(self.finished_at),
