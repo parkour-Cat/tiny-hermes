@@ -11,18 +11,34 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from tiny_hermes.api.app import create_app
+from tiny_hermes.sandbox.infrastructure import tables as sandbox_tables
 from tiny_hermes.shared.config import Settings
+from tiny_hermes.shared.database import Base
 
 from integration.support import EventsUrl, ReadStream
 
+# Imported for the side effect of registering its tables on `Base.metadata`,
+# which is what makes the derived TRUNCATE complete. `create_app` reaches every
+# other module; the sandbox tables have no route yet and would otherwise be
+# absent from the metadata and therefore never truncated.
+assert sandbox_tables.SandboxReservationRow.__tablename__
+
 STREAM_TIMEOUT = 20
 
-TRUNCATE = (
-    "TRUNCATE idempotency_records, worker_leases, run_events, run_budget_scopes, "
-    "session_messages, runs, sessions, agent_versions, agent_drafts, agents, "
-    "model_endpoints, audit_events, memberships, workspaces, auth_sessions, "
-    "auth_identities, users CASCADE"
-)
+def _truncate_every_table() -> str:
+    """Derived from the metadata rather than listed by hand.
+
+    This was a hand-written list, and the phase-3B sandbox tables were added
+    without it. The symptom was not "the new tables are dirty" — it was an
+    unrelated test failing on a row some earlier test had left behind, which is
+    a bad afternoon for whoever meets it next. Deriving it means a new table
+    cannot be forgotten. CASCADE handles the ordering.
+    """
+    names = ", ".join(sorted(table.name for table in Base.metadata.sorted_tables))
+    return f"TRUNCATE {names} CASCADE"
+
+
+TRUNCATE = _truncate_every_table()
 
 VALID_SPEC: dict[str, Any] = {
     "schema_version": 1,
