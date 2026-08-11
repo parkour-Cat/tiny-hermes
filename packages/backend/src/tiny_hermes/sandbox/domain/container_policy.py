@@ -189,11 +189,19 @@ def container_config(
 
 
 def _is_digest(value: str) -> bool:
-    """A tag is a name somebody can move. A digest is the bytes."""
+    """A tag is a name somebody can move. A digest is the bytes.
+
+    Two forms are real and both are accepted. A locally built image is referred
+    to by its bare id, `sha256:<hex>`, which is what M1's single-machine Compose
+    produces. A pulled one carries its repository, `name@sha256:<hex>`. What is
+    refused either way is a tag — `sandbox:latest` names whatever was pushed
+    last, which is exactly the property an approved image must not have.
+    """
+    _, _, digest = value.rpartition("@")
     return (
-        value.startswith(DIGEST_PREFIX)
-        and len(value) == DIGEST_LENGTH
-        and all(c in "0123456789abcdef" for c in value[len(DIGEST_PREFIX) :])
+        digest.startswith(DIGEST_PREFIX)
+        and len(digest) == DIGEST_LENGTH
+        and all(c in "0123456789abcdef" for c in digest[len(DIGEST_PREFIX) :])
     )
 
 

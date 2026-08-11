@@ -47,6 +47,25 @@ class Settings(BaseSettings):
     model_max_attempts: int = Field(default=3, ge=1, le=3)
     model_retry_base_ms: int = Field(default=250, ge=10, le=5_000)
 
+    #: The Sandbox Controller's socket, in the volume the Worker and Scheduler
+    #: share with it. They mount this and nothing else; the Docker socket is the
+    #: Controller's alone.
+    sandbox_controller_socket: str = "/run/tiny-hermes/controller.sock"
+    #: The approved runtime image, by digest. Empty by default, and an empty
+    #: allowlist approves nothing — a deployment that has not chosen an image
+    #: cannot run a tool, which is the correct way for this to fail.
+    sandbox_image_digest: str = ""
+    #: How long a frozen instance stays warm for its own Run. §11.4 allows
+    #: 0–30 minutes and lets a workspace lower it, never raise it.
+    sandbox_idle_ttl_seconds: int = Field(default=300, ge=0, le=1_800)
+    sandbox_start_attempts: int = Field(default=3, ge=1, le=5)
+    shell_timeout_seconds: int = Field(default=60, ge=1, le=900)
+    shell_output_bytes: int = Field(default=1_048_576, ge=1_024, le=10_485_760)
+
+    @property
+    def approved_image_digests(self) -> tuple[str, ...]:
+        return (self.sandbox_image_digest,) if self.sandbox_image_digest else ()
+
     @field_validator("outbound_allowed_cidrs")
     @classmethod
     def reject_unparseable_cidrs(cls, value: str) -> str:

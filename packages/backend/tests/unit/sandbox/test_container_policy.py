@@ -140,6 +140,23 @@ def test_a_tag_is_refused_even_when_it_is_the_approved_image() -> None:
         )
 
 
+def test_a_repository_qualified_digest_is_accepted() -> None:
+    """The form a pulled image has.
+
+    A locally built one is a bare `sha256:<hex>`, which is what M1's Compose
+    produces; a registry one carries its repository. Both are digests, and the
+    difference between them is not a security property.
+    """
+    pulled = f"registry.example.com/tiny-hermes/sandbox@{DIGEST}"
+    assert config(digest=pulled, approved_digests=(pulled,)).image == pulled
+
+
+def test_a_repository_with_a_tag_is_still_refused() -> None:
+    tagged = "registry.example.com/tiny-hermes/sandbox:v1"
+    with pytest.raises(UnapprovedImage):
+        config(digest=tagged, approved_digests=(tagged,))
+
+
 def test_an_empty_allowlist_approves_nothing() -> None:
     """The default when tools are not configured. It must fail closed."""
     with pytest.raises(UnapprovedImage):
