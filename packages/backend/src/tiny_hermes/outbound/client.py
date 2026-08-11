@@ -24,6 +24,7 @@ from typing import Any, Protocol, Self
 from urllib.parse import urljoin, urlsplit
 
 import httpx
+
 from tiny_hermes.outbound.domain.address_policy import (
     Address,
     AddressVerdict,
