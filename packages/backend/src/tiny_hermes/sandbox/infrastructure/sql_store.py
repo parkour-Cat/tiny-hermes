@@ -134,6 +134,20 @@ class SqlSandboxStore:
         )
         return [_reservation(row) for row in found.scalars()]
 
+    async def isolated(self, limit: int) -> list[SandboxReservation]:
+        """Reservations whose cleanup could not be confirmed.
+
+        Retried rather than forgotten: a container the platform is unsure about
+        is the one worth coming back to.
+        """
+        found = await self._session.execute(
+            select(SandboxReservationRow)
+            .where(SandboxReservationRow.status == ReservationStatus.ISOLATED.value)
+            .order_by(SandboxReservationRow.updated_at)
+            .limit(limit)
+        )
+        return [_reservation(row) for row in found.scalars()]
+
     async def read_instance(self, instance_id: UUID) -> SandboxInstance | None:
         row = await self._session.get(SandboxInstanceRow, instance_id)
         return None if row is None else _instance(row)

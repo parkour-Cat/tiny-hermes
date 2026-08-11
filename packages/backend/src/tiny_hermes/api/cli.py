@@ -21,6 +21,8 @@ from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 from tiny_hermes.runs.infrastructure.openai_model import RetryPolicy
 from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
+from tiny_hermes.sandbox.transport.adapter import SandboxClient
+from tiny_hermes.sandbox.transport.client import ControllerClient
 from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.database import build_session_factory
 from tiny_hermes.shared.logging import configure_logging
@@ -67,11 +69,16 @@ async def _worker() -> None:
             ),
         ),
         notifier=notifier,
+        # Absent when no image is approved: a deployment that has not chosen
+        # one cannot run a tool, and a Run that binds one fails rather than
+        # running the command anywhere else.
+        sandbox=_controller(settings),
         settings=WorkerSettings(
             worker_id=worker_id,
             lease_seconds=settings.worker_lease_seconds,
             max_slice_seconds=settings.worker_max_slice_seconds,
             idle_poll_seconds=settings.worker_idle_poll_seconds,
+            sandbox_idle_ttl_seconds=settings.sandbox_idle_ttl_seconds,
         ),
     )
     stop = _stop_on_termination()
@@ -81,6 +88,13 @@ async def _worker() -> None:
     finally:
         await notifier.close()
     logger.info("worker stopped", extra={"worker_id": worker_id})
+
+
+def _controller(settings: Settings) -> SandboxClient | None:
+    """The Controller over its socket, when this deployment has one."""
+    if not settings.sandbox_image_digest:
+        return None
+    return SandboxClient(ControllerClient(settings.sandbox_controller_socket))
 
 
 def scheduler_main() -> None:
@@ -94,6 +108,7 @@ async def _scheduler() -> None:
     runtime = SchedulerRuntime(
         session_factory=build_session_factory(settings),
         notifier=notifier,
+        sandbox=_controller(settings),
         settings=SchedulerSettings(
             max_recovery_attempts=settings.max_recovery_attempts,
             event_retention_hours=settings.event_retention_hours,
