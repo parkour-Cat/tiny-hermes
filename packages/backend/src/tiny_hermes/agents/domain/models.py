@@ -68,8 +68,36 @@ class AgentSpec(BaseModel):
     schema_version: Literal[1] = 1
     personality: str = Field(min_length=1, max_length=8192)
     model_policy: ModelPolicy
-    tools: tuple[()] = ()
+    #: Tools bound at publish, which is the whole of §10.2's first step: a Run
+    #: cannot gain a capability while it executes, because the set was fixed
+    #: when the version was made immutable.
+    #:
+    #: The widening from `tuple[()]` cost nothing. An unbound spec already
+    #: serialized to `[]` and still does, so every published version keeps its
+    #: content hash and `schema_version` stays 1 — pinned by a test rather than
+    #: assumed.
+    tools: tuple[str, ...] = ()
     limits: AgentLimits = AgentLimits()
+
+    @field_validator("tools")
+    @classmethod
+    def reject_unknown_tools(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Refused at publish rather than at the first call.
+
+        An AgentVersion naming a tool nobody implemented would be a Run that
+        fails on its first model round, discovered by whoever submitted it
+        instead of by the person who wrote it.
+        """
+        from tiny_hermes.tools.domain.registry import (  # noqa: PLC0415 - cycle
+            IMPLEMENTED_TOOLS,
+        )
+
+        if len(set(value)) != len(value):
+            raise ValueError("a tool may be bound once")
+        for name in value:
+            if name not in IMPLEMENTED_TOOLS:
+                raise ValueError(f"unknown tool: {name}")
+        return value
 
     @field_validator("personality")
     @classmethod
