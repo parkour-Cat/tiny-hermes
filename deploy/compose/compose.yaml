@@ -58,6 +58,15 @@ services:
       # Run short enough to watch; the restart drill raises it, because a Run
       # that finishes in a blink cannot have a restart land inside it.
       DETERMINISTIC_MODEL_DELAY_MS: ${DETERMINISTIC_MODEL_DELAY_MS:-50}
+      # Outbound safety. The default approves nothing, so only public addresses
+      # are reachable; an enterprise private endpoint needs its range named here.
+      OUTBOUND_ALLOWED_CIDRS: ${OUTBOUND_ALLOWED_CIDRS:-}
+      OUTBOUND_READ_TIMEOUT_SECONDS: ${OUTBOUND_READ_TIMEOUT_SECONDS:-60}
+      MODEL_MAX_ATTEMPTS: ${MODEL_MAX_ATTEMPTS:-3}
+      # Model endpoint credentials are passed through by name. Each registered
+      # endpoint's `credential_ref` must match a variable the deployment sets;
+      # nothing is stored in the database.
+      TINY_HERMES_MODEL_KEY_EXAMPLE: ${TINY_HERMES_MODEL_KEY_EXAMPLE:-}
     depends_on:
       postgres:
         condition: service_healthy

@@ -8,6 +8,9 @@ dependencies = [
     "asyncpg>=0.31.0",
     "email-validator>=2.3.0",
     "fastapi>=0.141.1",
+    # A runtime dependency since phase 3A: `tiny_hermes.outbound` is the one
+    # place allowed to build an HTTP client, and it is production code.
+    "httpx>=0.28.1",
     "pwdlib[argon2]>=0.3.0",
     "pydantic-settings>=2.15.0",
     "python-multipart>=0.0.32",
@@ -76,7 +79,6 @@ venv = ".venv"
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28.1",
     "httpx2>=2.10.0",
     "pyright>=1.1.411",
     "pytest>=9.1.1",

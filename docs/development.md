@@ -217,6 +217,9 @@ The Agent's published `model_policy.scenario` decides what its Runs do. All thre
 scenarios are answered by the deterministic provider, which makes no network
 call:
 
+These three are the deterministic provider's, and they remain selectable after
+phase 3A. An Agent may instead name a real endpoint; see *Model endpoints*.
+
 | Scenario | Behavior |
 | --- | --- |
 | `complete` | One model round, then `completed`. |
@@ -263,9 +266,9 @@ slice boundary, so a long Run is visibly claimed more than once. The Scheduler
 expires the lease of a Worker that stopped answering and hands the Run back; that
 recovery is what a killed Worker relies on, not any timeout inside the Worker.
 
-**What phase 2B still does not have.** There is no real model provider, no tools,
-no file handling, and no sandbox — the deterministic provider is the only one that
-exists, and a Run's `input` is never sent anywhere.
+**What phase 2B still did not have.** No real model provider, no tools, no file
+handling, and no sandbox. Phase 3A adds the first of those; see *Model endpoints*
+below. Everything in this section is provider-agnostic and unchanged by it.
 
 ## The console
 
@@ -305,6 +308,104 @@ cost accounting. None of those exist in the platform yet, so none of them appear
 as an empty pane: a panel reading "no data" claims nothing happened, which is a
 different statement from "not built yet". They arrive with the phases that
 produce the data.
+
+## Model endpoints
+
+Phase 3A adds a second model provider: a real OpenAI-compatible endpoint. The
+deterministic stand-in does not go away — an air-gapped installation still has to
+be able to prove the platform works, and every test above the provider boundary
+needs a Run whose outcome is known.
+
+**A model endpoint is approved by a platform administrator, not by a workspace.**
+`model_endpoints` is platform-scoped: a workspace administrator chooses among the
+endpoints that exist and cannot register one.
+
+**The platform stores no credential.** `credential_ref` names an environment
+variable the deployment provides; the value is read when a call is made and
+written nowhere — not to the database, not to a log, not to any response. This is
+a real limitation with a real cost: a model key is deployment configuration
+rather than workspace data, and rotating one is a restart. It is preferred to the
+alternative available in this slice, because a table holding plaintext, or
+ciphertext under a key with no rotation path, reads in a review as a control
+while not being one. Secret storage with a rewrappable KEK is phase four.
+
+Set the variable first, then register the endpoint. Registration refuses a
+`credential_ref` the process does not define, so a broken configuration is found
+by the administrator rather than inside somebody's Run:
+
+```powershell
+$env:TINY_HERMES_MODEL_KEY_ACME = "your endpoint key"
+$endpoint = Invoke-RestMethod -Uri "$api/model-endpoints" -Method Post -WebSession $browser `
+  -ContentType "application/json" -Headers @{ "X-CSRF-Token" = $csrf } `
+  -Body (@{
+    name = "acme-gpt"; kind = "openai_compatible"
+    base_url = "https://models.example.com/v1"; model = "acme-large"
+    context_window = 128000; max_output_tokens = 4096
+    usage_quality = "provider"; credential_ref = "TINY_HERMES_MODEL_KEY_ACME"
+  } | ConvertTo-Json)
+
+Invoke-RestMethod -Uri "$api/model-endpoints/$($endpoint.id)/check" -Method Post `
+  -WebSession $browser -Headers @{ "X-CSRF-Token" = $csrf }
+```
+
+The check makes one real request through the same guarded client a Run uses, and
+answers with a verdict and a duration. It never reports the endpoint's status or
+body: a `base_url` mistyped into an internal service would otherwise make that
+route a way to read it.
+
+`usage_quality` is the administrator's declaration of whether the endpoint
+reports Token counts. `provider` means it does. `unavailable` means it does not,
+and the platform then records `checkpoint_usage_quality=unavailable` on the Run
+and adds nothing to `consumed_tokens` — because "nothing was used" and "nobody
+counted" are different facts. Time limits and model-call counts are enforced
+unchanged either way. `estimated` is rejected: technical design §9.4 admits an
+estimate only from a tokenizer verified against the model, and none exists here.
+
+Then select the endpoint in the draft editor's 模型提供方 field, or over the API:
+
+```json
+{ "provider": "openai_compatible", "endpoint_id": "the endpoint UUID" }
+```
+
+Publishing refuses an endpoint that does not exist or has been disabled, and an
+`max_output_tokens` above the endpoint's own — refused rather than clamped,
+because an Agent that quietly produces less than it was configured for behaves
+unlike the one its author published. A draft may name anything; the check is at
+publish, which is the last moment a mistake is still cheap.
+
+### Outbound safety
+
+Every model call and every endpoint check goes through `SafeOutboundClient`, and
+nothing else in the process may open a connection — `ruff` fails the build on a
+raw `httpx` client or socket outside `tiny_hermes/outbound/`.
+
+It refuses loopback, link-local (which covers the AWS and GCP metadata address),
+carrier-grade NAT (which covers Alibaba Cloud's), unique-local, private, and
+reserved addresses. **Every** address a hostname resolves to is checked, not the
+first, and the connection is then made to that literal address with the hostname
+kept in the `Host` header and the TLS SNI — so a record that changes between the
+check and the socket cannot be used. Every redirect hop starts over from
+resolution, and a hop that crosses origin drops the `Authorization` header.
+
+`OUTBOUND_ALLOWED_CIDRS` is how an enterprise private endpoint becomes reachable:
+
+```powershell
+$env:OUTBOUND_ALLOWED_CIDRS = "10.20.0.0/16"
+```
+
+Only private and carrier-grade NAT ranges can be opened this way. Loopback and
+link-local stay refused however wide the approved range is, so approving
+`0.0.0.0/0` to reach one internal endpoint does not open this host to itself. A
+plaintext `http` endpoint is allowed only inside an approved range, because that
+is the one place plaintext is an operator's deliberate choice about a network
+they own.
+
+**What phase 3A does not have.** No streaming — `stream` is not sent and nothing
+consumes partial text yet; it arrives with Chat Completions in phase four. No
+tools, no sandbox, no file handling. No Token limit: `AgentLimits` has no such
+field, so §9.4's rule about strict Token ceilings has nothing to guard yet, and
+adding the field means teaching the platform to read more than one
+`schema_version`.
 
 ## Restart drill
 
@@ -398,3 +499,7 @@ This permanently deletes the local PostgreSQL and MinIO data in those two volume
 - Agent personality text is never echoed in an error response, and a resource in another workspace always answers with a generic `404`.
 - A wake-up message carries a workspace ID and a Run ID and nothing else. Redis never sees a Run's input, an Agent's personality, or any other content.
 - The event stream selects its workspace through a query parameter because `EventSource` cannot send a header. Authorization is still the session cookie, and a Run in another workspace answers `404` whatever the parameter says.
+- Model endpoint credentials are deployment environment variables, never database rows. The platform stores the variable's name and reads its value at call time; no route returns either the value or the name. Rotating a key is a restart until phase four adds Secret storage.
+- Everything that leaves the process goes through `tiny_hermes.outbound`, and `ruff` fails the build on a raw HTTP client or socket built anywhere else. The check is not advisory.
+- A refused outbound address is reported to a workspace member as a code only. The resolved address goes to the audit trail, because a refusal that names an internal IP is a way to map the network the platform runs on.
+- The endpoint connectivity check reports a verdict and a duration, never the endpoint's status or body. A `base_url` mistyped into an internal service would otherwise turn that route into a way to read it.
