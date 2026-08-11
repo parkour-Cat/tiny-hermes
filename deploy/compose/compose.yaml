@@ -54,6 +54,10 @@ services:
       S3_BUCKET: tiny-hermes
       SESSION_COOKIE_SECRET: ${SESSION_COOKIE_SECRET:-local-cookie-secret-with-32-characters}
       BOOTSTRAP_TOKEN: ${BOOTSTRAP_TOKEN:-local-bootstrap-token-with-32-characters}
+      # How long the deterministic model pretends to think. The default keeps a
+      # Run short enough to watch; the restart drill raises it, because a Run
+      # that finishes in a blink cannot have a restart land inside it.
+      DETERMINISTIC_MODEL_DELAY_MS: ${DETERMINISTIC_MODEL_DELAY_MS:-50}
     depends_on:
       postgres:
         condition: service_healthy

@@ -115,10 +115,29 @@ jobs:
           node-version: "24.6.0"
       - run: corepack enable
       - run: corepack prepare pnpm@10.15.0 --activate
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv sync --frozen
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
       - run: docker compose -f deploy/compose/compose.yaml up -d --build --wait
       - run: pnpm exec playwright test --config tests/e2e/playwright.config.ts
+      # The drill restarts processes in the middle of a Run, so a Run has to be
+      # long enough to be interrupted. The stack is recreated with a slower
+      # deterministic model rather than run that way throughout, which would
+      # only make the console walk above wait for nothing. Recreating keeps the
+      # volumes, so the account the Playwright setup bootstrapped is still there.
+      - name: Restart drill
+        env:
+          DETERMINISTIC_MODEL_DELAY_MS: "3000"
+        run: |
+          docker compose -f deploy/compose/compose.yaml up -d --wait
+          uv run python scripts/restart_drill.py
       - if: failure()
         run: docker compose -f deploy/compose/compose.yaml logs --no-color
       - if: failure()

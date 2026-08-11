@@ -116,7 +116,14 @@ uv run --no-sync pytest packages/backend/tests/integration -q -rs
 Remove-Item Env:REDIS_URL
 ```
 
-Run the Web checks and the browser acceptance test. The browser test creates the first administrator, so it requires empty local development volumes. If this platform has already been bootstrapped, follow the reset procedure below, then rerun the First start Compose command but do not bootstrap manually.
+Run the Web checks and the browser acceptance tests. A setup project bootstraps
+`admin@example.com`, signs in once, and shares the browser state with the rest; a
+rerun against an already-opened platform is fine, but a platform bootstrapped
+with some other account and password is not, because the setup cannot sign in and
+cannot recover the password. Either follow the reset procedure below and rerun
+the First start Compose command without bootstrapping by hand, or bring up a
+second isolated stack with `-p tiny-hermes-e2e`, which leaves the first one's
+volumes untouched.
 
 ```powershell
 corepack pnpm web:lint
@@ -258,8 +265,85 @@ recovery is what a killed Worker relies on, not any timeout inside the Worker.
 
 **What phase 2B still does not have.** There is no real model provider, no tools,
 no file handling, and no sandbox — the deterministic provider is the only one that
-exists, and a Run's `input` is never sent anywhere. The minimum Agent Builder and
-Run Detail pages arrive in phase 2C, so every command above is still an API call.
+exists, and a Run's `input` is never sent anywhere.
+
+## The console
+
+Phase 2C puts the commands above behind pages, so publishing an Agent and
+watching a Run no longer needs a shell. Sign in at
+`http://127.0.0.1:3000/login`; everything below is under `/workspaces`.
+
+| Route | Page |
+| --- | --- |
+| `/workspaces` | Every Workspace this account belongs to, and the form that creates one. |
+| `/workspaces/:workspaceId/agents` | The Workspace's Agents, and the form that creates one. |
+| `/workspaces/:workspaceId/agents/:agentId` | The one Draft, its revision, and publishing it as a version. |
+| `/workspaces/:workspaceId/runs` | The Workspace's Runs, and the form that submits one. |
+| `/workspaces/:workspaceId/runs/:runId` | One Run: its summary, its budget, its events as they arrive, and the actions the server says are available. |
+
+The Workspace is a route parameter rather than a stored selection, so a reload or
+a shared link reopens the same scope, and the console sends the `X-Workspace-Id`
+the address implies. It never checks membership itself and never quietly
+substitutes a Workspace it does know about: an address into a Workspace this
+account has no standing in renders the server's `404`, which is the same answer a
+Run that does not exist gets.
+
+The Run list is not paginated. A `limit`/`cursor` contract that the console
+pretends to honour while the server returns everything is a lie that gets found
+in production, so the list shows what the server sends and nothing suggests
+otherwise. Pagination arrives on the API first.
+
+The Run detail page reads `GET /runs/{id}/events` with `fetch` rather than
+`EventSource`, because `fetch` can send `X-Workspace-Id` and `Last-Event-ID` as
+headers and can be aborted when the page unmounts. The `workspace_id` query
+parameter stays supported for `EventSource` clients and has its own acceptance
+test; nothing in the console relies on it.
+
+**What phase 2C does not show.** Design §20.3 describes a Run Detail with a
+parent/child task tree, context and compaction events, artifacts, and token and
+cost accounting. None of those exist in the platform yet, so none of them appear
+as an empty pane: a panel reading "no data" claims nothing happened, which is a
+different statement from "not built yet". They arrive with the phases that
+produce the data.
+
+## Restart drill
+
+The Worker, the Scheduler, and Redis are separate processes, and the claim that a
+committed Run survives losing any one of them is only worth what it has been
+tested against. `scripts/restart_drill.py` restarts them under load against a
+running stack and checks what came out the other side.
+
+The drill needs a Run long enough for a restart to land inside it, so bring the
+stack up with a slower deterministic model and pass the same value to the script;
+below one second it refuses to run rather than prove nothing:
+
+```powershell
+$env:DETERMINISTIC_MODEL_DELAY_MS = "3000"
+docker compose --env-file .env -f deploy/compose/compose.yaml up -d --wait
+uv run --no-sync python scripts/restart_drill.py
+Remove-Item Env:DETERMINISTIC_MODEL_DELAY_MS
+```
+
+It signs in as the local administrator, publishes its own Agent, and runs three
+scenarios: the Worker restarted mid-slice, Redis stopped and started again, and
+the Worker killed while holding a lease with the Scheduler restarted underneath
+it. Each one has to end `completed` with an event history numbered from one with
+nothing skipped and nothing repeated. It prints identifiers, statuses, sequence
+counts, and timings — never a cookie, a token, a password, or a Run's input.
+
+The drill restarts containers. It never takes the stack down and never removes a
+volume, and it refuses `down`, `rm`, `-v`, and `--volumes` outright rather than
+trusting itself to stay careful. Recreating the stack for the slower model keeps
+the volumes, so the account you bootstrapped is still there afterwards. Set
+`DETERMINISTIC_MODEL_DELAY_MS` back, or drop it, when you are done.
+
+Two of its timings are worth reading rather than only passing. The Worker restart
+takes about thirty seconds to resolve, because a Worker asked to stop finishes
+its slice first. The first Run submitted after Redis returns is usually picked up
+a whole poll interval late, while the subscription is being re-established; a
+wake-up is published once and never repeated, so missing one costs exactly that
+and nothing more. The drill submits several and asks only that the channel
+delivers again.
 
 ## Database migrations
 

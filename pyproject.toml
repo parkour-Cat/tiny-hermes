@@ -49,7 +49,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "S"]
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
-include = ["packages/backend/src", "packages/backend/tests"]
+include = ["packages/backend/src", "packages/backend/tests", "scripts"]
 extraPaths = ["packages/backend/src", "packages/backend/tests"]
 venvPath = "."
 venv = ".venv"
