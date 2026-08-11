@@ -25,6 +25,7 @@ dependencies = [
 tiny-hermes-api = "tiny_hermes.api.cli:main"
 tiny-hermes-worker = "tiny_hermes.api.cli:worker_main"
 tiny-hermes-scheduler = "tiny_hermes.api.cli:scheduler_main"
+tiny-hermes-controller = "tiny_hermes.sandbox.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -107,5 +108,7 @@ dev = [
     "pyright>=1.1.411",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "pyyaml>=6.0.3",
     "ruff>=0.16.2",
+    "types-pyyaml>=6.0.12.20260724",
 ]

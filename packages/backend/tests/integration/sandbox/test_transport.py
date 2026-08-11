@@ -118,15 +118,21 @@ async def test_the_server_survives_a_malformed_frame(
 async def test_a_frame_larger_than_the_cap_is_refused(
     wired: tuple[SpyController, ControllerClient],
 ) -> None:
-    """An unbounded read on a local socket is still an unbounded read."""
+    """An unbounded read on a local socket is still an unbounded read.
+
+    The refusal is an answer, not a dropped connection. CI caught the first
+    version of this test asserting a broken pipe: the server does the better
+    thing and says `frame_too_large`, which a caller can log and act on rather
+    than having to guess why its socket died.
+    """
     spy, client = wired
     reader, writer = await asyncio.open_unix_connection(client.path)
     writer.write(b"x" * (ControllerServer.MAX_FRAME_BYTES + 1))
-    with pytest.raises((ConnectionError, BrokenPipeError)):
-        await writer.drain()
-        await asyncio.wait_for(reader.readline(), timeout=5)
+    await writer.drain()
+    answer = json.loads(await asyncio.wait_for(reader.readline(), timeout=5))
     writer.close()
 
+    assert answer["error"] == ProtocolError.TOO_LARGE.value
     assert spy.calls == []
 
 

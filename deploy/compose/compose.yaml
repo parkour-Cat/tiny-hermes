@@ -67,6 +67,11 @@ services:
       # endpoint's `credential_ref` must match a variable the deployment sets;
       # nothing is stored in the database.
       TINY_HERMES_MODEL_KEY_EXAMPLE: ${TINY_HERMES_MODEL_KEY_EXAMPLE:-}
+      # The sandbox. The image allowlist is empty by default, which is how a
+      # deployment that has not chosen an image fails: no tool can run at all.
+      SANDBOX_IMAGE_DIGEST: ${SANDBOX_IMAGE_DIGEST:-}
+      SANDBOX_CONTROLLER_SOCKET: /run/tiny-hermes/controller.sock
+      SANDBOX_IDLE_TTL_SECONDS: ${SANDBOX_IDLE_TTL_SECONDS:-300}
     depends_on:
       postgres:
         condition: service_healthy
@@ -99,12 +104,55 @@ services:
   # that knows how to finish its slice, and the liveness probe has a real
   # process to look at instead of a wrapper. Neither publishes a port, because
   # neither accepts a request; work arrives through PostgreSQL and Redis.
+  # The only service that mounts the Docker socket. Product design §16:
+  # Docker 控制权只授予可信的 sandbox-controller。API、Web、Agent 沙箱和模型
+  # 均不得直接访问 Docker socket. The Worker and the Scheduler get the
+  # controller's own socket and nothing else, so a Worker that wanted to create
+  # a privileged container has nothing to ask. That is a property of this file
+  # rather than of anybody's discipline, which is the point.
+  controller:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    command: ["/app/.venv/bin/tiny-hermes-controller"]
+    environment: *app-env
+    # Root inside its own container, because the socket is root:root 0660 and
+    # no group id is portable between Docker Desktop and a Linux host.
+    #
+    # This is worth being straight about rather than dressing up: **mounting
+    # the Docker socket is already root-equivalent on the host.** A process
+    # holding it can start a privileged container with the host filesystem
+    # mounted, whatever uid it runs as itself. So a non-root uid here would be
+    # decoration, and pretending otherwise would be worse than not having it.
+    #
+    # What actually contains this is the rest of the arrangement: exactly one
+    # service has the socket, it accepts six actions, it generates every
+    # container parameter itself, and it is small enough to read. The
+    # controller is the most privileged component in the platform and that is
+    # why it does so little.
+    user: "0:0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - controller-socket:/run/tiny-hermes
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    healthcheck: &process-alive
+      test: ["CMD-SHELL", "grep -q tiny-hermes /proc/1/cmdline"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   worker:
     build:
       context: ../..
       dockerfile: apps/api/Dockerfile
     command: ["/app/.venv/bin/tiny-hermes-worker"]
     environment: *app-env
+    volumes:
+      - controller-socket:/run/tiny-hermes
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -112,14 +160,18 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # Ordering, not hostage-taking. A deployment with no tools configured
+      # never calls the controller, and a Worker held back by an unhealthy one
+      # would leave every Run queued — which is what happened the first time
+      # this said `service_healthy`. A tool-bound Run that meets an absent
+      # controller fails as `sandbox_start_failed`, per §11.5, which is one Run
+      # rather than all of them.
+      controller:
+        condition: service_started
     # Liveness, not progress: this reports that the process is still there. A
     # Worker wedged inside a slice still answers healthy, and the Scheduler's
     # lease expiry is what actually recovers its Run.
-    healthcheck: &process-alive
-      test: ["CMD-SHELL", "grep -q tiny-hermes /proc/1/cmdline"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
+    healthcheck: *process-alive
 
   scheduler:
     build:
@@ -127,6 +179,8 @@ services:
       dockerfile: apps/api/Dockerfile
     command: ["/app/.venv/bin/tiny-hermes-scheduler"]
     environment: *app-env
+    volumes:
+      - controller-socket:/run/tiny-hermes
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -153,3 +207,6 @@ services:
 volumes:
   postgres-data:
   minio-data:
+  # Shared by the controller, the worker and the scheduler. Not by the API or
+  # the web service, which have no business talking to the controller at all.
+  controller-socket:
