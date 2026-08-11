@@ -37,6 +37,12 @@ class RefusalReason(StrEnum):
     different responses.
     """
 
+    # Raised by the client rather than by `verdict`, but part of the same
+    # vocabulary: an operator reading "this call was refused" should find one
+    # list of reasons, not two.
+    SCHEME_NOT_ALLOWED = "scheme_not_allowed"
+    PLAINTEXT_NOT_APPROVED = "plaintext_not_approved"
+
     UNRESOLVED = "unresolved"
     LOOPBACK = "loopback"
     LINK_LOCAL = "link_local"
