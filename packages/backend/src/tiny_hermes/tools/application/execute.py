@@ -11,19 +11,31 @@ is interrupted can be recovered, while a Run told "the sandbox is broken" would
 have the model politely try again forever.
 """
 
+from typing import Protocol
 from uuid import UUID
 
 from tiny_hermes.runs.domain.models import ToolCallBlock, ToolResultBlock
-from tiny_hermes.sandbox.application.controller import (
-    SandboxController,
-    SandboxRefused,
-)
+from tiny_hermes.sandbox.application.controller import SandboxRefused
+from tiny_hermes.sandbox.domain.command import CommandResult, SandboxCommand
 from tiny_hermes.tools.domain.registry import ToolRefused, authorize
+
+
+class CommandRunner(Protocol):
+    """The one thing this needs from the Controller.
+
+    Narrow on purpose: an executor that could freeze or destroy a sandbox would
+    be a second place deciding a container's lifetime, and the Worker is the
+    one that knows when a slice ends.
+    """
+
+    async def execute(
+        self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID, command: SandboxCommand
+    ) -> CommandResult: ...
 
 
 async def run_tool_call(
     *,
-    controller: SandboxController,
+    controller: CommandRunner,
     run_id: UUID,
     lease_id: UUID,
     sandbox_id: UUID,

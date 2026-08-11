@@ -26,6 +26,8 @@ from tiny_hermes.model_catalog.infrastructure import credentials
 from tiny_hermes.outbound.client import SafeOutboundClient
 from tiny_hermes.outbound.errors import OutboundError, OutboundRefused
 from tiny_hermes.runs.domain.models import (
+    CACHE_RESET_HINT,
+    CacheStateHint,
     CanonicalMessage,
     TextBlock,
     ToolCallBlock,
@@ -204,10 +206,14 @@ def build_payload(
     minimum here means a later change to that check cannot turn into a request
     the endpoint was never approved for.
     """
-    messages: list[dict[str, str]] = [
+    messages: list[dict[str, Any]] = [
         {"role": "system", "content": SAFETY_PREAMBLE},
         {"role": "system", "content": request.personality},
     ]
+    if request.cache_hint is CacheStateHint.RESET:
+        # With the platform's rules rather than in the conversation, so a later
+        # turn cannot talk over it. §11.3 calls it a protected runtime hint.
+        messages.append({"role": "system", "content": CACHE_RESET_HINT})
     for entry in request.messages:
         messages.extend(_as_messages(entry))
     payload: dict[str, Any] = {
@@ -215,10 +221,11 @@ def build_payload(
         "messages": messages,
         "max_tokens": spec.max_output_tokens,
     }
-    if tools:
+    advertised = tools if tools is not None else list(request.tools)
+    if advertised:
         # §10.2's first step: a model told about no tool cannot correctly ask
         # for one, so an Agent that binds none advertises none.
-        payload["tools"] = tools
+        payload["tools"] = advertised
     policy = request.policy
     if isinstance(policy, EndpointModelPolicy):
         if policy.max_output_tokens is not None:

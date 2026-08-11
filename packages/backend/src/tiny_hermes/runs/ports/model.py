@@ -7,10 +7,14 @@ in advance what round two will say and cannot be enough for anything else.
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 
 from tiny_hermes.agents.domain.models import ModelPolicy
-from tiny_hermes.runs.domain.models import CanonicalMessage, ToolCallBlock
+from tiny_hermes.runs.domain.models import (
+    CacheStateHint,
+    CanonicalMessage,
+    ToolCallBlock,
+)
 
 
 class StopReason(StrEnum):
@@ -46,6 +50,13 @@ class ModelRequest:
     #: The conversation so far, oldest first, ending with what the caller asked.
     messages: tuple[CanonicalMessage, ...]
     round_index: int
+    #: The tools this AgentVersion bound, as provider schemas. §10.2's first
+    #: step: an Agent that bound none advertises none.
+    tools: tuple[dict[str, Any], ...] = ()
+    #: Set when this slice began on a fresh writable layer. The provider places
+    #: it with the platform's own rules rather than in the conversation, so a
+    #: later turn cannot talk over it.
+    cache_hint: CacheStateHint | None = None
 
 
 @dataclass(frozen=True)

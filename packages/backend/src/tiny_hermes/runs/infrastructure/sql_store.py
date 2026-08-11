@@ -48,7 +48,6 @@ from tiny_hermes.runs.domain.models import (
     SessionMode,
     SessionSnapshot,
     StateDecision,
-    TextBlock,
     event_type_for,
     message_from_document,
 )
@@ -598,18 +597,15 @@ class SqlRunStore:
         # produced but not recorded would leave the transcript short, and the
         # next round would then build a different conversation than the one that
         # actually happened.
-        if command.assistant_text is not None:
+        for message in command.appended:
             self._session.add(
                 SessionMessageRow(
                     id=uuid4(),
                     session_id=session.id,
                     workspace_id=command.workspace_id,
                     sequence=session.next_message_sequence,
-                    role="assistant",
-                    content=CanonicalMessage(
-                        role="assistant",
-                        blocks=(TextBlock(text=command.assistant_text),),
-                    ).document(),
+                    role=message.role,
+                    content=message.document(),
                     source_run_id=run.id,
                     redacted=False,
                     created_at=now,

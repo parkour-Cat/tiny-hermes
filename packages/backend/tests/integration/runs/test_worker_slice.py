@@ -7,9 +7,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
 from tiny_hermes.runs.domain.models import (
+    CanonicalMessage,
     CheckpointEffectStatus,
     RunCapabilities,
     RunSignal,
+    TextBlock,
 )
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.store import (
@@ -54,7 +56,7 @@ def _slice(
     model_calls: int = 1,
     tokens: int = 32,
     limit_reached: bool = False,
-    assistant_text: str | None = "the answer",
+    said: str | None = "the answer",
 ) -> RecordSliceCommand:
     return RecordSliceCommand(
         workspace_id=UUID(workspace_id),
@@ -71,7 +73,11 @@ def _slice(
         executed_ms=executed_ms,
         model_calls=model_calls,
         tokens=tokens,
-        assistant_text=assistant_text,
+        appended=(
+            ()
+            if said is None
+            else (CanonicalMessage("assistant", (TextBlock(text=said),)),)
+        ),
         request_id="slice-1",
         capabilities=FULL,
     )

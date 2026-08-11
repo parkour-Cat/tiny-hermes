@@ -142,12 +142,16 @@ class RecordSliceCommand:
     executed_ms: int
     model_calls: int
     tokens: int
-    #: What the Agent said this round, appended to the Session in the same
-    #: transaction. ``None`` for a round that failed: the transcript holds what
-    #: the Agent said, never what it tried to say.
-    assistant_text: str | None
     request_id: str
     capabilities: RunCapabilities
+    #: Whole messages appended to the Session in this transaction: the
+    #: assistant's turn, and a tool turn when the round called one. Empty for a
+    #: round that failed — the transcript holds what the Agent said, never what
+    #: it tried to say.
+    #:
+    #: Phase 3A carried a single string here, which could not express a round
+    #: that acted rather than answered.
+    appended: tuple[CanonicalMessage, ...] = ()
 
 
 @dataclass(frozen=True)

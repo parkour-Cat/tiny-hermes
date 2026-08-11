@@ -99,6 +99,12 @@ class RunEventType(StrEnum):
     # refuses to invent names, so this member must be written explicitly.
     RUN_LIMIT_REACHED = "run_limit_reached"
 
+    # Also not derived from a signal: it records that a slice began on a fresh
+    # writable layer, which is a fact about the sandbox rather than a state
+    # transition. Technical design §11.3 requires the Agent be told, and this
+    # is the half a person reads.
+    SANDBOX_CACHE_RESET = "sandbox_cache_reset"
+
     RUN_LEASE_ACQUIRED = "run_lease_acquired"
     RUN_SLICE_ENDED = "run_slice_ended"
     RUN_PAUSE_REQUESTED = "run_pause_requested"
@@ -162,6 +168,29 @@ class QueueStatus(StrEnum):
     PENDING = "pending"
     SESSION_BLOCKED = "session_blocked"
     TERMINAL = "terminal"
+
+
+class CacheStateHint(StrEnum):
+    """What the Agent is told about the writable layer it just got.
+
+    Only ``RESET`` is ever sent. There is nothing to say about a cache that
+    survived, and saying it anyway would spend context on a non-event every
+    round.
+    """
+
+    RESET = "reset"
+
+
+#: Prepended to the first model call of a slice that began on a fresh layer,
+#: ahead of the conversation and behind the platform's own rules — so a later
+#: turn cannot displace it. §11.3 requires the Agent be told; this is the half
+#: the model reads.
+CACHE_RESET_HINT = (
+    "This execution slice started with a fresh sandbox. Any dependencies, "
+    "virtual environments, background processes or build caches from earlier "
+    "in this Run are gone and must be rebuilt before they are used. Files under "
+    "/workspace/data are unaffected."
+)
 
 
 @dataclass(frozen=True)
