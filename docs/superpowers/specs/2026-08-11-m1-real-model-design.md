@@ -605,3 +605,54 @@ calls and results extend; and the outbound module, which the Sandbox Controller
 must **not** use — its Docker socket is a local seam with its own rules, and
 reusing an outbound HTTP client for it would put a control designed for hostile
 addresses in charge of a trusted one.
+
+### 15.1 `/v1/responses`: why not in 3A, and what would change it
+
+3A speaks `/v1/chat/completions`, and 3C should too. This section exists so the
+question is not re-argued from scratch, and because part of the reasoning was
+settled by measurement rather than by opinion.
+
+**What was measured.** The endpoint used in the phase-3A manual check (§6 of the
+verification record) was probed on both paths. Both answered `200` — and the
+`chat.completions` response carried an `id` beginning `resp_`, which says the
+gateway is Responses-native and emulates Chat Completions on top of it. So for
+that endpoint, the path this platform uses is the *translated* one. The
+assumption that Responses is not yet widely available did not survive contact:
+vLLM and Ollama serve it too.
+
+**Why 3A still does not use it.** Not a technical judgement — a process one. That
+slice is committed, verified, and proven against a real endpoint. Changing it
+means repeating the whole verification for zero present capability, which is a
+certain cost against an uncertain gain.
+
+**The argument that does survive.** Responses' central offering is server-side
+state: `store` with `previous_response_id`. This platform took ownership of the
+conversation in phase 3A, in the same transaction that records a slice, and its
+entire recovery model rests on that ownership. Consider a Worker killed
+mid-round: the lease expires, the Scheduler requeues the Run, and a new Worker
+picks it up — which `previous_response_id` does it continue from, and did that
+round complete at the provider or not? The platform cannot know, and the failure
+lands exactly where recovery is supposed to work.
+
+**So any adoption is stateless.** `store=false`, with the full transcript sent
+from `session_messages` every round, as today. That constraint is not negotiable
+without redesigning recovery.
+
+**Which reduces the real question to one thing.** Stateless Responses is Chat
+Completions plus reasoning-item passing plus a different serialization. The net
+gain is reasoning items — which matter, because dropping them between rounds
+costs quality and prompt-cache hits on reasoning models, and matters most in the
+multi-round tool loops phase 3C introduces. That is a measurable claim, not a
+preference.
+
+**When to do it.** Phase 3B or 3C, as a second `kind` alongside
+`openai_compatible` — a schema widening, a second `normalize`, and a router
+branch. `ModelProvider` does not move; this is the same shape of change as
+adding `EndpointModelPolicy` was. Chat Completions stays, because it remains the
+protocol every provider implements and this platform registers other people's
+endpoints rather than one vendor's.
+
+**How to decide it.** Not by reading a changelog. Run one Agent and one
+conversation through both `kind`s against a reasoning model and compare answer
+quality and Token consumption. If the numbers do not move, the older path is the
+one with wider coverage and it stays.
