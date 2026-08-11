@@ -1,4 +1,5 @@
 from functools import lru_cache
+from ipaddress import IPv4Network, IPv6Network, ip_network
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -28,6 +29,34 @@ class Settings(BaseSettings):
     event_retention_hours: int = Field(default=168, ge=1, le=8_760)
     sse_heartbeat_seconds: int = Field(default=15, ge=5, le=60)
     deterministic_model_delay_ms: int = Field(default=50, ge=0, le=5_000)
+
+    # Outbound calls. The read timeout is what actually bounds one model round:
+    # the slice budget is checked between rounds and never inside one.
+    outbound_connect_timeout_seconds: float = Field(default=5.0, ge=0.5, le=60.0)
+    outbound_read_timeout_seconds: float = Field(default=60.0, ge=1.0, le=300.0)
+    outbound_max_redirects: int = Field(default=5, ge=0, le=10)
+    outbound_max_response_bytes: int = Field(default=10_485_760, ge=1_024, le=104_857_600)
+    #: Comma-separated CIDRs a platform administrator has approved, which is how
+    #: an enterprise private model endpoint becomes reachable at all. Only
+    #: private and carrier-grade NAT ranges can be opened this way; loopback and
+    #: link-local stay refused however wide the range is.
+    outbound_allowed_cidrs: str = ""
+
+    @field_validator("outbound_allowed_cidrs")
+    @classmethod
+    def reject_unparseable_cidrs(cls, value: str) -> str:
+        for entry in (part.strip() for part in value.split(",")):
+            if entry:
+                ip_network(entry)
+        return value
+
+    @property
+    def approved_networks(self) -> tuple[IPv4Network | IPv6Network, ...]:
+        return tuple(
+            ip_network(part.strip())
+            for part in self.outbound_allowed_cidrs.split(",")
+            if part.strip()
+        )
 
     @field_validator("session_cookie_secret", "bootstrap_token")
     @classmethod

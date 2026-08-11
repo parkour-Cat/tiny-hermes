@@ -11,6 +11,9 @@ from tiny_hermes.agents.application.service import AgentCatalog
 from tiny_hermes.agents.infrastructure.sql_store import SqlAgentStore
 from tiny_hermes.identity.application.auth_service import AuthService
 from tiny_hermes.identity.infrastructure.sql_store import SqlAuthStore
+from tiny_hermes.model_catalog.application.service import ModelEndpointService
+from tiny_hermes.model_catalog.infrastructure.sql_store import SqlModelEndpointStore
+from tiny_hermes.outbound.client import SafeOutboundClient
 from tiny_hermes.runs.application.service import RunCoordination
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
@@ -89,6 +92,32 @@ class ApplicationResources:
         async with self.session_factory()() as session:
             try:
                 yield WorkspaceService(SqlWorkspaceStore(session))
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
+
+    def outbound_client(self) -> SafeOutboundClient:
+        """A fresh client per call, not a shared one.
+
+        Nothing here is hot enough to need pooling, and a client that outlives a
+        request is a client whose approved ranges were read at a different time
+        than they are being used.
+        """
+        settings = self.settings
+        return SafeOutboundClient(
+            approved=settings.approved_networks,
+            connect_timeout=settings.outbound_connect_timeout_seconds,
+            read_timeout=settings.outbound_read_timeout_seconds,
+            max_redirects=settings.outbound_max_redirects,
+            max_response_bytes=settings.outbound_max_response_bytes,
+        )
+
+    async def model_endpoints(self) -> AsyncGenerator[ModelEndpointService]:
+        async with self.session_factory()() as session:
+            try:
+                yield ModelEndpointService(SqlModelEndpointStore(session))
             except BaseException:
                 await session.rollback()
                 raise
