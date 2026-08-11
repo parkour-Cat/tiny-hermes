@@ -67,6 +67,11 @@ jobs:
           version: "0.11.26"
           enable-cache: true
       - run: uv sync --frozen
+      # The sandbox suite builds and runs real containers. Build once as an
+      # explicit CI boundary check so an unavailable daemon or broken runtime
+      # image is reported as such; the fixture's second build is cache-backed.
+      - name: Build the sandbox runtime image
+        run: docker build -t tiny-hermes-sandbox:test -f deploy/sandbox/Dockerfile deploy/sandbox
       - run: uv run alembic upgrade head
       - run: uv run pytest packages/backend/tests/integration -v
       - name: Repeat concurrency regressions
@@ -137,7 +142,22 @@ jobs:
       - run: uv sync --frozen
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
-      - run: docker compose -f deploy/compose/compose.yaml up -d --build --wait
+      - name: Build the sandbox runtime image
+        id: sandbox
+        run: |
+          docker build -t tiny-hermes-sandbox:ci -f deploy/sandbox/Dockerfile deploy/sandbox
+          echo "digest=$(docker image inspect tiny-hermes-sandbox:ci --format '{{.Id}}')" >> "$GITHUB_OUTPUT"
+      - env:
+          SANDBOX_IMAGE_DIGEST: ${{ steps.sandbox.outputs.digest }}
+        run: docker compose -f deploy/compose/compose.yaml up -d --build --wait
+      # This is socket sharing, not a privileged Docker daemon nested inside
+      # another container. Only the small Controller gets the runner's daemon
+      # socket; the request-facing API and the Worker must not even see it.
+      - name: Prove the Docker socket boundary in the running stack
+        run: |
+          docker compose -f deploy/compose/compose.yaml exec -T controller sh -c 'test -S /var/run/docker.sock'
+          docker compose -f deploy/compose/compose.yaml exec -T api sh -c 'test ! -e /var/run/docker.sock'
+          docker compose -f deploy/compose/compose.yaml exec -T worker sh -c 'test ! -e /var/run/docker.sock'
       - run: pnpm exec playwright test --config tests/e2e/playwright.config.ts
       # The drill restarts processes in the middle of a Run, so a Run has to be
       # long enough to be interrupted. The stack is recreated with a slower
@@ -147,9 +167,18 @@ jobs:
       - name: Restart drill
         env:
           DETERMINISTIC_MODEL_DELAY_MS: "3000"
+          SANDBOX_IMAGE_DIGEST: ${{ steps.sandbox.outputs.digest }}
         run: |
           docker compose -f deploy/compose/compose.yaml up -d --wait
-          uv run python scripts/restart_drill.py
+          uv run --no-sync python scripts/restart_drill.py
+      # A container this run created and did not clean up is a finding, not
+      # housekeeping: the fourth drill scenario exists to make it impossible.
+      - name: No sandbox container outlived the run
+        if: always()
+        run: |
+          left=$(docker ps -aq --filter "label=tiny-hermes.run" | wc -l)
+          echo "sandbox containers left behind: $left"
+          test "$left" -eq 0
       - if: failure()
         run: docker compose -f deploy/compose/compose.yaml logs --no-color
       - if: failure()

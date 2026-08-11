@@ -400,12 +400,76 @@ plaintext `http` endpoint is allowed only inside an approved range, because that
 is the one place plaintext is an operator's deliberate choice about a network
 they own.
 
-**What phase 3A does not have.** No streaming — `stream` is not sent and nothing
+**What phase 3A did not have.** No streaming — `stream` is not sent and nothing
 consumes partial text yet; it arrives with Chat Completions in phase four. No
-tools, no sandbox, no file handling. No Token limit: `AgentLimits` has no such
-field, so §9.4's rule about strict Token ceilings has nothing to guard yet, and
-adding the field means teaching the platform to read more than one
+tools, sandbox, or file handling existed in that slice; phase 3B adds the first
+tool and the sandbox below. There is still no Token limit: `AgentLimits` has no
+such field, so §9.4's rule about strict Token ceilings has nothing to guard yet,
+and adding the field means teaching the platform to read more than one
 `schema_version`.
+
+## Sandbox and `shell.exec`
+
+Phase 3B adds one platform-owned Docker sandbox and one tool, `shell.exec`. The
+container is a short-lived place for a Run to execute a command. It is **not** a
+general Docker service, a long-lived development machine, or persistent file
+storage.
+
+Build the approved runtime image, read its immutable digest, and pass that
+digest to Compose. An empty `SANDBOX_IMAGE_DIGEST` approves no image and every
+tool-bound Run fails closed rather than using a tag or running on the host:
+
+```powershell
+docker build -t tiny-hermes-sandbox:local -f deploy/sandbox/Dockerfile deploy/sandbox
+$env:SANDBOX_IMAGE_DIGEST = (docker image inspect tiny-hermes-sandbox:local --format '{{.Id}}').Trim()
+docker compose --env-file .env -f deploy/compose/compose.yaml up -d --build --wait
+```
+
+The Sandbox Controller is the only platform process that can talk to Docker. It
+mounts `/var/run/docker.sock`; the API, Web, Worker, Scheduler, model, and sandbox
+container do not. The Worker can only ask the Controller to perform its small,
+fixed set of sandbox actions over a separate local socket. Reaching that socket
+is not enough: the Controller checks that the Run owns the sandbox and still
+holds a live Worker lease on every command. This matters because access to the
+Docker socket is effectively full control of the host, so it belongs in the
+smallest process rather than in request-handling or Agent code.
+
+The Agent cannot choose an image, mount, host path, network mode, capability, or
+resource profile. The Controller creates a non-root container with a read-only
+root filesystem, no network, all Linux capabilities dropped, no privilege
+escalation, and fixed CPU, memory, process, and temporary-space ceilings. Only
+`/workspace/data`, `/workspace/cache`, and a limited `/tmp` are writable.
+
+Phase 3B does **not** yet enforce the design's per-Run disk or file-count limit
+on `/workspace/data` and `/workspace/cache`. Docker's writable-layer quota does
+not cover these named volumes, so presenting that setting as active would be
+misleading. This remains an open M1 requirement; do not treat the sandbox slice
+as satisfying every resource ceiling until the named-volume limit and
+`paused(limit)` behavior are implemented and tested.
+
+Bind the tool in an Agent Draft before publishing:
+
+```powershell
+$spec.tools = @("shell.exec")
+```
+
+An Agent that does not bind `shell.exec` is not shown its schema, and a forged
+call is still refused immediately before execution. The command is interpreted
+by Bash. `cwd` must remain under `/workspace/data` or `/workspace/cache`, the
+default timeout is 60 seconds, the maximum is 900 seconds, and output beyond
+1 MiB is marked as truncated.
+
+`cache_state` tells the runtime whether the same warm sandbox was reused. When
+it is `reset`, the Run records `sandbox_cache_reset` and the next model call gets
+a protected notice that `/workspace/cache` is empty; the Agent must not assume a
+previous install or background process still exists. `reused` means the same
+Run's warm sandbox was recovered for another execution slice. A different Run
+never shares its writable layer.
+
+`/workspace/data` can survive a sandbox replacement while the **same Run** is
+being recovered, but phase 3B does not commit it to a Session workspace or an
+artifact store. A later Run must treat it as absent. Do not put user-visible
+claims of persistence around it yet.
 
 ## Restart drill
 
@@ -414,23 +478,29 @@ committed Run survives losing any one of them is only worth what it has been
 tested against. `scripts/restart_drill.py` restarts them under load against a
 running stack and checks what came out the other side.
 
-The drill needs a Run long enough for a restart to land inside it, so bring the
-stack up with a slower deterministic model and pass the same value to the script;
-below one second it refuses to run rather than prove nothing:
+The drill needs a Run long enough for a restart to land inside it and an approved
+sandbox image for its fourth scenario. Bring the stack up with both values and
+pass them to the script; below one second it refuses to run rather than prove
+nothing:
 
 ```powershell
 $env:DETERMINISTIC_MODEL_DELAY_MS = "3000"
+$env:SANDBOX_IMAGE_DIGEST = (docker image inspect tiny-hermes-sandbox:local --format '{{.Id}}').Trim()
 docker compose --env-file .env -f deploy/compose/compose.yaml up -d --wait
 uv run --no-sync python scripts/restart_drill.py
 Remove-Item Env:DETERMINISTIC_MODEL_DELAY_MS
+Remove-Item Env:SANDBOX_IMAGE_DIGEST
 ```
 
-It signs in as the local administrator, publishes its own Agent, and runs three
+It signs in as the local administrator, publishes its own Agents, and runs four
 scenarios: the Worker restarted mid-slice, Redis stopped and started again, and
 the Worker killed while holding a lease with the Scheduler restarted underneath
-it. Each one has to end `completed` with an event history numbered from one with
-nothing skipped and nothing repeated. It prints identifiers, statuses, sequence
-counts, and timings — never a cookie, a token, a password, or a Run's input.
+it; finally it waits until `shell.exec` is visibly running inside a live sandbox,
+kills the Worker, and requires the Run to pass through `interrupted`, recover,
+complete, and leave no sandbox container behind. Each one has to end `completed`
+with an event history numbered from one with nothing skipped and nothing
+repeated. It prints identifiers, statuses, sequence counts, and timings — never
+a cookie, a token, a password, or a Run's input.
 
 The drill restarts containers. It never takes the stack down and never removes a
 volume, and it refuses `down`, `rm`, `-v`, and `--volumes` outright rather than
@@ -495,7 +565,10 @@ This permanently deletes the local PostgreSQL and MinIO data in those two volume
 - The first successful bootstrap closes the bootstrap endpoint permanently; changing the token does not reopen it.
 - Local PostgreSQL and MinIO passwords are deliberately development-only and must not be copied into a production manifest.
 - Environment variables can be visible through process and container inspection. Future KEK support will use protected file mounts or an external key manager instead of ordinary environment variables.
-- M1 provides Agent publication, Run acceptance, and deterministic Run execution only. Approval, secret management, tools, files, and sandbox features do not exist yet.
+- M1 phase 3B provides Agent publication, Run execution, model endpoints, and the
+  platform-owned `shell.exec` tool inside a short-lived Docker sandbox. Approval,
+  secret management, Session-level file persistence, and artifact delivery do not
+  exist yet; no tool may execute on the API, Worker, or host directly.
 - Agent personality text is never echoed in an error response, and a resource in another workspace always answers with a generic `404`.
 - A wake-up message carries a workspace ID and a Run ID and nothing else. Redis never sees a Run's input, an Agent's personality, or any other content.
 - The event stream selects its workspace through a query parameter because `EventSource` cannot send a header. Authorization is still the session cookie, and a Run in another workspace answers `404` whatever the parameter says.

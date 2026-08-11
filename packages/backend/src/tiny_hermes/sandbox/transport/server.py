@@ -17,6 +17,7 @@ import json
 import os
 import stat
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from enum import StrEnum
 from typing import Any, cast
 
@@ -40,9 +41,16 @@ class ControllerServer:
     #: unbounded read. A tool request carries a command line, not a payload.
     MAX_FRAME_BYTES = 64 * 1024
 
-    def __init__(self, *, dispatch: Dispatch, path: str) -> None:
+    def __init__(self, *, dispatch: Dispatch, path: str, group: int | None = None) -> None:
         self._dispatch = dispatch
         self._path = path
+        # The gid the platform's own processes run as. The Controller runs as
+        # root — see the Compose file for why — so the socket it creates is
+        # root:root, and a Worker at 10001:10001 cannot open a 0660 socket
+        # whatever the group bits say. Handing it the app group is narrower
+        # than making the socket world-writable, which is the other way to make
+        # this work and the wrong one.
+        self._group = group
         self._server: asyncio.AbstractServer | None = None
 
     async def start(self) -> None:
@@ -52,9 +60,14 @@ class ControllerServer:
         # A leftover socket file from a killed Controller would make bind fail,
         # and a Controller that will not start because it crashed last time is
         # a worse outage than the crash.
-        with _ignoring_missing():
+        with suppress(FileNotFoundError):
             os.unlink(self._path)
         self._server = await asyncio.start_unix_server(self._serve, path=self._path)
+        if self._group is not None:
+            # Only root can do this, which the deployed Controller is. If it
+            # fails, the Worker cannot open the socket, so startup must fail
+            # rather than advertising a Controller that no caller can use.
+            os.chown(self._path, -1, self._group)
         # The volume is shared with the Worker and the Scheduler and nothing
         # else, but the socket should not be the weak half of that arrangement.
         os.chmod(self._path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IWGRP)
@@ -64,7 +77,7 @@ class ControllerServer:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
-        with _ignoring_missing():
+        with suppress(FileNotFoundError):
             os.unlink(self._path)
 
     async def _serve(
@@ -114,11 +127,3 @@ class ControllerServer:
     async def _say(self, writer: asyncio.StreamWriter, body: dict[str, Any]) -> None:
         writer.write(json.dumps(body).encode() + b"\n")
         await writer.drain()
-
-
-class _ignoring_missing:  # noqa: N801 - a context manager used as a statement
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(self, kind: object, error: object, traceback: object) -> bool:
-        return isinstance(error, FileNotFoundError | OSError)

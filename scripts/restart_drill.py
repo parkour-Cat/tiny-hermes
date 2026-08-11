@@ -1,8 +1,9 @@
 """Restart the platform's processes under load and prove no committed work is lost.
 
-Three failures an operator will actually meet, run against a live Compose stack:
+Four failures an operator will actually meet, run against a live Compose stack:
 the Worker is restarted while it is executing, Redis disappears and comes back,
-and the Worker dies without warning and is recovered by the Scheduler.
+the Worker dies without warning and is recovered by the Scheduler, and a Worker
+dies while a sandbox command is still running.
 
 The drill never removes state. It stops, starts, kills and restarts containers;
 it does not take the stack down and it does not touch a volume. A drill that
@@ -145,7 +146,9 @@ class Console:
         created.raise_for_status()
         return str(created.json()["id"])
 
-    def publish_agent(self, workspace: str, alias: str, scenario: str) -> str:
+    def publish_agent(
+        self, workspace: str, alias: str, scenario: str, tools: list[str] | None = None
+    ) -> str:
         created = self._client.post(
             "/api/v1/agents",
             headers=self._headers(workspace),
@@ -162,7 +165,7 @@ class Console:
                     "schema_version": 1,
                     "personality": "The restart drill's agent.",
                     "model_policy": {"provider": "deterministic", "scenario": scenario},
-                    "tools": [],
+                    "tools": tools or [],
                     "limits": {
                         "max_execution_seconds": 900,
                         "max_elapsed_seconds": 86_400,
@@ -382,6 +385,134 @@ def scheduler_restart(console: Console, workspace: str, agent: str) -> None:
     describe(console.events(workspace, run))
 
 
+def containers_for_drill() -> set[str]:
+    """Sandbox containers this platform currently has, by id.
+
+    Read from the daemon rather than from the platform's own tables, because
+    the failure this scenario exists to catch is exactly the one where the
+    tables say a container is gone and the daemon disagrees.
+    """
+    found = subprocess.run(  # noqa: S603 - every argument is a literal from this file
+        ["docker", "ps", "-aq", "--filter", "label=tiny-hermes.run"],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if found.returncode != 0:
+        detail = found.stderr.strip() or f"exit code {found.returncode}"
+        raise SystemExit(f"docker ps failed while observing sandboxes: {detail}")
+    return {line.strip() for line in found.stdout.splitlines() if line.strip()}
+
+
+def await_sandbox_command(
+    before: set[str], marker: str = "sleep 20", timeout: float = 30.0
+) -> set[str]:
+    """Wait until a new sandbox is running the command the model requested.
+
+    A live container alone is not enough evidence: the Worker acquires it
+    before calling the model, so killing at that point only interrupts model
+    latency. `docker top` observes the process table from the daemon and proves
+    the command crossed the Controller boundary before the Worker is killed.
+    """
+    deadline = time.monotonic() + timeout
+    latest: set[str] = set()
+    last_top_error = ""
+    while time.monotonic() < deadline:
+        latest = containers_for_drill() - before
+        for container_id in latest:
+            processes = subprocess.run(  # noqa: S603 - container id came from docker ps
+                ["docker", "top", container_id, "-eo", "pid,args"],  # noqa: S607
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if processes.returncode != 0:
+                # A newly created container can briefly have no process table.
+                # Keep looking, but preserve the daemon's explanation if the
+                # command never becomes visible instead of reporting "0".
+                last_top_error = processes.stderr.strip()
+                continue
+            if marker in processes.stdout:
+                return latest
+        time.sleep(0.2)
+    detail = f"; last docker top error: {last_top_error}" if last_top_error else ""
+    raise SystemExit(
+        f"no new sandbox ran the expected command marker {marker!r} within {timeout:.0f}s; "
+        f"containers seen: {len(latest)}{detail}"
+    )
+
+
+def sandbox_leak(console: Console, workspace: str) -> None:
+    """A Worker killed with a container live, and nothing left behind.
+
+    The other three scenarios prove no committed state is lost. This one proves
+    no *container* is leaked, which is the failure phase 3B newly makes
+    possible: a Worker that dies mid-command leaves a running container that
+    only the Scheduler's cleanup authority can reclaim.
+    """
+    print("\n4. Worker killed with a sandbox live")
+    if not os.environ.get("SANDBOX_IMAGE_DIGEST"):
+        raise SystemExit(
+            "FAILED: no approved sandbox image is configured; set "
+            "SANDBOX_IMAGE_DIGEST before running the four-scenario drill"
+        )
+
+    before = containers_for_drill()
+    agent = console.publish_agent(
+        workspace, f"drill-tools-{time.time_ns()}", "shell_once", tools=["shell.exec"]
+    )
+    run = console.submit(workspace, agent, f"drill-sandbox-{time.time_ns()}")
+    _, polled = console.await_status(workspace, run, ["running"], RECOVERY_TIMEOUT)
+    started = await_sandbox_command(before)
+    report("picked up", run=run, seconds=f"{polled:.2f}", containers=len(started))
+    check(bool(started), "no sandbox container ran the requested command")
+
+    compose("kill", "worker")
+    compose("start", "worker")
+    finished, elapsed = console.await_status(
+        workspace, run, ["completed", "failed"], RECOVERY_TIMEOUT
+    )
+    report("after the kill", status=finished["status"], seconds=f"{elapsed:.2f}")
+    # Completed, not merely finished. The Run has to get a *new* sandbox after
+    # the Scheduler reclaims the old one — a `failed` here means the recovered
+    # Run met its own abandoned reservation and gave up, which is how this
+    # first behaved.
+    check(
+        finished["status"] == "completed",
+        f"the recovered Run ended as {finished['status']} rather than completing",
+    )
+
+    events = console.events(workspace, run)
+    describe(events)
+    event_types = [event.event_type for event in events]
+    try:
+        interrupted_at = event_types.index("run_interrupted")
+        recovered_at = event_types.index("run_recovery_approved", interrupted_at + 1)
+        completed_at = event_types.index("run_completed", recovered_at + 1)
+    except ValueError as error:
+        raise SystemExit(
+            "FAILED: sandbox recovery history did not contain interrupted, recovery, "
+            f"and completion in order: {event_types}"
+        ) from error
+    report(
+        "recovery events",
+        interrupted=events[interrupted_at].sequence,
+        recovered=events[recovered_at].sequence,
+        completed=events[completed_at].sequence,
+    )
+
+    # The Scheduler reclaims on its own schedule, so this waits rather than
+    # asserting immediately — the claim is that nothing is leaked, not that
+    # nothing is ever briefly orphaned.
+    deadline = time.monotonic() + RECOVERY_TIMEOUT
+    leaked = containers_for_drill() - before
+    while leaked and time.monotonic() < deadline:
+        time.sleep(2.0)
+        leaked = containers_for_drill() - before
+    report("containers left", count=len(leaked))
+    check(not leaked, f"{len(leaked)} sandbox container(s) outlived the Run")
+
+
 def main() -> int:
     delay = int(os.environ.get("DETERMINISTIC_MODEL_DELAY_MS", "50"))
     if delay < MINIMUM_MODEL_DELAY_MS:
@@ -393,7 +524,10 @@ def main() -> int:
         )
     print(f"Restart drill against {API}  (model delay {delay}ms)")
     started = time.monotonic()
-    with httpx.Client(base_url=API, timeout=30.0) as client:
+    # This is an operator's local control-plane drill. A workstation-wide HTTP
+    # proxy must not receive bootstrap/login requests for 127.0.0.1, and some
+    # managed shells inject one without exposing proxy environment variables.
+    with httpx.Client(base_url=API, timeout=30.0, trust_env=False) as client:
         console = Console(client)
         console.sign_in()
         workspace = console.create_workspace(f"Drill-{time.time_ns()}")
@@ -403,7 +537,8 @@ def main() -> int:
         worker_restart(console, workspace, agent)
         redis_restart(console, workspace, agent)
         scheduler_restart(console, workspace, agent)
-    print(f"\nAll three scenarios held. {time.monotonic() - started:.1f}s")
+        sandbox_leak(console, workspace)
+    print(f"\nAll four scenarios held. {time.monotonic() - started:.1f}s")
     return 0
 
 

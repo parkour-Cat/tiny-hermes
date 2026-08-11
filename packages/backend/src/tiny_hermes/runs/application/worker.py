@@ -44,6 +44,8 @@ from tiny_hermes.runs.ports.store import (
     RenewLeaseCommand,
     ReservedEvent,
 )
+from tiny_hermes.sandbox.application.controller import RefusalReason as SandboxRefusal
+from tiny_hermes.sandbox.application.controller import SandboxRefused
 from tiny_hermes.sandbox.domain.container_policy import DEFAULT_PROFILE
 from tiny_hermes.sandbox.domain.models import CacheState
 from tiny_hermes.tools.application.execute import run_tool_call
@@ -259,6 +261,27 @@ class WorkerRuntime:
                 workspace_id=claimed.run.workspace_id,
                 profile=DEFAULT_PROFILE.name,
             )
+        except SandboxRefused as refused:
+            if refused.reason is SandboxRefusal.ALREADY_RESERVED:
+                # A previous slice's container is still being reclaimed. That is
+                # the platform being briefly not ready, not this Run being over,
+                # so the slice ends and the Run waits its turn again.
+                logger.info(
+                    "sandbox still held, ending the slice",
+                    extra={"run_id": str(claimed.run.id)},
+                )
+                await self._record(
+                    claimed,
+                    handle,
+                    context.state_version,
+                    SliceDecision(RunSignal.SLICE_ENDED),
+                    _no_round(),
+                    executed_ms=0,
+                )
+                return None
+            logger.exception("sandbox refused", extra={"run_id": str(claimed.run.id)})
+            await self._fail(claimed, handle, context, f"sandbox_{refused.reason.value}")
+            return None
         except Exception:
             logger.exception("sandbox acquire failed", extra={"run_id": str(claimed.run.id)})
             await self._fail(claimed, handle, context, "sandbox_start_failed")
@@ -376,13 +399,7 @@ class WorkerRuntime:
             handle,
             context.state_version,
             SliceDecision(RunSignal.FAILED),
-            ModelResponse(
-                stop_reason=StopReason.FAILED,
-                text="",
-                model_calls=0,
-                usage_quality=UsageQuality.UNAVAILABLE,
-                failure=reason,
-            ),
+            _no_round(failure=reason),
             executed_ms=0,
         )
 
@@ -486,6 +503,21 @@ class WorkerRuntime:
                     handle.lost = True
                     return
                 handle.version = renewed.version
+
+
+def _no_round(failure: str | None = None) -> ModelResponse:
+    """A slice that ended without a model call.
+
+    `model_calls=0` because none was made: charging the budget for a container
+    the platform could not give would let a Run run out of calls it never got.
+    """
+    return ModelResponse(
+        stop_reason=StopReason.FAILED if failure else StopReason.CONTINUE,
+        text="",
+        model_calls=0,
+        usage_quality=UsageQuality.UNAVAILABLE,
+        failure=failure,
+    )
 
 
 def _request(context: ExecutionContext, box: "_Sandbox | None") -> ModelRequest:

@@ -29,7 +29,9 @@ class DeterministicModelPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     provider: Literal["deterministic"] = "deterministic"
-    scenario: Literal["complete", "fail_replay_safe", "continue_once"] = "complete"
+    scenario: Literal[
+        "complete", "fail_replay_safe", "continue_once", "shell_once"
+    ] = "complete"
 
 
 class EndpointModelPolicy(BaseModel):

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tiny_hermes.runs.domain.models import RunState
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
-from tiny_hermes.sandbox.domain.models import InstanceStatus
+from tiny_hermes.sandbox.domain.models import InstanceStatus, ReservationStatus
 from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
 
 logger = logging.getLogger(__name__)
@@ -65,11 +65,18 @@ class SchedulerRuntime:
     async def run_once(self) -> None:
         now = datetime.now(UTC)
         await self._reclaim_expired_leases(now)
+        # Worker-side freeze/destroy failures interrupt the Run after its lease
+        # is released, so they do not appear in the expired-lease scan. Hand
+        # their still-live reservation to the same cleanup path explicitly.
+        await self._isolate_interrupted_sandboxes()
+        # A Run whose Worker died may still own a live container. Destroy that
+        # container before putting the Run back in the queue; otherwise a new
+        # Worker can race the cleanup and meet the abandoned reservation.
+        await self._reclaim_sandboxes(now)
         await self._recover_interrupted()
         await self._repair_session_heads()
         await self._time_out_waits(now)
         await self._collect_expired_records(now)
-        await self._reclaim_sandboxes(now)
 
     async def run_forever(self, stop: asyncio.Event, interval_seconds: int) -> None:
         while not stop.is_set():
@@ -88,10 +95,30 @@ class SchedulerRuntime:
             if not await store.try_scan_lock(LEASES):
                 return
             doomed = await store.expired_lease_runs(now, self._settings.batch_size)
+            sandboxes = SqlSandboxStore(session)
             for run_id in doomed:
+                # §11.4: 先隔离…再判断 Run 恢复. A Worker that died mid-slice
+                # left a container that may still be running a command, and the
+                # reservation is still `active` — which no other scan looks at.
+                # Isolating it here is what hands it to `_reclaim_sandboxes`,
+                # and what stops the recovered Run being given a second sandbox
+                # while the first may still be alive.
+                held = await sandboxes.live_for_run(run_id)
+                if held is not None and held.status is not ReservationStatus.ISOLATED:
+                    await sandboxes.isolate(held.id, reason="lease_expired")
                 await store.reclaim_expired_lease(run_id, "scheduler-lease-expiry")
             if doomed:
                 logger.info("reclaimed abandoned leases", extra={"count": len(doomed)})
+
+    async def _isolate_interrupted_sandboxes(self) -> None:
+        """Make every interrupted Run's possible container eligible for cleanup."""
+        async with self._sessions.begin() as session:
+            runs = SqlRunStore(session)
+            sandboxes = SqlSandboxStore(session)
+            for run_id in await runs.interrupted_runs(self._settings.batch_size):
+                held = await sandboxes.live_for_run(run_id)
+                if held is not None and held.status is not ReservationStatus.ISOLATED:
+                    await sandboxes.isolate(held.id, reason="run_interrupted")
 
     async def _reclaim_sandboxes(self, now: datetime) -> None:
         """Destroy containers whose Run is not coming back.
@@ -140,7 +167,14 @@ class SchedulerRuntime:
             store = SqlRunStore(session)
             if not await store.try_scan_lock(RECOVERY):
                 return
+            sandboxes = SqlSandboxStore(session)
             for run_id in await store.interrupted_runs(self._settings.batch_size):
+                # An isolated reservation means cleanup was not confirmed. Do
+                # not queue the Run while its old container may still exist:
+                # the next Worker would meet `already_reserved` and repeatedly
+                # yield without making progress.
+                if await sandboxes.live_for_run(run_id) is not None:
+                    continue
                 state = await store.recover_interrupted(
                     run_id, self._settings.max_recovery_attempts, "scheduler-recovery"
                 )

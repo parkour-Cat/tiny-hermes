@@ -76,7 +76,11 @@ async def _serve() -> None:
             await session.commit()
             return answer
 
-    server = ControllerServer(dispatch=dispatch, path=settings.sandbox_controller_socket)
+    server = ControllerServer(
+        dispatch=dispatch,
+        path=settings.sandbox_controller_socket,
+        group=settings.sandbox_socket_gid,
+    )
     await server.start()
     logger.info(
         "sandbox controller started",

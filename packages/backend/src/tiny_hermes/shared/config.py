@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     #: share with it. They mount this and nothing else; the Docker socket is the
     #: Controller's alone.
     sandbox_controller_socket: str = "/run/tiny-hermes/controller.sock"
+    #: The group the platform's own processes run as, from the application
+    #: image. The Controller runs as root and hands the socket to this group so
+    #: the Worker and the Scheduler can open it without it being world-writable.
+    sandbox_socket_gid: int = 10001
     #: The approved runtime image, by digest. Empty by default, and an empty
     #: allowlist approves nothing — a deployment that has not chosen an image
     #: cannot run a tool, which is the correct way for this to fail.

@@ -1,6 +1,7 @@
 import asyncio
 
 from tiny_hermes.agents.domain.models import DeterministicModelPolicy
+from tiny_hermes.runs.domain.models import ToolCallBlock, ToolResultBlock
 from tiny_hermes.runs.ports.model import (
     ModelRequest,
     ModelResponse,
@@ -41,6 +42,48 @@ class DeterministicModelProvider:
                 failure="policy_mismatch",
             )
         scenario = policy.scenario
+        if scenario == "shell_once":
+            results = tuple(
+                block
+                for message in request.messages
+                for block in message.blocks
+                if isinstance(block, ToolResultBlock) and block.call_id == "drill-shell-1"
+            )
+            if not results:
+                return ModelResponse(
+                    stop_reason=StopReason.TOOL_CALL,
+                    text="Running the deterministic sandbox drill command.",
+                    tool_calls=(
+                        ToolCallBlock(
+                            call_id="drill-shell-1",
+                            name="shell.exec",
+                            arguments={
+                                "command": (
+                                    "printf 'drill-started\\n'; sleep 20; "
+                                    "printf 'drill-finished\\n'"
+                                ),
+                                "timeout_seconds": 60,
+                            },
+                        ),
+                    ),
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                )
+            result = results[-1]
+            if result.failed or "drill-finished" not in result.output:
+                return ModelResponse(
+                    stop_reason=StopReason.FAILED,
+                    text="",
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                    failure="deterministic_shell_output_missing",
+                )
+            return ModelResponse(
+                stop_reason=StopReason.COMPLETED,
+                text="The model observed real command output: drill-finished.",
+                input_tokens=TOKENS_PER_ROUND // 2,
+                output_tokens=TOKENS_PER_ROUND // 2,
+            )
         if scenario == "fail_replay_safe":
             return ModelResponse(
                 stop_reason=StopReason.FAILED,
