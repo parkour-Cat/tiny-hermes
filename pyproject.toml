@@ -41,10 +41,30 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "ASYNC", "S"]
+# TID251 only, not the whole TID family: TID252's opinion about relative imports
+# is a style question this slice has no business reopening.
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "TID251"]
+
+# Everything that leaves this process goes through tiny_hermes.outbound, which
+# resolves, vets, and pins every address and re-checks every redirect hop. A
+# second client built anywhere else would bypass all of it, so the rule is
+# machine-checked rather than left to review.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"httpx.AsyncClient".msg = "Outbound requests go through tiny_hermes.outbound.client."
+"httpx.Client".msg = "Outbound requests go through tiny_hermes.outbound.client."
+"httpx.AsyncHTTPTransport".msg = "Outbound requests go through tiny_hermes.outbound.client."
+"httpx.HTTPTransport".msg = "Outbound requests go through tiny_hermes.outbound.client."
+"socket.socket".msg = "Outbound requests go through tiny_hermes.outbound.client."
+"socket.create_connection".msg = "Outbound requests go through tiny_hermes.outbound.client."
+"urllib.request.urlopen".msg = "Outbound requests go through tiny_hermes.outbound.client."
 
 [tool.ruff.lint.per-file-ignores]
-"packages/backend/tests/**/*.py" = ["S101", "S104", "S106"]
+# The guarded path itself.
+"packages/backend/src/tiny_hermes/outbound/**/*.py" = ["TID251"]
+# Tests and the restart drill are clients of this platform rather than parts of
+# it, and neither ships.
+"packages/backend/tests/**/*.py" = ["S101", "S104", "S106", "TID251"]
+"scripts/**/*.py" = ["TID251"]
 
 [tool.pyright]
 pythonVersion = "3.12"
