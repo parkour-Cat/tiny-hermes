@@ -200,3 +200,43 @@ async def test_missing_membership_is_forbidden_before_resource_lookup(
     )
     assert denied.status_code == 403
     assert denied.json()["code"] == "forbidden"
+
+
+async def test_a_developer_can_rename_an_agent(
+    client: TestClient, scope: dict[str, str]
+) -> None:
+    agent_id = client.post(
+        "/api/v1/agents", headers=scope, json={"name": "Analyst", "alias": "analyst"}
+    ).json()["id"]
+
+    renamed = client.patch(
+        f"/api/v1/agents/{agent_id}",
+        headers=scope,
+        json={"name": "Researcher", "alias": "researcher"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "Researcher"
+    assert renamed.json()["alias"] == "researcher"
+
+    reloaded = client.get(f"/api/v1/agents/{agent_id}", headers=scope)
+    assert reloaded.json()["name"] == "Researcher"
+    assert reloaded.json()["alias"] == "researcher"
+
+
+async def test_renaming_to_a_taken_alias_is_a_conflict(
+    client: TestClient, scope: dict[str, str]
+) -> None:
+    client.post(
+        "/api/v1/agents", headers=scope, json={"name": "Analyst", "alias": "analyst"}
+    )
+    other = client.post(
+        "/api/v1/agents", headers=scope, json={"name": "Other", "alias": "other"}
+    ).json()["id"]
+
+    conflict = client.patch(
+        f"/api/v1/agents/{other}",
+        headers=scope,
+        json={"alias": "analyst"},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "agent_alias_taken"

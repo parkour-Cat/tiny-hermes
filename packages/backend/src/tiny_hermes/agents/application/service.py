@@ -114,6 +114,27 @@ class AgentCatalog:
             await self._audit(workspace_id, actor, "agent.read", agent.id, request_id, platform)
         return agent
 
+    async def update_agent(
+        self,
+        workspace_id: UUID,
+        actor: Actor,
+        agent_id: UUID,
+        name: str | None,
+        alias: str | None,
+        request_id: str,
+    ) -> Agent:
+        platform = await self._require_role(workspace_id, actor, WRITERS)
+        agent = await self._store.update_agent(
+            workspace_id,
+            agent_id,
+            None if name is None else _valid_name(name),
+            None if alias is None else _valid_alias(alias),
+        )
+        if agent is None:
+            raise UnknownAgent
+        await self._audit(workspace_id, actor, "agent.updated", agent.id, request_id, platform)
+        return agent
+
     async def get_draft(
         self, workspace_id: UUID, actor: Actor, agent_id: UUID, request_id: str
     ) -> AgentDraft:

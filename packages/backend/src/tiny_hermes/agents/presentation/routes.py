@@ -55,6 +55,11 @@ class RollbackRequest(BaseModel):
     version_id: UUID
 
 
+class UpdateAgentRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    alias: str | None = Field(default=None, min_length=1, max_length=80)
+
+
 class AgentResponse(BaseModel):
     id: UUID
     name: str
@@ -174,6 +179,39 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
         try:
             agent = await catalog.get_agent(
                 workspace_id, _actor(user), agent_id, request.state.request_id
+            )
+        except AgentCatalogError as error:
+            raise _as_app_error(error) from error
+        return AgentResponse.from_domain(agent)
+
+    @router.patch("/{agent_id}", response_model=AgentResponse)
+    async def update_agent(  # pyright: ignore[reportUnusedFunction]
+        agent_id: UUID,
+        payload: UpdateAgentRequest,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[AgentCatalog, Depends(catalog_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> AgentResponse:
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        if payload.name is None and payload.alias is None:
+            raise AppError(
+                code="invalid_agent_update",
+                title="Invalid agent update",
+                status=422,
+                detail="A rename must include a name, an alias, or both.",
+            )
+        try:
+            agent = await catalog.update_agent(
+                workspace_id,
+                _actor(user),
+                agent_id,
+                payload.name,
+                payload.alias,
+                request.state.request_id,
             )
         except AgentCatalogError as error:
             raise _as_app_error(error) from error
