@@ -647,13 +647,14 @@ class WorkerRuntime:
             )
             return None
 
-        if result.status is not CheckpointStatus.COMMITTED:
-            # Every non-committed outcome is worth a line an operator can
-            # read next to the Run id, whatever happens afterwards.
-            logger.info(
-                "workspace checkpoint did not commit",
-                extra={"run_id": str(claimed.run.id), "status": result.status.value},
-            )
+        measured = result.measurement
+        logger.info(
+            "workspace checkpoint decided: run=%s status=%s total_bytes=%s quota_bytes=%s",
+            claimed.run.id,
+            result.status.value,
+            None if measured is None else measured.total_bytes,
+            runtime.quota.max_bytes,
+        )
         if result.status in (CheckpointStatus.COMMITTED, CheckpointStatus.UNCHANGED):
             renewed = box if result.status is CheckpointStatus.UNCHANGED else replace(
                 box, revision=result.revision_id

@@ -56,6 +56,10 @@ async def _worker() -> None:
     sessions = build_session_factory(settings)
     workspace = _workspace(settings)
     await _ensure_bucket(workspace)
+    if workspace is not None:
+        logger.info(
+            "workspace runtime configured: quota_bytes=%s", workspace.quota.max_bytes
+        )
     # One provider port, two providers behind it. Which one answers is decided
     # per round by the Agent Version the Run fixed at creation, so the Worker
     # never learns that endpoints exist.
