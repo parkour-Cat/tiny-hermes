@@ -77,6 +77,19 @@ class CheckpointEffectStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+class WorkspaceCleanupTarget(StrEnum):
+    """Where a Run must land once its sandbox and volume are confirmed gone.
+
+    Recorded in the same transaction as the rollback ToolResultBlock (design
+    §6.3), so a crash between "record the reason" and "delete the volume" is
+    recoverable without inventing state from logs.
+    """
+
+    PAUSED_LIMIT = "paused_limit"
+    QUEUED = "queued"
+    FAILED_CONFLICT = "failed_conflict"
+
+
 class WaitPolicy(StrEnum):
     ALL = "all"
     ANY = "any"

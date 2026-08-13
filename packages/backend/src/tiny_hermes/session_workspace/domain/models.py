@@ -142,3 +142,23 @@ class CheckpointStatus(StrEnum):
     LIMIT_EXCEEDED = "limit_exceeded"
     CONFLICT = "conflict"
     STORAGE_FAILED = "storage_failed"
+
+
+class UploadKind(StrEnum):
+    WORKSPACE = "workspace"
+    ARTIFACT = "artifact"
+
+
+class UploadStatus(StrEnum):
+    """Design §6.2 — the only rows GC may touch are the ones marked reclaimable.
+
+    ``FINALIZING`` and ``READY`` are GC roots: their candidate index is durable
+    and enumerates final keys that must survive a concurrent collector.
+    """
+
+    UPLOADING = "uploading"
+    FINALIZING = "finalizing"
+    READY = "ready"
+    COMMITTED = "committed"
+    ABANDONED = "abandoned"
+    EXPIRED = "expired"

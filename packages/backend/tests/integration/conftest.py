@@ -11,17 +11,21 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from tiny_hermes.api.app import create_app
+from tiny_hermes.artifacts.infrastructure import tables as artifact_tables
 from tiny_hermes.sandbox.infrastructure import tables as sandbox_tables
+from tiny_hermes.session_workspace.infrastructure import tables as workspace_tables
 from tiny_hermes.shared.config import Settings
 from tiny_hermes.shared.database import Base
 
 from integration.support import EventsUrl, ReadStream
 
-# Imported for the side effect of registering its tables on `Base.metadata`,
+# Imported for the side effect of registering their tables on `Base.metadata`,
 # which is what makes the derived TRUNCATE complete. `create_app` reaches every
-# other module; the sandbox tables have no route yet and would otherwise be
-# absent from the metadata and therefore never truncated.
+# other module; these tables have no route yet and would otherwise be absent
+# from the metadata and therefore never truncated.
 assert sandbox_tables.SandboxReservationRow.__tablename__
+assert workspace_tables.ObjectUploadRow.__tablename__
+assert artifact_tables.ArtifactRow.__tablename__
 
 STREAM_TIMEOUT = 20
 
