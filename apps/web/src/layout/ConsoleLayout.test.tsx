@@ -87,6 +87,10 @@ test("both sections stay inside the workspace the address names", async () => {
     "href",
     `/workspaces/${WORKSPACE}/api-keys`,
   );
+  expect(screen.getByRole("link", { name: "Secrets" })).toHaveAttribute(
+    "href",
+    `/workspaces/${WORKSPACE}/secrets`,
+  );
   expect(screen.queryByRole("link", { name: "Approvals" })).not.toBeInTheDocument();
   expect(screen.queryByText("审批")).not.toBeInTheDocument();
   expect(await screen.findByText("Acme")).toBeInTheDocument();

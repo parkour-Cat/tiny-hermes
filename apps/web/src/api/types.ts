@@ -223,6 +223,23 @@ export type IssuedApiKeyResponse = ApiKeyResponse & {
   token: string;
 };
 
+export type SecretResponse = {
+  id: string;
+  name: string;
+  scope: "workspace" | "platform";
+  workspace_id: string | null;
+  status: string;
+  mask: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RewrapResponse = {
+  processed: number;
+  remaining: number;
+  current_key_id: string;
+};
+
 /** Scopes a developer ServiceAccount may request. Viewer keys are a subset. */
 export const API_KEY_SCOPES = ["runs.read", "runs.write", "runs.control", "agents.read"] as const;
 

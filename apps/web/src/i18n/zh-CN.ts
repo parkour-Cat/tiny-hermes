@@ -145,6 +145,7 @@ export const zhCN = {
   members: "成员",
   modelEndpoints: "模型端点",
   apiKeys: "API Keys",
+  secrets: "Secrets",
   playground: "Playground",
   language: "语言",
   themeLight: "浅色",
@@ -221,6 +222,19 @@ export const zhCN = {
   openPlayground: "打开 Playground",
   credentialAvailable: "凭证已配置",
   credentialMissing: "凭证未配置",
+  secretsTitle: "Secrets",
+  secretsIntro: "明文只在创建时出现一次。列表只有名称与掩码。",
+  newSecret: "新建 Secret",
+  secretName: "名称",
+  secretScope: "范围",
+  secretScopeWorkspace: "工作空间",
+  secretScopePlatform: "平台",
+  secretPlaintext: "明文",
+  emptySecrets: "还没有 Secret",
+  disableSecret: "停用",
+  rewrapSecrets: "重包",
+  rewrapProcessed: "已处理 ",
+  rewrapRemaining: "，剩余 ",
 } as const;
 
 export type MessageKey = keyof typeof zhCN;

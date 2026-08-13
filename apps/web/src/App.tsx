@@ -43,6 +43,9 @@ const ApiKeysPage = lazy(() =>
 const ModelEndpointsPage = lazy(() =>
   import("./pages/ModelEndpointsPage").then((module) => ({ default: module.ModelEndpointsPage })),
 );
+const SecretsPage = lazy(() =>
+  import("./pages/SecretsPage").then((module) => ({ default: module.SecretsPage })),
+);
 
 function AppRoutes() {
   const t = useT();
@@ -90,6 +93,7 @@ function AppRoutes() {
           <Route path="members" element={<MembersPage />} />
           <Route path="api-keys" element={<ApiKeysPage />} />
           <Route path="model-endpoints" element={<ModelEndpointsPage />} />
+          <Route path="secrets" element={<SecretsPage />} />
         </Route>
         <Route
           path="*"
