@@ -4,7 +4,6 @@ Inbound Chat Completions streaming is a delivery concern of `POST /v1/chat/compl
 This outbound adapter still buffers one round: partial tokens are not RunEvents,
 and the Worker checkpoint needs the complete assistant turn. The HTTP adapter
 streams that turn to the compatibility client after the round is recorded.
-"""
 
 Every parsing failure produces a *failed round*, never an exception out of the
 Worker, and every one of them is replay-safe: nothing was written anywhere, so
