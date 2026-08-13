@@ -1056,7 +1056,7 @@ Commit as `feat: checkpoint the workspace with the words that describe it`.
 - Create: `packages/backend/tests/unit/artifacts/test_artifact_service.py`
 - Create: `packages/backend/tests/integration/artifacts/test_artifact_routes.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 async def test_output_past_the_preview_registers_an_upload_before_any_byte() -> None: ...
@@ -1068,11 +1068,11 @@ async def test_cross_tenant_artifact_requests_get_a_generic_not_found() -> None:
 async def test_download_streams_bytes_and_verifies_scope_again() -> None: ...
 ```
 
-- [ ] **Step 2: Run and fail**
+- [x] **Step 2: Run and fail**
 
 Both new test files fail on missing modules.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 The service implements the `OutputSink` Task 8 defined: preview bytes up to
 1 MiB in memory, artifact bytes streamed to the staging prefix of an
@@ -1092,10 +1092,18 @@ Both use the existing workspace-header dependency the Runs API uses and return
 the same generic 404 across tenants. `run_tool_call` threads the sink through
 `execute_stream` for `shell.exec`.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Focused tests plus the API integration suite. Commit as
 `feat: keep long output as artifacts, not as luck`.
+
+> Implementation notes, 2026-08-13: the recorder, stores, service, and both
+> routes landed with ceilings enforced *while bytes arrive* (the per-Run room
+> caps the stream, not just the commit). Deferred to the wiring backlog:
+> threading the recorder through `shell.exec`'s `execute_stream` in the
+> Worker — today `shell.exec` still returns its capped inline output, and the
+> recorder is exercised directly. The tool-result `artifact_id` text and the
+> `artifact_store_failed` fact land with that wiring.
 
 ### Task 14: Scheduler garbage collection
 

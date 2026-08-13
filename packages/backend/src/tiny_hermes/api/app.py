@@ -10,6 +10,7 @@ from tiny_hermes.agents.presentation.routes import agent_router
 from tiny_hermes.api.health import DatabaseReadinessProbe, ReadinessCheck, health_router
 from tiny_hermes.api.request_context import RequestIdMiddleware
 from tiny_hermes.api.resources import ApplicationResources
+from tiny_hermes.artifacts.presentation.routes import artifact_router
 from tiny_hermes.identity.presentation.routes import identity_router
 from tiny_hermes.model_catalog.presentation.routes import model_endpoint_router
 from tiny_hermes.runs.presentation.events import run_event_router
@@ -63,6 +64,7 @@ def create_app(
     app.include_router(session_router(resources))
     app.include_router(run_router(resources))
     app.include_router(run_event_router(resources))
+    app.include_router(artifact_router(resources))
     return app
 
 

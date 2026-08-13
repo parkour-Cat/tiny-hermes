@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import (
 
 from tiny_hermes.agents.application.service import AgentCatalog
 from tiny_hermes.agents.infrastructure.sql_store import SqlAgentStore
+from tiny_hermes.artifacts.application.service import ArtifactService
+from tiny_hermes.artifacts.infrastructure.sql_store import SqlArtifactStore
 from tiny_hermes.identity.application.auth_service import AuthService
 from tiny_hermes.identity.infrastructure.sql_store import SqlAuthStore
 from tiny_hermes.model_catalog.application.service import ModelEndpointService
@@ -19,6 +21,7 @@ from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
+from tiny_hermes.session_workspace.infrastructure.minio_store import MinioObjectStore
 from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.errors import AppError, AuditedDenial
 from tiny_hermes.tenancy.application.workspace_service import WorkspaceService
@@ -31,6 +34,7 @@ class ApplicationResources:
         self._engine: AsyncEngine | None = None
         self._session_factory: async_sessionmaker[AsyncSession] | None = None
         self._notifier: WakeUpNotifier | None = None
+        self._object_store: MinioObjectStore | None = None
 
     @property
     def settings(self) -> Settings:
@@ -155,3 +159,18 @@ class ApplicationResources:
                 raise
             else:
                 await session.commit()
+
+    def object_store(self) -> MinioObjectStore:
+        if self._object_store is None:
+            self._object_store = MinioObjectStore(
+                endpoint=self.settings.s3_endpoint,
+                access_key=self.settings.s3_access_key,
+                secret_key=self.settings.s3_secret_key,
+                bucket=self.settings.s3_bucket,
+            )
+        return self._object_store
+
+    async def artifact_service(self) -> AsyncGenerator[ArtifactService]:
+        """Reads only: nothing here writes, so nothing here commits."""
+        async with self.session_factory()() as session:
+            yield ArtifactService(SqlArtifactStore(session), self.object_store())
