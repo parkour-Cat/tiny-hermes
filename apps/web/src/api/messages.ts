@@ -20,6 +20,9 @@ const NAMED: Partial<Record<string, MessageKey>> = {
   state_version_conflict: "stateVersionConflict",
   forbidden: "forbidden",
   workspace_scope_mismatch: "forbidden",
+  user_not_found: "userNotFound",
+  member_already_present: "memberAlreadyPresent",
+  last_workspace_admin: "lastWorkspaceAdmin",
 };
 
 /** Which form field a refusal belongs to, when it belongs to one. */

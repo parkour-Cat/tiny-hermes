@@ -1,6 +1,7 @@
 import { ConfigProvider } from "antd";
 import type { ReactNode } from "react";
 
+import { LocaleProvider } from "../i18n/locale";
 import { ConsoleTheme } from "../layout/ConsoleTheme";
 
 /**
@@ -20,7 +21,9 @@ import { ConsoleTheme } from "../layout/ConsoleTheme";
 export function TestTheme({ children }: { children: ReactNode }) {
   return (
     <ConsoleTheme>
-      <ConfigProvider theme={{ token: { motion: false } }}>{children}</ConfigProvider>
+      <LocaleProvider>
+        <ConfigProvider theme={{ token: { motion: false } }}>{children}</ConfigProvider>
+      </LocaleProvider>
     </ConsoleTheme>
   );
 }

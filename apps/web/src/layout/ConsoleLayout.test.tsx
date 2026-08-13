@@ -5,7 +5,7 @@ import { theme } from "antd";
 import { http, HttpResponse } from "msw";
 import type { ReactNode } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { expect, test } from "vitest";
+import { afterEach, expect, test } from "vitest";
 
 import { ConsoleLayout } from "./ConsoleLayout";
 import { ConsoleTheme } from "./ConsoleTheme";
@@ -16,6 +16,10 @@ import { server } from "../test/server";
 
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
 const DARK_QUERY = "(prefers-color-scheme: dark)";
+
+afterEach(() => {
+  window.localStorage.clear();
+});
 
 const ADMIN = {
   id: "u1",
@@ -71,6 +75,20 @@ test("both sections stay inside the workspace the address names", async () => {
     "href",
     `/workspaces/${WORKSPACE}/runs`,
   );
+  expect(screen.getByRole("link", { name: "成员" })).toHaveAttribute(
+    "href",
+    `/workspaces/${WORKSPACE}/members`,
+  );
+  expect(screen.getByRole("link", { name: "模型端点" })).toHaveAttribute(
+    "href",
+    `/workspaces/${WORKSPACE}/model-endpoints`,
+  );
+  expect(screen.getByRole("link", { name: "API Keys" })).toHaveAttribute(
+    "href",
+    `/workspaces/${WORKSPACE}/api-keys`,
+  );
+  expect(screen.queryByRole("link", { name: "Approvals" })).not.toBeInTheDocument();
+  expect(screen.queryByText("审批")).not.toBeInTheDocument();
   expect(await screen.findByText("Acme")).toBeInTheDocument();
   expect(screen.getByText("agent list")).toBeInTheDocument();
 });
@@ -125,4 +143,24 @@ test("a light system preference keeps the default algorithm", () => {
 
   const light = theme.getDesignToken({ algorithm: theme.defaultAlgorithm });
   expect(screen.getByTestId("container")).toHaveTextContent(light.colorBgContainer);
+});
+
+test("a stored dark theme wins over a light system preference", () => {
+  window.localStorage.setItem("tiny-hermes-theme", "dark");
+
+  renderThemed(<ThemeProbe />);
+
+  const dark = theme.getDesignToken({ algorithm: theme.darkAlgorithm });
+  expect(screen.getByTestId("container")).toHaveTextContent(dark.colorBgContainer);
+});
+
+test("the locale switcher changes chrome into English", async () => {
+  renderShell(`/workspaces/${WORKSPACE}/agents`);
+
+  expect(await screen.findByRole("link", { name: "运行" })).toBeInTheDocument();
+  await userEvent.click(screen.getByLabelText("语言"));
+  await userEvent.click(await screen.findByTitle("English"));
+
+  expect(await screen.findByRole("link", { name: "Runs" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Members" })).toBeInTheDocument();
 });

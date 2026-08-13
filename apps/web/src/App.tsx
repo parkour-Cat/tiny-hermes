@@ -4,7 +4,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import { QueryProvider } from "./api/QueryProvider";
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
-import { t } from "./i18n/zh-CN";
+import { LocaleProvider, useT } from "./i18n/locale";
 import { ConsoleTheme } from "./layout/ConsoleTheme";
 
 const ConsoleLayout = lazy(() =>
@@ -33,6 +33,7 @@ const WorkspacesPage = lazy(() =>
 );
 
 function AppRoutes() {
+  const t = useT();
   const auth = useAuth();
   if (auth.loading) {
     return <Spin fullscreen description={t("loading")} />;
@@ -86,13 +87,15 @@ function AppRoutes() {
 export function App() {
   return (
     <ConsoleTheme>
-      <BrowserRouter>
-        <AuthProvider>
-          <QueryProvider>
-            <AppRoutes />
-          </QueryProvider>
-        </AuthProvider>
-      </BrowserRouter>
+      <LocaleProvider>
+        <BrowserRouter>
+          <AuthProvider>
+            <QueryProvider>
+              <AppRoutes />
+            </QueryProvider>
+          </AuthProvider>
+        </BrowserRouter>
+      </LocaleProvider>
     </ConsoleTheme>
   );
 }
