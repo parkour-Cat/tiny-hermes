@@ -256,7 +256,7 @@ Commit `pyproject.toml`, `uv.lock`, config, compose, env example, adapter, and t
 - Modify: `packages/backend/tests/integration/conftest.py`
 - Create: `packages/backend/tests/integration/session_workspace/test_migration.py`
 
-- [ ] **Step 1: Write schema tests before the migration**
+- [x] **Step 1: Write schema tests before the migration**
 
 Inspect PostgreSQL, not only SQLAlchemy metadata. Assert every design §6.1–6.4 column, immutable revision metadata, enum/check constraints, composite tenant foreign keys, unique `staging_prefix` and `candidate_index_key`, and these Run fields:
 
@@ -267,7 +267,7 @@ workspace_cleanup_sandbox_id nullable UUID
 
 Assert `object_uploads.status` accepts only `uploading`, `finalizing`, `ready`, `committed`, `abandoned`, `expired`; `kind` accepts only `workspace`, `artifact`; and cleanup target accepts only `paused_limit`, `queued`, `failed_conflict`.
 
-- [ ] **Step 2: Run the new test and observe the missing revision**
+- [x] **Step 2: Run the new test and observe the missing revision**
 
 ```powershell
 $env:DATABASE_URL='postgresql+asyncpg://tiny_hermes:local-only@localhost:5432/tiny_hermes_test'
@@ -277,11 +277,11 @@ uv run --no-sync pytest packages/backend/tests/integration/session_workspace/tes
 
 Expected: fails because the tables/columns do not exist.
 
-- [ ] **Step 3: Implement tables and reversible migration**
+- [x] **Step 3: Implement tables and reversible migration**
 
 Use UUID primary keys, UTC timestamps, and explicit indexes for `workspace_id`, `session_id`, `run_id`, `status`, `expires_at`, and `cleanup_pending`. Register both table modules on `Base.metadata` before the integration fixture derives its `TRUNCATE` statement. Downgrade removes only revision `0007` objects and returns to `20260811_0006_sandbox_event`.
 
-- [ ] **Step 4: Verify upgrade, downgrade, upgrade and commit**
+- [x] **Step 4: Verify upgrade, downgrade, upgrade and commit**
 
 Run:
 
@@ -295,6 +295,14 @@ uv run --no-sync alembic upgrade head
 Expected: all commands exit 0.
 
 Commit as `feat: add workspace and artifact storage schema`.
+
+> Verified 2026-08-13 against real PostgreSQL 17.6: at revision 0006 all eight
+> schema tests fail with `NoSuchTableError` (the right reason); at head all
+> pass; downgrade to 0006 and re-upgrade both exit 0. The Task 2 MinIO tests
+> also ran for real here (6 passed), and the full integration suite (275) and
+> unit suite (456) are green. The code itself landed in the preceding `wip:`
+> commit made to hand work over from the development machine; this commit
+> records the verification.
 
 ### Task 4: ObjectUpload lifecycle and final-object protection
 
