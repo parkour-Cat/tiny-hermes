@@ -63,8 +63,8 @@ requires a crash in teardown's last step.
 
 ### Task 1: Plan
 
-- [ ] **Step 1: Write this plan**
-- [ ] **Step 2: Commit** `docs: plan M1 phase 4D acceptance, deploy, Feishu record`
+- [x] **Step 1: Write this plan**
+- [x] **Step 2: Commit** `docs: plan M1 phase 4D acceptance, deploy, Feishu record`
 
 ### Task 2: Generated local secrets
 
@@ -75,9 +75,9 @@ Emits `SESSION_COOKIE_SECRET`, `BOOTSTRAP_TOKEN` (≥32 random characters) and
 without `--force`. `docker compose … config` with the generated file must
 interpolate those values onto `x-app-env` (not onto the Controller).
 
-- [ ] **Step 1: Failing tests** (length, KEK decode, no overwrite, compose config)
-- [ ] **Step 2: Implement**
-- [ ] **Step 3: Commit** `feat: generate local compose secrets instead of the zeroes`
+- [x] **Step 1: Failing tests** (length, KEK decode, no overwrite, compose config)
+- [x] **Step 2: Implement**
+- [x] **Step 3: Commit** `feat: generate local compose secrets instead of the zeroes`
 
 ### Task 3: Upgrade-from-previous-migration CI
 
@@ -86,8 +86,8 @@ interpolate those values onto `x-app-env` (not onto the Controller).
 Head is `20260813_0011`. After `alembic check`, add downgrade/upgrade for
 `20260813_0010` and `20260813_0009` before the existing 0008…base chain.
 
-- [ ] **Step 1: Add the two steps**
-- [ ] **Step 2: Commit** `ci: round-trip the 4A and 4C migrations`
+- [x] **Step 1: Add the two steps**
+- [x] **Step 2: Commit** `ci: round-trip the 4A and 4C migrations`
 
 ### Task 4: Operator path
 
@@ -98,8 +98,8 @@ two workspaces, creates and publishes an Agent from the console, sends from
 Playground, mints an API Key, and calls Chat Completions. Reuse existing
 PowerShell snippets; do not invent a second protocol.
 
-- [ ] **Step 1: Write the walkthrough**
-- [ ] **Step 2: Commit** `docs: an operator path from bootstrap to completions`
+- [x] **Step 1: Write the walkthrough**
+- [x] **Step 2: Commit** `docs: an operator path from bootstrap to completions`
 
 ### Task 5: Benchmark script
 
@@ -111,9 +111,9 @@ CPU, RSS, sha. `--shape-only` exits nonzero when the host is not 8 vCPU /
 ≥16 GiB. Live gates need Compose; they print raw numbers and fail closed.
 Never include a path that lowers a threshold.
 
-- [ ] **Step 1: Failing tests** (thresholds, percentiles, shape refusal, report shape)
-- [ ] **Step 2: Implement the script**
-- [ ] **Step 3: Commit** `feat: a benchmark that cannot pass by editing the gate`
+- [x] **Step 1: Failing tests** (thresholds, percentiles, shape refusal, report shape)
+- [x] **Step 2: Implement the script**
+- [x] **Step 3: Commit** `feat: a benchmark that cannot pass by editing the gate`
 
 ### Task 6: Feishu laboratory note
 
@@ -123,8 +123,8 @@ No adapter. Columns: measured / unconfirmed / Webhook-fallback decision.
 Sources: official long-connection docs. This environment did not open a
 Feishu WebSocket.
 
-- [ ] **Step 1: Write the note from official docs, mark what was not measured**
-- [ ] **Step 2: Commit** `docs: record Feishu long-connection facts without an adapter`
+- [x] **Step 1: Write the note from official docs, mark what was not measured**
+- [x] **Step 2: Commit** `docs: record Feishu long-connection facts without an adapter`
 
 ### Task 7: §27.1 closure record
 
@@ -134,8 +134,8 @@ Thirteen rows. Link 2A–4C verification and the tests that still run. Scenario
 11 is the Feishu note. Scenario 13 is the benchmark script: dated, not
 claimed green on this host.
 
-- [ ] **Step 1: Write the thirteen-row record**
-- [ ] **Step 2: Commit** `docs: map the thirteen M1 scenarios to evidence`
+- [x] **Step 1: Write the thirteen-row record**
+- [x] **Step 2: Commit** `docs: map the thirteen M1 scenarios to evidence`
 
 ### Task 8: 4D verification and public description
 
@@ -145,8 +145,8 @@ claimed green on this host.
 Public description remains “单 Agent 安全运行骨架”. Do not claim 0.1
 Technical Preview. Volume GC leftover named.
 
-- [ ] **Step 1: Run checks; write what they produced**
-- [ ] **Step 2: Commit** `docs: record what 4D acceptance could and could not prove`
+- [x] **Step 1: Run checks; write what they produced**
+- [x] **Step 2: Commit** `docs: record what 4D acceptance could and could not prove`
 
 ## 3. Explicit non-goals
 
@@ -159,9 +159,9 @@ Technical Preview. Volume GC leftover named.
 
 ## 4. Exit criteria
 
-- [ ] §27.1 scenarios 1–13 have automated or dated evidence.
-- [ ] `scripts/benchmark_m1.py` pins §24.1; shape mismatch cannot report pass.
-- [ ] Generated secrets interpolate into Compose; Controller still has no KEK.
-- [ ] CI round-trips 0010 and 0009.
-- [ ] Feishu note has measured / unconfirmed / Webhook-fallback columns.
-- [ ] Public description is “单 Agent 安全运行骨架”.
+- [x] §27.1 scenarios 1–13 have automated or dated evidence.
+- [x] `scripts/benchmark_m1.py` pins §24.1; shape mismatch cannot report pass.
+- [x] Generated secrets interpolate into Compose; Controller still has no KEK.
+- [x] CI round-trips 0010 and 0009.
+- [x] Feishu note has measured / unconfirmed / Webhook-fallback columns.
+- [x] Public description is “单 Agent 安全运行骨架”.
