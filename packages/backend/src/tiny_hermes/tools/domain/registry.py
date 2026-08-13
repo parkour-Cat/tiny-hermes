@@ -19,11 +19,18 @@ from tiny_hermes.sandbox.domain.command import (
     ALLOWED_WORKING_DIRECTORIES,
     SandboxCommand,
 )
+from tiny_hermes.tools.domain.files import (
+    FILE_ARGUMENTS,
+    FileArgumentsInvalid,
+    FilePathRefused,
+    changes_workspace,
+    file_tool_command,
+)
 
 #: Every tool this platform implements. An AgentVersion may bind a subset;
 #: publishing refuses a name outside it, so a Run cannot fail on its first call
 #: for a reason its author could have been told about.
-IMPLEMENTED_TOOLS = ("shell.exec",)
+IMPLEMENTED_TOOLS = ("shell.exec", "file.list", "file.read", "file.write")
 
 DEFAULT_WORKING_DIRECTORY = "/workspace/data"
 DEFAULT_TIMEOUT_SECONDS = 60
@@ -69,6 +76,59 @@ SHELL_EXEC_SCHEMA: dict[str, Any] = {
 SHELL_EXEC_ARGUMENTS = frozenset({"command", "cwd", "timeout_seconds"})
 
 
+def _file_schema(
+    name: str, description: str, properties: dict[str, Any], required: list[str]
+) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+_PATH = {
+    "type": "string",
+    "description": "A path relative to /workspace/data. No absolute paths, no `..`.",
+}
+
+FILE_SCHEMAS: dict[str, dict[str, Any]] = {
+    "file.read": _file_schema(
+        "file.read",
+        "Read one file under /workspace/data. Output beyond the per-call byte "
+        "limit is cut and explicitly marked as truncated.",
+        {"path": _PATH},
+        ["path"],
+    ),
+    "file.write": _file_schema(
+        "file.write",
+        "Write a whole file under /workspace/data atomically, creating parent "
+        "directories as needed. Refused when the content is over 16 MiB or the "
+        "workspace would exceed its committed quota.",
+        {"path": _PATH, "content": {"type": "string", "description": "The full new content."}},
+        ["path", "content"],
+    ),
+    "file.list": _file_schema(
+        "file.list",
+        "List one directory under /workspace/data, paginated and never "
+        "recursive. Entries come back in stable bytewise order.",
+        {
+            "path": {**_PATH, "description": _PATH["description"] + " Defaults to the root."},
+            "offset": {"type": "integer", "description": "Entries to skip. Defaults to 0."},
+            "limit": {"type": "integer", "description": "At most 1000. Defaults to 1000."},
+        },
+        [],
+    ),
+}
+
+
 class RefusalReason(StrEnum):
     NOT_AUTHORIZED = "tool_not_authorized"
     UNKNOWN_TOOL = "unknown_tool"
@@ -97,6 +157,9 @@ class AuthorizedCall:
     call_id: str
     name: str
     command: SandboxCommand
+    #: Whether this call may have altered /workspace/data — the fact the
+    #: Worker's checkpoint decision reads (design §8).
+    changes_workspace: bool
 
 
 def schemas_for(bound: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -106,7 +169,13 @@ def schemas_for(bound: tuple[str, ...]) -> list[dict[str, Any]]:
     of `shell.exec` cannot correctly ask for it — which is worth having even
     though step two is what enforces it.
     """
-    return [SHELL_EXEC_SCHEMA for name in bound if name == "shell.exec"]
+    schemas: list[dict[str, Any]] = []
+    for name in bound:
+        if name == "shell.exec":
+            schemas.append(SHELL_EXEC_SCHEMA)
+        elif name in FILE_SCHEMAS:
+            schemas.append(FILE_SCHEMAS[name])
+    return schemas
 
 
 def authorize(*, bound: tuple[str, ...], call: ToolCallBlock) -> AuthorizedCall:
@@ -117,9 +186,34 @@ def authorize(*, bound: tuple[str, ...], call: ToolCallBlock) -> AuthorizedCall:
         # Nothing about the call may be wrong except this. The schema list the
         # model was handed is not a control; this is.
         raise ToolRefused(RefusalReason.NOT_AUTHORIZED, call.call_id, call.name)
+    if call.name in FILE_ARGUMENTS:
+        return AuthorizedCall(
+            call_id=call.call_id,
+            name=call.name,
+            command=_file_command(call),
+            changes_workspace=changes_workspace(call.name),
+        )
     return AuthorizedCall(
-        call_id=call.call_id, name=call.name, command=_shell_command(call)
+        call_id=call.call_id,
+        name=call.name,
+        command=_shell_command(call),
+        changes_workspace=True,
     )
+
+
+def _file_command(call: ToolCallBlock) -> SandboxCommand:
+    try:
+        return file_tool_command(call)
+    except FilePathRefused as hostile:
+        # The same refusal every hostile path gets, with no shape-specific
+        # detail an attacker could sort probes by.
+        raise ToolRefused(
+            RefusalReason.NOT_AUTHORIZED, call.call_id, "path"
+        ) from hostile
+    except FileArgumentsInvalid as invalid:
+        raise ToolRefused(
+            RefusalReason.INVALID_ARGUMENTS, call.call_id, invalid.detail
+        ) from invalid
 
 
 def _shell_command(call: ToolCallBlock) -> SandboxCommand:

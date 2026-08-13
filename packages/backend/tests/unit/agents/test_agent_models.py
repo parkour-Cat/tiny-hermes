@@ -32,8 +32,10 @@ def test_agent_spec_has_stable_normalized_document_and_hash() -> None:
 
 
 def test_phase_two_rejects_tools_and_non_deterministic_provider() -> None:
+    # `file.read` was the example here until phase 3C implemented it; the rule
+    # under test is "no unimplemented tool", not any one name.
     with pytest.raises(ValidationError):
-        AgentSpec.model_validate({**valid_spec(), "tools": ["file.read"]})
+        AgentSpec.model_validate({**valid_spec(), "tools": ["web.search"]})
     with pytest.raises(ValidationError):
         AgentSpec.model_validate(
             {

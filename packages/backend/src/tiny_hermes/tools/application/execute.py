@@ -17,6 +17,7 @@ from uuid import UUID
 from tiny_hermes.runs.domain.models import ToolCallBlock, ToolResultBlock
 from tiny_hermes.sandbox.application.controller import SandboxRefused
 from tiny_hermes.sandbox.domain.command import CommandResult, SandboxCommand
+from tiny_hermes.tools.domain.files import FILE_ARGUMENTS, TRUNCATED_EXIT
 from tiny_hermes.tools.domain.registry import ToolRefused, authorize
 
 
@@ -73,11 +74,41 @@ async def run_tool_call(
             failed=False,
         )
 
+    if authorized.name in FILE_ARGUMENTS:
+        return _file_result(call.call_id, result)
+
     return ToolResultBlock(
         call_id=call.call_id,
         output=result.output,
         exit_code=result.exit_code,
         failed=False,
+    )
+
+
+def _file_result(call_id: str, result: CommandResult) -> ToolResultBlock:
+    """The helper's exit codes, translated into answers a model can act on."""
+    if result.exit_code == 0:
+        return ToolResultBlock(
+            call_id=call_id, output=result.output, exit_code=0, failed=False
+        )
+    if result.exit_code == TRUNCATED_EXIT:
+        # The bytes are a prefix, and the model is told so — a shorter answer
+        # it could not tell from a complete one would be a quiet lie.
+        return ToolResultBlock(
+            call_id=call_id,
+            output=f"{result.output}\n[truncated at the per-call byte limit]",
+            exit_code=0,
+            failed=False,
+        )
+    if result.exit_code == 1:
+        # The helper refused the input outright; same vocabulary as the
+        # registry's own refusals.
+        return _refusal(call_id, "tool_not_authorized", "")
+    return ToolResultBlock(
+        call_id=call_id,
+        output=result.output or "the file operation failed",
+        exit_code=result.exit_code,
+        failed=True,
     )
 
 

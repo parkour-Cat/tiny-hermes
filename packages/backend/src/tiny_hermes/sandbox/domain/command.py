@@ -22,6 +22,9 @@ class SandboxCommand:
     #: a fact the model is told rather than a shorter answer it cannot tell from
     #: a complete one.
     output_limit: int
+    #: Bytes fed to the process before its stdin closes. `file.write` bodies
+    #: travel here so no content ever rides a command line or a shell.
+    stdin: bytes | None = None
 
 
 @dataclass(frozen=True)

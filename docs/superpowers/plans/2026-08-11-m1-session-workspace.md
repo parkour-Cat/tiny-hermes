@@ -877,7 +877,7 @@ Unit on Windows; integration with Postgres + MinIO up. Commit as
 - Modify: `packages/backend/src/tiny_hermes/tools/application/execute.py`
 - Create: `packages/backend/tests/unit/tools/test_file_tools.py`
 
-- [ ] **Step 1: Write the failing tool tests**
+- [x] **Step 1: Write the failing tool tests**
 
 ```python
 @pytest.mark.parametrize("path", ["/etc/passwd", "../x", "a/../../x", "a\x00b"])
@@ -894,7 +894,7 @@ def test_schemas_advertise_only_bound_tools() -> None:
     assert [s["function"]["name"] for s in schemas_for(("file.read", "shell.exec"))] == ["file.read", "shell.exec"]
 ```
 
-- [ ] **Step 2: Run and fail**
+- [x] **Step 2: Run and fail**
 
 `uv run --no-sync pytest packages/backend/tests/unit/tools/test_file_tools.py -q`.
 
@@ -923,10 +923,16 @@ persisted as success**; the Worker hands it to the committer, which is what
 makes "a write does not return success until §8 commits" structural rather than
 polite.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Focused tests plus the existing `tests/unit/tools` suite. Commit as
 `feat: let an agent touch files, three verbs at a time`.
+
+> Implementation notes, 2026-08-13: `SandboxCommand` gained `stdin` — the
+> write body rides it, never an argv or a shell. Engine and socket-transport
+> support for stdin lands with Task 12's wiring, where the integration tests
+> live. One 3A-era agents test used `file.read` as its example of an
+> unimplemented tool; the example moved to `web.search`, the rule stayed.
 
 ### Task 12: The Worker restores, checkpoints, rolls back, and pauses honestly
 
