@@ -80,6 +80,15 @@ def test_the_image_allowlist_is_empty_by_default() -> None:
     assert "SANDBOX_IMAGE_DIGEST: ${SANDBOX_IMAGE_DIGEST:-}" in text
 
 
+def test_the_controller_does_not_receive_the_kek() -> None:
+    """The Controller holds Docker. It must not also hold the wrapping key."""
+    document = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    controller_env = services()["controller"]["environment"]
+    app = document["x-app-env"]
+    assert "TINY_HERMES_KEK" not in controller_env
+    assert "TINY_HERMES_KEK" in app
+
+
 def test_the_controller_is_the_platforms_own_image_not_a_docker_cli() -> None:
     """It talks to the daemon through the API from Python.
 

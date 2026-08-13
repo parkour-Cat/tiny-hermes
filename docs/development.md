@@ -357,12 +357,13 @@ watching a Run no longer needs a shell. Sign in at
 | `/workspaces/:workspaceId/runs/:runId` | One Run: summary, budget, transcript, tools, files, folded event payloads, and the actions the server offers. |
 | `/workspaces/:workspaceId/members` | Invite an existing user by email; change role; remove. Unknown email is an error, not a signup. |
 | `/workspaces/:workspaceId/api-keys` | Service accounts and API Keys. Plaintext is shown once. |
-| `/workspaces/:workspaceId/model-endpoints` | Selectable endpoints. Platform administrators also register, check, enable, and disable; detail shows `base_url` and `credential_available`, never the env value. |
+| `/workspaces/:workspaceId/model-endpoints` | Selectable endpoints. Platform administrators also register, check, enable, and disable; detail shows `base_url` and `credential_available`, never the credential. |
+| `/workspaces/:workspaceId/secrets` | Create a Secret (plaintext is typed here only). The list shows name, scope, mask, and status. Platform administrators can rewrap. |
 
 The header carries a language switcher (default `zh-CN`, persisted as
 `tiny-hermes-locale`) and a light/dark toggle (persisted as `tiny-hermes-theme`).
 Playground is reached from an Agent, not from a top-level nav item. There is no
-Approvals, Usage, task-tree, skills, Feishu, or Secrets page in this slice.
+Approvals, Usage, task-tree, skills, or Feishu page.
 
 The Workspace is a route parameter rather than a stored selection, so a reload or
 a shared link reopens the same scope, and the console sends the `X-Workspace-Id`
@@ -384,8 +385,7 @@ test; nothing in the console relies on it.
 
 **What this console still does not show.** Parent/child task trees, context and
 compaction events, and token/cost accounting remain M2/M3. Files (产物) on Run
-Detail and Playground list Artifacts the platform already stored. Secrets wait
-for slice 4C; a page that cannot store a Secret is not shipped.
+Detail and Playground list Artifacts the platform already stored.
 
 ## Playground
 
@@ -400,10 +400,11 @@ opens an unrelated persistent Session.
 Files download through `GET /api/v1/artifacts/{id}/content` with
 `X-Workspace-Id`; a bare link cannot send that header.
 
-Members, API Keys, and model endpoints are listed in the header nav of a
+Members, API Keys, Secrets, and model endpoints are listed in the header nav of a
 workspace. Inviting a member requires an email that already belongs to a User.
 An API Key's plaintext appears once in a dismissible panel; later listings show
-only the prefix.
+only the prefix. A Secret's plaintext is typed on create and is never returned
+by GET; the list shows a mask.
 
 ## Model endpoints
 
@@ -416,18 +417,22 @@ needs a Run whose outcome is known.
 `model_endpoints` is platform-scoped: a workspace administrator chooses among the
 endpoints that exist and cannot register one.
 
-**The platform stores no credential.** `credential_ref` names an environment
-variable the deployment provides; the value is read when a call is made and
-written nowhere — not to the database, not to a log, not to any response. This is
-a real limitation with a real cost: a model key is deployment configuration
-rather than workspace data, and rotating one is a restart. It is preferred to the
-alternative available in this slice, because a table holding plaintext, or
-ciphertext under a key with no rotation path, reads in a review as a control
-while not being one. Secret storage with a rewrappable KEK is phase four.
+**The platform stores no credential on the endpoint.** `credential_ref` names
+either an environment variable the deployment provides, or the id of an active
+Secret. The value is read when a call is made and written nowhere — not to a
+log, not to any response. An env-var name still works (overlap with 3A). A
+Secret is ciphertext under a wrapped DEK; rotating `TINY_HERMES_KEK` rewraps
+DEKs and does not re-encrypt every payload.
 
-Set the variable first, then register the endpoint. Registration refuses a
-`credential_ref` the process does not define, so a broken configuration is found
-by the administrator rather than inside somebody's Run:
+Local Compose still passes `TINY_HERMES_MODEL_KEY_EXAMPLE` so an endpoint
+registered against that name keeps resolving. To exercise rewrap, create a
+platform Secret from `/workspaces/:id/secrets` (or `POST /api/v1/secrets` with
+`scope: platform`) and register an endpoint whose `credential_ref` is that
+Secret's id.
+
+Set the variable *or* store the Secret first, then register the endpoint.
+Registration refuses a `credential_ref` that is neither a defined environment
+variable nor an active Secret id:
 
 ```powershell
 $env:TINY_HERMES_MODEL_KEY_ACME = "your endpoint key"
@@ -448,6 +453,23 @@ The check makes one real request through the same guarded client a Run uses, and
 answers with a verdict and a duration. It never reports the endpoint's status or
 body: a `base_url` mistyped into an internal service would otherwise make that
 route a way to read it.
+
+### Secrets and KEK rewrap
+
+`TINY_HERMES_KEK` is 32 bytes of standard base64. API `/health/ready` reports
+`kek: current` or `kek: missing` and is 503 when missing. A Worker still starts
+without it; unwrap at call time fails that call.
+
+Create a platform Secret (console Secrets page, or `POST /api/v1/secrets` with
+`scope: platform`). The response has a mask and never plaintext. `GET /api/v1/secrets`
+lists names, scope, mask, status, and timestamps.
+
+To rotate the KEK: set `TINY_HERMES_PREVIOUS_KEK` / `TINY_HERMES_PREVIOUS_KEK_ID`
+to the pair that wrapped existing rows, set `TINY_HERMES_KEK` / `TINY_HERMES_KEK_ID`
+to the new pair, restart the API, then `POST /api/v1/secrets/rewrap` as a platform
+administrator. The response is `{ processed, remaining, current_key_id }`.
+Interrupt and rerun; rows already on the new `key_id` are skipped. A database
+backup without the matching KEK cannot decrypt.
 
 `usage_quality` is the administrator's declaration of whether the endpoint
 reports Token counts. `provider` means it does. `unavailable` means it does not,
@@ -683,17 +705,20 @@ This permanently deletes the local PostgreSQL and MinIO data in those two volume
 - The values in Compose are for an isolated local machine only. An enterprise deployment must use generated secrets and protected secret delivery.
 - The first successful bootstrap closes the bootstrap endpoint permanently; changing the token does not reopen it.
 - Local PostgreSQL and MinIO passwords are deliberately development-only and must not be copied into a production manifest.
-- Environment variables can be visible through process and container inspection. Future KEK support will use protected file mounts or an external key manager instead of ordinary environment variables.
-- M1 through 4A provides Agent publication, Run execution, model endpoints,
+- Environment variables can be visible through process and container inspection. Local Compose sets `TINY_HERMES_KEK` for API ready; a production deployment must mount the KEK from a protected file or KMS.
+- M1 through 4C provides Agent publication, Run execution, model endpoints,
   platform-owned `file.*` and `shell.exec` in a Docker sandbox, persistent
-  `/workspace/data`, tenant-scoped Artifacts, ServiceAccount API Keys, and
-  inbound Chat Completions. Approval queues, secret envelopes, and the
-  Playground console are later slices; no tool may execute on the API, Worker,
+  `/workspace/data`, tenant-scoped Artifacts, ServiceAccount API Keys,
+  inbound Chat Completions, the Playground console, and Secret envelopes.
+  Approval queues remain later slices; no tool may execute on the API, Worker,
   or host directly.
 - Agent personality text is never echoed in an error response, and a resource in another workspace always answers with a generic `404`.
 - A wake-up message carries a workspace ID and a Run ID and nothing else. Redis never sees a Run's input, an Agent's personality, or any other content.
 - The event stream selects its workspace through a query parameter because `EventSource` cannot send a header. Authorization is still the session cookie, and a Run in another workspace answers `404` whatever the parameter says.
-- Model endpoint credentials are deployment environment variables, never database rows. The platform stores the variable's name and reads its value at call time; no route returns either the value or the name. Rotating a key is a restart until phase four adds Secret storage.
+- Model endpoint credentials are an environment variable name **or** a Secret
+  id. The platform never returns plaintext after create. API `/health/ready`
+  is 503 without a valid `TINY_HERMES_KEK`; a Worker still boots and fails the
+  call if unwrap is needed.
 - Everything that leaves the process goes through `tiny_hermes.outbound`, and `ruff` fails the build on a raw HTTP client or socket built anywhere else. The check is not advisory.
 - A refused outbound address is reported to a workspace member as a code only. The resolved address goes to the audit trail, because a refusal that names an internal IP is a way to map the network the platform runs on.
 - The endpoint connectivity check reports a verdict and a duration, never the endpoint's status or body. A `base_url` mistyped into an internal service would otherwise turn that route into a way to read it.

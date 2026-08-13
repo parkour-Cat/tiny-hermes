@@ -39,9 +39,16 @@ x-app-env: &app-env
   <<: *base-env
   S3_ACCESS_KEY: ${S3_ACCESS_KEY:-tiny-hermes-local}
   S3_SECRET_KEY: ${S3_SECRET_KEY:-tiny-hermes-local-password}
-  # Model endpoint credentials are passed through by name. Each registered
-  # endpoint's `credential_ref` must match a variable the deployment sets;
-  # nothing is stored in the database.
+  # Envelope KEK. 32 zero bytes, standard base64 — local compose only.
+  # Generate a real one: python -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"
+  TINY_HERMES_KEK: ${TINY_HERMES_KEK:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+  TINY_HERMES_KEK_ID: ${TINY_HERMES_KEK_ID:-v1}
+  TINY_HERMES_PREVIOUS_KEK: ${TINY_HERMES_PREVIOUS_KEK:-}
+  TINY_HERMES_PREVIOUS_KEK_ID: ${TINY_HERMES_PREVIOUS_KEK_ID:-}
+  # Model endpoint credentials. `credential_ref` may name this variable *or*
+  # a Secret id created from the console. Compose keeps the env form so an
+  # endpoint registered before 4C still resolves. Create a platform Secret
+  # and point an endpoint at its id to exercise rewrap.
   TINY_HERMES_MODEL_KEY_EXAMPLE: ${TINY_HERMES_MODEL_KEY_EXAMPLE:-}
 
 services:
