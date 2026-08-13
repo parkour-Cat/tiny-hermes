@@ -64,6 +64,9 @@ WAKE_UP_ATTEMPTS = 3
 #: A held lease expiring (30s) plus a Scheduler interval (5s), plus room to be slow.
 RECOVERY_TIMEOUT = 120.0
 RUN_TIMEOUT = 180.0
+#: Statuses a Run will not leave. Waiting for `completed` while the Run is
+#: already `failed` must fail immediately — compose-e2e burned 300s polling.
+TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
 
 def compose(*arguments: str) -> None:
@@ -218,8 +221,14 @@ class Console:
         snapshot: dict[str, Any] = {}
         while time.monotonic() < deadline:
             snapshot = self.read(workspace, run)
-            if snapshot["status"] in wanted:
+            status = snapshot["status"]
+            if status in wanted:
                 return snapshot, time.monotonic() - started
+            if status in TERMINAL_STATUSES:
+                raise SystemExit(
+                    f"run {run} ended as {status!r}, "
+                    f"waiting for one of {list(wanted)}"
+                )
             time.sleep(0.1)
         raise SystemExit(
             f"run {run} stayed {snapshot.get('status')!r} for {timeout:.0f}s, "

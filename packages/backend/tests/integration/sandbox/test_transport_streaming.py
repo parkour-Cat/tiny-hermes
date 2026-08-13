@@ -245,3 +245,98 @@ async def test_a_five_thousand_entry_scan_survives_the_socket(
     assert len(entries) == 5000
     assert entries[0].path == "tree/f0.bin"
     assert entries[-1].size == 65536
+
+
+async def test_progress_frames_keep_a_silent_stream_inside_the_idle_window(
+    tmp_path: Path,
+) -> None:
+    """Design §5.3: a legal silent exec is not killed by the 30s idle rule.
+
+    The workspace drill's ~100 MiB commit writes files and prints nothing.
+    After 4A routed `shell.exec` through frames, that silence used to look
+    like a dead stream. PROGRESS frames are the keep-alive the design named.
+    """
+
+    async def dispatch(action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        del action, payload
+        return {}
+
+    async def dispatch_stream(
+        action: str, payload: dict[str, Any], channel: ServerStream
+    ) -> dict[str, Any]:
+        del action, payload
+        await channel.start_send(total_limit=64)
+        stop = asyncio.Event()
+        heartbeat = asyncio.create_task(channel.keep_alive(stop, interval=0.05))
+        try:
+            await asyncio.sleep(0.3)
+        finally:
+            stop.set()
+            await heartbeat
+        await channel.finish_send()
+        return {
+            "exit_code": 0,
+            "timed_out": False,
+            "observed_bytes": 0,
+            "delivered_bytes": 0,
+            "truncated": False,
+        }
+
+    path = str(tmp_path / "controller.sock")
+    server = ControllerServer(
+        dispatch=dispatch, stream_dispatch=dispatch_stream, path=path
+    )
+    await server.start()
+    try:
+        received = bytearray()
+
+        async def sink(chunk: bytes) -> None:
+            received.extend(chunk)
+
+        # Shorter than the silence, longer than one heartbeat: without
+        # PROGRESS this call times out; with it, the stream finishes.
+        client = ControllerClient(path, timeout=0.12)
+        answer = await client.receive_stream(
+            "execute_stream", {"run_id": "r"}, sink, limit=64
+        )
+        assert answer["exit_code"] == 0
+        assert not received
+    finally:
+        await server.stop()
+
+
+async def test_a_silent_stream_without_progress_dies_inside_the_client_window(
+    tmp_path: Path,
+) -> None:
+    """The keep-alive is load-bearing: silence alone still trips the deadline."""
+
+    async def dispatch(action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        del action, payload
+        return {}
+
+    async def dispatch_stream(
+        action: str, payload: dict[str, Any], channel: ServerStream
+    ) -> dict[str, Any]:
+        del action, payload
+        await channel.start_send(total_limit=64)
+        await asyncio.sleep(0.3)
+        await channel.finish_send()
+        return {"exit_code": 0}
+
+    path = str(tmp_path / "controller.sock")
+    server = ControllerServer(
+        dispatch=dispatch, stream_dispatch=dispatch_stream, path=path
+    )
+    await server.start()
+    try:
+        client = ControllerClient(path, timeout=0.12)
+
+        async def sink(chunk: bytes) -> None:
+            del chunk
+
+        with pytest.raises(ControllerClient.Unreachable):
+            await client.receive_stream(
+                "execute_stream", {"run_id": "r"}, sink, limit=64
+            )
+    finally:
+        await server.stop()
