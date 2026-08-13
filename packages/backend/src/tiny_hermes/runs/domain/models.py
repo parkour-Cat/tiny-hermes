@@ -59,6 +59,10 @@ class RunSignal(StrEnum):
     INTERRUPTED = "interrupted"
     RECOVERY_APPROVED = "recovery_approved"
     RECOVERY_FAILED = "recovery_failed"
+    #: Design §9's one narrow door: an interrupted Run whose over-limit
+    #: rollback is recorded and whose sandbox and volume are confirmed gone
+    #: may become `paused(limit)`. The Scheduler is the only sender.
+    LIMIT_CLEANUP_CONFIRMED = "limit_cleanup_confirmed"
 
 
 class SessionMode(StrEnum):
@@ -137,6 +141,17 @@ class RunEventType(StrEnum):
     RUN_INTERRUPTED = "run_interrupted"
     RUN_RECOVERY_APPROVED = "run_recovery_approved"
     RUN_RECOVERY_FAILED = "run_recovery_failed"
+    RUN_LIMIT_CLEANUP_CONFIRMED = "run_limit_cleanup_confirmed"
+
+    # Workspace facts (design §8/§9), written explicitly like
+    # `sandbox_cache_reset`: each records something that happened to the
+    # Session's files rather than a state transition.
+    WORKSPACE_LIMIT_EXCEEDED = "workspace_limit_exceeded"
+    WORKSPACE_CONFLICT = "workspace_conflict"
+    WORKSPACE_CHECKPOINT_FAILED = "workspace_checkpoint_failed"
+    WORKSPACE_STORAGE_UNAVAILABLE = "workspace_storage_unavailable"
+    WORKSPACE_INTEGRITY_FAILED = "workspace_integrity_failed"
+    WORKSPACE_ENTRY_NOT_SUPPORTED = "workspace_entry_not_supported"
 
 
 def event_type_for(signal: RunSignal) -> RunEventType:

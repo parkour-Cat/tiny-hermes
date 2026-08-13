@@ -34,6 +34,10 @@ TRANSITIONS: dict[tuple[RunState, RunSignal], RunState] = {
     (RunState.INTERRUPTED, RunSignal.RECOVERY_APPROVED): RunState.QUEUED,
     (RunState.INTERRUPTED, RunSignal.RECOVERY_FAILED): RunState.FAILED,
     (RunState.INTERRUPTED, RunSignal.CANCEL_REQUESTED): RunState.CANCELLED,
+    # Design §9's one narrow addition: only after the Scheduler confirmed the
+    # over-limit sandbox and volume are gone, and only with the recorded
+    # reason. The store-level guard checks the cleanup-intent columns too.
+    (RunState.INTERRUPTED, RunSignal.LIMIT_CLEANUP_CONFIRMED): RunState.PAUSED,
 }
 
 PAUSE_REASONS: dict[RunSignal, frozenset[PauseReason]] = {
@@ -60,6 +64,9 @@ PAUSE_REASONS: dict[RunSignal, frozenset[PauseReason]] = {
             PauseReason.SYSTEM,
         }
     ),
+    # Exactly one reason may pass this door; anything else is a caller
+    # inventing a state the design does not have.
+    RunSignal.LIMIT_CLEANUP_CONFIRMED: frozenset({PauseReason.LIMIT}),
 }
 
 RESUMING_SIGNALS = frozenset(

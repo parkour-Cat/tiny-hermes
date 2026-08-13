@@ -898,7 +898,7 @@ def test_schemas_advertise_only_bound_tools() -> None:
 
 `uv run --no-sync pytest packages/backend/tests/unit/tools/test_file_tools.py -q`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `IMPLEMENTED_TOOLS` becomes `("shell.exec", "file.list", "file.read",
 "file.write")` with one schema each (relative `path`; `content` for write;
