@@ -90,19 +90,34 @@ to tighten.
 
 ## 5. CI evidence
 
-The full-suite run for this slice lives on the branch's Actions history
-(`ci` workflow, branch `m1-sandbox`). `backend-integration` runs every test
-above against service containers, and `compose-e2e` runs the boundary
-assertions and both drills.
+Green full-suite run for the slice, including the quota drill:
 
-A later Actions run (`31693609570`) showed the quota drill hanging after the
-checkpoint itself was already correct (`status=limit_exceeded`,
-`total_bytes=12582916`, quota 8 MiB). The Worker had recorded `INTERRUPTED`
-(releasing the lease) and then called `destroy`, which the Controller refused
-as `lease_invalid`. The drill treated that staging state as the outcome and
-opened the SSE history of a non-terminal Run, which never closes. The Worker
-now reclaims with the no-lease `cleanup` action after the rollback
-transaction, and the drill waits only for `paused` / `completed` / `failed`.
+https://github.com/parkour-Cat/tiny-hermes/actions/runs/31696930718
+(commit `e625231`, `ci` on `m1-sandbox`; the matching pull-request run is
+https://github.com/parkour-Cat/tiny-hermes/actions/runs/31696934512)
+
+`backend-unit`, `backend-integration`, `web`, and `compose-e2e` all
+succeeded. `compose-e2e` asserted the credential and Docker-socket
+boundaries, Playwright, the restart drill, and both workspace drills:
+
+| Gate | Result |
+|---|---|
+| crash persistence | run 1 recovered in 28.9s; run 2 completed |
+| tenant isolation | probe completed |
+| 1 MiB commits | 12 runs, p50 0.71s, p95 0.77s |
+| ~100 MiB / 501 files | 10.2s, worker RSS 157 MiB |
+| next Run sees the large commit | completed in 3.5s |
+| over-quota | `paused(limit)` in 0.6s; resume completed; old revision kept `keep.txt` and dropped `big.bin` |
+| leftovers | 0 containers, 0 volumes |
+
+A prior run (`31693609570`) hung the quota drill after the checkpoint itself
+was already correct (`status=limit_exceeded`, `total_bytes=12582916`, quota
+8 MiB). The Worker had recorded `INTERRUPTED` (releasing the lease) and then
+called `destroy`, which the Controller refused as `lease_invalid`. The drill
+treated that staging state as the outcome and opened the SSE history of a
+non-terminal Run, which never closes. `e625231` reclaims with the no-lease
+`cleanup` action after the rollback transaction, and the drill waits only
+for `paused` / `completed` / `failed`.
 
 ## 6. Standing limitations, stated plainly
 
