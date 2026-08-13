@@ -415,6 +415,21 @@ container is a short-lived place for a Run to execute a command. It is **not** a
 general Docker service, a long-lived development machine, or persistent file
 storage.
 
+Phase 3C adds the persistence the container itself deliberately lacks: a
+Session's `/workspace/data` is checkpointed after every write-capable tool
+round into immutable revisions in MinIO, restored into each fresh container
+before its first model call, and governed by `file.list` / `file.read` /
+`file.write` alongside `shell.exec`. Two facts are worth keeping straight:
+
+- `WORKSPACE_MAX_BYTES` and the object limit are a **checkpoint quota** — what
+  may become a committed revision — never a physical disk ceiling. A command
+  can temporarily exceed them while it runs; the frozen post-command scan is
+  what refuses to commit the excess and rolls that one step back.
+- The stack now requires `S3_ACCESS_KEY` / `S3_SECRET_KEY` (the compose file
+  defaults them for a local machine). The Controller deliberately runs with
+  both **empty**: the one process holding the Docker socket holds no
+  object-store credential, and CI asserts that in the running stack.
+
 Build the approved runtime image, read its immutable digest, and pass that
 digest to Compose. An empty `SANDBOX_IMAGE_DIGEST` approves no image and every
 tool-bound Run fails closed rather than using a tag or running on the host:
@@ -492,7 +507,15 @@ Remove-Item Env:DETERMINISTIC_MODEL_DELAY_MS
 Remove-Item Env:SANDBOX_IMAGE_DIGEST
 ```
 
-It signs in as the local administrator, publishes its own Agents, and runs four
+There is a second drill since phase 3C. `scripts/workspace_drill.py` proves the
+session workspace through the public API: a committed write survives killing
+the Worker, two Sessions cannot see each other's files, an over-quota command
+pauses the Run honestly and resume finds the preceding revision, and nothing
+labelled `tiny-hermes.run` — container or volume — outlives the drill. Run it
+twice, once as-is and once with `WORKSPACE_MAX_BYTES=8388608` and
+`--phase quota` for the quota scenario; CI does exactly that in `compose-e2e`.
+
+The restart drill signs in as the local administrator, publishes its own Agents, and runs four
 scenarios: the Worker restarted mid-slice, Redis stopped and started again, and
 the Worker killed while holding a lease with the Scheduler restarted underneath
 it; finally it waits until `shell.exec` is visibly running inside a live sandbox,
