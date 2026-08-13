@@ -111,6 +111,10 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6399/0
         run: uv run pytest packages/backend/tests/integration -q
       - run: uv run alembic check
+      - run: uv run alembic downgrade 20260813_0010
+      - run: uv run alembic upgrade head
+      - run: uv run alembic downgrade 20260813_0009
+      - run: uv run alembic upgrade head
       - run: uv run alembic downgrade 20260811_0008
       - run: uv run alembic upgrade head
       - run: uv run alembic downgrade 20260811_0007
