@@ -370,7 +370,7 @@ total, a running SHA-256, and a 30-second idle rule. All of it is a pure codec
 plus a receiver state machine — no sockets — for the same reason
 `container_policy.py` is pure: the rules must be testable on Windows.
 
-- [ ] **Step 1: Write the failing codec and receiver tests**
+- [x] **Step 1: Write the failing codec and receiver tests**
 
 ```python
 def test_frames_round_trip_and_reject_oversize() -> None:
@@ -400,12 +400,12 @@ bytes beyond 8 MiB refused, `credit(n)` restoring the window, cancellation
 mid-stream, an END digest mismatch, and a declared total above the operation's
 server-side limit refused at START.
 
-- [ ] **Step 2: Prove the codec is missing**
+- [x] **Step 2: Prove the codec is missing**
 
 Run `uv run --no-sync pytest packages/backend/tests/unit/sandbox/test_stream_frames.py -q`.
 Expected: `ModuleNotFoundError` for `frames`.
 
-- [ ] **Step 3: Implement the codec and receiver**
+- [x] **Step 3: Implement the codec and receiver**
 
 Wire format per frame: 4-byte big-endian payload length, 1 type byte, 8-byte
 big-endian sequence, payload. Public names:
@@ -443,10 +443,16 @@ START's payload is JSON: `{"total_limit": int}`; END's is
 `{"total_bytes": int, "frame_count": int, "sha256": str}` and the receiver
 verifies all three. The receiver hashes DATA payloads as they arrive.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run the focused test file plus ruff and pyright over `sandbox/transport`.
 Commit as `feat: frame the controller's streaming subprotocol`.
+
+> Implementation notes, 2026-08-13: the refusal enum gained `TOTAL_MISMATCH`
+> (an END whose totals disagree with what arrived is a different lie than data
+> overrunning the declaration) and `MALFORMED`. `CREDIT_EXCEEDED` is the one
+> non-terminal refusal — it means "stop reading", and the same frame is
+> re-presented after `credit()`.
 
 ### Task 6: Cache becomes bounded tmpfs; the data volume gets labels
 
