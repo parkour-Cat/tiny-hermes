@@ -160,6 +160,31 @@ class AgentCatalog:
             )
         return await self._store.list_versions(workspace_id, agent_id)
 
+    async def get_version(
+        self,
+        workspace_id: UUID,
+        actor: Actor,
+        agent_id: UUID,
+        version_id: UUID,
+        request_id: str,
+    ) -> AgentVersion:
+        platform = await self._require_role(workspace_id, actor, READERS)
+        if await self._store.get_agent(workspace_id, agent_id) is None:
+            raise UnknownAgent
+        for version in await self._store.list_versions(workspace_id, agent_id):
+            if version.id == version_id:
+                if platform:
+                    await self._audit(
+                        workspace_id,
+                        actor,
+                        "agent.version_read",
+                        version.id,
+                        request_id,
+                        platform,
+                    )
+                return version
+        raise UnknownAgent
+
     async def published_alias(
         self, workspace_id: UUID, actor: Actor, alias: str, request_id: str
     ) -> tuple[Agent, AgentVersion]:
