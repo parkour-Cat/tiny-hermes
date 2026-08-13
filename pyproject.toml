@@ -12,6 +12,7 @@ dependencies = [
     # A runtime dependency since phase 3A: `tiny_hermes.outbound` is the one
     # place allowed to build an HTTP client, and it is production code.
     "httpx>=0.28.1",
+    "minio>=7.2.20",
     "pwdlib[argon2]>=0.3.0",
     "pydantic-settings>=2.15.0",
     "python-multipart>=0.0.32",

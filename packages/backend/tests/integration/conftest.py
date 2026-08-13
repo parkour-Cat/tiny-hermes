@@ -90,8 +90,10 @@ def settings(database_url: str, redis_url: str) -> Settings:
     return Settings(
         database_url=database_url,
         redis_url=redis_url,
-        s3_endpoint="http://localhost:9000",
-        s3_bucket="tiny-hermes",
+        s3_endpoint=os.environ.get("S3_ENDPOINT", "http://localhost:9000"),
+        s3_bucket=os.environ.get("S3_BUCKET", "tiny-hermes-test"),
+        s3_access_key=os.environ.get("S3_ACCESS_KEY", "tiny-hermes-local"),
+        s3_secret_key=os.environ.get("S3_SECRET_KEY", "tiny-hermes-local-password"),
         session_cookie_secret="test-cookie-secret-with-32-characters",
         bootstrap_token=BOOTSTRAP_TOKEN,
     )

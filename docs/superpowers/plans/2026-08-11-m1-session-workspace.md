@@ -193,7 +193,7 @@ git commit -m "feat: define session workspace manifests"
 - Modify: `.env.example`
 - Modify: `deploy/compose/compose.yaml`
 
-- [ ] **Step 1: Write failing settings and key-generation tests**
+- [x] **Step 1: Write failing settings and key-generation tests**
 
 Assert that Settings requires `s3_access_key` and `s3_secret_key`, validates every 3C ceiling from design §15, refuses a workspace transfer timeout above 1,800 seconds, and no adapter method accepts an arbitrary object key from an API/model request. The key builder must produce exactly:
 
@@ -204,13 +204,13 @@ workspaces/{workspace_id}/sessions/{session_id}/manifests/{revision_id}.json
 workspaces/{workspace_id}/runs/{run_id}/artifacts/{artifact_id}
 ```
 
-- [ ] **Step 2: Prove the unit tests fail**
+- [x] **Step 2: Prove the unit tests fail**
 
 Run `uv run --no-sync pytest packages/backend/tests/unit/session_workspace/test_object_keys.py packages/backend/tests/unit/shared/test_config.py -q`.
 
 Expected: missing settings and object adapter imports fail.
 
-- [ ] **Step 3: Add the SDK, settings, and adapter**
+- [x] **Step 3: Add the SDK, settings, and adapter**
 
 Add `minio>=7.2.18` as a runtime dependency and regenerate `uv.lock` with `uv lock`. `MinioObjectStore` constructs the MinIO client only in `minio_store.py` and wraps blocking SDK calls in `asyncio.to_thread`. Its port exposes bounded `put_stream`, `get_stream`, `stat`, `server_copy`, and `delete_many`; callers pass typed server-generated object references, not strings from requests.
 
@@ -223,7 +223,12 @@ S3_SECRET_KEY=tiny-hermes-local-password
 
 The integration test creates a unique prefix, uploads bytes in multiple chunks, verifies SHA-256 and size, copies server-side, streams them back, and deletes its own objects in `finally`.
 
-- [ ] **Step 4: Run MinIO integration and commit**
+- [x] **Step 4: Run MinIO integration and commit**
+
+> Executed 2026-08-13 without a reachable Docker daemon on the development
+> machine: the six MinIO integration tests skip with a named reason (verified),
+> and unit + ruff + pyright pass. The round-trip runs for real in CI (Task 15)
+> and on any machine with the compose MinIO up.
 
 Run:
 

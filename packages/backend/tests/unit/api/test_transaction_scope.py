@@ -19,6 +19,8 @@ def test_transaction_dependencies_finish_before_the_response_is_sent() -> None:
         redis_url="",
         s3_endpoint="http://minio:9000",
         s3_bucket="test",
+        s3_access_key="test-access-key",
+        s3_secret_key="test-secret-key",
         session_cookie_secret="s" * 32,
         bootstrap_token="b" * 32,
     )

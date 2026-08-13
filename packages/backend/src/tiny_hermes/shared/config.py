@@ -13,6 +13,12 @@ class Settings(BaseSettings):
     redis_url: str
     s3_endpoint: str
     s3_bucket: str
+    #: Required since phase 3C: the platform writes real objects, so a
+    #: deployment without credentials must fail at startup rather than at the
+    #: first checkpoint. The Controller process never receives these — it has
+    #: Docker and must not gain MinIO.
+    s3_access_key: str = Field(min_length=1)
+    s3_secret_key: str = Field(min_length=1)
     session_cookie_secret: str = Field(min_length=32)
     bootstrap_token: str = Field(min_length=32)
     session_ttl_seconds: int = Field(default=28_800, ge=300, le=604_800)
@@ -65,6 +71,27 @@ class Settings(BaseSettings):
     sandbox_start_attempts: int = Field(default=3, ge=1, le=5)
     shell_timeout_seconds: int = Field(default=60, ge=1, le=900)
     shell_output_bytes: int = Field(default=1_048_576, ge=1_024, le=10_485_760)
+
+    # The SessionWorkspace, design §15. `workspace_max_bytes` and
+    # `workspace_max_objects` are a **checkpoint quota** — content over them
+    # cannot become a committed revision. They are not a physical host-disk
+    # limit while an arbitrary command is still running, and no document may
+    # describe them as one.
+    workspace_max_bytes: int = Field(default=2_147_483_648, ge=1_048_576, le=1_099_511_627_776)
+    workspace_max_objects: int = Field(default=100_000, ge=100, le=10_000_000)
+    workspace_file_list_entries: int = Field(default=1_000, ge=10, le=10_000)
+    workspace_file_read_bytes: int = Field(default=1_048_576, ge=1_024, le=104_857_600)
+    workspace_file_write_bytes: int = Field(default=16_777_216, ge=1_024, le=1_073_741_824)
+    workspace_staging_ttl_seconds: int = Field(default=86_400, ge=3_600, le=604_800)
+    #: Total deadline for one workspace import or export. Execute has its own
+    #: command timeout and is not bounded by this, so a legal silent 15-minute
+    #: command is not killed by a transfer rule.
+    workspace_transfer_timeout_seconds: int = Field(default=300, ge=30, le=1_800)
+    controller_stream_frame_bytes: int = Field(default=1_048_576, ge=4_096, le=1_048_576)
+    controller_stream_credit_bytes: int = Field(default=8_388_608, ge=1_048_576, le=67_108_864)
+    controller_stream_idle_seconds: int = Field(default=30, ge=5, le=300)
+    artifact_max_bytes: int = Field(default=104_857_600, ge=1_048_576, le=1_073_741_824)
+    run_artifact_max_bytes: int = Field(default=524_288_000, ge=1_048_576, le=10_737_418_240)
 
     @property
     def approved_image_digests(self) -> tuple[str, ...]:
