@@ -18,7 +18,6 @@ from tiny_hermes.model_catalog.domain.models import (
     ModelEndpoint,
     ModelEndpointSpec,
 )
-from tiny_hermes.model_catalog.infrastructure import credentials
 from tiny_hermes.tenancy.domain.models import Actor
 
 CsrfHeader = Annotated[str | None, Header(alias="X-CSRF-Token")]
@@ -70,13 +69,15 @@ class EndpointDetail(EndpointSummary):
     credential_available: bool
 
     @classmethod
-    def detail_from(cls, endpoint: ModelEndpoint) -> "EndpointDetail":
+    def detail_from(
+        cls, endpoint: ModelEndpoint, credential_available: bool
+    ) -> "EndpointDetail":
         summary = EndpointSummary.from_domain(endpoint)
         return cls(
             **summary.model_dump(),
             kind=endpoint.spec.kind,
             base_url=endpoint.spec.base_url,
-            credential_available=credentials.is_available(endpoint.spec.credential_ref),
+            credential_available=credential_available,
         )
 
 
@@ -120,7 +121,10 @@ def model_endpoint_router(resources: ApplicationResources) -> APIRouter:
         session_token: SessionCookie = None,
     ) -> EndpointDetail:
         user = await authenticate_browser_user(auth, session_token)
-        return EndpointDetail.detail_from(await endpoints.read(_actor(user), endpoint_id))
+        endpoint = await endpoints.read(_actor(user), endpoint_id)
+        return EndpointDetail.detail_from(
+            endpoint, await endpoints.credential_available(endpoint)
+        )
 
     @router.post("", response_model=EndpointDetail, status_code=status.HTTP_201_CREATED)
     async def register_endpoint(  # pyright: ignore[reportUnusedFunction]
@@ -131,7 +135,10 @@ def model_endpoint_router(resources: ApplicationResources) -> APIRouter:
         csrf_token: CsrfHeader = None,
     ) -> EndpointDetail:
         user = await verify_browser_write(auth, session_token, csrf_token)
-        return EndpointDetail.detail_from(await endpoints.register(_actor(user), payload))
+        endpoint = await endpoints.register(_actor(user), payload)
+        return EndpointDetail.detail_from(
+            endpoint, await endpoints.credential_available(endpoint)
+        )
 
     @router.patch("/{endpoint_id}", response_model=EndpointDetail)
     async def update_status(  # pyright: ignore[reportUnusedFunction]
@@ -144,7 +151,9 @@ def model_endpoint_router(resources: ApplicationResources) -> APIRouter:
     ) -> EndpointDetail:
         user = await verify_browser_write(auth, session_token, csrf_token)
         updated = await endpoints.set_status(_actor(user), endpoint_id, payload.status)
-        return EndpointDetail.detail_from(updated)
+        return EndpointDetail.detail_from(
+            updated, await endpoints.credential_available(updated)
+        )
 
     @router.post("/{endpoint_id}/check", response_model=CheckResponse)
     async def check_endpoint(  # pyright: ignore[reportUnusedFunction]

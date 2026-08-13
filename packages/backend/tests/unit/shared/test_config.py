@@ -105,6 +105,11 @@ def test_workspace_settings_reject_values_outside_their_range(
         _settings(**{name: high + 1})
 
 
+def test_settings_default_kek_is_empty_so_a_worker_can_boot() -> None:
+    assert _settings().tiny_hermes_kek == ""
+    assert _settings().tiny_hermes_kek_id == "v1"
+
+
 def test_a_transfer_timeout_above_thirty_minutes_is_refused() -> None:
     """Named in design §15: 300 by default, configurable up to 1,800."""
     assert _settings(workspace_transfer_timeout_seconds=1_800) is not None

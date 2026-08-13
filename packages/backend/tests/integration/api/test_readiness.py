@@ -16,6 +16,7 @@ def _settings(database_url: str) -> Settings:
         s3_secret_key="test-secret-key",
         session_cookie_secret="test-cookie-secret-with-32-characters",
         bootstrap_token="test-bootstrap-token-with-32-characters",
+        tiny_hermes_kek="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
     )
 
 
@@ -28,7 +29,10 @@ def test_readiness_is_503_when_database_probe_fails() -> None:
         response = client.get("/health/ready")
 
     assert response.status_code == 503
-    assert response.json() == {"status": "not_ready", "checks": {"database": "failed"}}
+    assert response.json() == {
+        "status": "not_ready",
+        "checks": {"database": "failed", "kek": "current"},
+    }
 
 
 async def test_reachable_empty_schema_is_reported_as_migration_behind(
@@ -73,5 +77,16 @@ async def test_readiness_is_503_when_schema_is_behind(
     assert response.status_code == 503
     assert response.json() == {
         "status": "not_ready",
-        "checks": {"database": "ok", "migration": "behind"},
+        "checks": {"database": "ok", "migration": "behind", "kek": "current"},
     }
+
+
+def test_readiness_is_503_when_the_kek_is_missing(database_url: str) -> None:
+    settings = _settings(database_url).model_copy(update={"tiny_hermes_kek": ""})
+    with TestClient(create_app(settings=settings)) as client:
+        response = client.get("/health/ready")
+    assert response.status_code == 503
+    checks = response.json()["checks"]
+    assert checks["kek"] == "missing"
+    assert checks["database"] == "ok"
+    assert checks["migration"] == "current"

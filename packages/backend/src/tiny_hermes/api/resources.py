@@ -24,6 +24,7 @@ from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
 from tiny_hermes.secrets.application.service import KekSettings, SecretService
+from tiny_hermes.secrets.domain.envelope import optional_kek
 from tiny_hermes.secrets.infrastructure.sql_store import SqlSecretStore
 from tiny_hermes.session_workspace.infrastructure.minio_store import MinioObjectStore
 from tiny_hermes.shared.config import Settings, get_settings
@@ -135,7 +136,11 @@ class ApplicationResources:
     async def model_endpoints(self) -> AsyncGenerator[ModelEndpointService]:
         async with self.session_factory()() as session:
             try:
-                yield ModelEndpointService(SqlModelEndpointStore(session))
+                yield ModelEndpointService(
+                    SqlModelEndpointStore(session),
+                    SqlSecretStore(session),
+                    optional_kek(self.settings.tiny_hermes_kek),
+                )
             except BaseException:
                 await session.rollback()
                 raise

@@ -45,6 +45,16 @@ def decode_kek(value: str) -> bytes:
     return kek
 
 
+def optional_kek(value: str) -> bytes | None:
+    """Worker boot: an empty or invalid KEK is None, and unwrap fails per call."""
+    if not value:
+        return None
+    try:
+        return decode_kek(value)
+    except InvalidKek:
+        return None
+
+
 def seal(plaintext: bytes, kek: bytes, key_id: str) -> Envelope:
     if len(kek) != KEK_LENGTH:
         raise InvalidKek("a KEK is 32 bytes")

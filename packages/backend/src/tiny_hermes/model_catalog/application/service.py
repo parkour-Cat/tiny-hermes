@@ -20,9 +20,11 @@ from tiny_hermes.model_catalog.domain.models import (
     ModelEndpointSpec,
 )
 from tiny_hermes.model_catalog.infrastructure import credentials
+from tiny_hermes.model_catalog.infrastructure.credentials import CredentialResolver
 from tiny_hermes.model_catalog.ports.store import EndpointNameTaken, ModelEndpointStore
 from tiny_hermes.outbound.client import SafeOutboundClient
 from tiny_hermes.outbound.errors import OutboundError, OutboundRefused
+from tiny_hermes.secrets.ports.store import SecretStore
 from tiny_hermes.shared.errors import AppError
 from tiny_hermes.tenancy.domain.models import Actor
 
@@ -52,13 +54,20 @@ def _forbidden() -> AppError:
 
 
 class ModelEndpointService:
-    def __init__(self, store: ModelEndpointStore) -> None:
+    def __init__(
+        self,
+        store: ModelEndpointStore,
+        secrets: SecretStore | None = None,
+        kek: bytes | None = None,
+    ) -> None:
         self._store = store
+        self._secrets = secrets
+        self._kek = kek
 
     async def register(self, actor: Actor, spec: ModelEndpointSpec) -> ModelEndpoint:
         if not actor.is_platform_admin:
             raise _forbidden()
-        self._require_credential(spec)
+        await self._require_credential(spec)
         try:
             return await self._store.register(spec, created_by=actor.id)
         except EndpointNameTaken as clash:
@@ -74,7 +83,7 @@ class ModelEndpointService:
     ) -> ModelEndpoint:
         if not actor.is_platform_admin:
             raise _forbidden()
-        self._require_credential(spec)
+        await self._require_credential(spec)
         try:
             updated = await self._store.update(endpoint_id, spec)
         except EndpointNameTaken as clash:
@@ -121,7 +130,9 @@ class ModelEndpointService:
         endpoint = await self.read(actor, endpoint_id)
         started = time.monotonic()
         try:
-            token = credentials.resolve(endpoint.spec.credential_ref)
+            token = await CredentialResolver(self._secrets, self._kek).resolve(
+                endpoint.spec.credential_ref
+            )
         except credentials.CredentialMissing:
             return CheckResult(
                 reachable=False, elapsed_ms=self._since(started), refusal="credential_missing"
@@ -156,6 +167,11 @@ class ModelEndpointService:
         # a Run, and reporting its status would start to describe its body.
         return CheckResult(reachable=True, elapsed_ms=self._since(started))
 
+    async def credential_available(self, endpoint: ModelEndpoint) -> bool:
+        return await CredentialResolver(self._secrets, None).is_available(
+            endpoint.spec.credential_ref
+        )
+
     @staticmethod
     def _since(started: float) -> int:
         return int((time.monotonic() - started) * 1000)
@@ -169,15 +185,16 @@ class ModelEndpointService:
             detail="No such model endpoint exists.",
         )
 
-    @staticmethod
-    def _require_credential(spec: ModelEndpointSpec) -> None:
-        if not credentials.is_available(spec.credential_ref):
-            raise AppError(
-                code="credential_missing",
-                title="Credential missing",
-                status=422,
-                detail=(
-                    "The deployment does not define the environment variable this "
-                    "endpoint names. Set it before registering the endpoint."
-                ),
-            )
+    async def _require_credential(self, spec: ModelEndpointSpec) -> None:
+        if await CredentialResolver(self._secrets, None).is_available(spec.credential_ref):
+            return
+        raise AppError(
+            code="credential_missing",
+            title="Credential missing",
+            status=422,
+            detail=(
+                "The deployment does not define the environment variable this "
+                "endpoint names, and no active Secret has that id. Set the "
+                "variable or store the Secret before registering the endpoint."
+            ),
+        )

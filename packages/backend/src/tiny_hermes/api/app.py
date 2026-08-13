@@ -7,7 +7,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from tiny_hermes.agents.presentation.routes import agent_router
-from tiny_hermes.api.health import DatabaseReadinessProbe, ReadinessCheck, health_router
+from tiny_hermes.api.health import (
+    ApiReadinessProbe,
+    DatabaseReadinessProbe,
+    ReadinessCheck,
+    health_router,
+)
 from tiny_hermes.api.request_context import RequestIdMiddleware
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.artifacts.presentation.routes import artifact_router
@@ -47,8 +52,9 @@ def create_app(
     settings: Settings | None = None,
 ) -> FastAPI:
     resources = ApplicationResources(settings)
-    selected_readiness = readiness or DatabaseReadinessProbe(
-        resources.database_engine, _migration_head()
+    selected_readiness = readiness or ApiReadinessProbe(
+        DatabaseReadinessProbe(resources.database_engine, _migration_head()),
+        lambda: resources.settings.tiny_hermes_kek,
     )
 
     @asynccontextmanager
