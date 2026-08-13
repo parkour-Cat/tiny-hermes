@@ -300,6 +300,18 @@ def _percentile(values: list[float], wanted: float) -> float:
 
 
 def main() -> None:
+    # A drill that hangs is a finding with no report. The alarm turns it into
+    # a traceback pointing at the exact wait that never ended.
+    import signal  # noqa: PLC0415
+
+    def _deadline(signum: int, frame: object) -> None:
+        del signum, frame
+        raise TimeoutError("the drill's ten-minute deadline arrived mid-wait")
+
+    if hasattr(signal, "SIGALRM"):
+        signal.signal(signal.SIGALRM, _deadline)
+        signal.alarm(600)
+
     phase = "quota" if "--phase" in sys.argv and "quota" in sys.argv else "main"
     with httpx.Client(base_url=API, timeout=30.0) as client:
         console = WorkspaceConsole(client)

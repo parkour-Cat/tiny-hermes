@@ -201,19 +201,21 @@ jobs:
           docker compose -f deploy/compose/compose.yaml up -d --wait
           uv run --no-sync python scripts/restart_drill.py
       - name: Workspace drill
+        timeout-minutes: 15
         env:
           SANDBOX_IMAGE_DIGEST: ${{ steps.sandbox.outputs.digest }}
         run: |
-          docker compose -f deploy/compose/compose.yaml up -d --wait
+          timeout 300 docker compose -f deploy/compose/compose.yaml up -d --wait
           uv run --no-sync python scripts/workspace_drill.py
       # The quota scenario needs a checkpoint quota small enough to cross
       # quickly; the stack is recreated with it and the volumes are kept.
       - name: Workspace quota drill
+        timeout-minutes: 15
         env:
           SANDBOX_IMAGE_DIGEST: ${{ steps.sandbox.outputs.digest }}
           WORKSPACE_MAX_BYTES: "8388608"
         run: |
-          docker compose -f deploy/compose/compose.yaml up -d --wait
+          timeout 300 docker compose -f deploy/compose/compose.yaml up -d --wait
           uv run --no-sync python scripts/workspace_drill.py --phase quota
       # A container or volume this run created and did not clean up is a
       # finding, not housekeeping: drill scenarios exist to make it impossible.
