@@ -82,6 +82,11 @@ def test_linux_8_vcpu_16_gib_is_the_reference_shape() -> None:
     assert benchmark.matches_reference(shape) is True
 
 
+def test_marketed_16_gib_is_not_rejected_for_kernel_pages() -> None:
+    shape = benchmark.Shape(os="linux", vcpu=8, ram_gib=15.64)
+    assert benchmark.matches_reference(shape) is True
+
+
 def test_shape_only_exits_nonzero_when_the_host_is_too_small(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

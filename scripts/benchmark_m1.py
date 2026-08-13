@@ -110,11 +110,10 @@ def percentile(values: tuple[float, ...] | list[float], p: float) -> float:
 
 
 def matches_reference(shape: Shape) -> bool:
-    return (
-        shape.os == "linux"
-        and shape.vcpu >= REFERENCE_VCPU
-        and shape.ram_gib >= REFERENCE_RAM_GIB
-    )
+    # MemTotal is a few hundred MiB short of the marketed size. Compare the
+    # rounded GiB so a 16 GB reference host is not rejected for kernel pages.
+    ram = int(shape.ram_gib + 0.5)
+    return shape.os == "linux" and shape.vcpu >= REFERENCE_VCPU and ram >= REFERENCE_RAM_GIB
 
 
 def host_shape() -> Shape:
