@@ -615,7 +615,7 @@ export against a paused container, a metadata scan that never extracts to the
 host filesystem, and an exec that drains output past a cap instead of buffering
 it.
 
-- [ ] **Step 1: Write the failing engine tests (real Docker)**
+- [x] **Step 1: Write the failing engine tests (real Docker)**
 
 ```python
 async def test_volume_lifecycle_with_labels() -> None:
@@ -650,11 +650,11 @@ async def test_cache_survives_freeze_thaw_and_dies_with_the_instance() -> None:
     ...
 ```
 
-- [ ] **Step 2: Run and fail on missing methods**
+- [x] **Step 2: Run and fail on missing methods**
 
 `uv run --no-sync pytest packages/backend/tests/integration/sandbox/test_engine_workspace.py -q`.
 
-- [ ] **Step 3: Implement against docker-py**
+- [x] **Step 3: Implement against docker-py**
 
 New engine surface (all through `_call`/`asyncio.to_thread`):
 
@@ -678,11 +678,17 @@ digest. `execute_streamed` uses `exec_start(stream=True, demux=False)`, feeds an
 both caps, and returns exit code, timeout flag, observed totals, truncation
 flags. `SandboxCommand.output_limit` keeps meaning the preview cap.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Focused engine tests plus `uv run --no-sync pytest packages/backend/tests/integration/sandbox -q`
 (the 3B suite must not regress). Commit as
 `feat: teach the engine volumes, archives, and streamed exec`.
+
+> Implementation notes, 2026-08-13: `OutputSink` exposes only `artifact_limit`
+> and `deliver` — the preview split is the consumer's business, so the engine
+> has exactly one cap to honor. The ENOSPC test uses a 1 MiB / 16-inode
+> profile rather than the shipped defaults; the property, not the numbers, is
+> what the kernel proves.
 
 ### Task 9: Controller workspace actions, ownership checks, and negotiation
 

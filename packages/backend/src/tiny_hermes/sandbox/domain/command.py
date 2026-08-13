@@ -7,6 +7,7 @@ that ever exists.
 """
 
 from dataclasses import dataclass
+from typing import Protocol
 
 #: The only directories a command may start in. Both are mounts this Run owns.
 ALLOWED_WORKING_DIRECTORIES = ("/workspace/data", "/workspace/cache")
@@ -29,3 +30,45 @@ class CommandResult:
     output: str
     truncated: bool
     timed_out: bool
+
+
+@dataclass(frozen=True)
+class ScannedEntry:
+    """One tree member as the scan saw it, judged by nobody yet.
+
+    The scanner reports symlinks, devices, FIFOs, and sockets rather than
+    skipping them (design §8): a checkpoint that silently dropped an entry
+    would commit a revision that restores to something other than what ran.
+    Refusing is the caller's decision, made on a complete report.
+    """
+
+    path: str
+    entry_type: str
+    mode: int
+    size: int
+    sha256: str | None
+
+
+class OutputSink(Protocol):
+    """Where streamed command output goes, up to the sink's own ceiling.
+
+    The preview/artifact split is the consumer's business; the engine's whole
+    contract is to deliver at most ``artifact_limit`` bytes and keep draining
+    the child beyond them, so nothing ever blocks on a full pipe.
+    """
+
+    @property
+    def artifact_limit(self) -> int: ...
+
+    async def deliver(self, chunk: bytes) -> None: ...
+
+
+@dataclass(frozen=True)
+class StreamedResult:
+    exit_code: int
+    timed_out: bool
+    #: Everything the child wrote, including what was drained and discarded.
+    observed_bytes: int
+    #: What actually reached the sink.
+    delivered_bytes: int
+    truncated: bool
