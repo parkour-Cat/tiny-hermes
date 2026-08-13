@@ -44,9 +44,16 @@ class SpyStreams:
         del payload
         if self.refusal is not None:
             raise _Refused(self.refusal)
-        if action == "workspace_import":
+        if action in ("workspace_import", "execute_stdin"):
             async for chunk in channel.receive(declared_limit=self.receive_limit):
                 self.received.extend(chunk)
+            if action == "execute_stdin":
+                return {
+                    "exit_code": 0,
+                    "output": f"{channel.received_bytes} bytes taken",
+                    "truncated": False,
+                    "timed_out": False,
+                }
             return {"received_bytes": channel.received_bytes}
         await channel.start_send(total_limit=len(self.to_send))
         await channel.push(self.to_send)
@@ -167,3 +174,34 @@ async def test_an_aborted_stream_does_not_take_the_server_down(
 
 async def _swallow(chunk: bytes) -> None:
     del chunk
+
+
+async def test_a_write_body_rides_frames_through_the_adapter(
+    wired: tuple[SpyStreams, ControllerClient],
+) -> None:
+    """The Worker-facing adapter routes a stdin-bearing execute over frames."""
+    from uuid import uuid4  # noqa: PLC0415
+
+    from tiny_hermes.sandbox.domain.command import SandboxCommand  # noqa: PLC0415
+    from tiny_hermes.sandbox.transport.adapter import SandboxClient  # noqa: PLC0415
+
+    spy, client = wired
+    body = b"w" * 300_000  # bigger than any control line may be
+    adapter = SandboxClient(client)
+
+    result = await adapter.execute(
+        run_id=uuid4(),
+        lease_id=uuid4(),
+        sandbox_id=uuid4(),
+        command=SandboxCommand(
+            argv=["helper", "write"],
+            cwd="/workspace/data",
+            timeout_seconds=30,
+            output_limit=4096,
+            stdin=body,
+        ),
+    )
+
+    assert bytes(spy.received) == body
+    assert result.exit_code == 0
+    assert "300000 bytes taken" in result.output

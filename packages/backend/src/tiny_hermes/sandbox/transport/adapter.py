@@ -83,20 +83,30 @@ class SandboxClient:
     async def execute(
         self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID, command: SandboxCommand
     ) -> CommandResult:
-        answer = await self._call(
-            "execute",
-            {
-                "run_id": run_id,
-                "lease_id": lease_id,
-                "sandbox_id": sandbox_id,
-                "command": {
-                    "argv": command.argv,
-                    "cwd": command.cwd,
-                    "timeout_seconds": command.timeout_seconds,
-                    "output_limit": command.output_limit,
-                },
+        payload = {
+            "run_id": run_id,
+            "lease_id": lease_id,
+            "sandbox_id": sandbox_id,
+            "command": {
+                "argv": command.argv,
+                "cwd": command.cwd,
+                "timeout_seconds": command.timeout_seconds,
+                "output_limit": command.output_limit,
             },
-        )
+        }
+        if command.stdin is None:
+            answer = await self._call("execute", payload)
+        else:
+            # A write body never rides the control line; it goes as frames.
+            try:
+                answer = await self._client.send_stream(
+                    "execute_stdin",
+                    payload,
+                    _one_chunk(command.stdin),
+                    declared_total=len(command.stdin),
+                )
+            except ControllerClient.Refused as refused:
+                raise self._refusal(refused) from refused
         return CommandResult(
             exit_code=int(answer["exit_code"]),
             output=str(answer["output"]),
@@ -255,3 +265,7 @@ class SandboxClient:
             return SandboxRefused(RefusalReason(refused.reason))
         except ValueError:
             return refused
+
+
+async def _one_chunk(data: bytes) -> AsyncIterator[bytes]:
+    yield data

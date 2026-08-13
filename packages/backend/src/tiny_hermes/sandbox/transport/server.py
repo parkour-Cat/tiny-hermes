@@ -38,7 +38,11 @@ StreamDispatch = Callable[
 ]
 
 #: Actions whose connection switches to Task 5 frames after the control line.
-STREAM_ACTIONS = frozenset({"workspace_import", "workspace_export", "execute_stream"})
+#: `execute_stdin` exists because a `file.write` body must not ride a JSON
+#: control line whose whole point is to stay small.
+STREAM_ACTIONS = frozenset(
+    {"workspace_import", "workspace_export", "execute_stream", "execute_stdin"}
+)
 
 #: The Controller's whole vocabulary. An action outside it is refused here
 #: rather than passed on, so a typo cannot become an attribute lookup.

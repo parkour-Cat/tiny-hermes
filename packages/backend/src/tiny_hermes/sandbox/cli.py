@@ -268,6 +268,26 @@ async def _invoke_stream(
         timeout_seconds=int(request["timeout_seconds"]),
         output_limit=int(request["output_limit"]),
     )
+    if action == "execute_stdin":
+        # The same authorization execute makes; the body arrives as frames
+        # because the line protocol's size cap is a guard worth keeping.
+        ticket = await controller.execute_stream(
+            run_id=run_id, lease_id=lease_id, sandbox_id=sandbox_id, command=command
+        )
+        received = bytearray()
+        async for chunk in channel.receive(
+            declared_limit=int(settings.workspace_file_write_bytes)
+        ):
+            received.extend(chunk)
+        outcome = await controller.engine.execute(
+            ticket.container_id, replace(command, stdin=bytes(received))
+        )
+        return {
+            "exit_code": outcome.exit_code,
+            "output": outcome.output,
+            "truncated": outcome.truncated,
+            "timed_out": outcome.timed_out,
+        }
     ticket = await controller.execute_stream(
         run_id=run_id, lease_id=lease_id, sandbox_id=sandbox_id, command=command
     )

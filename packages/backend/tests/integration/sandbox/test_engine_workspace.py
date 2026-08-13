@@ -177,6 +177,37 @@ async def test_exec_stream_drains_beyond_the_cap_and_reports_totals(
     assert result.truncated
 
 
+async def test_execute_feeds_stdin_and_the_helper_writes_atomically(
+    engine: DockerEngine, box: Any
+) -> None:
+    """file.write's whole delivery path: stdin to helper to rename, no shell."""
+    helper = "/usr/local/bin/tiny-hermes-file-helper"
+    body = b"stdin travels whole\n" * 1000
+    wrote = await engine.execute(
+        box.id,
+        SandboxCommand(
+            argv=[helper, "--root", DATA, "write", "notes/in.txt", str(len(body))],
+            cwd=DATA,
+            timeout_seconds=30,
+            output_limit=4096,
+            stdin=body,
+        ),
+    )
+    assert wrote.exit_code == 0, wrote.output
+
+    read = await engine.execute(
+        box.id,
+        SandboxCommand(
+            argv=[helper, "--root", DATA, "read", "notes/in.txt", str(len(body))],
+            cwd=DATA,
+            timeout_seconds=30,
+            output_limit=len(body) + 4096,
+        ),
+    )
+    assert read.exit_code == 0
+    assert read.output == body.decode()
+
+
 async def test_cache_tmpfs_returns_enospc_at_size_and_inode_ceilings(
     docker_client: Any, image_digest: str
 ) -> None:

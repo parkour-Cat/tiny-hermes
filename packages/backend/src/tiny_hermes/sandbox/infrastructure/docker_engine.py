@@ -67,15 +67,22 @@ class DockerEngine:
             workdir=command.cwd,
             stdout=True,
             stderr=True,
+            stdin=command.stdin is not None,
             # No tty: a tty merges streams through a pty and rewrites newlines,
             # which turns exact output into approximately-right output.
             tty=False,
         )
         try:
-            raw: bytes = await asyncio.wait_for(
-                self._call(self.client.api.exec_start, handle["Id"], demux=False),
-                timeout=command.timeout_seconds,
-            )
+            if command.stdin is None:
+                raw: bytes = await asyncio.wait_for(
+                    self._call(self.client.api.exec_start, handle["Id"], demux=False),
+                    timeout=command.timeout_seconds,
+                )
+            else:
+                raw = await asyncio.wait_for(
+                    self._call(self._exec_with_stdin, handle["Id"], command.stdin),
+                    timeout=command.timeout_seconds,
+                )
         except TimeoutError:
             # The exec is still running inside the container. It will be
             # collected when the container is destroyed, and the Run is told
@@ -268,6 +275,31 @@ class DockerEngine:
     async def remove(self, container_id: str) -> None:
         container = await self._call(self.client.containers.get, container_id)
         await self._call(container.remove, force=True)
+
+    def _exec_with_stdin(self, exec_id: str, stdin: bytes) -> bytes:
+        """Feed stdin whole, close it, then collect the demuxed output.
+
+        Runs in the engine's worker thread. Written for the file helper, which
+        reads all of stdin before it produces output — a command that streams
+        output while its input is still arriving could fill the daemon's
+        buffer, and no M1 tool does that.
+        """
+        import docker.utils.socket as docker_socket  # noqa: PLC0415
+
+        untyped: Any = docker_socket
+        sock = self.client.api.exec_start(exec_id, socket=True, demux=False)
+        received = bytearray()
+        with sock:
+            inner: Any = getattr(sock, "_sock", sock)
+            inner.sendall(stdin)
+            import socket as stdlib_socket  # noqa: PLC0415
+
+            inner.shutdown(stdlib_socket.SHUT_WR)
+            for frame in cast(
+                list[tuple[int, bytes]], untyped.frames_iter(sock, tty=False)
+            ):
+                received.extend(frame[1])
+        return bytes(received)
 
     async def _call(self, work: Any, *args: Any, **kwargs: Any) -> Any:
         from docker.errors import DockerException  # noqa: PLC0415 - narrow the import
