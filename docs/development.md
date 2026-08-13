@@ -29,12 +29,15 @@ corepack pnpm install --frozen-lockfile
 
 ## First start
 
-Create the local environment file and replace both example secrets with different random values of at least 32 characters:
+Create the local environment file and mint `SESSION_COOKIE_SECRET`,
+`BOOTSTRAP_TOKEN`, and `TINY_HERMES_KEK` (32-byte standard base64). Do not keep
+the documented Compose zeroes on a machine that will hold data:
 
 ```powershell
-Copy-Item .env.example .env
+uv run --no-sync python scripts/generate_local_secrets.py --env-file .env
 ```
 
+If `.env` already exists, pass `--force` to replace only those secret keys.
 `SESSION_COOKIE_SECRET` protects browser sessions. `BOOTSTRAP_TOKEN` is accepted only until the first platform administrator is created. Do not reuse either value outside this local installation.
 
 Build the images, apply database migrations, and wait until the API and Web containers are healthy:
@@ -66,6 +69,50 @@ try {
 ```
 
 After a successful bootstrap, the same endpoint permanently returns `bootstrap_closed`. Sign in at `http://127.0.0.1:3000/login`.
+
+## Operator walkthrough
+
+On a fresh Linux Docker host, after *First start* and sign-in, a reviewer can
+prove the M1 console and machine-identity path without inventing a second
+protocol. The PowerShell blocks later in this file are the same calls.
+
+1. Open `http://127.0.0.1:3000/workspaces` and create **two** workspaces.
+2. Inside the first workspace, create an Agent (name `Analyst`, alias `analyst`).
+   On the Agent page bind `file.list` if a sandbox image digest is configured,
+   enable Chat Completions delivery (`enabled`, `sync_timeout_seconds` 60), and
+   publish. The field-level diff is against the published spec; rollback is on
+   the same page.
+3. Open Playground from that Agent. Send a message. Playground posts
+   `POST /api/v1/runs` with a cookie, CSRF, and a fresh `Idempotency-Key`; it is
+   not Chat Completions. The Run Detail page lists transcript, tools, and files.
+4. Under **API Keys**, mint a ServiceAccount (`developer`) and an API Key with
+   `runs.read`, `runs.write`, and `runs.control`. The plaintext `token` appears
+   once. Listing afterwards shows only `prefix`.
+5. Call Completions with that token. `model` is the Agent alias. The route is
+   `POST /v1/chat/completions` (no `/api` prefix) and requires `Idempotency-Key`:
+
+```powershell
+$completionHeaders = @{
+  Authorization = "Bearer $token"
+  "Idempotency-Key" = [guid]::NewGuid().ToString()
+  "Content-Type" = "application/json"
+}
+$body = @{
+  model = "analyst"
+  messages = @(@{ role = "user"; content = "Summarize the weekly report." })
+} | ConvertTo-Json -Depth 5
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/v1/chat/completions" `
+  -Method Post -Headers $completionHeaders -Body $body
+```
+
+A second default Completions request without `X-Tiny-Hermes-Session-Id` is a
+new ephemeral Session. A blocked persistent Session returns 409
+`session_blocked` and inserts no Run. Secrets, members, and model endpoints
+are in the header nav; there is no Approvals page.
+
+The §24.1 benchmark is `uv run --no-sync python scripts/benchmark_m1.py`. It
+refuses to report a pass unless the host is Linux with at least 8 vCPU and
+16 GiB RAM. Do not edit its thresholds to make a run green.
 
 ## Local tests
 
