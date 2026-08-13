@@ -17,8 +17,12 @@ class Settings(BaseSettings):
     #: deployment without credentials must fail at startup rather than at the
     #: first checkpoint. The Controller process never receives these — it has
     #: Docker and must not gain MinIO.
-    s3_access_key: str = Field(min_length=1)
-    s3_secret_key: str = Field(min_length=1)
+    # Required to be *present*, allowed to be empty: the controller runs with
+    # both deliberately blank — it must never hold an object-store credential
+    # (design §14.6) — while a deployment that forgot to set them at all still
+    # fails at startup instead of at its first checkpoint.
+    s3_access_key: str
+    s3_secret_key: str
     session_cookie_secret: str = Field(min_length=32)
     bootstrap_token: str = Field(min_length=32)
     session_ttl_seconds: int = Field(default=28_800, ge=300, le=604_800)

@@ -200,14 +200,31 @@ jobs:
         run: |
           docker compose -f deploy/compose/compose.yaml up -d --wait
           uv run --no-sync python scripts/restart_drill.py
-      # A container this run created and did not clean up is a finding, not
-      # housekeeping: the fourth drill scenario exists to make it impossible.
-      - name: No sandbox container outlived the run
+      - name: Workspace drill
+        env:
+          SANDBOX_IMAGE_DIGEST: ${{ steps.sandbox.outputs.digest }}
+        run: |
+          docker compose -f deploy/compose/compose.yaml up -d --wait
+          uv run --no-sync python scripts/workspace_drill.py
+      # The quota scenario needs a checkpoint quota small enough to cross
+      # quickly; the stack is recreated with it and the volumes are kept.
+      - name: Workspace quota drill
+        env:
+          SANDBOX_IMAGE_DIGEST: ${{ steps.sandbox.outputs.digest }}
+          WORKSPACE_MAX_BYTES: "8388608"
+        run: |
+          docker compose -f deploy/compose/compose.yaml up -d --wait
+          uv run --no-sync python scripts/workspace_drill.py --phase quota
+      # A container or volume this run created and did not clean up is a
+      # finding, not housekeeping: drill scenarios exist to make it impossible.
+      - name: No sandbox container or volume outlived the run
         if: always()
         run: |
-          left=$(docker ps -aq --filter "label=tiny-hermes.run" | wc -l)
-          echo "sandbox containers left behind: $left"
-          test "$left" -eq 0
+          containers=$(docker ps -aq --filter "label=tiny-hermes.run" | wc -l)
+          volumes=$(docker volume ls -q --filter "label=tiny-hermes.run" | wc -l)
+          echo "sandbox containers left behind: $containers; volumes: $volumes"
+          test "$containers" -eq 0
+          test "$volumes" -eq 0
       - if: failure()
         run: docker compose -f deploy/compose/compose.yaml logs --no-color
       - if: failure()

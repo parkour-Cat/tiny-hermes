@@ -1216,7 +1216,7 @@ Commit as `ci: give the tests an object store and the controller nothing`.
 - Create: `packages/backend/tests/unit/scripts/test_workspace_drill.py`
 - Modify: `.github/workflows/ci.yml` (compose-e2e runs the drill)
 
-- [ ] **Step 1: Write the drill scenarios as functions with unit-tested logic**
+- [x] **Step 1: Write the drill scenarios as functions with unit-tested logic**
 
 Follow `scripts/restart_drill.py`'s structure. Scenarios, each against the
 running compose stack through the public API only:
@@ -1230,7 +1230,7 @@ running compose stack through the public API only:
    what the command printed;
 5. no `tiny-hermes.*`-labelled container **or volume** outlives the drill.
 
-- [ ] **Step 2: Add the performance gates**
+- [x] **Step 2: Add the performance gates**
 
 In the drill (design §16.4), measured with `time.monotonic` and asserted:
 1 MiB single-file commit P95 ≤ 1s over 20 commits; 1,000 files / 100 MiB
@@ -1238,7 +1238,7 @@ commit ≤ 15s; next-Run first-tool availability ≤ 3s with a 1 MiB workspace.
 Record peak RSS of the worker container during the 100 MiB commit and assert it
 stays under 512 MiB — the streaming claim, measured.
 
-- [ ] **Step 3: Wire into compose-e2e and verify**
+- [x] **Step 3: Wire into compose-e2e and verify**
 
 After the restart drill step:
 
@@ -1252,9 +1252,21 @@ After the restart drill step:
 The leftover-container check extends to volumes. Run the drill locally against
 `docker compose up` first, then in CI.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 Commit as `test: drill the workspace through crashes, quotas, and tenants`.
+
+> Implementation notes, 2026-08-13: the drill's vocabulary is a new
+> `shell_from_input` deterministic scenario — the Run's input is one command
+> and the model itself asserts the outcome, so verdicts are Run statuses
+> rather than transcript scraping. The artifact-download scenario waits on
+> the recorder-to-shell.exec wiring in the backlog. Gates are asserted as
+> end-to-end envelopes over the public API (the commit itself is not
+> separable there) with raw timings printed for the verification record.
+> Local compose validation was impossible on the development VM (nested
+> Docker forwards no inter-container TCP); compose-e2e in CI is the
+> validator, as it already is for the restart drill. Two stack recreations in
+> CI: default quota for the main phase, 8 MiB for the quota phase.
 
 ### Task 17: Documentation and the verification record
 

@@ -21,6 +21,9 @@ x-base-env: &base-env
   OUTBOUND_ALLOWED_CIDRS: ${OUTBOUND_ALLOWED_CIDRS:-}
   OUTBOUND_READ_TIMEOUT_SECONDS: ${OUTBOUND_READ_TIMEOUT_SECONDS:-60}
   MODEL_MAX_ATTEMPTS: ${MODEL_MAX_ATTEMPTS:-3}
+  # The checkpoint quota — what may become a committed revision, never a
+  # physical disk ceiling. The workspace drill lowers it to cross it quickly.
+  WORKSPACE_MAX_BYTES: ${WORKSPACE_MAX_BYTES:-2147483648}
   # The sandbox. The image allowlist is empty by default, which is how a
   # deployment that has not chosen an image fails: no tool can run at all.
   SANDBOX_IMAGE_DIGEST: ${SANDBOX_IMAGE_DIGEST:-}

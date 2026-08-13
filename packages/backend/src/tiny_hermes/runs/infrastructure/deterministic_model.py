@@ -1,7 +1,7 @@
 import asyncio
 
 from tiny_hermes.agents.domain.models import DeterministicModelPolicy
-from tiny_hermes.runs.domain.models import ToolCallBlock, ToolResultBlock
+from tiny_hermes.runs.domain.models import TextBlock, ToolCallBlock, ToolResultBlock
 from tiny_hermes.runs.ports.model import (
     ModelRequest,
     ModelResponse,
@@ -84,6 +84,62 @@ class DeterministicModelProvider:
                 input_tokens=TOKENS_PER_ROUND // 2,
                 output_tokens=TOKENS_PER_ROUND // 2,
             )
+        if scenario == "shell_from_input":
+            # The workspace drill's whole vocabulary: the Run's input *is* the
+            # command, and this scenario is the assertion. A command that
+            # failed, exited non-zero, or was rolled back by the platform is
+            # reported as exactly that, so a drill reads verdicts from Run
+            # status instead of scraping transcripts.
+            results = tuple(
+                block
+                for message in request.messages
+                for block in message.blocks
+                if isinstance(block, ToolResultBlock)
+                and block.call_id == "input-shell-1"
+            )
+            if not results:
+                command = _last_user_text(request)
+                if not command:
+                    return ModelResponse(
+                        stop_reason=StopReason.FAILED,
+                        text="",
+                        failure="deterministic_no_input_command",
+                    )
+                return ModelResponse(
+                    stop_reason=StopReason.TOOL_CALL,
+                    text="Running the drill's command from the Run input.",
+                    tool_calls=(
+                        ToolCallBlock(
+                            call_id="input-shell-1",
+                            name="shell.exec",
+                            arguments={"command": command, "timeout_seconds": 120},
+                        ),
+                    ),
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                )
+            outcome = results[-1]
+            if "rolled back:" in outcome.output:
+                return ModelResponse(
+                    stop_reason=StopReason.COMPLETED,
+                    text=f"The platform rolled the command back: {outcome.output[:200]}",
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                )
+            if outcome.failed or outcome.exit_code != 0:
+                return ModelResponse(
+                    stop_reason=StopReason.FAILED,
+                    text="",
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                    failure="deterministic_command_failed",
+                )
+            return ModelResponse(
+                stop_reason=StopReason.COMPLETED,
+                text=f"exit=0\n{outcome.output[:2000]}",
+                input_tokens=TOKENS_PER_ROUND // 2,
+                output_tokens=TOKENS_PER_ROUND // 2,
+            )
         if scenario == "fail_replay_safe":
             return ModelResponse(
                 stop_reason=StopReason.FAILED,
@@ -106,3 +162,13 @@ class DeterministicModelProvider:
             input_tokens=TOKENS_PER_ROUND // 2,
             output_tokens=TOKENS_PER_ROUND // 2,
         )
+
+
+def _last_user_text(request: ModelRequest) -> str:
+    for message in reversed(request.messages):
+        if message.role != "user":
+            continue
+        for block in message.blocks:
+            if isinstance(block, TextBlock):
+                return block.text.strip()
+    return ""

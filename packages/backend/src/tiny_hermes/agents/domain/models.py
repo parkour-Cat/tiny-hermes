@@ -30,7 +30,13 @@ class DeterministicModelPolicy(BaseModel):
 
     provider: Literal["deterministic"] = "deterministic"
     scenario: Literal[
-        "complete", "fail_replay_safe", "continue_once", "shell_once"
+        "complete",
+        "fail_replay_safe",
+        "continue_once",
+        "shell_once",
+        # The workspace drill's scenario: the Run input is one shell command,
+        # and the model itself asserts the outcome.
+        "shell_from_input",
     ] = "complete"
 
 
