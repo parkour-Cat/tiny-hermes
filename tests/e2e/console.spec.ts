@@ -198,7 +198,11 @@ test("the builder binds a tool, playground sends, and rollback restores v1", asy
   await expect(page).toHaveURL(/\/playground$/);
   await page.getByLabel("输入要发给 Agent 的消息").fill("Say hello to the playground walk.");
   await page.getByRole("button", { name: "发送" }).click();
-  await expect(page.getByText("assistant", { exact: true })).toBeVisible({ timeout: 60_000 });
+  // A bound tool yields a tool-call turn and a final turn, so there are two
+  // role tags. One assistant message is the claim; uniqueness is not.
+  await expect(page.getByText("assistant", { exact: true }).first()).toBeVisible({
+    timeout: 60_000,
+  });
 
   const pause = page.getByRole("button", { name: "暂停" });
   if (await pause.isVisible().catch(() => false)) {
