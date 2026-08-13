@@ -79,6 +79,9 @@ test("the loaded draft fills every field the console can edit", async () => {
 
   expect(await screen.findByLabelText("人格")).toHaveValue("You answer support questions.");
   expect(screen.getByText("continue_once")).toBeInTheDocument();
+  for (const tool of ["file.list", "file.read", "file.write", "shell.exec"]) {
+    expect(screen.getByRole("checkbox", { name: tool })).not.toBeChecked();
+  }
   expect(screen.getByLabelText("单次执行秒数上限")).toHaveValue("600");
   expect(screen.getByLabelText("总时长秒数上限")).toHaveValue("3600");
   expect(screen.getByLabelText("模型调用次数上限")).toHaveValue("12");
