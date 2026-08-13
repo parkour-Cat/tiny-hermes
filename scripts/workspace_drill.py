@@ -202,8 +202,17 @@ def quota_rollback(console: WorkspaceConsole, workspace: str, agent: str) -> Non
         "ws-quota-break",
     )
     paused, took = console.await_status(
-        workspace, breaker, ("paused",), RECOVERY_TIMEOUT
+        workspace,
+        breaker,
+        ("paused", "completed", "failed", "interrupted"),
+        RECOVERY_TIMEOUT,
     )
+    if paused["status"] != "paused":
+        # Before failing, say what the platform recorded: the event names are
+        # the diagnosis, and reading them beats guessing.
+        for event in console.events(workspace, breaker):
+            report("event", sequence=event.sequence, type=event.event_type)
+        check(False, f"the over-quota run ended {paused['status']!r}, not paused")
     report(
         "over-quota run",
         status=paused["status"],
