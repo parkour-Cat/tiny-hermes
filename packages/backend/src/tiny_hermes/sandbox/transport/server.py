@@ -25,6 +25,7 @@ from typing import Any, cast
 from tiny_hermes.sandbox.transport.frames import (
     IDLE_SECONDS,
     MAX_FRAME_PAYLOAD,
+    PROGRESS_SECONDS,
     Frame,
     FrameType,
     StreamReceiver,
@@ -88,8 +89,10 @@ class ServerStream:
     """One streaming exchange on one connection, driven by the dispatcher.
 
     Exactly one of `receive` or `start_send`/`push`/`finish_send` is used per
-    call. The "stream ready" line is sent only from here — after the dispatch
-    authorized the action — so a refused caller never gets to transmit a byte.
+    call. `progress` / `keep_alive` ride the send path so a silent exec still
+    produces frames. The "stream ready" line is sent only from here — after
+    the dispatch authorized the action — so a refused caller never gets to
+    transmit a byte.
     """
 
     def __init__(
@@ -106,6 +109,7 @@ class ServerStream:
         self._sent = 0
         self._hasher = hashlib.sha256()
         self._data_frames = 0
+        self._write_lock = asyncio.Lock()
         self.received_bytes = 0
 
     async def receive(self, *, declared_limit: int) -> AsyncIterator[bytes]:
@@ -137,17 +141,38 @@ class ServerStream:
     async def start_send(self, *, total_limit: int) -> None:
         await self._ready()
         payload = json.dumps({"total_limit": total_limit}).encode()
-        await self._write_frame(Frame(FrameType.START, 0, payload))
-        self._sequence = 1
+        async with self._write_lock:
+            await self._write_frame(Frame(FrameType.START, 0, payload))
+            self._sequence = 1
 
     async def push(self, chunk: bytes) -> None:
-        for start in range(0, len(chunk), MAX_FRAME_PAYLOAD):
-            piece = chunk[start : start + MAX_FRAME_PAYLOAD]
-            await self._write_frame(Frame(FrameType.DATA, self._sequence, piece))
+        async with self._write_lock:
+            for start in range(0, len(chunk), MAX_FRAME_PAYLOAD):
+                piece = chunk[start : start + MAX_FRAME_PAYLOAD]
+                await self._write_frame(Frame(FrameType.DATA, self._sequence, piece))
+                self._sequence += 1
+                self._sent += len(piece)
+                self._data_frames += 1
+                self._hasher.update(piece)
+
+    async def progress(self) -> None:
+        """A keep-alive with no payload and no digest contribution (design §5.3)."""
+        async with self._write_lock:
+            await self._write_frame(Frame(FrameType.PROGRESS, self._sequence, b""))
             self._sequence += 1
-            self._sent += len(piece)
-            self._data_frames += 1
-            self._hasher.update(piece)
+
+    async def keep_alive(
+        self, stop: asyncio.Event, *, interval: float = PROGRESS_SECONDS
+    ) -> None:
+        """Send PROGRESS until `stop`, so a command that prints nothing is not idle."""
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+            except TimeoutError:
+                try:
+                    await self.progress()
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    return
 
     async def finish_send(self) -> dict[str, Any]:
         totals: dict[str, Any] = {
@@ -155,10 +180,11 @@ class ServerStream:
             "frame_count": self._data_frames,
             "sha256": self._hasher.hexdigest(),
         }
-        await self._write_frame(
-            Frame(FrameType.END, self._sequence, json.dumps(totals).encode())
-        )
-        self._sequence += 1
+        async with self._write_lock:
+            await self._write_frame(
+                Frame(FrameType.END, self._sequence, json.dumps(totals).encode())
+            )
+            self._sequence += 1
         return totals
 
     async def _ready(self) -> None:
