@@ -90,9 +90,14 @@ class DeterministicModelProvider:
             # failed, exited non-zero, or was rolled back by the platform is
             # reported as exactly that, so a drill reads verdicts from Run
             # status instead of scraping transcripts.
+            #
+            # Only results *after the last user message* count: in a shared
+            # Session the transcript already carries earlier Runs' results
+            # under the same call id, and believing one of those would skip
+            # this Run's command entirely.
             results = tuple(
                 block
-                for message in request.messages
+                for message in request.messages[_last_user_index(request) + 1 :]
                 for block in message.blocks
                 if isinstance(block, ToolResultBlock)
                 and block.call_id == "input-shell-1"
@@ -164,11 +169,18 @@ class DeterministicModelProvider:
         )
 
 
+def _last_user_index(request: ModelRequest) -> int:
+    for index in range(len(request.messages) - 1, -1, -1):
+        if request.messages[index].role == "user":
+            return index
+    return -1
+
+
 def _last_user_text(request: ModelRequest) -> str:
-    for message in reversed(request.messages):
-        if message.role != "user":
-            continue
-        for block in message.blocks:
-            if isinstance(block, TextBlock):
-                return block.text.strip()
+    last = _last_user_index(request)
+    if last < 0:
+        return ""
+    for block in request.messages[last].blocks:
+        if isinstance(block, TextBlock):
+            return block.text.strip()
     return ""
