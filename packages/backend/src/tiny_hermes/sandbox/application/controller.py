@@ -24,7 +24,9 @@ from tiny_hermes.sandbox.domain.command import (
     SandboxCommand,
 )
 from tiny_hermes.sandbox.domain.container_policy import (
+    DEFAULT_PROFILE,
     ContainerPolicyError,
+    ResourceProfile,
     container_config,
     profile_named,
 )
@@ -96,12 +98,14 @@ class SandboxController:
         approved_digests: tuple[str, ...],
         leases: LeaseAuthority | None = None,
         audit: SandboxAudit | None = None,
+        ceiling: ResourceProfile = DEFAULT_PROFILE,
     ) -> None:
         self.engine = engine
         self.store = store
         self.approved_digests = approved_digests
         self.leases: LeaseAuthority = leases or _AlwaysHolds()
         self.audit: SandboxAudit = audit or _Recording()
+        self.ceiling = ceiling
 
     # -- Worker actions ----------------------------------------------------
 
@@ -124,10 +128,12 @@ class SandboxController:
         try:
             config = container_config(
                 digest=self._digest(),
-                profile=profile_named(profile),
+                profile=profile_named(profile, ceiling=self.ceiling),
                 run_id=run_id,
                 instance_id=instance_id,
+                workspace_id=workspace_id,
                 approved_digests=self.approved_digests,
+                ceiling=self.ceiling,
             )
         except ContainerPolicyError as refused:
             # Before Docker is asked, so a refused image leaves nothing behind.

@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     #: How long a frozen instance stays warm for its own Run. §11.4 allows
     #: 0–30 minutes and lets a workspace lower it, never raise it.
     sandbox_idle_ttl_seconds: int = Field(default=300, ge=0, le=1_800)
+    #: The cache tmpfs ceilings (design §9). Kernel-enforced; the profile the
+    #: controller hands Docker is built from these at startup.
+    sandbox_cache_mb: int = Field(default=512, ge=64, le=4_096)
+    sandbox_cache_inodes: int = Field(default=200_000, ge=10_000, le=1_000_000)
     sandbox_start_attempts: int = Field(default=3, ge=1, le=5)
     shell_timeout_seconds: int = Field(default=60, ge=1, le=900)
     shell_output_bytes: int = Field(default=1_048_576, ge=1_024, le=10_485_760)

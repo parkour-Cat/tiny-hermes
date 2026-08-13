@@ -467,7 +467,7 @@ enforced — leaves `ResourceProfile` so no reader can mistake it for a physical
 limit again. `workspace_max_bytes` (Task 2's setting) is its successor and is a
 checkpoint quota.
 
-- [ ] **Step 1: Write the failing policy tests**
+- [x] **Step 1: Write the failing policy tests**
 
 ```python
 def test_cache_is_tmpfs_with_bytes_inodes_and_sandbox_ownership() -> None:
@@ -493,12 +493,12 @@ recorded is now closed by the checkpoint quota, so the test is replaced, not
 deleted silently: its replacement asserts the profile carries `cache_mb` and
 `cache_inodes` and that `exceeds()` compares them.
 
-- [ ] **Step 2: Run and watch the old shape fail**
+- [x] **Step 2: Run and watch the old shape fail**
 
 `uv run --no-sync pytest packages/backend/tests/unit/sandbox/test_container_policy.py -q`
 fails on the new assertions.
 
-- [ ] **Step 3: Reshape the profile and config**
+- [x] **Step 3: Reshape the profile and config**
 
 `ResourceProfile`: drop `disk_mb`, add `cache_mb: int` and `cache_inodes: int`
 (defaults 512 and 200,000 in `DEFAULT_PROFILE`); `fields()` and `exceeds()`
@@ -510,11 +510,18 @@ with it. Settings gain `sandbox_cache_mb` (default 512, ge=64, le=4096) and
 `sandbox_cache_inodes` (default 200_000, ge=10_000, le=1_000_000); the
 controller CLI threads them into the profile ceiling.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Focused policy tests, then the whole unit suite (`uv run --no-sync pytest
 packages/backend/tests/unit -q`) because the worker and controller tests build
 configs. Commit as `feat: bound the cache with tmpfs, not a promise`.
+
+> Implementation notes, 2026-08-13: `workspace_id`/`session_id` are optional
+> on `container_config` until Task 9 threads them through `acquire` (the
+> controller already stamps the workspace label). `profile_named` now derives
+> "default" from the operator's ceiling, so lowering `sandbox_cache_mb` cannot
+> refuse the only profile that exists. The 3B real-Docker suite (56) passed on
+> the new shape.
 
 ### Task 7: The openat2 file helper and the image that carries it
 

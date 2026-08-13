@@ -81,6 +81,8 @@ WORKSPACE_BOUNDS = [
     ("controller_stream_idle_seconds", 30, 5, 300),
     ("artifact_max_bytes", 104_857_600, 1_048_576, 1_073_741_824),
     ("run_artifact_max_bytes", 524_288_000, 1_048_576, 10_737_418_240),
+    ("sandbox_cache_mb", 512, 64, 4_096),
+    ("sandbox_cache_inodes", 200_000, 10_000, 1_000_000),
 ]
 
 

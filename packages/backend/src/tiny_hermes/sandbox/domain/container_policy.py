@@ -46,11 +46,21 @@ class ProfileTooLarge(ContainerPolicyError):
 
 @dataclass(frozen=True)
 class ResourceProfile:
+    """The dimensions a sandbox may consume.
+
+    There is deliberately no disk number here. The old ``disk_mb`` was
+    declared and never enforced — Docker's ``storage_opt`` covers neither
+    named volumes nor tmpfs — and a limit that reads like one but is not is
+    worse than no field at all. Committed data answers to the checkpoint
+    quota (``workspace_max_bytes``); the cache answers to the kernel below.
+    """
+
     name: str
     cpus: float
     memory_mb: int
     pids_limit: int
-    disk_mb: int
+    cache_mb: int
+    cache_inodes: int
     tmp_mb: int
 
     def fields(self) -> dict[str, Any]:
@@ -59,7 +69,8 @@ class ResourceProfile:
             "cpus": self.cpus,
             "memory_mb": self.memory_mb,
             "pids_limit": self.pids_limit,
-            "disk_mb": self.disk_mb,
+            "cache_mb": self.cache_mb,
+            "cache_inodes": self.cache_inodes,
             "tmp_mb": self.tmp_mb,
         }
 
@@ -68,7 +79,8 @@ class ResourceProfile:
             self.cpus > ceiling.cpus
             or self.memory_mb > ceiling.memory_mb
             or self.pids_limit > ceiling.pids_limit
-            or self.disk_mb > ceiling.disk_mb
+            or self.cache_mb > ceiling.cache_mb
+            or self.cache_inodes > ceiling.cache_inodes
             or self.tmp_mb > ceiling.tmp_mb
         )
 
@@ -76,7 +88,13 @@ class ResourceProfile:
 #: Technical design §11.2's M1 default, and in phase 3B the only profile there
 #: is. A second one arrives with something that needs it.
 DEFAULT_PROFILE = ResourceProfile(
-    name="default", cpus=1.0, memory_mb=1024, pids_limit=128, disk_mb=2048, tmp_mb=256
+    name="default",
+    cpus=1.0,
+    memory_mb=1024,
+    pids_limit=128,
+    cache_mb=512,
+    cache_inodes=200_000,
+    tmp_mb=256,
 )
 
 
@@ -91,19 +109,15 @@ class VolumeMount:
 class ContainerConfig:
     """The container, as Docker will be asked for it.
 
-    ``disk_mb`` is carried and **not passed to Docker**. `storage_opt` was the
-    obvious way to spend it and is the wrong one twice over: Docker only accepts
-    it on overlay-over-xfs with `pquota`, so it fails outright on an ordinary
-    developer machine — and more importantly it limits the container's *writable
-    layer*, which with a read-only root holds almost nothing. Everything a
-    command actually writes goes to the two named volumes or the tmpfs, and
-    `storage_opt` covers neither.
+    Both writable byte ceilings a container has are kernel-enforced tmpfs
+    limits (`/tmp` and `/workspace/cache`). The data volume is deliberately
+    unsized at the Docker level: what may *persist* is the checkpoint quota's
+    decision (design §9), and a command may exceed it temporarily while it
+    runs — the post-command scan is what refuses to commit the excess.
 
-    So the tmpfs is sized and the volumes are not. That is a real, named gap:
-    see `test_the_disk_ceiling_is_declared_but_not_enforced`. Enforcing it needs
-    per-volume quotas, which needs a filesystem the platform does not get to
-    choose, and §11.5's `paused(limit)` needs a measurement that does not exist
-    yet. Both belong to the slice that can do them properly.
+    ``volume_labels`` is not passed to `docker run`: it is what the engine
+    stamps on the explicitly created data volume, so the Scheduler can later
+    enumerate ownership from labels instead of parsing a name (design §13).
     """
 
     image: str
@@ -115,11 +129,11 @@ class ContainerConfig:
     nano_cpus: int
     mem_limit: int
     pids_limit: int
-    disk_mb: int
     tmpfs: dict[str, str]
     mounts: tuple[VolumeMount, ...]
     init: bool
     labels: dict[str, str]
+    volume_labels: dict[str, str]
 
     def as_docker_kwargs(self) -> dict[str, Any]:
         """The exact argument set, and no more.
@@ -162,16 +176,33 @@ def container_config(
     profile: ResourceProfile,
     run_id: UUID,
     instance_id: UUID,
+    workspace_id: UUID | None = None,
+    session_id: UUID | None = None,
     approved_digests: tuple[str, ...],
     ceiling: ResourceProfile = DEFAULT_PROFILE,
 ) -> ContainerConfig:
-    """Describe the one container this Run is allowed."""
+    """Describe the one container this Run is allowed.
+
+    ``workspace_id`` and ``session_id`` become data-volume labels. They are
+    optional only until Task 9 threads them through `acquire`; a label the
+    caller knows must always be stamped, because the Scheduler's enumeration
+    can only see what was written.
+    """
     if not _is_digest(digest) or digest not in approved_digests:
         # Fails closed on an empty allowlist, which is the default when tools
         # are not configured.
         raise UnapprovedImage(f"image is not approved: {digest[:24]}")
     if profile.exceeds(ceiling):
         raise ProfileTooLarge(f"{profile.name} exceeds the instance ceiling")
+
+    volume_labels = {
+        "tiny-hermes.run": str(run_id),
+        "tiny-hermes.instance": str(instance_id),
+    }
+    if workspace_id is not None:
+        volume_labels["tiny-hermes.workspace"] = str(workspace_id)
+    if session_id is not None:
+        volume_labels["tiny-hermes.session"] = str(session_id)
 
     return ContainerConfig(
         image=digest,
@@ -183,15 +214,27 @@ def container_config(
         nano_cpus=int(profile.cpus * 1_000_000_000),
         mem_limit=profile.memory_mb * 1024 * 1024,
         pids_limit=profile.pids_limit,
-        disk_mb=profile.disk_mb,
-        # A writable directory that can execute is a place to stage a binary.
-        tmpfs={SANDBOX_TMP: f"rw,noexec,nosuid,nodev,size={profile.tmp_mb}m"},
+        tmpfs={
+            # A writable directory that can execute is a place to stage a
+            # binary — /tmp stays noexec.
+            SANDBOX_TMP: f"rw,noexec,nosuid,nodev,size={profile.tmp_mb}m",
+            # Cache is *not* noexec: it is the intended home of rebuilt
+            # dependencies and their executables (design §9). Its byte and
+            # inode ceilings are the kernel's, and its pages compete with
+            # process memory inside the existing memory limit rather than
+            # consuming host memory outside it. No name, so nothing to leak
+            # or accidentally reuse: it lives and dies with this container,
+            # which is what makes `cache_state=reset` honest.
+            "/workspace/cache": (
+                f"rw,nosuid,nodev,size={profile.cache_mb}m"
+                f",nr_inodes={profile.cache_inodes}"
+                f",uid={SANDBOX_UID},gid={SANDBOX_UID},mode=0700"
+            ),
+        },
         mounts=(
             # Data outlives the instance — in 3B for the Run's own length, and
-            # in 3C for the Session's. Cache lives and dies with one warm
-            # instance, which is what makes `cache_state=reset` honest.
+            # in 3C for the Session's.
             VolumeMount(source=f"tiny-hermes-data-{run_id}", target="/workspace/data"),
-            VolumeMount(source=f"tiny-hermes-cache-{instance_id}", target="/workspace/cache"),
         ),
         # Without it a command that forks and exits fills the pids ceiling with
         # zombies, and the next command in the same slice fails for no visible
@@ -201,6 +244,7 @@ def container_config(
             "tiny-hermes.run": str(run_id),
             "tiny-hermes.instance": str(instance_id),
         },
+        volume_labels=volume_labels,
     )
 
 
@@ -221,8 +265,15 @@ def _is_digest(value: str) -> bool:
     )
 
 
-def profile_named(name: str) -> ResourceProfile:
-    """The one profile phase 3B has."""
+def profile_named(
+    name: str, *, ceiling: ResourceProfile = DEFAULT_PROFILE
+) -> ResourceProfile:
+    """The one profile M1 has: the instance default itself.
+
+    With a single profile, "default" *is* the ceiling the operator configured
+    — a separate copy of the shipped numbers would refuse to start the moment
+    settings lowered the cache below them.
+    """
     if name != DEFAULT_PROFILE.name:
         raise ProfileTooLarge(f"unknown resource profile: {name}")
-    return replace(DEFAULT_PROFILE)
+    return replace(ceiling, name=DEFAULT_PROFILE.name)

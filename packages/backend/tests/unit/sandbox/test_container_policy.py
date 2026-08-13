@@ -23,6 +23,8 @@ DIGEST = "sha256:" + "b" * 64
 OTHER = "sha256:" + "c" * 64
 RUN = UUID("11111111-2222-4333-8444-555555555555")
 INSTANCE = UUID("66666666-7777-4888-8999-aaaaaaaaaaaa")
+WORKSPACE = UUID("12121212-3434-4545-8686-787878787878")
+SESSION = UUID("90909090-abab-4cdc-8ded-fafafafafafa")
 
 
 def config(**overrides: Any) -> Any:
@@ -31,6 +33,8 @@ def config(**overrides: Any) -> Any:
         "profile": DEFAULT_PROFILE,
         "run_id": RUN,
         "instance_id": INSTANCE,
+        "workspace_id": WORKSPACE,
+        "session_id": SESSION,
         "approved_digests": (DIGEST,),
         "ceiling": DEFAULT_PROFILE,
     }
@@ -85,9 +89,24 @@ def test_an_init_process_reaps_what_a_command_leaves_behind() -> None:
     assert config().init is True
 
 
-def test_exactly_two_volumes_are_mounted() -> None:
-    mounts = config().mounts
-    assert {mount.target for mount in mounts} == {"/workspace/data", "/workspace/cache"}
+def test_cache_is_tmpfs_with_bytes_inodes_and_sandbox_ownership() -> None:
+    """Design §9: the cache ceiling is the kernel's, not a promise.
+
+    Its pages count toward the container's memory limit, so process memory and
+    cache compete inside the existing 1 GiB instead of silently consuming host
+    memory outside it.
+    """
+    cache = config().tmpfs["/workspace/cache"]
+    assert cache == (
+        "rw,nosuid,nodev,size=512m,nr_inodes=200000,uid=10001,gid=10001,mode=0700"
+    )
+    # Not noexec: cache is where rebuilt dependencies and their executables live.
+    assert "noexec" not in cache
+
+
+def test_only_the_data_volume_is_mounted() -> None:
+    """Cache moved to tmpfs, so exactly one named volume remains."""
+    assert [mount.target for mount in config().mounts] == ["/workspace/data"]
 
 
 def test_no_mount_is_a_host_path() -> None:
@@ -106,19 +125,33 @@ def test_no_mount_is_a_host_path() -> None:
 def test_the_data_volume_belongs_to_the_run_and_the_cache_to_the_instance() -> None:
     """Technical design §11.3.
 
-    Cache lives and dies with one warm instance. Data outlives it — in 3B only
-    for the Run's own length, and in 3C for the Session's.
+    Cache is a tmpfs that lives and dies with one container, which is what
+    makes `cache_state=reset` honest. Data outlives it — in 3B only for the
+    Run's own length, and in 3C for the Session's.
     """
-    by_target = {mount.target: mount.source for mount in config().mounts}
-    assert str(RUN) in by_target["/workspace/data"]
-    assert str(INSTANCE) in by_target["/workspace/cache"]
+    answer = config()
+    assert str(RUN) in answer.mounts[0].source
+    assert "/workspace/cache" in answer.tmpfs, "cache has no name to leak or reuse"
 
 
 def test_two_runs_never_share_a_writable_layer() -> None:
     first = {m.target: m.source for m in config().mounts}
     second = {m.target: m.source for m in config(run_id=uuid4(), instance_id=uuid4()).mounts}
     assert first["/workspace/data"] != second["/workspace/data"]
-    assert first["/workspace/cache"] != second["/workspace/cache"]
+
+
+def test_data_volume_labels_carry_the_whole_ownership_chain() -> None:
+    """Design §13: volume enumeration uses labels, never a parsed name.
+
+    The Scheduler that reclaims an orphaned volume must learn Workspace,
+    Session, and Run from the platform's own labels, not from splitting a
+    string a future refactor may reshape.
+    """
+    labels = config().volume_labels
+    assert labels["tiny-hermes.run"] == str(RUN)
+    assert labels["tiny-hermes.workspace"] == str(WORKSPACE)
+    assert labels["tiny-hermes.session"] == str(SESSION)
+    assert labels["tiny-hermes.instance"] == str(INSTANCE)
 
 
 def test_an_image_outside_the_approved_list_is_refused() -> None:
@@ -169,7 +202,8 @@ def test_an_empty_allowlist_approves_nothing() -> None:
         {"cpus": 2.0},
         {"memory_mb": 2048},
         {"pids_limit": 256},
-        {"disk_mb": 4096},
+        {"cache_mb": 1024},
+        {"cache_inodes": 400_000},
         {"tmp_mb": 512},
     ],
 )
@@ -217,23 +251,31 @@ def test_the_docker_arguments_are_exactly_these_and_no_others() -> None:
     }
 
 
-def test_the_disk_ceiling_is_declared_but_not_enforced() -> None:
-    """A named gap, pinned so it is not mistaken for a working limit.
+def test_the_unenforceable_disk_number_is_gone_for_good() -> None:
+    """Replaces `test_the_disk_ceiling_is_declared_but_not_enforced`.
 
-    §11.2 lists a 2 GiB writable disk. `storage_opt` is the obvious way to
-    spend it and is wrong twice: Docker accepts it only on overlay-over-xfs
-    with `pquota`, and it limits the container writable layer — which, with a
-    read-only root, holds almost nothing. Every byte a command writes lands in
-    a named volume or the tmpfs, and `storage_opt` covers neither.
-
-    The tmpfs is sized. The volumes are not. This test fails the moment
-    somebody adds a disk argument, which is when the enforcement story has to
-    be written properly.
+    That test pinned an honest gap: `disk_mb` was declared and Docker never
+    enforced it. The gap is now closed from two directions — the cache is a
+    kernel-bounded tmpfs, and committed data answers to the checkpoint quota
+    (`workspace_max_bytes`). The number itself leaves the profile so no reader
+    can mistake it for a physical limit again.
     """
-    assert DEFAULT_PROFILE.disk_mb == 2048
+    assert not hasattr(DEFAULT_PROFILE, "disk_mb")
+    assert DEFAULT_PROFILE.cache_mb == 512
+    assert DEFAULT_PROFILE.cache_inodes == 200_000
     kwargs = config().as_docker_kwargs()
     assert "storage_opt" not in kwargs
     assert not [key for key in kwargs if "disk" in key or "storage" in key]
+
+
+def test_exceeds_compares_every_cache_dimension() -> None:
+    """The ceiling rule must not be invented at the second profile."""
+    base = DEFAULT_PROFILE.fields()
+    bigger_bytes = ResourceProfile(name="b", **{**base, "cache_mb": 513})
+    bigger_inodes = ResourceProfile(name="i", **{**base, "cache_inodes": 200_001})
+    assert bigger_bytes.exceeds(DEFAULT_PROFILE)
+    assert bigger_inodes.exceeds(DEFAULT_PROFILE)
+    assert not DEFAULT_PROFILE.exceeds(DEFAULT_PROFILE)
 
 
 def test_the_container_is_not_removed_when_it_exits() -> None:

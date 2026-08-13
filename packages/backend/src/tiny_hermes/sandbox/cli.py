@@ -13,6 +13,7 @@ ban enforces.
 import asyncio
 import logging
 import signal
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -27,6 +28,7 @@ from tiny_hermes.sandbox.application.controller import (
     SandboxRefused,
 )
 from tiny_hermes.sandbox.domain.command import SandboxCommand
+from tiny_hermes.sandbox.domain.container_policy import DEFAULT_PROFILE
 from tiny_hermes.sandbox.infrastructure.docker_engine import DockerEngine
 from tiny_hermes.sandbox.infrastructure.lease_authority import SqlLeaseAuthority
 from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
@@ -46,6 +48,13 @@ def main() -> None:
 async def _serve() -> None:
     settings = get_settings()
     sessions = build_session_factory(settings)
+    # The operator's cache ceiling, threaded once at startup: with M1's single
+    # profile, "default" is whatever the instance configuration says it is.
+    ceiling = replace(
+        DEFAULT_PROFILE,
+        cache_mb=settings.sandbox_cache_mb,
+        cache_inodes=settings.sandbox_cache_inodes,
+    )
     client: Any = docker.from_env()  # noqa: TID251 - the one place, by design
 
     async def dispatch(action: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -62,6 +71,7 @@ async def _serve() -> None:
                 approved_digests=settings.approved_image_digests,
                 leases=SqlLeaseAuthority(session),
                 audit=_AuditSink(session),
+                ceiling=ceiling,
             )
             try:
                 answer = await _invoke(controller, action, payload)
