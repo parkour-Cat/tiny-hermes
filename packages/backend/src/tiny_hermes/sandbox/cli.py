@@ -11,6 +11,7 @@ ban enforces.
 """
 
 import asyncio
+import json
 import logging
 import signal
 from dataclasses import replace
@@ -194,22 +195,6 @@ async def _invoke(
     if action == "thaw":
         await controller.thaw(run_id=run_id, lease_id=lease_id, sandbox_id=sandbox_id)
         return {}
-    if action == "workspace_scan":
-        entries = await controller.workspace_scan(
-            run_id=run_id, lease_id=lease_id, sandbox_id=sandbox_id
-        )
-        return {
-            "entries": [
-                {
-                    "path": entry.path,
-                    "type": entry.entry_type,
-                    "mode": entry.mode,
-                    "size": entry.size,
-                    "sha256": entry.sha256,
-                }
-                for entry in entries
-            ]
-        }
     await controller.destroy(run_id=run_id, lease_id=lease_id, sandbox_id=sandbox_id)
     return {}
 
@@ -249,6 +234,30 @@ async def _invoke_stream(
             await controller.workspace_import_failed(run_id=run_id, sandbox_id=sandbox_id)
             raise
         return {"received_bytes": channel.received_bytes}
+
+    if action == "workspace_scan":
+        # Full-tree metadata is workspace-sized, not line-sized: a hundred
+        # thousand entries is megabytes of JSON, so it travels as frames.
+        entries = await controller.workspace_scan(
+            run_id=run_id, lease_id=lease_id, sandbox_id=sandbox_id
+        )
+        document = json.dumps(
+            {
+                "entries": [
+                    {
+                        "path": entry.path,
+                        "type": entry.entry_type,
+                        "mode": entry.mode,
+                        "size": entry.size,
+                        "sha256": entry.sha256,
+                    }
+                    for entry in entries
+                ]
+            }
+        ).encode()
+        await channel.start_send(total_limit=len(document))
+        await channel.push(document)
+        return await channel.finish_send()
 
     if action == "workspace_export":
         ticket = await controller.workspace_export(

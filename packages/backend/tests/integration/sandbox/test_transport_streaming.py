@@ -55,6 +55,26 @@ class SpyStreams:
                     "timed_out": False,
                 }
             return {"received_bytes": channel.received_bytes}
+        if action == "workspace_scan":
+            import json  # noqa: PLC0415
+
+            document = json.dumps(
+                {
+                    "entries": [
+                        {
+                            "path": f"tree/f{index}.bin",
+                            "type": "file",
+                            "mode": 420,
+                            "size": 65536,
+                            "sha256": "a" * 64,
+                        }
+                        for index in range(5000)
+                    ]
+                }
+            ).encode()
+            await channel.start_send(total_limit=len(document))
+            await channel.push(document)
+            return await channel.finish_send()
         await channel.start_send(total_limit=len(self.to_send))
         await channel.push(self.to_send)
         return await channel.finish_send()
@@ -205,3 +225,23 @@ async def test_a_write_body_rides_frames_through_the_adapter(
     assert bytes(spy.received) == body
     assert result.exit_code == 0
     assert "300000 bytes taken" in result.output
+
+
+async def test_a_five_thousand_entry_scan_survives_the_socket(
+    wired: tuple[SpyStreams, ControllerClient],
+) -> None:
+    """The drill's 502-entry scan overflowed the 64 KiB line; never again."""
+    from uuid import uuid4  # noqa: PLC0415
+
+    from tiny_hermes.sandbox.transport.adapter import SandboxClient  # noqa: PLC0415
+
+    _, client = wired
+    adapter = SandboxClient(client)
+
+    entries = await adapter.workspace_scan(
+        run_id=uuid4(), lease_id=uuid4(), sandbox_id=uuid4()
+    )
+
+    assert len(entries) == 5000
+    assert entries[0].path == "tree/f0.bin"
+    assert entries[-1].size == 65536

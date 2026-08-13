@@ -10,6 +10,7 @@ would be a rule the Controller could not enforce, and the Controller is the
 only thing on the far side that cannot be bypassed.
 """
 
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -25,6 +26,10 @@ from tiny_hermes.sandbox.domain.command import (
 )
 from tiny_hermes.sandbox.domain.models import CacheState, InstanceStatus, SandboxInstance
 from tiny_hermes.sandbox.transport.client import ControllerClient
+
+#: A 100,000-entry scan is ~20 MiB of JSON; far beyond this it is not a scan
+#: but a mistake.
+SCAN_DOCUMENT_LIMIT = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -182,11 +187,22 @@ class SandboxClient:
     async def workspace_scan(
         self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID
     ) -> tuple[ScannedEntry, ...]:
-        answer = await self._call(
-            "workspace_scan",
-            {"run_id": run_id, "lease_id": lease_id, "sandbox_id": sandbox_id},
-        )
-        entries: Any = answer.get("entries", [])
+        received = bytearray()
+
+        async def collect(chunk: bytes) -> None:
+            received.extend(chunk)
+
+        try:
+            await self._client.receive_stream(
+                "workspace_scan",
+                {"run_id": run_id, "lease_id": lease_id, "sandbox_id": sandbox_id},
+                collect,
+                limit=SCAN_DOCUMENT_LIMIT,
+            )
+        except ControllerClient.Refused as refused:
+            raise self._refusal(refused) from refused
+        document: Any = json.loads(bytes(received))
+        entries: Any = document.get("entries", [])
         return tuple(
             ScannedEntry(
                 path=str(entry["path"]),
