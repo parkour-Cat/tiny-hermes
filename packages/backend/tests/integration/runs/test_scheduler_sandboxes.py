@@ -84,9 +84,15 @@ class PersistingDestroyFailure:
         self._instance = instance()
 
     async def acquire(
-        self, *, run_id: UUID, lease_id: UUID, workspace_id: UUID, profile: str
+        self,
+        *,
+        run_id: UUID,
+        lease_id: UUID,
+        workspace_id: UUID,
+        profile: str,
+        session_id: UUID | None = None,
     ) -> AcquiredSandbox:
-        del lease_id, profile
+        del lease_id, profile, session_id
         async with self._sessions() as session:
             await SqlSandboxStore(session).reserve(
                 run_id=run_id, workspace_id=workspace_id, instance=self._instance

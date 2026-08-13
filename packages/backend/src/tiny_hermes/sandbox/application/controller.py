@@ -22,6 +22,7 @@ from tiny_hermes.sandbox.domain.command import (
     ALLOWED_WORKING_DIRECTORIES,
     CommandResult,
     SandboxCommand,
+    ScannedEntry,
 )
 from tiny_hermes.sandbox.domain.container_policy import (
     DEFAULT_PROFILE,
@@ -47,7 +48,10 @@ class RefusalReason(StrEnum):
     ALREADY_RESERVED = "already_reserved"
     LEASE_INVALID = "lease_invalid"
     LEASE_STILL_LIVE = "lease_still_live"
+    RESERVATION_STILL_LIVE = "reservation_still_live"
     NOT_RUNNING = "not_running"
+    NOT_FROZEN = "not_frozen"
+    INSTANCE_DIRTY = "instance_dirty"
     IMAGE_NOT_APPROVED = "image_not_approved"
     WORKING_DIRECTORY_NOT_ALLOWED = "working_directory_not_allowed"
 
@@ -89,6 +93,22 @@ class AcquireResult:
     cache_state: CacheState
 
 
+@dataclass(frozen=True)
+class WorkspaceTicket:
+    """Proof that one workspace action was authorized, and for which container.
+
+    The transport drives the engine with this in hand; the container id never
+    comes from a payload, only from the reservation the checks walked.
+    """
+
+    container_id: str
+
+
+#: Where every workspace byte lives inside the container. Fixed here, so no
+#: payload can name another mount.
+DATA_MOUNT = "/workspace/data"
+
+
 class SandboxController:
     def __init__(
         self,
@@ -110,7 +130,13 @@ class SandboxController:
     # -- Worker actions ----------------------------------------------------
 
     async def acquire(
-        self, *, run_id: UUID, lease_id: UUID, workspace_id: UUID, profile: str
+        self,
+        *,
+        run_id: UUID,
+        lease_id: UUID,
+        workspace_id: UUID,
+        profile: str,
+        session_id: UUID | None = None,
     ) -> AcquireResult:
         await self._require_lease(run_id, lease_id)
         existing = await self.store.live_for_run(run_id)
@@ -132,6 +158,7 @@ class SandboxController:
                 run_id=run_id,
                 instance_id=instance_id,
                 workspace_id=workspace_id,
+                session_id=session_id,
                 approved_digests=self.approved_digests,
                 ceiling=self.ceiling,
             )
@@ -139,6 +166,10 @@ class SandboxController:
             # Before Docker is asked, so a refused image leaves nothing behind.
             raise SandboxRefused(RefusalReason.IMAGE_NOT_APPROVED) from refused
 
+        # Explicitly, before the container, and with the full ownership chain
+        # in labels: the Scheduler that later reclaims an orphan enumerates by
+        # label (design §13), and it can only see what was written.
+        await self.engine.create_volume(_volume_name(run_id), config.volume_labels)
         container_id = await self.engine.create(config)
         await self.store.reserve(
             run_id=run_id,
@@ -162,6 +193,90 @@ class SandboxController:
         if not _inside_workspace(command.cwd):
             raise SandboxRefused(RefusalReason.WORKING_DIRECTORY_NOT_ALLOWED)
         return await self.engine.execute(instance.container_id, command)
+
+    # -- Workspace actions ---------------------------------------------------
+
+    async def workspace_import(
+        self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID, declared_total: int
+    ) -> WorkspaceTicket:
+        """Authorize a restore into a frozen, clean instance.
+
+        Freezing first is design §7's order: the first import byte may only
+        land in a container no process can be changing.
+        """
+        await self._require_lease(run_id, lease_id)
+        instance = await self._require_frozen(run_id, sandbox_id)
+        if declared_total < 0:
+            raise SandboxRefused(RefusalReason.WORKING_DIRECTORY_NOT_ALLOWED)
+        return WorkspaceTicket(container_id=instance.container_id)
+
+    async def workspace_import_failed(self, *, run_id: UUID, sandbox_id: UUID) -> None:
+        """An interrupted import leaves a tree nobody can vouch for.
+
+        The instance is marked dirty so only destruction remains; the model
+        never sees a partially restored tree (design §7).
+        """
+        reservation = await self._reservation(run_id, sandbox_id)
+        await self.store.set_instance_status(sandbox_id, InstanceStatus.ISOLATED)
+        await self.store.isolate(reservation.id, reason="import_interrupted")
+        await self.audit.record(
+            AuditEntry(
+                action="sandbox.import_failed",
+                run_id=run_id,
+                sandbox_id=sandbox_id,
+                detail="instance dirtied by an interrupted import",
+            )
+        )
+
+    async def workspace_scan(
+        self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID
+    ) -> tuple[ScannedEntry, ...]:
+        await self._require_lease(run_id, lease_id)
+        instance = await self._require_frozen(run_id, sandbox_id)
+        return await self.engine.scan_tree(instance.container_id, DATA_MOUNT)
+
+    async def workspace_export(
+        self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID
+    ) -> WorkspaceTicket:
+        await self._require_lease(run_id, lease_id)
+        instance = await self._require_frozen(run_id, sandbox_id)
+        return WorkspaceTicket(container_id=instance.container_id)
+
+    async def execute_stream(
+        self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID, command: SandboxCommand
+    ) -> WorkspaceTicket:
+        """Authorize a streamed command: the checks `execute` makes, no more."""
+        await self._require_lease(run_id, lease_id)
+        instance = await self._require_running(run_id, sandbox_id)
+        if not _inside_workspace(command.cwd):
+            raise SandboxRefused(RefusalReason.WORKING_DIRECTORY_NOT_ALLOWED)
+        return WorkspaceTicket(container_id=instance.container_id)
+
+    async def volume_remove(self, *, run_id: UUID, sandbox_id: UUID) -> None:
+        """Scheduler authority: reclaim a data volume nothing live still owns.
+
+        Refused while a lease is live or while an active claim still believes
+        it is executing; an isolated claim is exactly the case this exists
+        for. The volume name is derived from the server-side Run id — no
+        payload names a volume.
+        """
+        if await self.leases.any_live(run_id):
+            raise SandboxRefused(RefusalReason.LEASE_STILL_LIVE)
+        claim = await self.store.live_for_run(run_id)
+        if claim is not None:
+            if claim.instance_id != sandbox_id:
+                raise SandboxRefused(RefusalReason.RESERVATION_NOT_OWNED)
+            if claim.status is not ReservationStatus.ISOLATED:
+                raise SandboxRefused(RefusalReason.RESERVATION_STILL_LIVE)
+        await self.engine.remove_volume(_volume_name(run_id))
+        await self.audit.record(
+            AuditEntry(
+                action="sandbox.volume_remove",
+                run_id=run_id,
+                sandbox_id=sandbox_id,
+                detail="data volume reclaimed",
+            )
+        )
 
     async def freeze(self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID) -> None:
         await self._require_lease(run_id, lease_id)
@@ -243,6 +358,18 @@ class SandboxController:
             await self.engine.remove(instance.container_id)
             await self.store.set_instance_status(sandbox_id, InstanceStatus.DESTROYED)
         await self.store.release(reservation.id)
+        # Container first, then volume: the volume cannot be in use once the
+        # container is confirmed gone. Session state lives in MinIO revisions;
+        # a Run's teardown owes the host nothing but this reclamation.
+        await self.engine.remove_volume(_volume_name(run_id))
+        await self.audit.record(
+            AuditEntry(
+                action="sandbox.volume_remove",
+                run_id=run_id,
+                sandbox_id=sandbox_id,
+                detail="data volume removed with its sandbox",
+            )
+        )
 
     async def _require_lease(self, run_id: UUID, lease_id: UUID) -> None:
         if not await self.leases.holds(run_id, lease_id):
@@ -273,8 +400,24 @@ class SandboxController:
             raise SandboxRefused(RefusalReason.NOT_RUNNING)
         return instance
 
+    async def _require_frozen(self, run_id: UUID, sandbox_id: UUID) -> SandboxInstance:
+        instance = await self._require_owned(run_id, sandbox_id)
+        if instance.status is InstanceStatus.ISOLATED:
+            # Dirtied by an interrupted import; only destruction remains.
+            raise SandboxRefused(RefusalReason.INSTANCE_DIRTY)
+        if instance.status is not InstanceStatus.FROZEN:
+            # Scanning or importing while processes run would checkpoint files
+            # that are still being changed (design §7/§8).
+            raise SandboxRefused(RefusalReason.NOT_FROZEN)
+        return instance
+
     def _digest(self) -> str:
         return self.approved_digests[0] if self.approved_digests else ""
+
+
+def _volume_name(run_id: UUID) -> str:
+    """Server-derived, always: no payload may name a volume (design §13)."""
+    return f"tiny-hermes-data-{run_id}"
 
 
 def _inside_workspace(cwd: str) -> bool:

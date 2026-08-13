@@ -98,7 +98,13 @@ class SandboxSession(Protocol):
     """
 
     async def acquire(
-        self, *, run_id: UUID, lease_id: UUID, workspace_id: UUID, profile: str
+        self,
+        *,
+        run_id: UUID,
+        lease_id: UUID,
+        workspace_id: UUID,
+        profile: str,
+        session_id: UUID | None = None,
     ) -> Any: ...
 
     async def execute(
@@ -259,6 +265,7 @@ class WorkerRuntime:
                 run_id=claimed.run.id,
                 lease_id=handle.lease_id,
                 workspace_id=claimed.run.workspace_id,
+                session_id=claimed.run.session_id,
                 profile=DEFAULT_PROFILE.name,
             )
         except SandboxRefused as refused:

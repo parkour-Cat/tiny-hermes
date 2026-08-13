@@ -700,7 +700,7 @@ Focused engine tests plus `uv run --no-sync pytest packages/backend/tests/integr
 - Create: `packages/backend/tests/unit/sandbox/test_controller_workspace.py`
 - Create: `packages/backend/tests/integration/sandbox/test_transport_streaming.py`
 
-- [ ] **Step 1: Write the failing authorization tests first**
+- [x] **Step 1: Write the failing authorization tests first**
 
 Every new action re-checks what `execute` already checks, plus the freeze
 requirement design §7/§8 impose:
@@ -719,11 +719,11 @@ async def test_volume_remove_uses_scheduler_authority_rules() -> None:
     ...
 ```
 
-- [ ] **Step 2: Run them against the six-action Controller and fail**
+- [x] **Step 2: Run them against the six-action Controller and fail**
 
 `uv run --no-sync pytest packages/backend/tests/unit/sandbox/test_controller_workspace.py -q`.
 
-- [ ] **Step 3: Implement actions and the framed negotiation**
+- [x] **Step 3: Implement actions and the framed negotiation**
 
 `ACTIONS` gains `workspace_import`, `workspace_scan`, `workspace_export`,
 `volume_remove`, `execute_stream`. `RefusalReason` gains `NOT_FROZEN` and
@@ -752,10 +752,22 @@ The client grows matching `send_stream`/`receive_stream` helpers. The
 integration test round-trips a multi-frame import and export over a real Unix
 socket (skipped on Windows exactly like the existing transport tests).
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Unit controller tests on Windows; transport streaming plus 3B transport suite
 in WSL/CI. Commit as `feat: stream workspaces through the controller's socket`.
+
+> Implementation notes, 2026-08-13: workspace actions return a
+> `WorkspaceTicket` (authorization proof carrying the reservation's container
+> id) and the CLI's stream dispatcher moves the bytes — rules stay in the
+> Controller, mechanics in the engine. A streaming connection is single-use:
+> after frames, the byte stream is not trusted to frame another call.
+> `acquire` gained `session_id` (threaded Worker → adapter → CLI) so the data
+> volume's labels carry the whole ownership chain, and `_remove` reclaims the
+> volume with its container, which added a second audit entry to the 3B
+> cleanup test. The upload client reads the server's verdict concurrently
+> with its frames, so a mid-stream refusal is reported as the decision it is
+> rather than as a broken pipe.
 
 ### Task 10: SessionWorkspace restore and checkpoint, and the committer
 

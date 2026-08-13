@@ -53,9 +53,15 @@ class StandInSandbox:
     sandbox_id: UUID = field(default_factory=uuid4)
 
     async def acquire(
-        self, *, run_id: UUID, lease_id: UUID, workspace_id: UUID, profile: str
+        self,
+        *,
+        run_id: UUID,
+        lease_id: UUID,
+        workspace_id: UUID,
+        profile: str,
+        session_id: UUID | None = None,
     ) -> Any:
-        del run_id, lease_id, workspace_id, profile
+        del run_id, lease_id, workspace_id, profile, session_id
         self.calls.append("acquire")
         return _Acquired(self.sandbox_id, self.cache_state)
 

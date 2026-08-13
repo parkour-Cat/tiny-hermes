@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
 from tiny_hermes.sandbox.application.controller import (
+    DATA_MOUNT,
     AuditEntry,
     SandboxController,
     SandboxRefused,
@@ -32,7 +33,7 @@ from tiny_hermes.sandbox.domain.container_policy import DEFAULT_PROFILE
 from tiny_hermes.sandbox.infrastructure.docker_engine import DockerEngine
 from tiny_hermes.sandbox.infrastructure.lease_authority import SqlLeaseAuthority
 from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
-from tiny_hermes.sandbox.transport.server import ControllerServer
+from tiny_hermes.sandbox.transport.server import ControllerServer, ServerStream
 from tiny_hermes.shared.config import get_settings
 from tiny_hermes.shared.database import build_session_factory
 from tiny_hermes.shared.logging import configure_logging
@@ -86,8 +87,32 @@ async def _serve() -> None:
             await session.commit()
             return answer
 
+    async def dispatch_stream(
+        action: str, payload: dict[str, Any], channel: ServerStream
+    ) -> dict[str, Any]:
+        async with sessions() as session:
+            controller = SandboxController(
+                engine=DockerEngine(client),
+                store=SqlSandboxStore(session),
+                approved_digests=settings.approved_image_digests,
+                leases=SqlLeaseAuthority(session),
+                audit=_AuditSink(session),
+                ceiling=ceiling,
+            )
+            try:
+                answer = await _invoke_stream(controller, action, payload, channel, settings)
+            except SandboxRefused:
+                await session.commit()
+                raise
+            except BaseException:
+                await session.rollback()
+                raise
+            await session.commit()
+            return answer
+
     server = ControllerServer(
         dispatch=dispatch,
+        stream_dispatch=dispatch_stream,
         path=settings.sandbox_controller_socket,
         group=settings.sandbox_socket_gid,
     )
@@ -115,10 +140,12 @@ async def _invoke(
     """
     run_id = UUID(str(payload["run_id"]))
     if action == "acquire":
+        raw_session = payload.get("session_id")
         answer = await controller.acquire(
             run_id=run_id,
             lease_id=UUID(str(payload["lease_id"])),
             workspace_id=UUID(str(payload["workspace_id"])),
+            session_id=None if raw_session is None else UUID(str(raw_session)),
             profile=str(payload["profile"]),
         )
         return {"sandbox_id": str(answer.sandbox_id), "cache_state": answer.cache_state.value}
@@ -126,6 +153,9 @@ async def _invoke(
     sandbox_id = UUID(str(payload["sandbox_id"]))
     if action == "cleanup":
         await controller.cleanup(run_id=run_id, sandbox_id=sandbox_id)
+        return {}
+    if action == "volume_remove":
+        await controller.volume_remove(run_id=run_id, sandbox_id=sandbox_id)
         return {}
     if action == "inspect":
         instance = await controller.inspect(run_id=run_id, sandbox_id=sandbox_id)
@@ -164,8 +194,108 @@ async def _invoke(
     if action == "thaw":
         await controller.thaw(run_id=run_id, lease_id=lease_id, sandbox_id=sandbox_id)
         return {}
+    if action == "workspace_scan":
+        entries = await controller.workspace_scan(
+            run_id=run_id, lease_id=lease_id, sandbox_id=sandbox_id
+        )
+        return {
+            "entries": [
+                {
+                    "path": entry.path,
+                    "type": entry.entry_type,
+                    "mode": entry.mode,
+                    "size": entry.size,
+                    "sha256": entry.sha256,
+                }
+                for entry in entries
+            ]
+        }
     await controller.destroy(run_id=run_id, lease_id=lease_id, sandbox_id=sandbox_id)
     return {}
+
+
+async def _invoke_stream(
+    controller: SandboxController,
+    action: str,
+    payload: dict[str, Any],
+    channel: ServerStream,
+    settings: Any,
+) -> dict[str, Any]:
+    """Streaming actions: authorize through the Controller, then move bytes.
+
+    The Controller's ticket is what separates "may" from "does": no frame is
+    read or written until the same checks `execute` makes have passed, and the
+    container id the engine receives came from the reservation, never from the
+    payload.
+    """
+    run_id = UUID(str(payload["run_id"]))
+    lease_id = UUID(str(payload["lease_id"]))
+    sandbox_id = UUID(str(payload["sandbox_id"]))
+
+    if action == "workspace_import":
+        ticket = await controller.workspace_import(
+            run_id=run_id,
+            lease_id=lease_id,
+            sandbox_id=sandbox_id,
+            declared_total=int(payload["declared_total"]),
+        )
+        try:
+            await controller.engine.import_tree(
+                ticket.container_id,
+                DATA_MOUNT,
+                channel.receive(declared_limit=int(settings.workspace_max_bytes)),
+            )
+        except BaseException:
+            await controller.workspace_import_failed(run_id=run_id, sandbox_id=sandbox_id)
+            raise
+        return {"received_bytes": channel.received_bytes}
+
+    if action == "workspace_export":
+        ticket = await controller.workspace_export(
+            run_id=run_id, lease_id=lease_id, sandbox_id=sandbox_id
+        )
+        # Tar framing adds headers and padding on top of the quota's bytes.
+        cap = int(settings.workspace_max_bytes) + int(settings.workspace_max_objects) * 2048
+        await channel.start_send(total_limit=cap)
+        async for chunk in controller.engine.export_tree(ticket.container_id, DATA_MOUNT):
+            await channel.push(chunk)
+        return await channel.finish_send()
+
+    request: Any = payload["command"]
+    command = SandboxCommand(
+        argv=[str(part) for part in request["argv"]],
+        cwd=str(request["cwd"]),
+        timeout_seconds=int(request["timeout_seconds"]),
+        output_limit=int(request["output_limit"]),
+    )
+    ticket = await controller.execute_stream(
+        run_id=run_id, lease_id=lease_id, sandbox_id=sandbox_id, command=command
+    )
+    cap = min(int(payload["artifact_limit"]), int(settings.artifact_max_bytes))
+    await channel.start_send(total_limit=cap)
+    sink = _ChannelSink(channel, artifact_limit=cap)
+    result = await controller.engine.execute_streamed(
+        ticket.container_id, command, sink
+    )
+    await channel.finish_send()
+    return {
+        "exit_code": result.exit_code,
+        "timed_out": result.timed_out,
+        "observed_bytes": result.observed_bytes,
+        "delivered_bytes": result.delivered_bytes,
+        "truncated": result.truncated,
+    }
+
+
+class _ChannelSink:
+    """The engine's OutputSink, writing frames as bytes arrive."""
+
+    def __init__(self, channel: ServerStream, *, artifact_limit: int) -> None:
+        self._channel = channel
+        self.artifact_limit = artifact_limit
+
+    async def deliver(self, chunk: bytes) -> None:
+        await self._channel.push(chunk)
 
 
 class _AuditSink:

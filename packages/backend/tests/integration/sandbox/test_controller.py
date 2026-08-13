@@ -162,7 +162,12 @@ async def test_scheduler_cleanup_after_expiry_destroys_and_audits(
     await controller.cleanup(run_id=RUN, sandbox_id=box.sandbox_id)
 
     assert container not in {c.id for c in docker_client.containers.list(all=True)}
-    assert [entry.action for entry in audit.entries] == ["sandbox.cleanup"]
+    # Two entries since 3C: the data volume's reclamation is a material
+    # deletion of its own (design §13), confirmed separately from the sandbox.
+    assert [entry.action for entry in audit.entries] == [
+        "sandbox.volume_remove",
+        "sandbox.cleanup",
+    ]
     assert audit.entries[0].run_id == RUN
 
 

@@ -10,13 +10,19 @@ would be a rule the Controller could not enforce, and the Controller is the
 only thing on the far side that cannot be bypassed.
 """
 
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 from tiny_hermes.sandbox.application.controller import RefusalReason, SandboxRefused
-from tiny_hermes.sandbox.domain.command import CommandResult, SandboxCommand
+from tiny_hermes.sandbox.domain.command import (
+    CommandResult,
+    SandboxCommand,
+    ScannedEntry,
+    StreamedResult,
+)
 from tiny_hermes.sandbox.domain.models import CacheState, InstanceStatus, SandboxInstance
 from tiny_hermes.sandbox.transport.client import ControllerClient
 
@@ -51,7 +57,13 @@ class SandboxClient:
             raise SandboxRefused(reason) from refused
 
     async def acquire(
-        self, *, run_id: UUID, lease_id: UUID, workspace_id: UUID, profile: str
+        self,
+        *,
+        run_id: UUID,
+        lease_id: UUID,
+        workspace_id: UUID,
+        profile: str,
+        session_id: UUID | None = None,
     ) -> AcquiredSandbox:
         answer = await self._call(
             "acquire",
@@ -59,6 +71,7 @@ class SandboxClient:
                 "run_id": run_id,
                 "lease_id": lease_id,
                 "workspace_id": workspace_id,
+                "session_id": session_id,
                 "profile": profile,
             },
         )
@@ -129,3 +142,116 @@ class SandboxClient:
 
     async def cleanup(self, *, run_id: UUID, sandbox_id: UUID) -> None:
         await self._call("cleanup", {"run_id": run_id, "sandbox_id": sandbox_id})
+
+    # -- Workspace actions -----------------------------------------------------
+
+    async def workspace_import(
+        self,
+        *,
+        run_id: UUID,
+        lease_id: UUID,
+        sandbox_id: UUID,
+        tar_stream: AsyncIterator[bytes],
+        declared_total: int,
+    ) -> dict[str, Any]:
+        try:
+            return await self._client.send_stream(
+                "workspace_import",
+                {
+                    "run_id": run_id,
+                    "lease_id": lease_id,
+                    "sandbox_id": sandbox_id,
+                    "declared_total": declared_total,
+                },
+                tar_stream,
+                declared_total=declared_total,
+            )
+        except ControllerClient.Refused as refused:
+            raise self._refusal(refused) from refused
+
+    async def workspace_scan(
+        self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID
+    ) -> tuple[ScannedEntry, ...]:
+        answer = await self._call(
+            "workspace_scan",
+            {"run_id": run_id, "lease_id": lease_id, "sandbox_id": sandbox_id},
+        )
+        entries: Any = answer.get("entries", [])
+        return tuple(
+            ScannedEntry(
+                path=str(entry["path"]),
+                entry_type=str(entry["type"]),
+                mode=int(entry["mode"]),
+                size=int(entry["size"]),
+                sha256=None if entry.get("sha256") is None else str(entry["sha256"]),
+            )
+            for entry in entries
+        )
+
+    async def workspace_export(
+        self,
+        *,
+        run_id: UUID,
+        lease_id: UUID,
+        sandbox_id: UUID,
+        sink: Callable[[bytes], Awaitable[None]],
+        limit: int,
+    ) -> dict[str, Any]:
+        try:
+            return await self._client.receive_stream(
+                "workspace_export",
+                {"run_id": run_id, "lease_id": lease_id, "sandbox_id": sandbox_id},
+                sink,
+                limit=limit,
+            )
+        except ControllerClient.Refused as refused:
+            raise self._refusal(refused) from refused
+
+    async def execute_stream(
+        self,
+        *,
+        run_id: UUID,
+        lease_id: UUID,
+        sandbox_id: UUID,
+        command: SandboxCommand,
+        artifact_limit: int,
+        sink: Callable[[bytes], Awaitable[None]],
+    ) -> StreamedResult:
+        try:
+            answer = await self._client.receive_stream(
+                "execute_stream",
+                {
+                    "run_id": run_id,
+                    "lease_id": lease_id,
+                    "sandbox_id": sandbox_id,
+                    "artifact_limit": artifact_limit,
+                    "command": {
+                        "argv": command.argv,
+                        "cwd": command.cwd,
+                        "timeout_seconds": command.timeout_seconds,
+                        "output_limit": command.output_limit,
+                    },
+                },
+                sink,
+                limit=artifact_limit,
+            )
+        except ControllerClient.Refused as refused:
+            raise self._refusal(refused) from refused
+        return StreamedResult(
+            exit_code=int(answer["exit_code"]),
+            timed_out=bool(answer["timed_out"]),
+            observed_bytes=int(answer["observed_bytes"]),
+            delivered_bytes=int(answer["delivered_bytes"]),
+            truncated=bool(answer["truncated"]),
+        )
+
+    async def volume_remove(self, *, run_id: UUID, sandbox_id: UUID) -> None:
+        await self._call(
+            "volume_remove", {"run_id": run_id, "sandbox_id": sandbox_id}
+        )
+
+    def _refusal(self, refused: ControllerClient.Refused) -> Exception:
+        try:
+            return SandboxRefused(RefusalReason(refused.reason))
+        except ValueError:
+            return refused
