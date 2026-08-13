@@ -48,6 +48,7 @@ from tiny_hermes.runs.domain.models import (
     SessionMode,
     SessionSnapshot,
     StateDecision,
+    WorkspaceCleanupTarget,
     event_type_for,
     message_from_document,
 )
@@ -426,6 +427,19 @@ class SqlRunStore:
         if session is None:
             raise UnknownSession
 
+        if command.signal is RunSignal.LIMIT_CLEANUP_CONFIRMED:
+            # Design §6.3: the door opens only for the Run whose rollback
+            # recorded this exact destination and this exact sandbox. The
+            # Scheduler is the only caller that can name both.
+            if (
+                run.workspace_cleanup_target != WorkspaceCleanupTarget.PAUSED_LIMIT.value
+                or run.workspace_cleanup_sandbox_id is None
+                or run.workspace_cleanup_sandbox_id != command.confirmed_sandbox_id
+            ):
+                raise InvalidStateMetadata(
+                    "the run's recorded cleanup intent does not match this confirmation"
+                )
+
         await self._decide_and_write(
             run,
             session,
@@ -436,6 +450,10 @@ class SqlRunStore:
             request_id=command.request_id,
             payload=dict(command.payload),
         )
+        if command.signal is RunSignal.LIMIT_CLEANUP_CONFIRMED:
+            # Cleared only in the same transition that reaches the target.
+            run.workspace_cleanup_target = None
+            run.workspace_cleanup_sandbox_id = None
         return await self._snapshot(run, command.capabilities)
 
     async def _decide_and_write(
@@ -593,6 +611,11 @@ class SqlRunStore:
         run.checkpoint_replay_safe = command.checkpoint_replay_safe
         run.checkpoint_effect_status = command.checkpoint_effect_status.value
         run.updated_at = now
+        if command.workspace_cleanup_target is not None:
+            # Design §6.3: the destination and the sandbox to confirm, written
+            # in the same transaction as the rollback results they belong to.
+            run.workspace_cleanup_target = command.workspace_cleanup_target.value
+            run.workspace_cleanup_sandbox_id = command.workspace_cleanup_sandbox_id
         # In this transaction and not a second one. A round whose text was
         # produced but not recorded would leave the transcript short, and the
         # next round would then build a different conversation than the one that

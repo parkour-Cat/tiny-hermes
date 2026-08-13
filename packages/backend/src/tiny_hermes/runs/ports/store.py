@@ -18,6 +18,7 @@ from tiny_hermes.runs.domain.models import (
     RunSnapshot,
     SessionMode,
     SessionSnapshot,
+    WorkspaceCleanupTarget,
 )
 from tiny_hermes.tenancy.domain.models import Role
 
@@ -88,6 +89,9 @@ class ApplySignalCommand:
     wait_kind: str | None = None
     wait_deadline_at: datetime | None = None
     payload: dict[str, Any] = field(default_factory=dict[str, Any])
+    #: For `LIMIT_CLEANUP_CONFIRMED` only: the sandbox the caller confirmed
+    #: gone, compared against the Run's recorded cleanup intent.
+    confirmed_sandbox_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -152,6 +156,11 @@ class RecordSliceCommand:
     #: Phase 3A carried a single string here, which could not express a round
     #: that acted rather than answered.
     appended: tuple[CanonicalMessage, ...] = ()
+    #: Design §6.3: where the Run must go after this exact sandbox and its
+    #: volume are confirmed gone. Recorded in the same transaction as the
+    #: rollback results, so a crash in between is recoverable from rows.
+    workspace_cleanup_target: WorkspaceCleanupTarget | None = None
+    workspace_cleanup_sandbox_id: UUID | None = None
 
 
 @dataclass(frozen=True)
