@@ -39,6 +39,20 @@ async function choose(page: Page, label: string, value: string): Promise<void> {
     .click();
 }
 
+/**
+ * Binds a tool the way a person does: the visible Ant Design wrapper.
+ *
+ * `locator.check()` targets the opacity-0 native input. Clicking that input
+ * does not change Ant Design 6's checked state, so the walk never saves a
+ * bound tool.
+ */
+async function bindTool(page: Page, name: string): Promise<void> {
+  const box = page.getByRole("checkbox", { name });
+  await expect(box).not.toBeChecked();
+  await page.locator(".ant-checkbox-wrapper").filter({ hasText: name }).click();
+  await expect(box).toBeChecked();
+}
+
 /** Creates an Agent, writes the scenario into its draft, and publishes v1. */
 async function publishAgent(page: Page, scenario: string): Promise<string> {
   const name = unique(scenario);
@@ -173,7 +187,7 @@ test("the builder binds a tool, playground sends, and rollback restores v1", asy
 
   await page.getByLabel("人格").fill("A playground agent for the console acceptance walk.");
   await choose(page, "模型场景", "continue_once");
-  await page.getByRole("checkbox", { name: "file.list" }).check();
+  await bindTool(page, "file.list");
   await page.getByRole("button", { name: "保存草稿" }).click();
   await expect(page.getByText("草稿修订 2")).toBeVisible();
   await page.getByRole("button", { name: "发布" }).click();
