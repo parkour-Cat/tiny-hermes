@@ -144,6 +144,16 @@ flowchart LR
 
 **逐文件计划触发条件：** 阶段三已用真实模型端点和 Docker 沙箱完成端到端文件任务。
 
+**设计与切片：** `docs/superpowers/specs/2026-08-13-m1-product-closure-design.md`。
+阶段四再分成四片，避免把控制台、密钥信封和验收门禁绑在同一条未验证的链上：
+
+- 4A 机器身份与 Chat Completions（计划：`docs/superpowers/plans/2026-08-13-m1-machine-identity.md`）
+- 4B 控制台产品闭环
+- 4C Secret 信封与 KEK 重包
+- 4D 验收、部署与飞书技术验证记录
+
+每一片在上一片的验证记录存在之后再写自己的逐任务计划。
+
 **出口检查：**
 
 - 产品设计 §27.1 的 13 个 M1 场景全部有自动检查或有证据的人工验收记录。
