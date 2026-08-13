@@ -3,12 +3,35 @@ from uuid import UUID
 from tiny_hermes.tenancy.domain.models import Actor, Role, Workspace, WorkspaceMember
 from tiny_hermes.tenancy.ports.store import WorkspaceStore
 
+WRITERS = {Role.WORKSPACE_ADMIN}
+READERS = {Role.WORKSPACE_ADMIN, Role.DEVELOPER, Role.VIEWER}
+
 
 class Forbidden(Exception):
     pass
 
 
 class InvalidWorkspaceName(Exception):
+    pass
+
+
+class UnknownUser(Exception):
+    pass
+
+
+class UnknownMember(Exception):
+    pass
+
+
+class MemberAlreadyPresent(Exception):
+    pass
+
+
+class LastWorkspaceAdmin(Exception):
+    pass
+
+
+class InvalidMemberRole(Exception):
     pass
 
 
@@ -41,10 +64,8 @@ class WorkspaceService:
     async def list_members(
         self, actor: Actor, workspace_id: UUID, request_id: str
     ) -> list[WorkspaceMember]:
-        role = await self._store.get_membership(workspace_id, actor.id)
-        if role is None:
-            if not actor.is_platform_admin:
-                raise Forbidden
+        platform = await self._require_member(actor, workspace_id)
+        if platform:
             await self._store.append_audit(
                 workspace_id=workspace_id,
                 actor_id=actor.id,
@@ -53,3 +74,118 @@ class WorkspaceService:
                 request_id=request_id,
             )
         return await self._store.list_members(workspace_id)
+
+    async def invite_member(
+        self,
+        actor: Actor,
+        workspace_id: UUID,
+        email: str,
+        role: Role,
+        request_id: str,
+    ) -> WorkspaceMember:
+        platform = await self._require_admin(actor, workspace_id)
+        _valid_member_role(role)
+        found = await self._store.find_user_by_subject(email.strip().lower())
+        if found is None:
+            raise UnknownUser
+        user_id, display_name = found
+        if await self._store.get_membership(workspace_id, user_id) is not None:
+            raise MemberAlreadyPresent
+        await self._store.add_membership(workspace_id, user_id, role)
+        await self._store.append_audit(
+            workspace_id=workspace_id,
+            actor_id=actor.id,
+            action=(
+                "workspace.member_invited_by_platform_admin"
+                if platform
+                else "workspace.member_invited"
+            ),
+            resource_id=user_id,
+            request_id=request_id,
+        )
+        return WorkspaceMember(user_id, display_name, email.strip().lower(), role)
+
+    async def change_member_role(
+        self,
+        actor: Actor,
+        workspace_id: UUID,
+        user_id: UUID,
+        role: Role,
+        request_id: str,
+    ) -> WorkspaceMember:
+        platform = await self._require_admin(actor, workspace_id)
+        _valid_member_role(role)
+        current = await self._store.get_membership(workspace_id, user_id)
+        if current is None:
+            raise UnknownMember
+        if current is Role.WORKSPACE_ADMIN and role is not Role.WORKSPACE_ADMIN:
+            await self._refuse_last_admin(workspace_id)
+        updated = await self._store.update_membership(workspace_id, user_id, role)
+        if updated is None:
+            raise UnknownMember
+        await self._store.append_audit(
+            workspace_id=workspace_id,
+            actor_id=actor.id,
+            action=(
+                "workspace.member_role_changed_by_platform_admin"
+                if platform
+                else "workspace.member_role_changed"
+            ),
+            resource_id=user_id,
+            request_id=request_id,
+        )
+        return updated
+
+    async def remove_member(
+        self, actor: Actor, workspace_id: UUID, user_id: UUID, request_id: str
+    ) -> None:
+        platform = await self._require_admin(actor, workspace_id)
+        current = await self._store.get_membership(workspace_id, user_id)
+        if current is None:
+            raise UnknownMember
+        if current is Role.WORKSPACE_ADMIN:
+            await self._refuse_last_admin(workspace_id)
+        removed = await self._store.remove_membership(workspace_id, user_id)
+        if not removed:
+            raise UnknownMember
+        await self._store.append_audit(
+            workspace_id=workspace_id,
+            actor_id=actor.id,
+            action=(
+                "workspace.member_removed_by_platform_admin"
+                if platform
+                else "workspace.member_removed"
+            ),
+            resource_id=user_id,
+            request_id=request_id,
+        )
+
+    async def _require_member(self, actor: Actor, workspace_id: UUID) -> bool:
+        role = await self._store.get_membership(workspace_id, actor.id)
+        if role is not None:
+            if role not in READERS:
+                raise Forbidden
+            return False
+        if not actor.is_platform_admin:
+            raise Forbidden
+        return True
+
+    async def _require_admin(self, actor: Actor, workspace_id: UUID) -> bool:
+        role = await self._store.get_membership(workspace_id, actor.id)
+        if role is not None:
+            if role not in WRITERS:
+                raise Forbidden
+            return False
+        if not actor.is_platform_admin:
+            raise Forbidden
+        return True
+
+    async def _refuse_last_admin(self, workspace_id: UUID) -> None:
+        members = await self._store.list_members(workspace_id)
+        if sum(1 for member in members if member.role is Role.WORKSPACE_ADMIN) <= 1:
+            raise LastWorkspaceAdmin
+
+
+def _valid_member_role(role: Role) -> None:
+    if role not in READERS:
+        raise InvalidMemberRole
