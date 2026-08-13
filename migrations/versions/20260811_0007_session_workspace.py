@@ -88,12 +88,14 @@ def upgrade() -> None:
         sa.Column("candidate_artifact_id", sa.Uuid(), nullable=True),
         sa.Column("staging_prefix", sa.String(length=512), nullable=False),
         sa.Column("candidate_index_key", sa.String(length=512), nullable=False),
+        sa.Column("candidate_index_sha256", sa.String(length=64), nullable=True),
         sa.Column("final_object_key", sa.String(length=512), nullable=True),
         sa.Column("status", sa.String(length=16), nullable=False),
         sa.Column("cleanup_pending", sa.Boolean(), nullable=False),
         sa.Column("total_bytes", sa.BigInteger(), nullable=True),
         sa.Column("object_count", sa.Integer(), nullable=True),
         sa.Column("committed_revision_id", sa.Uuid(), nullable=True),
+        sa.Column("abandon_reason", sa.String(length=120), nullable=True),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
@@ -112,6 +114,10 @@ def upgrade() -> None:
             f"status IN ({UPLOAD_STATUSES})", name="ck_object_uploads_status"
         ),
         sa.CheckConstraint(f"kind IN ({UPLOAD_KINDS})", name="ck_object_uploads_kind"),
+        sa.CheckConstraint(
+            "(status IN ('abandoned', 'expired')) OR (abandon_reason IS NULL)",
+            name="ck_object_uploads_abandon_reason",
+        ),
         sa.CheckConstraint(
             "total_bytes IS NULL OR total_bytes >= 0",
             name="ck_object_uploads_total_bytes",

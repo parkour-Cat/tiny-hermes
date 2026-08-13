@@ -101,6 +101,12 @@ class ObjectUploadRow(IdMixin, CreatedAtMixin, Base):
         ),
         CheckConstraint(_in_enum("status", UploadStatus), name="ck_object_uploads_status"),
         CheckConstraint(_in_enum("kind", UploadKind), name="ck_object_uploads_kind"),
+        # `expired` may carry the reason too: it is the terminal state of an
+        # abandoned upload, and the reason is history worth keeping.
+        CheckConstraint(
+            "(status IN ('abandoned', 'expired')) OR (abandon_reason IS NULL)",
+            name="ck_object_uploads_abandon_reason",
+        ),
         CheckConstraint(
             "total_bytes IS NULL OR total_bytes >= 0",
             name="ck_object_uploads_total_bytes",
@@ -143,11 +149,15 @@ class ObjectUploadRow(IdMixin, CreatedAtMixin, Base):
     candidate_artifact_id: Mapped[UUID | None] = mapped_column(nullable=True)
     staging_prefix: Mapped[str] = mapped_column(String(512))
     candidate_index_key: Mapped[str] = mapped_column(String(512))
+    # Recorded at `finalizing` so GC can refuse to trust index bytes that are
+    # not the ones the commit verified.
+    candidate_index_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     final_object_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
     status: Mapped[str] = mapped_column(String(16), index=True)
     cleanup_pending: Mapped[bool] = mapped_column(default=False, index=True)
     total_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     object_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     committed_revision_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    abandon_reason: Mapped[str | None] = mapped_column(String(120), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

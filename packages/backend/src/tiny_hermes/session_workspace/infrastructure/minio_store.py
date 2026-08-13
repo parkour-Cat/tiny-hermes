@@ -20,6 +20,7 @@ from typing import Any, cast
 from urllib.parse import urlparse
 
 from tiny_hermes.session_workspace.ports.objects import (
+    ObjectMissing,
     ObjectRef,
     ObjectStat,
     ObjectStorageUnavailable,
@@ -75,8 +76,15 @@ class MinioObjectStore:
         return StoredObject(size=reader.total, sha256=reader.digest())
 
     async def get_stream(self, ref: ObjectRef) -> AsyncIterator[bytes]:
+        from minio.error import S3Error  # noqa: PLC0415
+
         def open_object() -> Any:
-            return self._client.get_object(self._bucket, ref.key)
+            try:
+                return self._client.get_object(self._bucket, ref.key)
+            except S3Error as failure:
+                if failure.code in ("NoSuchKey", "NoSuchObject"):
+                    raise ObjectMissing(ref.key) from failure
+                raise
 
         response = await self._call(open_object)
         try:
@@ -128,13 +136,29 @@ class MinioObjectStore:
             # itself pending rather than believing it finished.
             raise ObjectStorageUnavailable(f"objects not deleted: {failed[:3]}")
 
+    async def list_prefix(self, prefix: str, *, limit: int) -> tuple[ObjectRef, ...]:
+        def enumerate_keys() -> tuple[ObjectRef, ...]:
+            found: list[ObjectRef] = []
+            for entry in self._client.list_objects(
+                self._bucket, prefix=prefix, recursive=True
+            ):
+                name = entry.object_name
+                if name is None:
+                    continue
+                found.append(ObjectRef(key=name))
+                if len(found) >= limit:
+                    break
+            return tuple(found)
+
+        return await self._call(enumerate_keys)
+
     async def _call(self, work: Any) -> Any:
         from minio.error import MinioException  # noqa: PLC0415
         from urllib3.exceptions import HTTPError  # noqa: PLC0415
 
         try:
             return await asyncio.to_thread(work)
-        except ObjectTooLarge:
+        except (ObjectTooLarge, ObjectMissing):
             raise
         except (MinioException, HTTPError, OSError) as failure:
             raise ObjectStorageUnavailable(str(failure)) from failure

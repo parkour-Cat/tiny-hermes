@@ -36,11 +36,29 @@ class ObjectStorageUnavailable(Exception):
     """
 
 
+class ObjectMissing(Exception):
+    """The store answered, and the answer was that the object is not there.
+
+    A verified absence and an unreachable store demand opposite reactions —
+    §7 maps the first to ``workspace_integrity_failed`` and the second to
+    bounded recovery — so they must not share an exception type.
+    """
+
+
 @dataclass(frozen=True)
 class ObjectRef:
     """One fully-formed object key. Constructed only by the builders below."""
 
     key: str
+
+
+def staging_prefix_key(*, workspace_id: UUID, session_id: UUID, upload_id: UUID) -> str:
+    """The prefix every staged object of one upload lives under.
+
+    Stored on the ObjectUpload row at registration, so cleanup can enumerate
+    exactly what this upload wrote and nothing else.
+    """
+    return f"workspaces/{workspace_id}/sessions/{session_id}/staging/{upload_id}/"
 
 
 def staging_object(
@@ -53,8 +71,23 @@ def staging_object(
     trusted name eventually is not.
     """
     safe = normalize_workspace_path(name)
+    prefix = staging_prefix_key(
+        workspace_id=workspace_id, session_id=session_id, upload_id=upload_id
+    )
+    return ObjectRef(key=f"{prefix}{safe}")
+
+
+def candidate_index_object(
+    *, workspace_id: UUID, session_id: UUID, upload_id: UUID
+) -> ObjectRef:
+    """The durable enumeration of one upload's intended final keys.
+
+    Deliberately outside the staging prefix: it must outlive staging deletion,
+    because it is the only complete list of what a failed commit may have
+    placed at final keys (design §6.2).
+    """
     return ObjectRef(
-        key=f"workspaces/{workspace_id}/sessions/{session_id}/staging/{upload_id}/{safe}"
+        key=f"workspaces/{workspace_id}/sessions/{session_id}/uploads/{upload_id}.index.json"
     )
 
 
@@ -114,3 +147,11 @@ class ObjectStore(Protocol):
     async def server_copy(self, source: ObjectRef, target: ObjectRef) -> None: ...
 
     async def delete_many(self, refs: Sequence[ObjectRef]) -> None: ...
+
+    async def list_prefix(self, prefix: str, *, limit: int) -> tuple[ObjectRef, ...]:
+        """At most ``limit`` keys under a server-generated prefix.
+
+        Bounded like every other operation; a caller that must drain a prefix
+        deletes what it received and asks again.
+        """
+        ...

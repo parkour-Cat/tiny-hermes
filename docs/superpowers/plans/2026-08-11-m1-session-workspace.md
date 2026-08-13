@@ -313,7 +313,7 @@ Commit as `feat: add workspace and artifact storage schema`.
 - Create: `packages/backend/tests/integration/session_workspace/test_upload_lifecycle.py`
 - Create: `packages/backend/tests/integration/session_workspace/test_upload_gc_race.py`
 
-- [ ] **Step 1: Write lifecycle and race tests**
+- [x] **Step 1: Write lifecycle and race tests**
 
 Cover this exact graph:
 
@@ -325,13 +325,13 @@ uploading/finalizing/ready -> expired (TTL cleanup)
 
 The row and its durable `candidate_index_key` are created before any final object. Tests must pause GC while a candidate is `finalizing` and `ready` and prove those final objects survive; a committed row with failed staging deletion keeps `cleanup_pending=true`; an unknown database result is re-read by `upload_id`; a connection failure alone never changes the row to `abandoned`.
 
-- [ ] **Step 2: Run tests to establish failure**
+- [x] **Step 2: Run tests to establish failure**
 
 Run `uv run --no-sync pytest packages/backend/tests/integration/session_workspace/test_upload_lifecycle.py packages/backend/tests/integration/session_workspace/test_upload_gc_race.py -q`.
 
 Expected: fails because `WorkspaceStore` and cleanup planner are missing.
 
-- [ ] **Step 3: Implement the state changes with database guards**
+- [x] **Step 3: Implement the state changes with database guards**
 
 Expose typed commands rather than a general status setter:
 
@@ -347,9 +347,15 @@ finish_cleanup(upload_id: UUID) -> None
 
 Every update includes its expected prior state in SQL. Candidate-index cleanup order is: read and verify index, recheck GC roots, delete unreferenced final keys, delete staging, delete index, then set `expired` and `cleanup_pending=false`. An uncertain reference keeps the object and row claim retryable.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run the two focused tests plus `uv run --no-sync pyright packages/backend/src/tiny_hermes/session_workspace` and expect all pass. Commit as `feat: make object uploads recoverable`.
+
+> Implementation notes, 2026-08-13: migration 0007 gained
+> `candidate_index_sha256` (GC refuses index bytes the commit never verified)
+> and `abandon_reason` (history for postmortems) — revised in place because the
+> revision has never left this branch. The `ObjectStore` port gained
+> `list_prefix` and a distinct `ObjectMissing`, both needed by cleanup.
 
 ### Task 5: Framed streaming subprotocol for the controller socket
 

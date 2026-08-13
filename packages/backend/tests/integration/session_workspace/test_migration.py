@@ -84,12 +84,14 @@ async def test_object_uploads_track_the_full_lifecycle(engine: AsyncEngine) -> N
         "candidate_artifact_id",
         "staging_prefix",
         "candidate_index_key",
+        "candidate_index_sha256",
         "final_object_key",
         "status",
         "cleanup_pending",
         "total_bytes",
         "object_count",
         "committed_revision_id",
+        "abandon_reason",
         "expires_at",
         "created_at",
         "updated_at",
@@ -101,10 +103,12 @@ async def test_object_uploads_track_the_full_lifecycle(engine: AsyncEngine) -> N
         "base_revision_id",
         "candidate_revision_id",
         "candidate_artifact_id",
+        "candidate_index_sha256",
         "final_object_key",
         "total_bytes",
         "object_count",
         "committed_revision_id",
+        "abandon_reason",
     }
 
 
