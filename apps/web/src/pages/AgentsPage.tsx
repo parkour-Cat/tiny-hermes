@@ -6,7 +6,7 @@ import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import { problemField, problemMessage } from "../api/messages";
 import type { AgentResponse } from "../api/types";
-import { t } from "../i18n/zh-CN";
+import { useT } from "../i18n/locale";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 type AgentValues = {
@@ -15,6 +15,7 @@ type AgentValues = {
 };
 
 export function AgentsPage() {
+  const t = useT();
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
   const [form] = Form.useForm<AgentValues>();
@@ -84,6 +85,11 @@ export function AgentsPage() {
                     <Link to={`/workspaces/${workspaceId}/agents/${entry.id}`}>{entry.name}</Link>
                   </Typography.Title>
                   <Typography.Text type="secondary">{entry.alias}</Typography.Text>
+                  <div>
+                    <Link to={`/workspaces/${workspaceId}/agents/${entry.id}/playground`}>
+                      {t("playground")}
+                    </Link>
+                  </div>
                 </div>
                 <Tag color={entry.current_version_id === null ? "default" : "green"}>
                   {entry.current_version_id === null ? t("agentUnpublished") : t("agentPublished")}

@@ -31,6 +31,18 @@ const RunsPage = lazy(() =>
 const WorkspacesPage = lazy(() =>
   import("./pages/WorkspacesPage").then((module) => ({ default: module.WorkspacesPage })),
 );
+const PlaygroundPage = lazy(() =>
+  import("./pages/PlaygroundPage").then((module) => ({ default: module.PlaygroundPage })),
+);
+const MembersPage = lazy(() =>
+  import("./pages/MembersPage").then((module) => ({ default: module.MembersPage })),
+);
+const ApiKeysPage = lazy(() =>
+  import("./pages/ApiKeysPage").then((module) => ({ default: module.ApiKeysPage })),
+);
+const ModelEndpointsPage = lazy(() =>
+  import("./pages/ModelEndpointsPage").then((module) => ({ default: module.ModelEndpointsPage })),
+);
 
 function AppRoutes() {
   const t = useT();
@@ -72,8 +84,12 @@ function AppRoutes() {
           <Route index element={<Navigate to="agents" replace />} />
           <Route path="agents" element={<AgentsPage />} />
           <Route path="agents/:agentId" element={<AgentDetailPage />} />
+          <Route path="agents/:agentId/playground" element={<PlaygroundPage />} />
           <Route path="runs" element={<RunsPage />} />
           <Route path="runs/:runId" element={<RunDetailPage />} />
+          <Route path="members" element={<MembersPage />} />
+          <Route path="api-keys" element={<ApiKeysPage />} />
+          <Route path="model-endpoints" element={<ModelEndpointsPage />} />
         </Route>
         <Route
           path="*"

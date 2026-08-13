@@ -40,6 +40,19 @@ export type ModelEndpointSummary = {
   status: string;
 };
 
+export type ModelEndpointDetail = ModelEndpointSummary & {
+  kind: string;
+  base_url: string;
+  credential_available: boolean;
+};
+
+export type EndpointCheckResponse = {
+  reachable: boolean;
+  elapsed_ms: number;
+  refusal: string | null;
+  detail: string | null;
+};
+
 export type AgentSpecDocument = {
   schema_version: number;
   personality: string;
@@ -149,6 +162,71 @@ export type RunEventFrame = {
   occurred_at: string;
   payload: Record<string, unknown>;
 };
+
+export type CanonicalMessagePart = {
+  type: string;
+  text?: string;
+  call_id?: string;
+  name?: string;
+  arguments?: Record<string, unknown>;
+  output?: string;
+  exit_code?: number;
+  failed?: boolean;
+};
+
+export type CanonicalMessage = {
+  role: string;
+  parts: CanonicalMessagePart[];
+};
+
+export type ArtifactResponse = {
+  id: string;
+  run_id: string;
+  session_id: string;
+  filename: string;
+  media_type: string;
+  size_bytes: number;
+  sha256: string;
+  truncated: boolean;
+  expires_at: string;
+};
+
+export type WorkspaceMemberResponse = {
+  user_id: string;
+  display_name: string;
+  subject: string;
+  role: string;
+};
+
+export type ServiceAccountResponse = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  role: string;
+  status: string;
+  created_by_user_id: string;
+  created_at: string;
+};
+
+export type ApiKeyResponse = {
+  id: string;
+  service_account_id: string;
+  prefix: string;
+  scopes: string[];
+  agent_ids: string[];
+  expires_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+};
+
+export type IssuedApiKeyResponse = ApiKeyResponse & {
+  token: string;
+};
+
+/** Scopes a developer ServiceAccount may request. Viewer keys are a subset. */
+export const API_KEY_SCOPES = ["runs.read", "runs.write", "runs.control", "agents.read"] as const;
+
+export const VIEWER_API_KEY_SCOPES = ["runs.read", "agents.read"] as const;
 
 /** Every tool this platform implements. An Agent may bind a subset. */
 export const IMPLEMENTED_TOOLS = ["file.list", "file.read", "file.write", "shell.exec"] as const;
