@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -73,3 +74,28 @@ def test_fourth_scenario_refuses_to_skip_without_an_approved_image(
 
     with pytest.raises(SystemExit, match="approved sandbox image"):
         restart_drill.sandbox_leak(object(), "workspace-id")
+
+
+def test_await_status_fails_fast_when_the_run_already_ended_elsewhere() -> None:
+    """A failed Run must not burn the drill's timeout waiting for completed.
+
+    compose-e2e did exactly that: the large commit was already `failed`, and
+    `await_status(..., ['completed'], 300)` polled for five more minutes.
+    """
+
+    class _Answer:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"status": "failed"}
+
+    class _Client:
+        def get(self, *_: object, **__: object) -> _Answer:
+            return _Answer()
+
+    console = restart_drill.Console(_Client())  # type: ignore[arg-type]
+    started = time.monotonic()
+    with pytest.raises(SystemExit, match="ended as 'failed'"):
+        console.await_status("workspace", "run-id", ["completed"], 30.0)
+    assert time.monotonic() - started < 1.0
