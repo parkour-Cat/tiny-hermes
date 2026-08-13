@@ -112,6 +112,12 @@ async def test_recorded_output_downloads_byte_for_byte(
     assert upload.status is UploadStatus.COMMITTED
     assert not upload.cleanup_pending, "staging was settled after the commit"
 
+    listed = client.get(f"/api/v1/runs/{submitted_run['id']}/artifacts", headers=scope)
+    assert listed.status_code == 200
+    assert [row["id"] for row in listed.json()] == [str(artifact.id)]
+    assert "object_key" not in listed.json()[0]
+    assert listed.json()[0]["filename"] == "command-output.log"
+
 
 async def test_cross_tenant_artifact_requests_get_a_generic_not_found(
     client: TestClient,

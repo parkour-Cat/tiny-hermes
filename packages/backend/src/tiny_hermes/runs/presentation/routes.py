@@ -6,10 +6,13 @@ from fastapi import APIRouter, Cookie, Depends, Header, Request, Response, statu
 from pydantic import BaseModel, Field, model_serializer
 
 from tiny_hermes.api.resources import ApplicationResources
+from tiny_hermes.artifacts.application.service import ArtifactForbidden, ArtifactService
+from tiny_hermes.artifacts.presentation.routes import ArtifactResponse
 from tiny_hermes.identity.application.auth_service import AuthService
 from tiny_hermes.identity.application.machine_service import MachineIdentityService
 from tiny_hermes.identity.presentation.dependencies import (
     SESSION_COOKIE,
+    forbidden,
     resolve_workspace_caller,
 )
 from tiny_hermes.runs.application.service import (
@@ -260,6 +263,7 @@ def run_router(resources: ApplicationResources) -> APIRouter:
     auth_dependency = resources.auth_service
     machines_dependency = resources.machine_identity_service
     runs_dependency = resources.run_coordination
+    artifacts_dependency = resources.artifact_service
 
     async def _announce(workspace_id: UUID, run_id: UUID) -> None:
         """Tell Workers after the transaction that created work committed."""
@@ -362,6 +366,55 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         except RunCoordinationError as error:
             raise as_app_error(error) from error
         return RunResponse.from_domain(found)
+
+    @router.get("/{run_id}/artifacts", response_model=list[ArtifactResponse])
+    async def list_run_artifacts(  # pyright: ignore[reportUnusedFunction]
+        run_id: UUID,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[
+            MachineIdentityService, Depends(machines_dependency, scope="function")
+        ],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
+        artifacts: Annotated[
+            ArtifactService, Depends(artifacts_dependency, scope="function")
+        ],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        authorization: AuthorizationHeader = None,
+    ) -> list[ArtifactResponse]:
+        caller = await resolve_workspace_caller(
+            auth,
+            machines,
+            session_token=session_token,
+            authorization=authorization,
+            csrf_token=None,
+            workspace_header=selected_workspace,
+            write=False,
+            required_scope="runs.read",
+        )
+        try:
+            await runs.get_run(caller.workspace_id, caller.actor, run_id)
+            found = await artifacts.list_for_run(
+                caller.workspace_id, caller.actor, run_id
+            )
+        except RunCoordinationError as error:
+            raise as_app_error(error) from error
+        except ArtifactForbidden as error:
+            raise forbidden() from error
+        return [
+            ArtifactResponse(
+                id=item.id,
+                run_id=item.run_id,
+                session_id=item.session_id,
+                filename=item.filename,
+                media_type=item.media_type,
+                size_bytes=item.size_bytes,
+                sha256=item.sha256,
+                truncated=item.truncated,
+                expires_at=item.expires_at,
+            )
+            for item in found
+        ]
 
     async def _control(
         run_id: UUID,

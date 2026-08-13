@@ -23,3 +23,7 @@ class ArtifactStore(Protocol):
     async def run_total_bytes(self, run_id: UUID) -> int:
         """What this Run's artifacts already weigh, for the per-Run ceiling."""
         ...
+
+    async def list_for_run(
+        self, workspace_id: UUID, run_id: UUID
+    ) -> list[Artifact]: ...
