@@ -83,7 +83,7 @@ docs/superpowers/verification/2026-08-11-m1-session-workspace.md
 - Create: `packages/backend/tests/unit/session_workspace/__init__.py`
 - Create: `packages/backend/tests/unit/session_workspace/test_manifest.py`
 
-- [ ] **Step 1: Write the failing manifest tests**
+- [x] **Step 1: Write the failing manifest tests**
 
 Define tests for these concrete cases:
 
@@ -109,7 +109,7 @@ def test_one_byte_and_one_object_over_limit_are_distinct() -> None:
 
 Also test invalid UTF-8, NFC duplicates, symlink/hard-link/device/FIFO/socket rejection, directory counting, lower-nine mode preservation with setuid/setgid/sticky removal, and replacement-delta arithmetic for `file.write`.
 
-- [ ] **Step 2: Prove the tests fail for the missing module**
+- [x] **Step 2: Prove the tests fail for the missing module**
 
 Run:
 
@@ -119,7 +119,7 @@ uv run --no-sync pytest packages/backend/tests/unit/session_workspace/test_manif
 
 Expected: collection fails with `ModuleNotFoundError: tiny_hermes.session_workspace`.
 
-- [ ] **Step 3: Implement the domain types and pure functions**
+- [x] **Step 3: Implement the domain types and pure functions**
 
 Use these names consistently for the rest of the plan:
 
@@ -158,7 +158,7 @@ class CheckpointStatus(StrEnum):
 
 `canonical_bytes()` must use UTF-8 JSON with sorted object keys and compact separators; entry ordering is bytewise order of normalized UTF-8 path bytes. `normalize_workspace_path()` accepts `/` only as separator, forbids empty, `.`, `..`, NUL and absolute paths, and returns NFC.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run:
 
