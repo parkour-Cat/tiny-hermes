@@ -611,6 +611,46 @@ async def test_conflict_flow_becomes_failed_workspace_conflict_after_cleanup(
     assert "workspace_conflict" in await _events_of(engine, run)
 
 
+async def test_unchanged_write_round_flow_still_records_its_turns(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    objects: MinioObjectStore,
+    tooled_agent: Callable[[list[str]], str],
+) -> None:
+    """A shell round that changed nothing commits nothing — but the transcript
+    must still gain the round's turns, or the next round rebuilds a different
+    conversation and the model repeats the command forever."""
+    agent = tooled_agent(["shell.exec"])
+    run, _ = _submit(client, scope, agent)
+    # Round one writes and commits; round two touches nothing.
+    sandbox = GatewaySandbox(effects=[_write_effect("stable.txt", b"unmoved")])
+
+    model = Recording(
+        sandbox, _tool(call_id="c1"), _tool(call_id="c2"), _text("nothing new")
+    )
+    await _drive(engine, model, sandbox, objects)
+
+    assert (await _run_row(engine, run)).status == "completed"
+    assert await _revisions(engine) == 1, "the unchanged round must not commit again"
+    assert len(model.requests) == 3, "an unrecorded round would loop the model"
+    async with engine.connect() as connection:
+        roles = [
+            str(row.role)
+            for row in (
+                await connection.execute(
+                    text(
+                        "SELECT m.role FROM session_messages m "
+                        "JOIN runs r ON r.session_id = m.session_id "
+                        "WHERE r.id = :run ORDER BY m.sequence"
+                    ),
+                    {"run": run},
+                )
+            ).all()
+        ]
+    assert roles == ["user", "assistant", "tool", "assistant", "tool", "assistant"]
+
+
 async def test_read_only_flow_creates_no_revision_and_never_freezes(
     client: TestClient,
     scope: dict[str, str],

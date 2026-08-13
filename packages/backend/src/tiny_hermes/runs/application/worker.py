@@ -655,10 +655,27 @@ class WorkerRuntime:
             None if measured is None else measured.total_bytes,
             runtime.quota.max_bytes,
         )
-        if result.status in (CheckpointStatus.COMMITTED, CheckpointStatus.UNCHANGED):
-            renewed = box if result.status is CheckpointStatus.UNCHANGED else replace(
-                box, revision=result.revision_id
+        if result.status is CheckpointStatus.UNCHANGED:
+            # Nothing was committed, so nothing recorded the round either: the
+            # turns and accounting go through the ordinary path, or the next
+            # round rebuilds a conversation without this one's result and the
+            # model repeats the command forever.
+            final = await self._dispose_frozen(claimed, handle, box, decision)
+            written = await self._record(
+                claimed,
+                handle,
+                after.state_version,
+                final,
+                response,
+                executed_ms,
+                appended=appended,
             )
+            if written is False or final.signal is not None:
+                return None
+            return box
+
+        if result.status is CheckpointStatus.COMMITTED:
+            renewed = replace(box, revision=result.revision_id)
             return await self._dispose_after_commit(claimed, handle, renewed, decision)
 
         if result.status is CheckpointStatus.LIMIT_EXCEEDED:
@@ -701,6 +718,47 @@ class WorkerRuntime:
             target=None,
         )
         return None
+
+    async def _dispose_frozen(
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        box: "_Sandbox",
+        decision: SliceDecision,
+    ) -> SliceDecision:
+        """The frozen instance's fate for a round the commit did not record.
+
+        Mirrors `_close_sandbox` without the freeze (the checkpoint already
+        froze); a failure downgrades the decision to INTERRUPTED, exactly as
+        3B's rule demands.
+        """
+        sandbox = self._sandbox
+        if sandbox is None:  # pragma: no cover - caller checks
+            return decision
+        try:
+            if decision.signal is None:
+                await sandbox.thaw(
+                    run_id=claimed.run.id,
+                    lease_id=handle.lease_id,
+                    sandbox_id=box.sandbox_id,
+                )
+            elif decision.signal is RunSignal.SLICE_ENDED:
+                await sandbox.keep(
+                    run_id=claimed.run.id,
+                    sandbox_id=box.sandbox_id,
+                    until=datetime.now(UTC)
+                    + timedelta(seconds=self._settings.sandbox_idle_ttl_seconds),
+                )
+            else:
+                await sandbox.destroy(
+                    run_id=claimed.run.id,
+                    lease_id=handle.lease_id,
+                    sandbox_id=box.sandbox_id,
+                )
+        except Exception:
+            logger.exception("sandbox close failed", extra={"run_id": str(claimed.run.id)})
+            return SliceDecision(RunSignal.INTERRUPTED)
+        return decision
 
     async def _dispose_after_commit(
         self,
