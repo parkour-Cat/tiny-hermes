@@ -406,3 +406,53 @@ async def test_a_tiny_sync_window_pauses_with_compat_timeout(
         ).one()
     assert row[0] == "paused"
     assert row[1] == "compat_timeout"
+
+
+async def test_streamed_completions_emit_a_delta_then_stop(
+    concurrent_client: httpx.AsyncClient,
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+) -> None:
+    token = _mint(client, scope, "streamer")
+    _publish_enabled(client, scope, "streamer")
+    async with _worker_pump(engine):
+        response = await concurrent_client.post(
+            COMPLETIONS,
+            headers={**_bearer(token), "Idempotency-Key": "stream-1"},
+            json={**_body("streamer"), "stream": True},
+        )
+        replayed = await concurrent_client.post(
+            COMPLETIONS,
+            headers={**_bearer(token), "Idempotency-Key": "stream-1"},
+            json={**_body("streamer"), "stream": True},
+        )
+    assert response.status_code == 200
+    assert "text/event-stream" in response.headers["content-type"]
+    body = response.text
+    assert "chat.completion.chunk" in body
+    assert FINISHED in body
+    assert "data: [DONE]" in body
+    assert replayed.status_code == 200
+    assert replayed.text == body
+
+
+async def test_a_pause_after_stream_headers_is_an_error_event(
+    concurrent_client: httpx.AsyncClient,
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+) -> None:
+    token = _mint(client, scope, "stream-pause")
+    _publish_enabled(client, scope, "stream-pause", scenario="continue_once", timeout=1)
+    async with _worker_pump(engine, delay_ms=1500):
+        response = await concurrent_client.post(
+            COMPLETIONS,
+            headers={**_bearer(token), "Idempotency-Key": "stream-pause"},
+            json={**_body("stream-pause"), "stream": True},
+        )
+    assert response.status_code == 200
+    assert "text/event-stream" in response.headers["content-type"]
+    assert "event: error" in response.text
+    assert "compat_timeout" in response.text
+    assert "data: [DONE]" not in response.text

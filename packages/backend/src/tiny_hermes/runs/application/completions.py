@@ -10,9 +10,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import monotonic
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -116,6 +118,15 @@ def user_text(messages: list[dict[str, Any]]) -> str:
     )
 
 
+@dataclass(frozen=True)
+class AdmittedCompletion:
+    run_id: UUID
+    session_id: UUID
+    timeout: int
+    key: str
+    model: str
+
+
 async def complete_chat(
     *,
     sessions: async_sessionmaker[AsyncSession],
@@ -129,10 +140,62 @@ async def complete_chat(
     session_header: str | None,
     request_id: str,
 ) -> dict[str, Any]:
-    if stream:
-        raise CompletionsError(
-            400, "stream_not_supported", "Streaming completions are not enabled yet."
+    admitted = await admit_chat(
+        sessions=sessions,
+        actor=actor,
+        workspace_id=workspace_id,
+        model=model,
+        messages=messages,
+        stream=stream,
+        idempotency_key=idempotency_key,
+        session_header=session_header,
+        request_id=request_id,
+    )
+    if isinstance(admitted, dict):
+        return admitted
+    await notifier.publish(workspace_id, admitted.run_id)
+    return await _finish_completion(
+        sessions, actor, workspace_id, admitted
+    )
+
+
+async def stream_admitted(
+    admitted: dict[str, Any] | AdmittedCompletion,
+    *,
+    sessions: async_sessionmaker[AsyncSession],
+    notifier: WakeUpNotifier,
+    actor: Actor,
+    workspace_id: UUID,
+) -> AsyncIterator[bytes]:
+    """Yield OpenAI chunk SSE. Headers have already gone out."""
+    if isinstance(admitted, dict):
+        async for frame in _document_to_sse(admitted):
+            yield frame
+        return
+    await notifier.publish(workspace_id, admitted.run_id)
+    try:
+        document = await _finish_completion(
+            sessions, actor, workspace_id, admitted
         )
+    except CompletionsError as error:
+        yield _sse_error(error)
+        return
+    async for frame in _document_to_sse(document):
+        yield frame
+
+
+async def admit_chat(
+    *,
+    sessions: async_sessionmaker[AsyncSession],
+    actor: Actor,
+    workspace_id: UUID,
+    model: str,
+    messages: list[dict[str, Any]],
+    stream: bool,
+    idempotency_key: str | None,
+    session_header: str | None,
+    request_id: str,
+) -> dict[str, Any] | AdmittedCompletion:
     key = _require_key(idempotency_key)
     bound_session_id = _parse_session_header(session_header)
     text = user_text(messages)
@@ -181,15 +244,28 @@ async def complete_chat(
             delivery_mode=DeliveryMode.CHAT_COMPLETIONS,
         )
         await session.commit()
+    return AdmittedCompletion(
+        run_id=accepted.run_id,
+        session_id=session_id,
+        timeout=timeout,
+        key=key,
+        model=model,
+    )
 
-    await notifier.publish(workspace_id, accepted.run_id)
+
+async def _finish_completion(
+    sessions: async_sessionmaker[AsyncSession],
+    actor: Actor,
+    workspace_id: UUID,
+    admitted: AdmittedCompletion,
+) -> dict[str, Any]:
     snapshot = await _wait_for_run(
-        sessions, workspace_id, actor, accepted.run_id, timeout
+        sessions, workspace_id, actor, admitted.run_id, admitted.timeout
     )
     if snapshot.state is not RunState.COMPLETED:
-        raise _unfinished(snapshot, accepted.run_id)
+        raise _unfinished(snapshot, admitted.run_id)
     document = await _completion_document(
-        sessions, workspace_id, actor, model, session_id, accepted.run_id
+        sessions, workspace_id, actor, admitted.model, admitted.session_id, admitted.run_id
     )
     async with sessions() as session:
         runs = RunCoordination(SqlRunStore(session))
@@ -197,8 +273,8 @@ async def complete_chat(
             workspace_id,
             actor,
             COMPLETIONS_ENDPOINT,
-            key,
-            accepted.run_id,
+            admitted.key,
+            admitted.run_id,
             document,
         )
         await session.commit()
@@ -382,3 +458,54 @@ def _parse_session_header(raw: str | None) -> UUID | None:
         raise CompletionsError(
             404, "session_not_found", "No such session exists."
         ) from error
+
+
+def _sse_error(error: CompletionsError) -> bytes:
+    return (
+        "event: error\n"
+        f"data: {json.dumps(error.payload(), ensure_ascii=False)}\n\n"
+    ).encode()
+
+
+async def _document_to_sse(document: dict[str, Any]) -> AsyncIterator[bytes]:
+    completion_id = str(document.get("id", "chatcmpl-unknown"))
+    created = int(document.get("created") or 0)
+    model = str(document.get("model") or "")
+    choices = document.get("choices")
+    content = ""
+    if isinstance(choices, list) and choices:
+        first = cast(object, choices[0])
+        if isinstance(first, dict):
+            typed = cast(dict[str, Any], first)
+            message = typed.get("message")
+            if isinstance(message, dict):
+                typed_message = cast(dict[str, Any], message)
+                raw = typed_message.get("content")
+                if isinstance(raw, str):
+                    content = raw
+    yield _sse_chunk(
+        completion_id,
+        created,
+        model,
+        {"role": "assistant", "content": content},
+        None,
+    )
+    yield _sse_chunk(completion_id, created, model, {}, "stop")
+    yield b"data: [DONE]\n\n"
+
+
+def _sse_chunk(
+    completion_id: str,
+    created: int,
+    model: str,
+    delta: dict[str, Any],
+    finish_reason: str | None,
+) -> bytes:
+    payload = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
