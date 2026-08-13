@@ -11,6 +11,7 @@ from tiny_hermes.identity.infrastructure import tables as identity_tables  # noq
 from tiny_hermes.model_catalog.infrastructure import tables as endpoint_tables  # noqa: F401
 from tiny_hermes.runs.infrastructure import tables as run_tables  # noqa: F401
 from tiny_hermes.sandbox.infrastructure import tables as sandbox_tables  # noqa: F401
+from tiny_hermes.secrets.infrastructure import tables as secret_tables  # noqa: F401
 from tiny_hermes.session_workspace.infrastructure import (  # noqa: F401
     tables as workspace_tables,
 )

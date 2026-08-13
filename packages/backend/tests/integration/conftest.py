@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from tiny_hermes.api.app import create_app
 from tiny_hermes.artifacts.infrastructure import tables as artifact_tables
 from tiny_hermes.sandbox.infrastructure import tables as sandbox_tables
+from tiny_hermes.secrets.infrastructure import tables as secret_tables
 from tiny_hermes.session_workspace.infrastructure import tables as workspace_tables
 from tiny_hermes.shared.config import Settings
 from tiny_hermes.shared.database import Base
@@ -26,6 +27,7 @@ from integration.support import EventsUrl, ReadStream
 assert sandbox_tables.SandboxReservationRow.__tablename__
 assert workspace_tables.ObjectUploadRow.__tablename__
 assert artifact_tables.ArtifactRow.__tablename__
+assert secret_tables.SecretRow.__tablename__
 
 STREAM_TIMEOUT = 20
 
