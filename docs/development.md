@@ -205,7 +205,78 @@ Invoke-RestMethod -Uri "$api/runs/$($run.id)/pause" -Method Post -WebSession $br
 
 `pause`, `resume`, `cancel`, and `retry` all require the state version or key
 shown above, and every Run snapshot reports `queue`, `budget`, and
-server-computed `available_actions`.
+server-computed `available_actions`. When the Session's head is `paused` or
+`waiting_*`, a second Runs API submit still returns `201` and a
+`queue.status` of `session_blocked` that names the head, its reason, and the
+actions this caller may take on **that head**.
+
+## Machine identity
+
+A workspace administrator mints a ServiceAccount (developer or viewer, never
+admin) and then an API Key. The plaintext token is in the create response
+once, as `token`, and is never stored or listed afterwards. Listing returns
+`prefix` and scopes. The authenticated caller on Sessions and Runs is the
+ServiceAccount; the key's scopes are intersected with the account's role.
+
+```powershell
+$account = Invoke-RestMethod -Uri "$api/service-accounts" -Method Post `
+  -WebSession $browser -ContentType "application/json" -Headers $headers `
+  -Body (@{ name = "ci-runner"; role = "developer" } | ConvertTo-Json)
+
+$issued = Invoke-RestMethod `
+  -Uri "$api/service-accounts/$($account.id)/api-keys" -Method Post `
+  -WebSession $browser -ContentType "application/json" -Headers $headers `
+  -Body (@{ scopes = @("runs.read", "runs.write", "runs.control") } | ConvertTo-Json)
+
+# $issued.token is shown once. Keep it out of logs and out of git.
+$token = $issued.token
+```
+
+`GET /api/v1/service-accounts/{id}/api-keys` never includes `token`.
+`POST /api/v1/api-keys/{id}/revoke` disables that key. A Bearer request that
+sends a disagreeing `X-Workspace-Id` is the same generic 403 a missing
+membership gets. Completions and the Runs API both use
+`Authorization: Bearer <token>`; they do not accept the browser session cookie
+as a substitute on `POST /v1/chat/completions`.
+
+## Chat Completions
+
+Enable delivery on the Agent spec before publishing (`delivery.enabled = true`,
+`sync_timeout_seconds` 1–60, default 60). The default omitted block does not
+change published content hashes. `model` is the Agent's workspace alias.
+
+`POST /v1/chat/completions` sits at the API root, not under `/api`. It requires
+`Idempotency-Key`. With no session header the platform creates an ephemeral
+Session. `X-Tiny-Hermes-Session-Id` must name a persistent Session this caller
+already owns for this Agent; a blocked persistent Session returns 409
+`session_blocked` and inserts no Run.
+
+```powershell
+$spec.delivery = @{ enabled = $true; sync_timeout_seconds = 60 }
+# republish the draft as above, then:
+
+$completionHeaders = @{
+  Authorization = "Bearer $token"
+  "Idempotency-Key" = [guid]::NewGuid().ToString()
+  "Content-Type" = "application/json"
+}
+$body = @{
+  model = "analyst"
+  messages = @(@{ role = "user"; content = "Summarize the weekly report." })
+} | ConvertTo-Json -Depth 5
+
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/v1/chat/completions" `
+  -Method Post -Headers $completionHeaders -Body $body
+```
+
+For a stream, set `stream = $true` and use `curl.exe -N`. After the response
+headers, a pause or timeout is an SSE `event: error` frame, not a JSON 409.
+Token chunks are not stored as RunEvents.
+
+A Completions Run holds its Worker lease until it finishes or
+`sync_timeout_seconds` elapses (`paused(compat_timeout)`). Other pauses tell
+the client `requires_runs_api`. The Scheduler cancels a `compat_timeout` pause
+that is still there after 24 hours.
 
 ## Executing Runs
 
@@ -588,10 +659,12 @@ This permanently deletes the local PostgreSQL and MinIO data in those two volume
 - The first successful bootstrap closes the bootstrap endpoint permanently; changing the token does not reopen it.
 - Local PostgreSQL and MinIO passwords are deliberately development-only and must not be copied into a production manifest.
 - Environment variables can be visible through process and container inspection. Future KEK support will use protected file mounts or an external key manager instead of ordinary environment variables.
-- M1 phase 3B provides Agent publication, Run execution, model endpoints, and the
-  platform-owned `shell.exec` tool inside a short-lived Docker sandbox. Approval,
-  secret management, Session-level file persistence, and artifact delivery do not
-  exist yet; no tool may execute on the API, Worker, or host directly.
+- M1 through 4A provides Agent publication, Run execution, model endpoints,
+  platform-owned `file.*` and `shell.exec` in a Docker sandbox, persistent
+  `/workspace/data`, tenant-scoped Artifacts, ServiceAccount API Keys, and
+  inbound Chat Completions. Approval queues, secret envelopes, and the
+  Playground console are later slices; no tool may execute on the API, Worker,
+  or host directly.
 - Agent personality text is never echoed in an error response, and a resource in another workspace always answers with a generic `404`.
 - A wake-up message carries a workspace ID and a Run ID and nothing else. Redis never sees a Run's input, an Agent's personality, or any other content.
 - The event stream selects its workspace through a query parameter because `EventSource` cannot send a header. Authorization is still the session cookie, and a Run in another workspace answers `404` whatever the parameter says.
