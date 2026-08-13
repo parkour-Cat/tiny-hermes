@@ -7,11 +7,10 @@ from pydantic import BaseModel, Field, model_serializer
 
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.identity.application.auth_service import AuthService
+from tiny_hermes.identity.application.machine_service import MachineIdentityService
 from tiny_hermes.identity.presentation.dependencies import (
     SESSION_COOKIE,
-    authenticate_browser_user,
-    require_workspace_id,
-    verify_browser_write,
+    resolve_workspace_caller,
 )
 from tiny_hermes.runs.application.service import (
     RunCoordination,
@@ -23,12 +22,13 @@ from tiny_hermes.runs.domain.models import (
     SessionMode,
     SessionSnapshot,
 )
-from tiny_hermes.runs.presentation.errors import actor_of, as_app_error
+from tiny_hermes.runs.presentation.errors import as_app_error
 
 WorkspaceHeader = Annotated[str | None, Header(alias="X-Workspace-Id")]
 CsrfHeader = Annotated[str | None, Header(alias="X-CSRF-Token")]
 IdempotencyHeader = Annotated[str | None, Header(alias="Idempotency-Key")]
 SessionCookie = Annotated[str | None, Cookie(alias=SESSION_COOKIE)]
+AuthorizationHeader = Annotated[str | None, Header()]
 
 REPLAYED_HEADER = "Idempotent-Replayed"
 
@@ -118,19 +118,32 @@ class RunResponse(BaseModel):
 def session_router(resources: ApplicationResources) -> APIRouter:
     router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
     auth_dependency = resources.auth_service
+    machines_dependency = resources.machine_identity_service
     runs_dependency = resources.run_coordination
 
     @router.get("", response_model=list[SessionResponse])
     async def list_sessions(  # pyright: ignore[reportUnusedFunction]
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[
+            MachineIdentityService, Depends(machines_dependency, scope="function")
+        ],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
+        authorization: AuthorizationHeader = None,
     ) -> list[SessionResponse]:
-        user = await authenticate_browser_user(auth, session_token)
-        workspace_id = require_workspace_id(selected_workspace)
+        caller = await resolve_workspace_caller(
+            auth,
+            machines,
+            session_token=session_token,
+            authorization=authorization,
+            csrf_token=None,
+            workspace_header=selected_workspace,
+            write=False,
+            required_scope="runs.read",
+        )
         try:
-            sessions = await runs.list_sessions(workspace_id, actor_of(user))
+            sessions = await runs.list_sessions(caller.workspace_id, caller.actor)
         except RunCoordinationError as error:
             raise as_app_error(error) from error
         return [SessionResponse.from_domain(item) for item in sessions]
@@ -140,17 +153,29 @@ def session_router(resources: ApplicationResources) -> APIRouter:
         payload: CreateSessionRequest,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[
+            MachineIdentityService, Depends(machines_dependency, scope="function")
+        ],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
+        authorization: AuthorizationHeader = None,
     ) -> SessionResponse:
-        user = await verify_browser_write(auth, session_token, csrf_token)
-        workspace_id = require_workspace_id(selected_workspace)
+        caller = await resolve_workspace_caller(
+            auth,
+            machines,
+            session_token=session_token,
+            authorization=authorization,
+            csrf_token=csrf_token,
+            workspace_header=selected_workspace,
+            write=True,
+            required_scope="runs.write",
+        )
         try:
             created = await runs.create_session(
-                workspace_id,
-                actor_of(user),
+                caller.workspace_id,
+                caller.actor,
                 payload.agent_id,
                 payload.session_mode,
                 request.state.request_id,
@@ -163,14 +188,26 @@ def session_router(resources: ApplicationResources) -> APIRouter:
     async def get_session(  # pyright: ignore[reportUnusedFunction]
         session_id: UUID,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[
+            MachineIdentityService, Depends(machines_dependency, scope="function")
+        ],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
+        authorization: AuthorizationHeader = None,
     ) -> SessionResponse:
-        user = await authenticate_browser_user(auth, session_token)
-        workspace_id = require_workspace_id(selected_workspace)
+        caller = await resolve_workspace_caller(
+            auth,
+            machines,
+            session_token=session_token,
+            authorization=authorization,
+            csrf_token=None,
+            workspace_header=selected_workspace,
+            write=False,
+            required_scope="runs.read",
+        )
         try:
-            found = await runs.get_session(workspace_id, actor_of(user), session_id)
+            found = await runs.get_session(caller.workspace_id, caller.actor, session_id)
         except RunCoordinationError as error:
             raise as_app_error(error) from error
         return SessionResponse.from_domain(found)
@@ -181,6 +218,7 @@ def session_router(resources: ApplicationResources) -> APIRouter:
 def run_router(resources: ApplicationResources) -> APIRouter:
     router = APIRouter(prefix="/api/v1/runs", tags=["runs"])
     auth_dependency = resources.auth_service
+    machines_dependency = resources.machine_identity_service
     runs_dependency = resources.run_coordination
 
     async def _announce(workspace_id: UUID, run_id: UUID) -> None:
@@ -190,15 +228,27 @@ def run_router(resources: ApplicationResources) -> APIRouter:
     @router.get("", response_model=list[RunResponse])
     async def list_runs(  # pyright: ignore[reportUnusedFunction]
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[
+            MachineIdentityService, Depends(machines_dependency, scope="function")
+        ],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         session_id: UUID | None = None,
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
+        authorization: AuthorizationHeader = None,
     ) -> list[RunResponse]:
-        user = await authenticate_browser_user(auth, session_token)
-        workspace_id = require_workspace_id(selected_workspace)
+        caller = await resolve_workspace_caller(
+            auth,
+            machines,
+            session_token=session_token,
+            authorization=authorization,
+            csrf_token=None,
+            workspace_header=selected_workspace,
+            write=False,
+            required_scope="runs.read",
+        )
         try:
-            found = await runs.list_runs(workspace_id, actor_of(user), session_id)
+            found = await runs.list_runs(caller.workspace_id, caller.actor, session_id)
         except RunCoordinationError as error:
             raise as_app_error(error) from error
         return [RunResponse.from_domain(item) for item in found]
@@ -209,18 +259,30 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         request: Request,
         response: Response,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[
+            MachineIdentityService, Depends(machines_dependency, scope="function")
+        ],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
         idempotency_key: IdempotencyHeader = None,
+        authorization: AuthorizationHeader = None,
     ) -> RunResponse:
-        user = await verify_browser_write(auth, session_token, csrf_token)
-        workspace_id = require_workspace_id(selected_workspace)
+        caller = await resolve_workspace_caller(
+            auth,
+            machines,
+            session_token=session_token,
+            authorization=authorization,
+            csrf_token=csrf_token,
+            workspace_header=selected_workspace,
+            write=True,
+            required_scope="runs.write",
+        )
         try:
             accepted = await runs.submit_run(
-                workspace_id,
-                actor_of(user),
+                caller.workspace_id,
+                caller.actor,
                 payload.session_id,
                 payload.input,
                 idempotency_key,
@@ -230,21 +292,33 @@ def run_router(resources: ApplicationResources) -> APIRouter:
             raise as_app_error(error) from error
         _apply_acceptance_headers(response, accepted.replayed, accepted.run_id)
         if not accepted.replayed:
-            await _announce(workspace_id, accepted.run_id)
+            await _announce(caller.workspace_id, accepted.run_id)
         return RunResponse.model_validate(accepted.document)
 
     @router.get("/{run_id}", response_model=RunResponse)
     async def get_run(  # pyright: ignore[reportUnusedFunction]
         run_id: UUID,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[
+            MachineIdentityService, Depends(machines_dependency, scope="function")
+        ],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
+        authorization: AuthorizationHeader = None,
     ) -> RunResponse:
-        user = await authenticate_browser_user(auth, session_token)
-        workspace_id = require_workspace_id(selected_workspace)
+        caller = await resolve_workspace_caller(
+            auth,
+            machines,
+            session_token=session_token,
+            authorization=authorization,
+            csrf_token=None,
+            workspace_header=selected_workspace,
+            write=False,
+            required_scope="runs.read",
+        )
         try:
-            found = await runs.get_run(workspace_id, actor_of(user), run_id)
+            found = await runs.get_run(caller.workspace_id, caller.actor, run_id)
         except RunCoordinationError as error:
             raise as_app_error(error) from error
         return RunResponse.from_domain(found)
@@ -254,18 +328,28 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         payload: ControlRunRequest,
         request: Request,
         auth: AuthService,
+        machines: MachineIdentityService,
         runs: RunCoordination,
         signal: RunSignal,
         session_token: str | None,
         csrf_token: str | None,
         selected_workspace: str | None,
+        authorization: str | None,
     ) -> RunResponse:
-        user = await verify_browser_write(auth, session_token, csrf_token)
-        workspace_id = require_workspace_id(selected_workspace)
+        caller = await resolve_workspace_caller(
+            auth,
+            machines,
+            session_token=session_token,
+            authorization=authorization,
+            csrf_token=csrf_token,
+            workspace_header=selected_workspace,
+            write=True,
+            required_scope="runs.control",
+        )
         try:
             updated = await runs.control_run(
-                workspace_id,
-                actor_of(user),
+                caller.workspace_id,
+                caller.actor,
                 run_id,
                 signal,
                 payload.expected_state_version,
@@ -281,18 +365,30 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         request: Request,
         response: Response,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[
+            MachineIdentityService, Depends(machines_dependency, scope="function")
+        ],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
         idempotency_key: IdempotencyHeader = None,
+        authorization: AuthorizationHeader = None,
     ) -> RunResponse:
-        user = await verify_browser_write(auth, session_token, csrf_token)
-        workspace_id = require_workspace_id(selected_workspace)
+        caller = await resolve_workspace_caller(
+            auth,
+            machines,
+            session_token=session_token,
+            authorization=authorization,
+            csrf_token=csrf_token,
+            workspace_header=selected_workspace,
+            write=True,
+            required_scope="runs.control",
+        )
         try:
             accepted = await runs.retry_run(
-                workspace_id,
-                actor_of(user),
+                caller.workspace_id,
+                caller.actor,
                 run_id,
                 idempotency_key,
                 request.state.request_id,
@@ -301,7 +397,7 @@ def run_router(resources: ApplicationResources) -> APIRouter:
             raise as_app_error(error) from error
         _apply_acceptance_headers(response, accepted.replayed, accepted.run_id)
         if not accepted.replayed:
-            await _announce(workspace_id, accepted.run_id)
+            await _announce(caller.workspace_id, accepted.run_id)
         return RunResponse.model_validate(accepted.document)
 
     @router.post("/{run_id}/pause", response_model=RunResponse)
@@ -310,21 +406,27 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         payload: ControlRunRequest,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[
+            MachineIdentityService, Depends(machines_dependency, scope="function")
+        ],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
+        authorization: AuthorizationHeader = None,
     ) -> RunResponse:
         return await _control(
             run_id,
             payload,
             request,
             auth,
+            machines,
             runs,
             RunSignal.PAUSE_REQUESTED,
             session_token,
             csrf_token,
             selected_workspace,
+            authorization,
         )
 
     @router.post("/{run_id}/resume", response_model=RunResponse)
@@ -333,21 +435,27 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         payload: ControlRunRequest,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[
+            MachineIdentityService, Depends(machines_dependency, scope="function")
+        ],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
+        authorization: AuthorizationHeader = None,
     ) -> RunResponse:
         return await _control(
             run_id,
             payload,
             request,
             auth,
+            machines,
             runs,
             RunSignal.RESUME_REQUESTED,
             session_token,
             csrf_token,
             selected_workspace,
+            authorization,
         )
 
     @router.post("/{run_id}/cancel", response_model=RunResponse)
@@ -356,25 +464,30 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         payload: ControlRunRequest,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[
+            MachineIdentityService, Depends(machines_dependency, scope="function")
+        ],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
+        authorization: AuthorizationHeader = None,
     ) -> RunResponse:
         return await _control(
             run_id,
             payload,
             request,
             auth,
+            machines,
             runs,
             RunSignal.CANCEL_REQUESTED,
             session_token,
             csrf_token,
             selected_workspace,
+            authorization,
         )
 
     return router
-
 
 def _apply_acceptance_headers(response: Response, replayed: bool, run_id: UUID) -> None:
     if replayed:

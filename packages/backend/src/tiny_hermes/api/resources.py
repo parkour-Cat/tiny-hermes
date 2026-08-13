@@ -12,6 +12,8 @@ from tiny_hermes.agents.infrastructure.sql_store import SqlAgentStore
 from tiny_hermes.artifacts.application.service import ArtifactService
 from tiny_hermes.artifacts.infrastructure.sql_store import SqlArtifactStore
 from tiny_hermes.identity.application.auth_service import AuthService
+from tiny_hermes.identity.application.machine_service import MachineIdentityService
+from tiny_hermes.identity.infrastructure.sql_machine_store import SqlMachineIdentityStore
 from tiny_hermes.identity.infrastructure.sql_store import SqlAuthStore
 from tiny_hermes.model_catalog.application.service import ModelEndpointService
 from tiny_hermes.model_catalog.infrastructure.sql_store import SqlModelEndpointStore
@@ -71,6 +73,16 @@ class ApplicationResources:
                 else:
                     await session.rollback()
                 raise
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
+
+    async def machine_identity_service(self) -> AsyncGenerator[MachineIdentityService]:
+        async with self.session_factory()() as session:
+            try:
+                yield MachineIdentityService(SqlMachineIdentityStore(session))
             except BaseException:
                 await session.rollback()
                 raise

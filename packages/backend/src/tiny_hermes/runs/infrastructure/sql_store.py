@@ -162,6 +162,7 @@ class SqlRunStore:
             "session",
             row.id,
             command.request_id,
+            actor_type=command.caller.caller_type.value,
         )
         return _session_snapshot(row)
 
@@ -265,6 +266,7 @@ class SqlRunStore:
             "run",
             run_id,
             command.request_id,
+            actor_type=command.caller.caller_type.value,
         )
 
         snapshot = await self._snapshot(run, command.capabilities)
@@ -410,6 +412,7 @@ class SqlRunStore:
                 command.request_id,
                 result="denied",
                 context={"signal": command.signal.value},
+                actor_type=command.caller.caller_type.value,
             )
             raise DeniedRunControl(_denial_code(error)) from error
 
@@ -1298,6 +1301,7 @@ class SqlRunStore:
             "run",
             run_id,
             command.request_id,
+            actor_type=command.caller.caller_type.value,
         )
 
         document = (await self._snapshot(run, command.capabilities)).document()
@@ -1619,11 +1623,14 @@ class SqlRunStore:
         request_id: str,
         result: str = "succeeded",
         context: dict[str, Any] | None = None,
+        actor_type: str | None = None,
     ) -> None:
+        if actor_type is None:
+            actor_type = "user" if actor_id is not None else "system"
         self._session.add(
             AuditEventRow(
                 workspace_id=workspace_id,
-                actor_type="user" if actor_id is not None else "system",
+                actor_type=actor_type,
                 actor_id=actor_id,
                 action=action,
                 resource_type=resource_type,

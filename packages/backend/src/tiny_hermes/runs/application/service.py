@@ -302,6 +302,10 @@ class RunCoordination:
     async def _require_role(
         self, workspace_id: UUID, actor: Actor, allowed: set[Role]
     ) -> Role:
+        if actor.is_service_account:
+            if actor.role is None or actor.role not in allowed:
+                raise ForbiddenRunAction
+            return actor.role
         role = await self._store.role_for(workspace_id, actor.id)
         if role is not None:
             if role not in allowed:
@@ -313,7 +317,8 @@ class RunCoordination:
 
 
 def _caller(actor: Actor) -> CallerIdentity:
-    return CallerIdentity(CallerType.USER, actor.id)
+    kind = CallerType.SERVICE_ACCOUNT if actor.is_service_account else CallerType.USER
+    return CallerIdentity(kind, actor.id)
 
 
 def _capabilities(role: Role) -> RunCapabilities:

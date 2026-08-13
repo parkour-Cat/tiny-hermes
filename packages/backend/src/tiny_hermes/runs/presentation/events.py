@@ -28,14 +28,14 @@ from fastapi.responses import StreamingResponse
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.identity.presentation.dependencies import (
     SESSION_COOKIE,
-    authenticate_browser_user,
+    resolve_workspace_caller,
 )
 from tiny_hermes.runs.application.service import (
     RunCoordinationError,
     RunEventCursorTooOld,
 )
 from tiny_hermes.runs.ports.store import RunEventRecord, RunEventWindow
-from tiny_hermes.runs.presentation.errors import actor_of, as_app_error
+from tiny_hermes.runs.presentation.errors import as_app_error
 from tiny_hermes.shared.errors import AppError
 from tiny_hermes.tenancy.domain.models import Actor
 
@@ -49,6 +49,7 @@ POLL_SECONDS = 0.5
 def run_event_router(resources: ApplicationResources) -> APIRouter:
     router = APIRouter(prefix="/api/v1/runs", tags=["runs"])
     auth_scope = asynccontextmanager(resources.auth_service)
+    machines_scope = asynccontextmanager(resources.machine_identity_service)
     runs_scope = asynccontextmanager(resources.run_coordination)
 
     async def _poll(
@@ -97,11 +98,21 @@ def run_event_router(resources: ApplicationResources) -> APIRouter:
         last_event_id: str | None = None,
         cursor_header: CursorHeader = None,
         session_token: SessionCookie = None,
+        authorization: Annotated[str | None, Header()] = None,
     ) -> StreamingResponse:
-        async with auth_scope() as auth:
-            user = await authenticate_browser_user(auth, session_token)
-        selected = _selected_workspace(workspace_id)
-        actor = actor_of(user)
+        async with auth_scope() as auth, machines_scope() as machines:
+            caller = await resolve_workspace_caller(
+                auth,
+                machines,
+                session_token=session_token,
+                authorization=authorization,
+                csrf_token=None,
+                workspace_header=workspace_id,
+                write=False,
+                required_scope="runs.read",
+            )
+        selected = caller.workspace_id
+        actor = caller.actor
         after = _cursor(cursor_header, last_event_id)
         try:
             async with runs_scope() as runs:
@@ -144,25 +155,6 @@ def _cursor(header_value: str | None, query_value: str | None) -> int:
         except ValueError:
             return 0
     return 0
-
-
-def _selected_workspace(raw_value: str | None) -> UUID:
-    if raw_value is None:
-        raise AppError(
-            code="workspace_required",
-            title="Workspace required",
-            status=400,
-            detail="A workspace_id query parameter is required for this stream.",
-        )
-    try:
-        return UUID(raw_value)
-    except ValueError as error:
-        raise AppError(
-            code="invalid_workspace_id",
-            title="Invalid workspace identifier",
-            status=400,
-            detail="workspace_id must be a UUID.",
-        ) from error
 
 
 def _as_stream_error(error: RunCoordinationError, run_id: UUID) -> AppError:
