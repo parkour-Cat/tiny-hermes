@@ -201,17 +201,23 @@ def quota_rollback(console: WorkspaceConsole, workspace: str, agent: str) -> Non
         "dd if=/dev/zero of=big.bin bs=1M count=12 2>/dev/null",
         "ws-quota-break",
     )
+    # `interrupted` is the rollback's staging state, not the outcome. Waiting
+    # for it returns the instant the intent is recorded, before cleanup is
+    # confirmed — and dumping the SSE history of a non-terminal Run never
+    # ends, which is how this drill hung for ten minutes in CI.
     paused, took = console.await_status(
         workspace,
         breaker,
-        ("paused", "completed", "failed", "interrupted"),
+        ("paused", "completed", "failed"),
         RECOVERY_TIMEOUT,
     )
     if paused["status"] != "paused":
-        # Before failing, say what the platform recorded: the event names are
-        # the diagnosis, and reading them beats guessing.
-        for event in console.events(workspace, breaker):
-            report("event", sequence=event.sequence, type=event.event_type)
+        report(
+            "over-quota run",
+            status=paused["status"],
+            reason=paused.get("pause_reason"),
+            took=f"{took:.1f}s",
+        )
         check(False, f"the over-quota run ended {paused['status']!r}, not paused")
     report(
         "over-quota run",

@@ -49,6 +49,7 @@ from tiny_hermes.runs.ports.store import (
     ClaimRunCommand,
     RecordSliceCommand,
 )
+from tiny_hermes.sandbox.application.controller import RefusalReason, SandboxRefused
 from tiny_hermes.sandbox.domain.command import (
     CommandResult,
     SandboxCommand,
@@ -253,6 +254,13 @@ class GatewaySandbox:
 
     async def destroy(self, **_: Any) -> None:
         self.calls.append("destroy")
+        if self.destroy_fails:
+            raise RuntimeError("the daemon did not confirm destroy")
+
+    async def cleanup(self, **_: Any) -> None:
+        # After INTERRUPTED the WorkerLease is gone, so the real Controller
+        # refuses `destroy` and this is the reclaim that can still succeed.
+        self.calls.append("cleanup")
         if self.destroy_fails:
             raise RuntimeError("the daemon did not confirm destroy")
 
@@ -532,10 +540,49 @@ async def test_over_quota_flow_rolls_back_cleans_up_then_pauses_limit(
     assert row.status == "paused"
     assert row.pause_reason == "limit"
     assert row.workspace_cleanup_target is None, "cleared in the same transition"
-    assert "destroy" in sandbox.calls
+    assert "cleanup" in sandbox.calls
+    assert "destroy" not in sandbox.calls
     assert "workspace_limit_exceeded" in await _events_of(engine, run)
     assert await _revisions(engine) == 0, "the over-limit step never becomes a revision"
     assert len(model.requests) == 1, "no model call may follow an unhandled rollback"
+
+
+async def test_over_quota_cleanup_confirms_after_the_lease_is_released(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    objects: MinioObjectStore,
+    tooled_agent: Callable[[list[str]], str],
+) -> None:
+    """The real Controller refuses Worker `destroy` once INTERRUPTED released the lease.
+
+    CI's quota drill hung here: the rollback was recorded, `destroy` came back
+    `lease_invalid`, and the Run sat in `interrupted` until the Scheduler's
+    next cycle. The Worker must use the no-lease `cleanup` action itself so
+    the pause does not wait on that sweep.
+    """
+
+    class LeaseReleasedSandbox(GatewaySandbox):
+        async def destroy(self, **_: Any) -> None:
+            self.calls.append("destroy")
+            raise SandboxRefused(RefusalReason.LEASE_INVALID)
+
+    agent = tooled_agent(["shell.exec"])
+    run, _ = _submit(client, scope, agent)
+    sandbox = LeaseReleasedSandbox(effects=[_write_effect("huge.bin", b"x" * 500)])
+    await _drive(
+        engine,
+        Recording(sandbox, _tool()),
+        sandbox,
+        objects,
+        quota=WorkspaceQuota(max_bytes=100, max_objects=10),
+    )
+
+    row = await _run_row(engine, run)
+    assert row.status == "paused"
+    assert row.pause_reason == "limit"
+    assert "cleanup" in sandbox.calls
+    assert "destroy" not in sandbox.calls
 
 
 async def test_unconfirmed_destroy_flow_stays_interrupted_not_paused(
@@ -607,7 +654,7 @@ async def test_conflict_flow_becomes_failed_workspace_conflict_after_cleanup(
     row = await _run_row(engine, run)
     assert row.status == "failed"
     assert row.workspace_cleanup_target is None
-    assert "destroy" in sandbox.calls
+    assert "cleanup" in sandbox.calls
     assert "workspace_conflict" in await _events_of(engine, run)
 
 

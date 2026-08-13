@@ -90,11 +90,19 @@ to tighten.
 
 ## 5. CI evidence
 
-The full-suite run for this slice's final commit is on the branch's Actions
-history (`ci` workflow, branch `m1-sandbox`, commit `cefc969` and successors);
-`backend-integration` runs every test above against service containers, and
-`compose-e2e` runs the boundary assertions and both drills. This record is
-written alongside that run; its link belongs in the PR that merges the slice.
+The full-suite run for this slice lives on the branch's Actions history
+(`ci` workflow, branch `m1-sandbox`). `backend-integration` runs every test
+above against service containers, and `compose-e2e` runs the boundary
+assertions and both drills.
+
+A later Actions run (`31693609570`) showed the quota drill hanging after the
+checkpoint itself was already correct (`status=limit_exceeded`,
+`total_bytes=12582916`, quota 8 MiB). The Worker had recorded `INTERRUPTED`
+(releasing the lease) and then called `destroy`, which the Controller refused
+as `lease_invalid`. The drill treated that staging state as the outcome and
+opened the SSE history of a non-terminal Run, which never closes. The Worker
+now reclaims with the no-lease `cleanup` action after the rollback
+transaction, and the drill waits only for `paused` / `completed` / `failed`.
 
 ## 6. Standing limitations, stated plainly
 

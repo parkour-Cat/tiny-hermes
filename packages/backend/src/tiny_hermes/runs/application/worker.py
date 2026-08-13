@@ -157,6 +157,8 @@ class SandboxSession(Protocol):
 
     async def destroy(self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID) -> None: ...
 
+    async def cleanup(self, *, run_id: UUID, sandbox_id: UUID) -> None: ...
+
 
 class WorkerRuntime:
     """Claims one Head Run at a time and advances it for one execution slice.
@@ -849,8 +851,13 @@ class WorkerRuntime:
         if sandbox is None:  # pragma: no cover - caller checks
             return
         try:
-            await sandbox.destroy(
-                run_id=claimed.run.id, lease_id=handle.lease_id, sandbox_id=box.sandbox_id
+            # INTERRUPTED already released the WorkerLease. The Controller's
+            # Worker `destroy` requires a live one, so that call is
+            # `lease_invalid` by construction. The Scheduler's no-lease
+            # `cleanup` is the reclaim that can still succeed — and the one
+            # the next cycle retries if this attempt is unconfirmed.
+            await sandbox.cleanup(
+                run_id=claimed.run.id, sandbox_id=box.sandbox_id
             )
         except Exception:
             # Not confirmed, so the Run must not claim a safe pause while the

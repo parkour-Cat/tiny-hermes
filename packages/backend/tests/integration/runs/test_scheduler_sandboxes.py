@@ -115,6 +115,9 @@ class PersistingDestroyFailure:
     async def destroy(self, **_: Any) -> None:
         raise RuntimeError("the daemon did not confirm destroy")
 
+    async def cleanup(self, **_: Any) -> None:
+        raise AssertionError("a completed Run still holds a lease, so it destroys")
+
 
 def instance() -> SandboxInstance:
     return SandboxInstance(

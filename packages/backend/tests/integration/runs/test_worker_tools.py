@@ -88,6 +88,10 @@ class StandInSandbox:
         if self.destroy_fails:
             raise RuntimeError("the daemon did not answer")
 
+    async def cleanup(self, *, run_id: UUID, sandbox_id: UUID) -> None:
+        del run_id, sandbox_id
+        raise AssertionError("a slice that still holds a lease destroys, it does not clean up")
+
 
 @dataclass(frozen=True)
 class _Acquired:
