@@ -351,9 +351,18 @@ watching a Run no longer needs a shell. Sign in at
 | --- | --- |
 | `/workspaces` | Every Workspace this account belongs to, and the form that creates one. |
 | `/workspaces/:workspaceId/agents` | The Workspace's Agents, and the form that creates one. |
-| `/workspaces/:workspaceId/agents/:agentId` | The one Draft, its revision, and publishing it as a version. |
+| `/workspaces/:workspaceId/agents/:agentId` | Draft editor: tools, Chat Completions delivery, field-level diff, rollback, rename. |
+| `/workspaces/:workspaceId/agents/:agentId/playground` | Persistent Session over the Runs API (cookie + CSRF). Not Chat Completions. |
 | `/workspaces/:workspaceId/runs` | The Workspace's Runs, and the form that submits one. |
-| `/workspaces/:workspaceId/runs/:runId` | One Run: its summary, its budget, its events as they arrive, and the actions the server says are available. |
+| `/workspaces/:workspaceId/runs/:runId` | One Run: summary, budget, transcript, tools, files, folded event payloads, and the actions the server offers. |
+| `/workspaces/:workspaceId/members` | Invite an existing user by email; change role; remove. Unknown email is an error, not a signup. |
+| `/workspaces/:workspaceId/api-keys` | Service accounts and API Keys. Plaintext is shown once. |
+| `/workspaces/:workspaceId/model-endpoints` | Selectable endpoints. Platform administrators also register, check, enable, and disable; detail shows `base_url` and `credential_available`, never the env value. |
+
+The header carries a language switcher (default `zh-CN`, persisted as
+`tiny-hermes-locale`) and a light/dark toggle (persisted as `tiny-hermes-theme`).
+Playground is reached from an Agent, not from a top-level nav item. There is no
+Approvals, Usage, task-tree, skills, Feishu, or Secrets page in this slice.
 
 The Workspace is a route parameter rather than a stored selection, so a reload or
 a shared link reopens the same scope, and the console sends the `X-Workspace-Id`
@@ -373,12 +382,28 @@ headers and can be aborted when the page unmounts. The `workspace_id` query
 parameter stays supported for `EventSource` clients and has its own acceptance
 test; nothing in the console relies on it.
 
-**What phase 2C does not show.** Design §20.3 describes a Run Detail with a
-parent/child task tree, context and compaction events, artifacts, and token and
-cost accounting. None of those exist in the platform yet, so none of them appear
-as an empty pane: a panel reading "no data" claims nothing happened, which is a
-different statement from "not built yet". They arrive with the phases that
-produce the data.
+**What this console still does not show.** Parent/child task trees, context and
+compaction events, and token/cost accounting remain M2/M3. Files (产物) on Run
+Detail and Playground list Artifacts the platform already stored. Secrets wait
+for slice 4C; a page that cannot store a Secret is not shipped.
+
+## Playground
+
+Playground is a Runs API client with a cookie, never a Chat Completions client.
+Opening `/workspaces/:workspaceId/agents/:agentId/playground` reuses the latest
+persistent Session for this Agent and this signed-in user, or creates one.
+Each send posts `POST /api/v1/runs` with a fresh `Idempotency-Key`. When the
+head Run is paused or waiting, a further send still returns `201` and the page
+shows the queue snapshot, including the head's `available_actions`. 「新 Session」
+opens an unrelated persistent Session.
+
+Files download through `GET /api/v1/artifacts/{id}/content` with
+`X-Workspace-Id`; a bare link cannot send that header.
+
+Members, API Keys, and model endpoints are listed in the header nav of a
+workspace. Inviting a member requires an email that already belongs to a User.
+An API Key's plaintext appears once in a dismissible panel; later listings show
+only the prefix.
 
 ## Model endpoints
 
