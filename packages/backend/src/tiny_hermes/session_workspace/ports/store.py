@@ -13,10 +13,14 @@ makes PostgreSQL the referee when two processes disagree.
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
-from tiny_hermes.session_workspace.domain.models import UploadKind, UploadStatus
+from tiny_hermes.session_workspace.domain.models import (
+    CheckpointStatus,
+    UploadKind,
+    UploadStatus,
+)
 
 
 class UnknownUpload(Exception):
@@ -108,6 +112,73 @@ class ObjectUpload:
     committed_revision_id: UUID | None
     abandon_reason: str | None
     expires_at: datetime
+
+
+@dataclass(frozen=True)
+class RevisionRecord:
+    """One committed revision as the service needs it: keys and promises."""
+
+    revision_id: UUID
+    manifest_object_key: str
+    manifest_sha256: str
+    manifest_schema_version: int
+    total_bytes: int
+    object_count: int
+
+
+@dataclass(frozen=True)
+class CommitCheckpoint:
+    """Everything design §8 step 5 writes in its one transaction.
+
+    ``slice_command`` is the Run module's ``RecordSliceCommand``, carried
+    opaquely: the tool turns and the revision pointer must move together, and
+    this bundle is how they arrive at the same transaction.
+    """
+
+    upload_id: UUID
+    workspace_id: UUID
+    session_id: UUID
+    run_id: UUID
+    base_revision_id: UUID | None
+    revision_id: UUID
+    manifest_object_key: str
+    manifest_sha256: str
+    manifest_schema_version: int
+    total_bytes: int
+    object_count: int
+    slice_command: Any
+
+
+@dataclass(frozen=True)
+class CommitOutcome:
+    status: CheckpointStatus
+    run: Any | None
+
+
+class WorkspaceLedger(Protocol):
+    """Every database fact the workspace service reads or writes.
+
+    One port rather than three stores, so the unit tests can script the whole
+    persistence story and the service never opens a session of its own.
+    """
+
+    async def current_revision(
+        self, workspace_id: UUID, session_id: UUID
+    ) -> RevisionRecord | None: ...
+
+    async def register_upload(self, command: RegisterUpload) -> None: ...
+
+    async def mark_finalizing(self, upload_id: UUID, *, index_sha256: str) -> None: ...
+
+    async def mark_ready(self, upload_id: UUID, *, totals: "UploadTotals") -> None: ...
+
+    async def abandon(self, upload_id: UUID, *, reason: str) -> None: ...
+
+    async def commit(self, commit: CommitCheckpoint) -> CommitOutcome: ...
+
+    async def settle(self, upload_id: UUID) -> None:
+        """Clear the cleanup debt after staging was actually deleted."""
+        ...
 
 
 class WorkspaceStore(Protocol):

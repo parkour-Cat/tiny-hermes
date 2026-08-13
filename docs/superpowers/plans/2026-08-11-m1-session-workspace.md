@@ -782,7 +782,7 @@ This is the deep module. Callers see exactly two operations (design §5.1); the
 manifest arithmetic (Task 1), object adapter (Task 2), upload lifecycle
 (Task 4), and sandbox streams (Task 9) are hidden behind it.
 
-- [ ] **Step 1: Write the failing service tests**
+- [x] **Step 1: Write the failing service tests**
 
 Unit tests drive the flow with fake ports:
 
@@ -810,11 +810,11 @@ async def test_lost_database_answer_reconciles_by_upload_id() -> None: ...
 async def test_conflict_marks_candidate_abandoned_and_keeps_the_pointer() -> None: ...
 ```
 
-- [ ] **Step 2: Run and fail on the missing service**
+- [x] **Step 2: Run and fail on the missing service**
 
 Both files fail with missing imports.
 
-- [ ] **Step 3: Implement service, port, committer**
+- [x] **Step 3: Implement service, port, committer**
 
 ```python
 @dataclass(frozen=True)
@@ -853,10 +853,21 @@ and the pointer move together, mark the upload committed. The preallocated
 `upload_id` reconciliation from Task 4 runs before any retry. Post-commit
 staging cleanup failure only leaves `cleanup_pending` set.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Unit on Windows; integration with Postgres + MinIO up. Commit as
 `feat: give a session a workspace it can trust`.
+
+> Implementation notes, 2026-08-13: the service depends on a single
+> `WorkspaceLedger` port (revision reads, upload lifecycle, the commit, and
+> post-commit settle) implemented by `SqlWorkspaceLedger` in `committer.py` —
+> one seam to fake in unit tests instead of three stores and a sessionmaker.
+> The sandbox port exports named file bodies (`export_files`) rather than a
+> raw tar, so tar *parsing* lives in the adapter (Task 12) and the service
+> only builds tars, which is the easy direction. `restore`/`checkpoint`
+> commands do not carry lease/sandbox ids — the port arrives already bound to
+> one slice. Commit retries reconcile by `upload_id` before any state change,
+> which is what makes the lost-answer test a read instead of a guess.
 
 ### Task 11: file.list, file.read, file.write
 
