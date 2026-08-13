@@ -2,7 +2,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from tiny_hermes.secrets.domain.envelope import InvalidKek, decode_kek, seal
+from tiny_hermes.secrets.domain.envelope import (
+    InvalidKek,
+    UnwrapFailed,
+    decode_kek,
+    seal,
+)
+from tiny_hermes.secrets.domain.envelope import (
+    rewrap as rewrap_envelope,
+)
 from tiny_hermes.secrets.domain.mask import mask_plaintext
 from tiny_hermes.secrets.domain.models import (
     SecretRecord,
@@ -39,6 +47,17 @@ class InvalidSecretPlaintext(Exception):
 
 class SecretNameTaken(Exception):
     pass
+
+
+class PreviousKekMissing(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class RewrapResult:
+    processed: int
+    remaining: int
+    current_key_id: str
 
 
 @dataclass(frozen=True)
@@ -127,6 +146,44 @@ class SecretService:
         )
         return _view(disabled)
 
+    async def rewrap(
+        self, actor: Actor, workspace_id: UUID, request_id: str
+    ) -> RewrapResult:
+        if actor.is_service_account or not actor.is_platform_admin:
+            raise ForbiddenSecretAction
+        current = self._current_kek()
+        previous = self._previous_kek()
+        processed = 0
+        for record in await self._store.list_by_key_id(self._kek.previous_id):
+            try:
+                rotated = rewrap_envelope(
+                    record.envelope(), previous, current, self._kek.current_id
+                )
+            except UnwrapFailed:
+                continue
+            await self._store.replace_wrap(
+                record.id, rotated.wrapped_dek, rotated.wrap_nonce, rotated.key_id
+            )
+            processed += 1
+        remaining = await self._store.count_by_key_id(self._kek.previous_id)
+        await self._store.append_audit(
+            workspace_id=workspace_id,
+            actor_id=actor.id,
+            action="secret.rewrapped",
+            resource_id=workspace_id,
+            request_id=request_id,
+            context={
+                "processed": str(processed),
+                "remaining": str(remaining),
+                "current_key_id": self._kek.current_id,
+            },
+        )
+        return RewrapResult(
+            processed=processed,
+            remaining=remaining,
+            current_key_id=self._kek.current_id,
+        )
+
     async def _visible(self, workspace_id: UUID, secret_id: UUID) -> SecretRecord:
         record = await self._store.get(secret_id)
         if record is None:
@@ -144,6 +201,14 @@ class SecretService:
             return decode_kek(self._kek.current)
         except InvalidKek as error:
             raise KekMissing from error
+
+    def _previous_kek(self) -> bytes:
+        if not self._kek.previous or not self._kek.previous_id:
+            raise PreviousKekMissing
+        try:
+            return decode_kek(self._kek.previous)
+        except InvalidKek as error:
+            raise PreviousKekMissing from error
 
     async def _require_lister(
         self, actor: Actor, workspace_id: UUID, request_id: str

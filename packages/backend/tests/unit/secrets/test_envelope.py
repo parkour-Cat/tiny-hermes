@@ -6,6 +6,7 @@ from tiny_hermes.secrets.domain.envelope import (
     InvalidKek,
     UnwrapFailed,
     decode_kek,
+    rewrap,
     seal,
     unseal,
 )
@@ -44,3 +45,15 @@ def test_a_key_id_mismatch_does_not_yield_plaintext() -> None:
 def test_a_short_kek_is_refused() -> None:
     with pytest.raises(InvalidKek):
         decode_kek("c2hvcnQ=")
+
+
+def test_rewrap_keeps_the_plaintext_under_a_new_kek() -> None:
+    previous = decode_kek("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+    current = decode_kek("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=")
+    sealed = seal(b"model-key-value", previous, "v1")
+    rotated = rewrap(sealed, previous, current, "v2")
+    assert rotated.ciphertext == sealed.ciphertext
+    assert rotated.key_id == "v2"
+    assert unseal(rotated, current) == b"model-key-value"
+    with pytest.raises(UnwrapFailed):
+        unseal(rotated, previous)

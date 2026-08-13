@@ -82,3 +82,24 @@ def unseal(envelope: Envelope, kek: bytes) -> bytes:
         return AESGCM(dek).decrypt(envelope.nonce, envelope.ciphertext, None)
     except InvalidTag as error:
         raise UnwrapFailed from error
+
+
+def rewrap(envelope: Envelope, previous_kek: bytes, new_kek: bytes, new_key_id: str) -> Envelope:
+    """Wrap the same DEK under a new KEK. The payload ciphertext does not move."""
+    if len(previous_kek) != KEK_LENGTH or len(new_kek) != KEK_LENGTH:
+        raise InvalidKek("a KEK is 32 bytes")
+    try:
+        dek = AESGCM(previous_kek).decrypt(
+            envelope.wrap_nonce, envelope.wrapped_dek, envelope.key_id.encode("utf-8")
+        )
+    except InvalidTag as error:
+        raise UnwrapFailed from error
+    wrap_nonce = token_bytes(NONCE_LENGTH)
+    wrapped_dek = AESGCM(new_kek).encrypt(wrap_nonce, dek, new_key_id.encode("utf-8"))
+    return Envelope(
+        ciphertext=envelope.ciphertext,
+        nonce=envelope.nonce,
+        wrapped_dek=wrapped_dek,
+        wrap_nonce=wrap_nonce,
+        key_id=new_key_id,
+    )

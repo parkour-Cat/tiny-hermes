@@ -159,3 +159,47 @@ def test_create_response_shape_has_no_envelope_fields(
         "created_at",
         "updated_at",
     }
+
+
+TEST_KEK = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+NEXT_KEK = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+
+
+def test_rewrap_skips_already_rotated_rows(
+    settings: Settings,
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+) -> None:
+    assert _create(client, scope, name="one").status_code == 201
+    assert _create(client, scope, name="two").status_code == 201
+    rotated = settings.model_copy(
+        update={
+            "tiny_hermes_kek": NEXT_KEK,
+            "tiny_hermes_kek_id": "v2",
+            "tiny_hermes_previous_kek": TEST_KEK,
+            "tiny_hermes_previous_kek_id": "v1",
+        }
+    )
+    with TestClient(create_app(settings=rotated)) as other:
+        login = other.post(
+            "/api/v1/auth/sessions",
+            json={"subject": "admin@example.com", "password": "long-pass-123"},
+        )
+        headers = {
+            "X-Workspace-Id": workspace_id,
+            "X-CSRF-Token": login.cookies["tiny_hermes_csrf"],
+        }
+        first = other.post("/api/v1/secrets/rewrap", headers=headers)
+        assert first.status_code == 200, first.text
+        assert first.json() == {
+            "processed": 2,
+            "remaining": 0,
+            "current_key_id": "v2",
+        }
+        second = other.post("/api/v1/secrets/rewrap", headers=headers)
+        assert second.json() == {
+            "processed": 0,
+            "remaining": 0,
+            "current_key_id": "v2",
+        }

@@ -5,12 +5,13 @@ from tiny_hermes.secrets.application.service import (
     ForbiddenSecretAction,
     KekMissing,
     KekSettings,
+    PreviousKekMissing,
     SecretNameTaken,
     SecretService,
     UnknownSecret,
 )
 from tiny_hermes.secrets.domain.envelope import decode_kek, unseal
-from tiny_hermes.secrets.domain.models import SecretScope, SecretStatus
+from tiny_hermes.secrets.domain.models import SecretRecord, SecretScope, SecretStatus
 from tiny_hermes.secrets.infrastructure.memory_store import MemorySecretStore
 from tiny_hermes.tenancy.domain.models import Actor, Role
 
@@ -172,3 +173,87 @@ async def test_a_service_account_cannot_manage_secrets() -> None:
         await service.create(
             machine, workspace_id, "openai", SecretScope.WORKSPACE, "value", "req-write"
         )
+
+
+OTHER_KEK = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+
+
+class InterruptAfterOne(MemorySecretStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.writes = 0
+        self.interrupted = False
+
+    async def replace_wrap(
+        self,
+        secret_id: UUID,
+        wrapped_dek: bytes,
+        wrap_nonce: bytes,
+        key_id: str,
+    ) -> SecretRecord | None:
+        if self.writes >= 1 and not self.interrupted:
+            self.interrupted = True
+            raise RuntimeError("interrupted")
+        self.writes += 1
+        return await super().replace_wrap(secret_id, wrapped_dek, wrap_nonce, key_id)
+
+
+@pytest.mark.asyncio
+async def test_rewrap_can_be_interrupted_and_resumed() -> None:
+    store = InterruptAfterOne()
+    workspace_id = uuid4()
+    store.memberships[(workspace_id, PLATFORM.id)] = Role.WORKSPACE_ADMIN
+    creator = SecretService(store, KekSettings(current=TEST_KEK, current_id="v1"))
+    first = await creator.create(
+        PLATFORM, workspace_id, "one", SecretScope.PLATFORM, "alpha", "req-1"
+    )
+    second = await creator.create(
+        PLATFORM, workspace_id, "two", SecretScope.PLATFORM, "beta", "req-2"
+    )
+    rotator = SecretService(
+        store,
+        KekSettings(
+            current=OTHER_KEK,
+            current_id="v2",
+            previous=TEST_KEK,
+            previous_id="v1",
+        ),
+    )
+    with pytest.raises(RuntimeError, match="interrupted"):
+        await rotator.rewrap(PLATFORM, workspace_id, "req-rewrap-1")
+
+    key_ids = {store.records[first.id].key_id, store.records[second.id].key_id}
+    assert key_ids == {"v1", "v2"}
+
+    result = await rotator.rewrap(PLATFORM, workspace_id, "req-rewrap-2")
+    assert result.processed == 1
+    assert result.remaining == 0
+    assert result.current_key_id == "v2"
+    assert store.records[first.id].key_id == "v2"
+    assert store.records[second.id].key_id == "v2"
+    assert unseal(store.records[first.id].envelope(), decode_kek(OTHER_KEK)) == b"alpha"
+    assert unseal(store.records[second.id].envelope(), decode_kek(OTHER_KEK)) == b"beta"
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_admin_cannot_rewrap() -> None:
+    store, service, workspace_id = _service()
+    await service.create(
+        ADMIN, workspace_id, "openai", SecretScope.WORKSPACE, "value", "req-1"
+    )
+    rotator = SecretService(
+        store,
+        KekSettings(
+            current=OTHER_KEK, current_id="v2", previous=TEST_KEK, previous_id="v1"
+        ),
+    )
+    with pytest.raises(ForbiddenSecretAction):
+        await rotator.rewrap(ADMIN, workspace_id, "req-rewrap")
+
+
+@pytest.mark.asyncio
+async def test_rewrap_without_the_previous_kek_is_refused() -> None:
+    store, _, workspace_id = _service()
+    rotator = SecretService(store, KekSettings(current=TEST_KEK, current_id="v1"))
+    with pytest.raises(PreviousKekMissing):
+        await rotator.rewrap(PLATFORM, workspace_id, "req-rewrap")
