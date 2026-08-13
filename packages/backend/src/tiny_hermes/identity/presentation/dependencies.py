@@ -139,6 +139,36 @@ def require_scope(actor: Actor, scope: str | None) -> None:
         raise forbidden()
 
 
+async def resolve_api_key_caller(
+    machines: MachineIdentityService,
+    *,
+    authorization: str | None,
+    workspace_header: str | None,
+    required_scope: str | None,
+) -> WorkspaceCaller:
+    """Bearer only. A cookie is never a substitute on Chat Completions."""
+    token = parse_bearer_token(authorization)
+    if token is None:
+        raise unauthenticated_bearer()
+    try:
+        machine = await machines.authenticate(
+            token, optional_workspace_id(workspace_header)
+        )
+    except InvalidApiKey as error:
+        raise unauthenticated_bearer() from error
+    except WorkspaceBindingMismatch as error:
+        raise forbidden() from error
+    actor = Actor(
+        machine.account.id,
+        False,
+        is_service_account=True,
+        role=machine.account.role,
+        scopes=machine.scopes,
+    )
+    require_scope(actor, required_scope)
+    return WorkspaceCaller(actor, machine.account.workspace_id)
+
+
 async def resolve_workspace_caller(
     auth: AuthService,
     machines: MachineIdentityService,

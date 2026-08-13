@@ -131,6 +131,52 @@ async def test_platform_admin_without_membership_is_allowed_and_audited() -> Non
     assert "agent.created_by_platform_admin" in store.audit_actions
 
 
+async def test_published_alias_names_the_current_version() -> None:
+    workspace_id = uuid4()
+    actor = Actor(uuid4(), False)
+    store = MemoryAgentStore()
+    store.roles[(workspace_id, actor.id)] = Role.DEVELOPER
+    catalog = AgentCatalog(store)
+
+    agent = await catalog.create_agent(workspace_id, actor, "Analyst", "analyst", "req-1")
+    draft = await catalog.replace_draft(
+        workspace_id, actor, agent.id, 1, valid_spec(), "req-2"
+    )
+    published = await catalog.publish(
+        workspace_id, actor, agent.id, draft.revision, "req-3"
+    )
+
+    found_agent, found_version = await catalog.published_alias(
+        workspace_id, actor, "analyst", "req-4"
+    )
+    assert found_agent.id == agent.id
+    assert found_version.id == published.version.id
+
+    with pytest.raises(UnknownAgent):
+        await catalog.published_alias(workspace_id, actor, "missing", "req-5")
+
+
+async def test_a_service_account_can_resolve_a_published_alias() -> None:
+    workspace_id = uuid4()
+    author = Actor(uuid4(), False)
+    store = MemoryAgentStore()
+    store.roles[(workspace_id, author.id)] = Role.DEVELOPER
+    catalog = AgentCatalog(store)
+    agent = await catalog.create_agent(workspace_id, author, "Analyst", "analyst", "req-1")
+    draft = await catalog.replace_draft(
+        workspace_id, author, agent.id, 1, valid_spec(), "req-2"
+    )
+    await catalog.publish(workspace_id, author, agent.id, draft.revision, "req-3")
+
+    machine = Actor(
+        uuid4(), False, is_service_account=True, role=Role.DEVELOPER
+    )
+    found_agent, _version = await catalog.published_alias(
+        workspace_id, machine, "analyst", "req-4"
+    )
+    assert found_agent.id == agent.id
+
+
 async def test_alias_must_be_lowercase_slug() -> None:
     workspace_id = uuid4()
     actor = Actor(uuid4(), False)

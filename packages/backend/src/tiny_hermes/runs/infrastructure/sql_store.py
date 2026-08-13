@@ -1316,6 +1316,55 @@ class SqlRunStore:
         )
         return AcceptedRun(run_id=run_id, document=document, replayed=False)
 
+    async def list_session_messages(
+        self, workspace_id: UUID, session_id: UUID
+    ) -> Sequence[CanonicalMessage]:
+        rows = (
+            await self._session.scalars(
+                select(SessionMessageRow)
+                .where(
+                    SessionMessageRow.workspace_id == workspace_id,
+                    SessionMessageRow.session_id == session_id,
+                    SessionMessageRow.redacted.is_(False),
+                )
+                .order_by(SessionMessageRow.sequence)
+            )
+        ).all()
+        return [_to_message(row) for row in rows]
+
+    async def claim_idempotency(
+        self,
+        workspace_id: UUID,
+        caller_type: CallerType,
+        caller_id: UUID,
+        endpoint: str,
+        idempotency_key: str,
+        fingerprint: str,
+    ) -> AcceptedRun | None:
+        return await self._claim_idempotency(
+            workspace_id, caller_type, caller_id, endpoint, idempotency_key, fingerprint
+        )
+
+    async def store_idempotency_response(
+        self,
+        workspace_id: UUID,
+        caller_type: CallerType,
+        caller_id: UUID,
+        endpoint: str,
+        idempotency_key: str,
+        run_id: UUID,
+        document: dict[str, Any],
+    ) -> None:
+        await self._store_response(
+            workspace_id,
+            caller_type,
+            caller_id,
+            endpoint,
+            idempotency_key,
+            run_id,
+            document,
+        )
+
     async def _copy_checkpoint_messages(
         self, session: SessionRow, source: RunRow, run_id: UUID, now: datetime
     ) -> None:

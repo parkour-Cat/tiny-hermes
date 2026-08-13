@@ -8,6 +8,7 @@ from tiny_hermes.agents.domain.models import AgentSpec
 from tiny_hermes.runs.domain.models import (
     BudgetSummary,
     CallerIdentity,
+    CallerType,
     CanonicalMessage,
     CheckpointEffectStatus,
     PauseReason,
@@ -318,3 +319,28 @@ class RunStore(Protocol):
     ) -> RepairResult: ...
 
     async def derive_retry(self, command: RetryRunCommand) -> AcceptedRun: ...
+
+    async def list_session_messages(
+        self, workspace_id: UUID, session_id: UUID
+    ) -> Sequence[CanonicalMessage]: ...
+
+    async def claim_idempotency(
+        self,
+        workspace_id: UUID,
+        caller_type: CallerType,
+        caller_id: UUID,
+        endpoint: str,
+        idempotency_key: str,
+        fingerprint: str,
+    ) -> AcceptedRun | None: ...
+
+    async def store_idempotency_response(
+        self,
+        workspace_id: UUID,
+        caller_type: CallerType,
+        caller_id: UUID,
+        endpoint: str,
+        idempotency_key: str,
+        run_id: UUID,
+        document: dict[str, Any],
+    ) -> None: ...
