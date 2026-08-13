@@ -537,7 +537,7 @@ Controller execs only this helper for file tools; no user string is
 interpolated into its argv beyond the relative path and byte limits it
 validates.
 
-- [ ] **Step 1: Write the failing integration tests (real Docker)**
+- [x] **Step 1: Write the failing integration tests (real Docker)**
 
 In `test_file_helper.py`, start one runtime container (reuse the sandbox test
 fixtures), then exec the helper directly:
@@ -562,12 +562,12 @@ async def test_helper_probe_reports_openat2_support(sandbox) -> None:
 async def test_write_is_atomic_same_directory_tmp_plus_rename(sandbox) -> None: ...
 ```
 
-- [ ] **Step 2: Run against the current image and fail**
+- [x] **Step 2: Run against the current image and fail**
 
 `uv run --no-sync pytest packages/backend/tests/integration/sandbox/test_file_helper.py -q`
 fails: the binary does not exist in the image.
 
-- [ ] **Step 3: Write the helper and the multi-stage build**
+- [x] **Step 3: Write the helper and the multi-stage build**
 
 `file_helper.c` subcommands, all relative to a data-root fd opened once from
 argv `--root /workspace/data`:
@@ -588,7 +588,7 @@ two stages: a `gcc` build stage compiling `file_helper.c` with
 `-static -O2 -Wall -Werror`, and the existing runtime stage copying it to
 `/usr/local/bin/tiny-hermes-file-helper`. Nothing else in the image changes.
 
-- [ ] **Step 4: Rebuild, verify, and commit**
+- [x] **Step 4: Rebuild, verify, and commit**
 
 ```powershell
 docker build -t tiny-hermes-sandbox:test -f deploy/sandbox/Dockerfile deploy/sandbox
@@ -596,6 +596,11 @@ uv run --no-sync pytest packages/backend/tests/integration/sandbox/test_file_hel
 ```
 
 Commit as `feat: resolve sandbox file paths in the kernel, not in strings`.
+
+> Verified 2026-08-13 on a real daemon: ten tests including a 400-iteration
+> symlink-swap race (zero reads escaped the data root). One test-side lesson —
+> the race harness must swap the real directory in atomically (`mv -T`), or a
+> half-copied file gets counted as a leak it is not.
 
 ### Task 8: The engine learns volumes, archives, and streamed exec
 

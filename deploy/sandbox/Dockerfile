@@ -9,7 +9,20 @@
 # `curl` and no `wget`: the container is created with `network_mode=none`, so a
 # network tool could only ever fail, and a failing `curl` invites a bug report
 # about `curl` when the answer is that there is no network at all.
+
+# Stage one exists to compile the openat2 file helper (design §5.2) and is
+# thrown away: the runtime image gains one static binary and no compiler.
+FROM debian@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258 AS build
+RUN set -eu; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends gcc libc6-dev; \
+    rm -rf /var/lib/apt/lists/*
+COPY file_helper.c /src/file_helper.c
+RUN gcc -static -O2 -Wall -Werror -o /src/tiny-hermes-file-helper /src/file_helper.c
+
 FROM debian@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258
+
+COPY --from=build /src/tiny-hermes-file-helper /usr/local/bin/tiny-hermes-file-helper
 
 # Numeric and fixed, matching SANDBOX_UID in the container policy. The platform
 # passes `--user 10001:10001` rather than a name, so the container's own
