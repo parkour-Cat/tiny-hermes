@@ -133,10 +133,12 @@ def scheduler_main() -> None:
 async def _scheduler() -> None:
     settings = get_settings()
     notifier = _notifier(settings)
+    workspace = _workspace(settings)
     runtime = SchedulerRuntime(
         session_factory=build_session_factory(settings),
         notifier=notifier,
         sandbox=_controller(settings),
+        objects=None if workspace is None else workspace.objects,
         settings=SchedulerSettings(
             max_recovery_attempts=settings.max_recovery_attempts,
             event_retention_hours=settings.event_retention_hours,

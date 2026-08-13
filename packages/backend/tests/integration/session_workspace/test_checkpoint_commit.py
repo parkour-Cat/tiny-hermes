@@ -111,7 +111,7 @@ def _soon() -> Any:
     return datetime.now(UTC) + timedelta(hours=1)
 
 
-def _slice(claimed: Any, *, lease_version: int | None = None) -> RecordSliceCommand:
+def slice_command(claimed: Any, *, lease_version: int | None = None) -> RecordSliceCommand:
     from tiny_hermes.runs.domain.models import CanonicalMessage, TextBlock  # noqa: PLC0415
 
     return RecordSliceCommand(
@@ -154,7 +154,7 @@ def _commit(
         "manifest_schema_version": 1,
         "total_bytes": 5,
         "object_count": 1,
-        "slice_command": _slice(claimed),
+        "slice_command": slice_command(claimed),
     }
     fields.update(overrides)
     return CommitCheckpoint(**fields)
@@ -208,7 +208,7 @@ async def test_commit_transaction_is_atomic_across_all_five_tables(
         registration,
         revision_id,
         claimed,
-        slice_command=_slice(claimed, lease_version=claimed.lease_version + 7),
+        slice_command=slice_command(claimed, lease_version=claimed.lease_version + 7),
     )
 
     with pytest.raises(LeaseLost):

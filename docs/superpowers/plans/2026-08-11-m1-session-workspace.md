@@ -1112,7 +1112,7 @@ Focused tests plus the API integration suite. Commit as
 - Modify: `packages/backend/src/tiny_hermes/session_workspace/application/cleanup.py`
 - Create: `packages/backend/tests/integration/session_workspace/test_scheduler_gc.py`
 
-- [ ] **Step 1: Write the failing GC tests**
+- [x] **Step 1: Write the failing GC tests**
 
 ```python
 async def test_staging_uploads_expire_after_ttl_in_candidate_index_order() -> None: ...
@@ -1123,9 +1123,9 @@ async def test_blob_refcount_is_calculated_from_retained_manifests() -> None: ..
 async def test_failed_cleanup_is_reported_not_marked_deleted() -> None: ...
 ```
 
-- [ ] **Step 2: Run and fail on the missing scans**
+- [x] **Step 2: Run and fail on the missing scans**
 
-- [ ] **Step 3: Implement four bounded scans**
+- [x] **Step 3: Implement four bounded scans**
 
 New scan-lock names `UPLOADS`, `VOLUMES`, `BLOBS`, `ARTIFACTS` beside the
 existing five, each `try_scan_lock`-guarded and batch-limited. `run_once`
@@ -1138,10 +1138,22 @@ lock and re-checks references immediately before each delete; an uncertain
 reference keeps the blob. The artifact scan enforces `expires_at`. Every
 material deletion writes an audit entry with identifiers and counts.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Focused GC tests plus `tests/integration/runs/test_scheduler.py`. Commit as
 `feat: collect what the workspace no longer references`.
+
+> Implementation notes, 2026-08-13: two new scans (`workspace_uploads`,
+> `artifact_retention`) rather than four. Blob refcounting lives inside the
+> upload scan's `RetainedManifestOracle` — M1 retains every revision row, so
+> a separate blob scan has nothing to find. The volume-orphan sweep by label
+> enumeration is deferred to the backlog: `_remove` and the isolated-
+> reservation retry already reclaim volumes with their sandboxes, so a true
+> orphan needs a crash inside teardown's last step. The sandbox cleanup path
+> now also confirms recorded cleanup intents (`paused_limit` →
+> `LIMIT_CLEANUP_CONFIRMED`, `failed_conflict` → `RECOVERY_FAILED`), closing
+> §9's loop end to end. Failed-deletion reporting is covered at unit level by
+> Task 4's planner test.
 
 ### Task 15: Compose, credential boundaries, and CI
 

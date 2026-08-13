@@ -1,5 +1,6 @@
 """The ArtifactStore over PostgreSQL. Mechanics, no rules."""
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -42,21 +43,7 @@ class SqlArtifactStore:
                 ArtifactRow.workspace_id == workspace_id,
             )
         )
-        if row is None:
-            return None
-        return Artifact(
-            id=row.id,
-            workspace_id=row.workspace_id,
-            session_id=row.session_id,
-            run_id=row.run_id,
-            object_key=row.object_key,
-            filename=row.filename,
-            media_type=row.media_type,
-            size_bytes=row.size_bytes,
-            sha256=row.sha256,
-            truncated=row.truncated,
-            expires_at=row.expires_at,
-        )
+        return None if row is None else self._domain(row)
 
     async def role_for(self, workspace_id: UUID, user_id: UUID) -> Role | None:
         value = await self._session.scalar(
@@ -74,3 +61,33 @@ class SqlArtifactStore:
             )
         )
         return int(total or 0)
+
+    async def expired(self, now: "datetime", limit: int) -> list[Artifact]:
+        rows = await self._session.scalars(
+            select(ArtifactRow)
+            .where(ArtifactRow.expires_at <= now)
+            .order_by(ArtifactRow.expires_at)
+            .limit(limit)
+        )
+        return [self._domain(row) for row in rows.all()]
+
+    async def delete(self, artifact_id: UUID) -> None:
+        row = await self._session.get(ArtifactRow, artifact_id)
+        if row is not None:
+            await self._session.delete(row)
+            await self._session.flush()
+
+    def _domain(self, row: ArtifactRow) -> Artifact:
+        return Artifact(
+            id=row.id,
+            workspace_id=row.workspace_id,
+            session_id=row.session_id,
+            run_id=row.run_id,
+            object_key=row.object_key,
+            filename=row.filename,
+            media_type=row.media_type,
+            size_bytes=row.size_bytes,
+            sha256=row.sha256,
+            truncated=row.truncated,
+            expires_at=row.expires_at,
+        )
