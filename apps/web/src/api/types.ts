@@ -44,13 +44,17 @@ export type AgentSpecDocument = {
   schema_version: number;
   personality: string;
   model_policy: ModelPolicyDocument;
-  tools: unknown[];
+  tools: string[];
   limits: {
     max_execution_seconds: number;
     max_elapsed_seconds: number;
     max_model_calls: number;
     max_tool_calls: number;
     max_derived_retries: number;
+  };
+  delivery?: {
+    enabled: boolean;
+    sync_timeout_seconds: number;
   };
 };
 
@@ -68,6 +72,10 @@ export type AgentVersionResponse = {
   schema_version: number;
   content_hash: string;
   created_at: string;
+};
+
+export type AgentVersionDetailResponse = AgentVersionResponse & {
+  spec: AgentSpecDocument;
 };
 
 export type SessionResponse = {
@@ -141,6 +149,9 @@ export type RunEventFrame = {
   occurred_at: string;
   payload: Record<string, unknown>;
 };
+
+/** Every tool this platform implements. An Agent may bind a subset. */
+export const IMPLEMENTED_TOOLS = ["file.list", "file.read", "file.write", "shell.exec"] as const;
 
 /** The three scenarios the deterministic substitute actually implements. */
 export const MODEL_SCENARIOS = ["complete", "continue_once", "fail_replay_safe"] as const;

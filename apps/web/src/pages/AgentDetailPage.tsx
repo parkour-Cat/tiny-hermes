@@ -3,16 +3,18 @@ import {
   Alert,
   Button,
   Card,
+  Checkbox,
   Form,
   Input,
   InputNumber,
   Modal,
   Select,
   Space,
+  Switch,
   Typography,
 } from "antd";
 import { useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 
 import { ApiError, api, apiWithStatus } from "../api/client";
 import { problemMessage } from "../api/messages";
@@ -20,11 +22,13 @@ import type {
   AgentDraftResponse,
   AgentResponse,
   AgentSpecDocument,
+  AgentVersionDetailResponse,
   AgentVersionResponse,
   ModelEndpointSummary,
 } from "../api/types";
-import { MODEL_SCENARIOS } from "../api/types";
-import { t } from "../i18n/zh-CN";
+import { IMPLEMENTED_TOOLS, MODEL_SCENARIOS } from "../api/types";
+import { useT } from "../i18n/locale";
+import type { MessageKey } from "../i18n/zh-CN";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 type DraftValues = {
@@ -37,32 +41,42 @@ type DraftValues = {
   max_model_calls: number;
   max_tool_calls: number;
   max_derived_retries: number;
+  tools: string[];
+  delivery_enabled: boolean;
+  sync_timeout_seconds: number;
 };
+
+type NameValues = {
+  name: string;
+  alias: string;
+};
+
+const DEFAULT_DELIVERY = { enabled: false, sync_timeout_seconds: 60 };
 
 function valuesOf(draft: AgentDraftResponse): DraftValues {
   const policy = draft.spec.model_policy;
+  const delivery = draft.spec.delivery ?? DEFAULT_DELIVERY;
   return {
     personality: draft.spec.personality,
     provider: policy.provider,
-    // Both fields are kept in the form whichever provider is selected, so
-    // switching back and forth does not lose what was already chosen.
     scenario: policy.provider === "deterministic" ? policy.scenario : "complete",
     endpoint_id: policy.provider === "openai_compatible" ? policy.endpoint_id : undefined,
     ...draft.spec.limits,
+    tools: [...draft.spec.tools],
+    delivery_enabled: delivery.enabled,
+    sync_timeout_seconds: delivery.sync_timeout_seconds,
   };
 }
 
 function specOf(values: DraftValues): AgentSpecDocument {
-  return {
+  const spec: AgentSpecDocument = {
     schema_version: 1,
     personality: values.personality,
-    // Built from the selection rather than echoed from the loaded spec, so the
-    // console never carries forward a shape it could not have produced.
     model_policy:
       values.provider === "openai_compatible"
         ? { provider: "openai_compatible", endpoint_id: values.endpoint_id ?? "" }
         : { provider: "deterministic", scenario: values.scenario },
-    tools: [],
+    tools: values.tools,
     limits: {
       max_execution_seconds: values.max_execution_seconds,
       max_elapsed_seconds: values.max_elapsed_seconds,
@@ -71,27 +85,55 @@ function specOf(values: DraftValues): AgentSpecDocument {
       max_derived_retries: values.max_derived_retries,
     },
   };
+  const timeout = values.sync_timeout_seconds ?? DEFAULT_DELIVERY.sync_timeout_seconds;
+  if (
+    values.delivery_enabled !== DEFAULT_DELIVERY.enabled ||
+    timeout !== DEFAULT_DELIVERY.sync_timeout_seconds
+  ) {
+    spec.delivery = {
+      enabled: values.delivery_enabled,
+      sync_timeout_seconds: timeout,
+    };
+  }
+  return spec;
 }
 
-/** The server's own bounds, so a refusal is rare rather than routine. */
-const LIMITS: { name: keyof DraftValues; label: string; min: number; max: number }[] = [
-  { name: "max_execution_seconds", label: t("maxExecutionSeconds"), min: 1, max: 900 },
-  { name: "max_elapsed_seconds", label: t("maxElapsedSeconds"), min: 60, max: 86_400 },
-  { name: "max_model_calls", label: t("maxModelCalls"), min: 1, max: 20 },
-  { name: "max_tool_calls", label: t("maxToolCalls"), min: 0, max: 50 },
-  { name: "max_derived_retries", label: t("maxDerivedRetries"), min: 0, max: 3 },
-];
+function summarizeSpec(spec: AgentSpecDocument): Record<string, string> {
+  const delivery = spec.delivery ?? DEFAULT_DELIVERY;
+  return {
+    personality: spec.personality,
+    model: JSON.stringify(spec.model_policy),
+    tools: spec.tools.join(", ") || "—",
+    max_execution_seconds: String(spec.limits.max_execution_seconds),
+    max_elapsed_seconds: String(spec.limits.max_elapsed_seconds),
+    max_model_calls: String(spec.limits.max_model_calls),
+    max_tool_calls: String(spec.limits.max_tool_calls),
+    max_derived_retries: String(spec.limits.max_derived_retries),
+    delivery: delivery.enabled
+      ? `chat_completions/${delivery.sync_timeout_seconds}s`
+      : "off",
+  };
+}
 
 export function AgentDetailPage() {
+  const t = useT();
   const workspaceId = useWorkspaceId();
   const { agentId = "" } = useParams();
   const queryClient = useQueryClient();
   const [form] = Form.useForm<DraftValues>();
+  const [nameForm] = Form.useForm<NameValues>();
   const [modal, contextHolder] = Modal.useModal();
   const [saveError, setSaveError] = useState<string | null>(null);
   const [publishNote, setPublishNote] = useState<string | null>(null);
   const scope = { workspace: workspaceId ?? "" };
   const enabled = workspaceId !== null && agentId !== "";
+  const limits: { name: keyof DraftValues; label: MessageKey; min: number; max: number }[] = [
+    { name: "max_execution_seconds", label: "maxExecutionSeconds", min: 1, max: 900 },
+    { name: "max_elapsed_seconds", label: "maxElapsedSeconds", min: 60, max: 86_400 },
+    { name: "max_model_calls", label: "maxModelCalls", min: 1, max: 20 },
+    { name: "max_tool_calls", label: "maxToolCalls", min: 0, max: 50 },
+    { name: "max_derived_retries", label: "maxDerivedRetries", min: 0, max: 3 },
+  ];
 
   const agent = useQuery({
     queryKey: ["agent", workspaceId, agentId] as const,
@@ -104,19 +146,29 @@ export function AgentDetailPage() {
     queryFn: () => api<AgentDraftResponse>(`/api/v1/agents/${agentId}/draft`, scope),
     enabled,
   });
-  // Platform-wide rather than workspace-scoped: an endpoint is approved by a
-  // platform administrator and every workspace chooses from the same list.
   const endpoints = useQuery({
     queryKey: ["model-endpoints"] as const,
     queryFn: () => api<ModelEndpointSummary[]>("/api/v1/model-endpoints", scope),
   });
   const provider = Form.useWatch("provider", form);
+  const deliveryEnabled = Form.useWatch("delivery_enabled", form);
+  const watched = Form.useWatch([], form) as DraftValues | undefined;
   const agentQuery = ["agent", workspaceId, agentId] as const;
   const versionsQuery = ["agent-versions", workspaceId, agentId] as const;
   const versions = useQuery({
     queryKey: versionsQuery,
     queryFn: () => api<AgentVersionResponse[]>(`/api/v1/agents/${agentId}/versions`, scope),
     enabled,
+  });
+  const publishedId = agent.data?.current_version_id ?? null;
+  const published = useQuery({
+    queryKey: ["agent-version", workspaceId, agentId, publishedId] as const,
+    queryFn: () =>
+      api<AgentVersionDetailResponse>(
+        `/api/v1/agents/${agentId}/versions/${publishedId ?? ""}`,
+        scope,
+      ),
+    enabled: enabled && publishedId !== null,
   });
 
   const saveDraft = useMutation({
@@ -133,10 +185,20 @@ export function AgentDetailPage() {
       queryClient.setQueryData(draftQuery, saved);
       setSaveError(null);
     },
-    // No refetch-and-retry. Saving again with the revision the server just
-    // reported would overwrite whatever the other writer stored and report it
-    // as a success — a lost update wearing a success message. The conflict is
-    // the user's to resolve, and their text stays in the form while they do.
+    onError: (caught) => setSaveError(problemMessage(caught)),
+  });
+
+  const rename = useMutation({
+    mutationFn: (values: NameValues) =>
+      api<AgentResponse>(`/api/v1/agents/${agentId}`, {
+        ...scope,
+        method: "PATCH",
+        body: JSON.stringify(values),
+      }),
+    onSuccess: (updated) => {
+      queryClient.setQueryData(agentQuery, updated);
+      setSaveError(null);
+    },
     onError: (caught) => setSaveError(problemMessage(caught)),
   });
 
@@ -156,10 +218,25 @@ export function AgentDetailPage() {
       queryClient.setQueryData<AgentVersionResponse[]>(versionsQuery, (current = []) =>
         current.some((entry) => entry.id === version.id) ? current : [...current, version],
       );
-      // 200 means this content was already published. The server calls that
-      // success, so the console reports what happened rather than dressing it
-      // up as a new version or as a failure.
       setPublishNote(status === 200 ? t("publishUnchanged") : null);
+      setSaveError(null);
+    },
+    onError: (caught) => setSaveError(problemMessage(caught)),
+  });
+
+  const rollback = useMutation({
+    mutationFn: (versionId: string) =>
+      api<AgentVersionResponse>(`/api/v1/agents/${agentId}/rollback`, {
+        ...scope,
+        method: "POST",
+        body: JSON.stringify({ version_id: versionId }),
+      }),
+    onSuccess: (version) => {
+      queryClient.setQueryData<AgentResponse>(agentQuery, (current) =>
+        current === undefined
+          ? current
+          : { ...current, status: "published", current_version_id: version.id },
+      );
       setSaveError(null);
     },
     onError: (caught) => setSaveError(problemMessage(caught)),
@@ -181,8 +258,6 @@ export function AgentDetailPage() {
   }
 
   function reload(): void {
-    // Asked before it happens, because the draft in the form may be the only
-    // copy of what the user wrote.
     void modal.confirm({
       title: t("reloadDraft"),
       content: t("reloadDraftWarning"),
@@ -204,17 +279,35 @@ export function AgentDetailPage() {
       content: `${t("publishWarningPrefix")}${revision}${t("publishWarningSuffix")}`,
       okText: t("confirm"),
       cancelText: t("cancel"),
-      // The question closes whether or not the publish succeeded: a refusal is
-      // reported on the page, and leaving the dialog open would cover the very
-      // message the user has to read.
       onOk: () => publish.mutateAsync(revision).catch(() => undefined),
     });
   }
 
-  const published = versions.data?.find((version) => version.id === agent.data?.current_version_id);
-  const lastError = saveDraft.error ?? publish.error;
+  function askToRollback(versionId: string, number: number): void {
+    void modal.confirm({
+      title: `${t("rollback")} v${number}`,
+      content: t("rollbackWarning"),
+      okText: t("confirm"),
+      cancelText: t("cancel"),
+      onOk: () => rollback.mutateAsync(versionId).catch(() => undefined),
+    });
+  }
+
+  const currentVersion = versions.data?.find((version) => version.id === agent.data?.current_version_id);
+  const lastError = saveDraft.error ?? publish.error ?? rename.error ?? rollback.error;
   const conflicted =
     lastError instanceof ApiError && lastError.code === "draft_revision_conflict";
+  const draftValues =
+    watched !== undefined && watched.personality !== undefined
+      ? watched
+      : valuesOf(draft.data);
+  const draftSummary = summarizeSpec(specOf(draftValues));
+  const publishedSummary =
+    published.data === undefined ? null : summarizeSpec(published.data.spec);
+  const diffEntries =
+    publishedSummary === null
+      ? []
+      : Object.entries(draftSummary).filter(([key, value]) => publishedSummary[key] !== value);
 
   return (
     <>
@@ -224,18 +317,53 @@ export function AgentDetailPage() {
           <Typography.Title level={2}>{agent.data.name}</Typography.Title>
           <Typography.Paragraph type="secondary">{agent.data.alias}</Typography.Paragraph>
         </div>
-        <Button
-          type="primary"
-          loading={publish.isPending}
-          onClick={() => askToPublish(draft.data?.revision ?? 0)}
-        >
-          {t("publish")}
-        </Button>
+        <Space wrap>
+          <Link to={`/workspaces/${workspaceId}/agents/${agentId}/playground`}>
+            <Button>{t("openPlayground")}</Button>
+          </Link>
+          <Button
+            type="primary"
+            loading={publish.isPending}
+            onClick={() => askToPublish(draft.data?.revision ?? 0)}
+          >
+            {t("publish")}
+          </Button>
+        </Space>
       </div>
+      <Card title={t("renameAgent")} variant="borderless" className="page-alert">
+        <Form<NameValues>
+          form={nameForm}
+          layout="inline"
+          requiredMark={false}
+          initialValues={{ name: agent.data.name, alias: agent.data.alias }}
+          onFinish={(values) => rename.mutate(values)}
+        >
+          <Form.Item
+            name="name"
+            label={t("agentName")}
+            rules={[
+              { required: true, whitespace: true, message: t("required") },
+              { max: 120, message: t("agentNameMaximum") },
+            ]}
+          >
+            <Input />
+          </Form.Item>
+          <Form.Item
+            name="alias"
+            label={t("agentAlias")}
+            extra={t("agentAliasHint")}
+            rules={[{ required: true, whitespace: true, message: t("required") }]}
+          >
+            <Input />
+          </Form.Item>
+          <Form.Item>
+            <Button htmlType="submit" loading={rename.isPending}>
+              {t("saveName")}
+            </Button>
+          </Form.Item>
+        </Form>
+      </Card>
       <Card variant="borderless" className="page-alert">
-        {/* Two facts, side by side and unrelated. Stated rather than compared:
-            the draft endpoint returns no content hash, so "unchanged since
-            publish" is not something this console can know. */}
         <Space size="large" wrap>
           <Typography.Text strong>
             {`${t("draftRevision")} ${draft.data.revision}`}
@@ -244,20 +372,33 @@ export function AgentDetailPage() {
             <Typography.Text>{t("agentUnpublished")}</Typography.Text>
           ) : (
             <Typography.Text>
-              {`${t("currentVersion")} v${published?.version_number ?? "?"}`}
+              {`${t("currentVersion")} v${currentVersion?.version_number ?? "?"}`}
             </Typography.Text>
           )}
         </Space>
-        {published === undefined ? null : (
-          // The whole hash, not a prefix: a truncated one cannot be compared
-          // against anything, which is the only thing a hash is for.
+        {currentVersion === undefined ? null : (
           <Typography.Paragraph className="fact-note">
-            <Typography.Text code>{published.content_hash}</Typography.Text>
+            <Typography.Text code>{currentVersion.content_hash}</Typography.Text>
           </Typography.Paragraph>
         )}
-        <Typography.Paragraph type="secondary" className="fact-note">
-          {t("draftComparisonUnavailable")}
-        </Typography.Paragraph>
+        <Typography.Title level={5}>{t("diffSection")}</Typography.Title>
+        {publishedSummary === null ? (
+          <Typography.Paragraph type="secondary">{t("diffUnpublished")}</Typography.Paragraph>
+        ) : diffEntries.length === 0 ? (
+          <Typography.Paragraph type="secondary">{t("diffNone")}</Typography.Paragraph>
+        ) : (
+          <ul>
+            {diffEntries.map(([key, value]) => (
+              <li key={key}>
+                <Typography.Text>{key}</Typography.Text>
+                {": "}
+                <Typography.Text delete>{publishedSummary[key]}</Typography.Text>
+                {" → "}
+                <Typography.Text>{value}</Typography.Text>
+              </li>
+            ))}
+          </ul>
+        )}
       </Card>
       {publishNote === null ? null : (
         <Alert className="page-alert" type="info" title={publishNote} showIcon />
@@ -301,8 +442,6 @@ export function AgentDetailPage() {
               name="endpoint_id"
               label={t("modelEndpoint")}
               rules={[{ required: true, message: t("required") }]}
-              // An empty dropdown reads as a loading bug. Saying that nothing is
-              // registered points at the person who can change that.
               extra={endpoints.data?.length === 0 ? t("modelEndpointsEmpty") : undefined}
             >
               <Select
@@ -321,11 +460,11 @@ export function AgentDetailPage() {
           )}
           <Typography.Title level={5}>{t("limitsSection")}</Typography.Title>
           <div className="limit-grid">
-            {LIMITS.map((limit) => (
+            {limits.map((limit) => (
               <Form.Item
                 key={limit.name}
                 name={limit.name}
-                label={limit.label}
+                label={t(limit.label)}
                 rules={[{ required: true, message: t("required") }]}
               >
                 <InputNumber min={limit.min} max={limit.max} className="full-width" />
@@ -333,7 +472,25 @@ export function AgentDetailPage() {
             ))}
           </div>
           <Typography.Title level={5}>{t("toolsSection")}</Typography.Title>
-          <Typography.Paragraph type="secondary">{t("toolsPhaseGap")}</Typography.Paragraph>
+          <Typography.Paragraph type="secondary">{t("toolsHint")}</Typography.Paragraph>
+          <Form.Item name="tools">
+            <Checkbox.Group
+              options={IMPLEMENTED_TOOLS.map((name) => ({ value: name, label: name }))}
+            />
+          </Form.Item>
+          <Typography.Title level={5}>{t("deliverySection")}</Typography.Title>
+          <Form.Item name="delivery_enabled" label={t("chatCompletionsEnabled")} valuePropName="checked">
+            <Switch />
+          </Form.Item>
+          {deliveryEnabled ? (
+            <Form.Item
+              name="sync_timeout_seconds"
+              label={t("syncTimeoutSeconds")}
+              rules={[{ required: true, message: t("required") }]}
+            >
+              <InputNumber min={1} max={60} className="full-width" />
+            </Form.Item>
+          ) : null}
           <Space>
             <Button type="primary" htmlType="submit" loading={saveDraft.isPending}>
               {t("saveDraft")}
@@ -344,6 +501,26 @@ export function AgentDetailPage() {
           </Space>
         </Form>
       </Card>
+      {(versions.data ?? []).length === 0 ? null : (
+        <Card title={t("currentVersion")} variant="borderless" className="page-alert">
+          {(versions.data ?? []).map((version) => (
+            <Space key={version.id} className="workspace-row" wrap>
+              <Typography.Text>{`v${version.version_number}`}</Typography.Text>
+              <Typography.Text code>{version.content_hash}</Typography.Text>
+              {version.id === agent.data.current_version_id ? (
+                <Typography.Text type="secondary">{t("agentPublished")}</Typography.Text>
+              ) : (
+                <Button
+                  loading={rollback.isPending}
+                  onClick={() => askToRollback(version.id, version.version_number)}
+                >
+                  {t("rollback")}
+                </Button>
+              )}
+            </Space>
+          ))}
+        </Card>
+      )}
     </>
   );
 }
