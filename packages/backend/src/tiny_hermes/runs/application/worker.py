@@ -3,7 +3,7 @@ import logging
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from time import monotonic
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -14,11 +14,13 @@ from tiny_hermes.runs.domain.models import (
     CacheStateHint,
     CanonicalMessage,
     CheckpointEffectStatus,
+    PauseReason,
     RunCapabilities,
     RunEventType,
     RunSignal,
     TextBlock,
     ToolResultBlock,
+    WorkspaceCleanupTarget,
 )
 from tiny_hermes.runs.domain.slice_policy import (
     RoundOutcome,
@@ -46,14 +48,47 @@ from tiny_hermes.runs.ports.store import (
 )
 from tiny_hermes.sandbox.application.controller import RefusalReason as SandboxRefusal
 from tiny_hermes.sandbox.application.controller import SandboxRefused
+from tiny_hermes.sandbox.domain.command import SandboxCommand
 from tiny_hermes.sandbox.domain.container_policy import DEFAULT_PROFILE
 from tiny_hermes.sandbox.domain.models import CacheState
+from tiny_hermes.session_workspace.application.committer import SqlWorkspaceLedger
+from tiny_hermes.session_workspace.application.service import (
+    SessionWorkspaceService,
+    WorkspaceCheckpoint,
+    WorkspaceIntegrityFailed,
+    WorkspaceRestore,
+)
+from tiny_hermes.session_workspace.domain.models import (
+    CheckpointStatus,
+    UnsupportedWorkspaceEntry,
+    WorkspaceQuota,
+)
+from tiny_hermes.session_workspace.infrastructure.sandbox_port import (
+    ControllerWorkspacePort,
+    WorkspaceGateway,
+)
+from tiny_hermes.session_workspace.ports.objects import ObjectStore
 from tiny_hermes.tools.application.execute import run_tool_call
+from tiny_hermes.tools.domain.files import DATA_ROOT, FILE_HELPER, changes_workspace
 from tiny_hermes.tools.domain.registry import schemas_for
 
 logger = logging.getLogger(__name__)
 
 PLATFORM = RunCapabilities(can_control=True, can_retry=True)
+
+
+@dataclass(frozen=True)
+class WorkspaceRuntime:
+    """Everything the Worker needs to give Sessions persistent files.
+
+    Optional as a whole: a deployment without object storage runs exactly the
+    3B behavior, and a test that is not about workspaces never meets one.
+    """
+
+    objects: ObjectStore
+    quota: WorkspaceQuota
+    staging_ttl_seconds: int
+    export_limit: int
 
 
 @dataclass(frozen=True)
@@ -88,6 +123,9 @@ class _Sandbox:
 
     sandbox_id: UUID
     hint: CacheStateHint | None
+    #: The committed revision the workspace currently equals — the base every
+    #: checkpoint this slice makes must name (design §8).
+    revision: UUID | None = None
 
 
 class SandboxSession(Protocol):
@@ -113,6 +151,8 @@ class SandboxSession(Protocol):
 
     async def freeze(self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID) -> None: ...
 
+    async def thaw(self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID) -> None: ...
+
     async def keep(self, *, run_id: UUID, sandbox_id: UUID, until: datetime) -> None: ...
 
     async def destroy(self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID) -> None: ...
@@ -132,6 +172,7 @@ class WorkerRuntime:
         notifier: WakeUpNotifier,
         settings: WorkerSettings,
         sandbox: SandboxSession | None = None,
+        workspace: WorkspaceRuntime | None = None,
     ) -> None:
         self._sessions = session_factory
         self._model = model
@@ -142,6 +183,7 @@ class WorkerRuntime:
         # running the command anywhere else — product design §16 leaves no
         # fallback, and "no sandbox configured" is not an exception to it.
         self._sandbox = sandbox
+        self._workspace = workspace
         # Renewal and slice recording both read the lease version, and both run
         # on this event loop, so one lock removes the interleaving entirely.
         self._lease_lock = asyncio.Lock()
@@ -205,7 +247,7 @@ class WorkerRuntime:
                     box = replace(box, hint=None)
                 executed_ms = int((monotonic() - round_started) * 1000)
 
-                appended, results = await self._answer_tools(
+                appended, wrote = await self._answer_tools(
                     claimed, handle, box, response, context
                 )
 
@@ -225,6 +267,19 @@ class WorkerRuntime:
                         >= self._settings.max_slice_seconds,
                     )
                 )
+
+                if wrote and box is not None and self._workspace is not None:
+                    # Design §8: after every tool round that may have changed
+                    # the data mount, one frozen scan and one commit cover the
+                    # round's effects before the next model call.
+                    continuation = await self._checkpoint_round(
+                        claimed, handle, box, after, decision, response, executed_ms, appended
+                    )
+                    if continuation is None:
+                        return
+                    box = continuation
+                    continue
+
                 if decision.signal is not None and box is not None:
                     # Before the lease is released, per product design §16. A
                     # freeze or destroy that cannot be confirmed makes this an
@@ -241,7 +296,6 @@ class WorkerRuntime:
                     executed_ms,
                     appended=appended,
                 )
-                del results
                 if written is False or decision.signal is not None:
                     return
         finally:
@@ -298,8 +352,155 @@ class WorkerRuntime:
             # §11.3, and both halves of it: the event a person reads, and the
             # protected hint the model reads on the next call.
             await self._append_event(claimed, RunEventType.SANDBOX_CACHE_RESET)
-            return _Sandbox(acquired.sandbox_id, hint=CacheStateHint.RESET)
-        return _Sandbox(acquired.sandbox_id, hint=None)
+            box = _Sandbox(acquired.sandbox_id, hint=CacheStateHint.RESET)
+        else:
+            box = _Sandbox(acquired.sandbox_id, hint=None)
+
+        if self._workspace is None:
+            return box
+        if any(name.startswith("file.") for name in context.spec.tools):
+            if not await self._file_safety_holds(claimed, handle, box):
+                await self._discard_sandbox(claimed, handle, box)
+                await self._fail(claimed, handle, context, "file_safety_unavailable")
+                return None
+        if acquired.cache_state is not CacheState.RESET:
+            # A warm instance still holds the state this Run itself committed;
+            # only the base pointer needs reading.
+            record = await SqlWorkspaceLedger(self._sessions).current_revision(
+                claimed.run.workspace_id, claimed.run.session_id
+            )
+            return replace(box, revision=None if record is None else record.revision_id)
+        return await self._restore_workspace(claimed, handle, box, context)
+
+    async def _restore_workspace(
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        box: _Sandbox,
+        context: ExecutionContext,
+    ) -> "_Sandbox | None":
+        """Design §7: freeze, verify, stream, re-scan, and only then a model."""
+        sandbox = self._sandbox
+        if sandbox is None:  # pragma: no cover - guarded by the caller
+            return None
+        current = await SqlWorkspaceLedger(self._sessions).current_revision(
+            claimed.run.workspace_id, claimed.run.session_id
+        )
+        if current is None:
+            # An empty workspace needs no import, so the fresh container is
+            # not frozen for nothing.
+            return box
+        service = self._workspace_service(claimed, handle, box)
+        try:
+            await sandbox.freeze(
+                run_id=claimed.run.id, lease_id=handle.lease_id, sandbox_id=box.sandbox_id
+            )
+            result = await service.restore(
+                WorkspaceRestore(
+                    workspace_id=claimed.run.workspace_id,
+                    session_id=claimed.run.session_id,
+                    run_id=claimed.run.id,
+                )
+            )
+            await sandbox.thaw(
+                run_id=claimed.run.id, lease_id=handle.lease_id, sandbox_id=box.sandbox_id
+            )
+        except WorkspaceIntegrityFailed as broken:
+            # Verified-bad stored state: an operator must repair it. Retrying
+            # into a lucky success is exactly what must not happen (design §7).
+            logger.error(
+                "workspace integrity failed", extra={"run_id": str(claimed.run.id)}
+            )
+            await self._append_event(
+                claimed,
+                RunEventType.WORKSPACE_INTEGRITY_FAILED,
+                payload={"detail": str(broken)[:200]},
+            )
+            await self._discard_sandbox(claimed, handle, box)
+            await self._fail(claimed, handle, context, "workspace_integrity_failed")
+            return None
+        except Exception:
+            # Transient storage or transport trouble: interrupted, for bounded
+            # recovery. The partially restored sandbox is destroyed — the
+            # model never sees a half-written tree.
+            logger.exception(
+                "workspace restore unavailable", extra={"run_id": str(claimed.run.id)}
+            )
+            await self._append_event(claimed, RunEventType.WORKSPACE_STORAGE_UNAVAILABLE)
+            await self._discard_sandbox(claimed, handle, box)
+            await self._record(
+                claimed,
+                handle,
+                context.state_version,
+                SliceDecision(RunSignal.INTERRUPTED),
+                _no_round(),
+                executed_ms=0,
+            )
+            return None
+        return replace(box, revision=result.revision_id)
+
+    async def _file_safety_holds(
+        self, claimed: ClaimedRun, handle: _LeaseHandle, box: _Sandbox
+    ) -> bool:
+        """The openat2 probe: file tools exist only where the kernel can hold
+        the design's promises (design §5.2)."""
+        sandbox = self._sandbox
+        if sandbox is None:  # pragma: no cover - guarded by the caller
+            return False
+        try:
+            probe = await sandbox.execute(
+                run_id=claimed.run.id,
+                lease_id=handle.lease_id,
+                sandbox_id=box.sandbox_id,
+                command=SandboxCommand(
+                    argv=[FILE_HELPER, "--root", DATA_ROOT, "probe"],
+                    cwd=DATA_ROOT,
+                    timeout_seconds=10,
+                    output_limit=1024,
+                ),
+            )
+        except Exception:
+            logger.exception("file safety probe failed", extra={"run_id": str(claimed.run.id)})
+            return False
+        return int(probe.exit_code) == 0
+
+    async def _discard_sandbox(
+        self, claimed: ClaimedRun, handle: _LeaseHandle, box: _Sandbox
+    ) -> None:
+        """Best-effort teardown on a path that is already failing."""
+        sandbox = self._sandbox
+        if sandbox is None:
+            return
+        try:
+            await sandbox.destroy(
+                run_id=claimed.run.id, lease_id=handle.lease_id, sandbox_id=box.sandbox_id
+            )
+        except Exception:
+            logger.exception("sandbox discard failed", extra={"run_id": str(claimed.run.id)})
+
+    def _workspace_service(
+        self, claimed: ClaimedRun, handle: _LeaseHandle, box: _Sandbox
+    ) -> SessionWorkspaceService:
+        runtime = self._workspace
+        sandbox = self._sandbox
+        if runtime is None or sandbox is None:  # pragma: no cover - callers check
+            raise RuntimeError("workspace runtime is not configured")
+        # A workspace-configured deployment wires a gateway-capable sandbox
+        # (the socket adapter carries all three workspace calls); the protocol
+        # stays narrow so 3B-only fakes and deployments never learn of them.
+        port = ControllerWorkspacePort(
+            gateway=cast(WorkspaceGateway, sandbox),
+            run_id=claimed.run.id,
+            lease_id=handle.lease_id,
+            sandbox_id=box.sandbox_id,
+            export_limit=runtime.export_limit,
+        )
+        return SessionWorkspaceService(
+            ledger=SqlWorkspaceLedger(self._sessions),
+            objects=runtime.objects,
+            sandbox=port,
+            staging_ttl_seconds=runtime.staging_ttl_seconds,
+        )
 
     async def _answer_tools(
         self,
@@ -309,7 +510,12 @@ class WorkerRuntime:
         response: ModelResponse,
         context: ExecutionContext,
     ) -> tuple[tuple[CanonicalMessage, ...], bool]:
-        """Run whatever the round asked for, and build the turns to append."""
+        """Run whatever the round asked for, and build the turns to append.
+
+        The second value answers design §8's question: may this round have
+        changed `/workspace/data`? A refused call never ran, so it cannot
+        have; a successful `file.read` looked and touched nothing.
+        """
         if response.stop_reason is StopReason.FAILED:
             # A failed round said nothing the transcript should keep.
             return (), False
@@ -322,6 +528,7 @@ class WorkerRuntime:
         blocks.extend(response.tool_calls)
         assistant = CanonicalMessage("assistant", tuple(blocks))
 
+        wrote = False
         results: list[Block] = []
         for call in response.tool_calls:
             if box is None or self._sandbox is None:
@@ -339,17 +546,281 @@ class WorkerRuntime:
                     )
                 )
                 continue
-            results.append(
-                await run_tool_call(
-                    controller=self._sandbox,
+            answer = await run_tool_call(
+                controller=self._sandbox,
+                run_id=claimed.run.id,
+                lease_id=handle.lease_id,
+                sandbox_id=box.sandbox_id,
+                bound=context.spec.tools,
+                call=call,
+            )
+            if not answer.failed and changes_workspace(call.name):
+                wrote = True
+            results.append(answer)
+        return (assistant, CanonicalMessage("tool", tuple(results))), wrote
+
+    async def _checkpoint_round(
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        box: "_Sandbox",
+        after: ExecutionContext,
+        decision: SliceDecision,
+        response: ModelResponse,
+        executed_ms: int,
+        appended: tuple[CanonicalMessage, ...],
+    ) -> "_Sandbox | None":
+        """One write round's whole consequence: scan, commit, dispose, signal.
+
+        Returns the sandbox (with its new base revision) when the slice
+        continues, and None when it is over — however it ended. The round's
+        turns and accounting are committed *with* the revision (design §8
+        step 5), so the plain `_record` path must not run again for it.
+        """
+        sandbox = self._sandbox
+        runtime = self._workspace
+        if sandbox is None or runtime is None:  # pragma: no cover - caller checks
+            return None
+        service = self._workspace_service(claimed, handle, box)
+        # The commit itself keeps the lease (`signal=None`); the round's real
+        # signal is applied after the sandbox's fate is confirmed, because a
+        # completed Run whose container may still run is not completed.
+        slice_command = self._slice_command(
+            claimed,
+            handle,
+            after.state_version,
+            SliceDecision(None, limit_reached=decision.limit_reached),
+            response,
+            executed_ms,
+            appended,
+        )
+        try:
+            await sandbox.freeze(
+                run_id=claimed.run.id, lease_id=handle.lease_id, sandbox_id=box.sandbox_id
+            )
+        except Exception:
+            logger.exception("freeze failed", extra={"run_id": str(claimed.run.id)})
+            await self._record(
+                claimed,
+                handle,
+                after.state_version,
+                SliceDecision(RunSignal.INTERRUPTED),
+                response,
+                executed_ms,
+                appended=appended,
+            )
+            return None
+
+        try:
+            result = await service.checkpoint(
+                WorkspaceCheckpoint(
+                    workspace_id=claimed.run.workspace_id,
+                    session_id=claimed.run.session_id,
+                    run_id=claimed.run.id,
+                    base_revision_id=box.revision,
+                    quota=runtime.quota,
+                    slice_command=slice_command,
+                )
+            )
+        except (LeaseLost, StateVersionConflict):
+            handle.lost = True
+            return None
+        except UnsupportedWorkspaceEntry as refused:
+            await self._roll_back_round(
+                claimed, handle, box, after, response, executed_ms, appended,
+                reason="workspace_entry_not_supported",
+                event=RunEventType.WORKSPACE_ENTRY_NOT_SUPPORTED,
+                payload={"entry_type": str(refused)[:80]},
+                target=None,
+            )
+            return None
+        except Exception:
+            logger.exception(
+                "workspace checkpoint unavailable", extra={"run_id": str(claimed.run.id)}
+            )
+            await self._roll_back_round(
+                claimed, handle, box, after, response, executed_ms, appended,
+                reason="workspace_checkpoint_failed",
+                event=RunEventType.WORKSPACE_STORAGE_UNAVAILABLE,
+                payload={},
+                target=None,
+            )
+            return None
+
+        if result.status in (CheckpointStatus.COMMITTED, CheckpointStatus.UNCHANGED):
+            renewed = box if result.status is CheckpointStatus.UNCHANGED else replace(
+                box, revision=result.revision_id
+            )
+            return await self._dispose_after_commit(claimed, handle, renewed, decision)
+
+        if result.status is CheckpointStatus.LIMIT_EXCEEDED:
+            measured = result.measurement
+            await self._roll_back_round(
+                claimed, handle, box, after, response, executed_ms, appended,
+                reason="workspace_limit_exceeded",
+                event=RunEventType.WORKSPACE_LIMIT_EXCEEDED,
+                # The dimension and numbers, never a filename (design §9).
+                payload={
+                    "dimension": measured.dimension if measured else None,
+                    "total_bytes": measured.total_bytes if measured else None,
+                    "object_count": measured.object_count if measured else None,
+                },
+                target=WorkspaceCleanupTarget.PAUSED_LIMIT,
+                confirm_signal=RunSignal.LIMIT_CLEANUP_CONFIRMED,
+                confirm_reason=PauseReason.LIMIT,
+            )
+            return None
+
+        if result.status is CheckpointStatus.CONFLICT:
+            await self._roll_back_round(
+                claimed, handle, box, after, response, executed_ms, appended,
+                reason="workspace_conflict",
+                event=RunEventType.WORKSPACE_CONFLICT,
+                payload={},
+                target=WorkspaceCleanupTarget.FAILED_CONFLICT,
+                confirm_signal=RunSignal.RECOVERY_FAILED,
+                confirm_reason=None,
+            )
+            return None
+
+        # STORAGE_FAILED: the dirty sandbox is rolled back and the Run is
+        # interrupted for bounded recovery (design §8).
+        await self._roll_back_round(
+            claimed, handle, box, after, response, executed_ms, appended,
+            reason="workspace_checkpoint_failed",
+            event=RunEventType.WORKSPACE_CHECKPOINT_FAILED,
+            payload={},
+            target=None,
+        )
+        return None
+
+    async def _dispose_after_commit(
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        box: "_Sandbox",
+        decision: SliceDecision,
+    ) -> "_Sandbox | None":
+        """The frozen instance's fate, then the round's real signal."""
+        sandbox = self._sandbox
+        if sandbox is None:  # pragma: no cover - caller checks
+            return None
+        try:
+            if decision.signal is None:
+                await sandbox.thaw(
                     run_id=claimed.run.id,
                     lease_id=handle.lease_id,
                     sandbox_id=box.sandbox_id,
-                    bound=context.spec.tools,
-                    call=call,
+                )
+                return box
+            if decision.signal is RunSignal.SLICE_ENDED:
+                await sandbox.keep(
+                    run_id=claimed.run.id,
+                    sandbox_id=box.sandbox_id,
+                    until=datetime.now(UTC)
+                    + timedelta(seconds=self._settings.sandbox_idle_ttl_seconds),
+                )
+            else:
+                await sandbox.destroy(
+                    run_id=claimed.run.id,
+                    lease_id=handle.lease_id,
+                    sandbox_id=box.sandbox_id,
+                )
+        except Exception:
+            logger.exception("sandbox close failed", extra={"run_id": str(claimed.run.id)})
+            await self._apply(claimed, RunSignal.INTERRUPTED)
+            return None
+
+        await self._apply(claimed, decision.signal, pause_reason=decision.pause_reason)
+        if decision.signal is RunSignal.SAFE_CANCEL_STARTED:
+            # The sandbox is already gone, so the cancellation completes here.
+            await self._apply(claimed, RunSignal.SAFE_CANCEL_FINISHED)
+        return None
+
+    async def _roll_back_round(
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        box: "_Sandbox",
+        after: ExecutionContext,
+        response: ModelResponse,
+        executed_ms: int,
+        appended: tuple[CanonicalMessage, ...],
+        *,
+        reason: str,
+        event: RunEventType,
+        payload: dict[str, Any],
+        target: "WorkspaceCleanupTarget | None",
+        confirm_signal: RunSignal | None = None,
+        confirm_reason: PauseReason | None = None,
+    ) -> None:
+        """Design §9's A1 rollback: the step is undone, and the record says so.
+
+        One transaction writes the rewritten tool results against the
+        preceding revision, the interruption, the workspace fact, and — when a
+        destination is known — the cleanup intent. Then the sandbox and its
+        volume are destroyed, and only a confirmed destruction may move the
+        Run onward; an unconfirmed one leaves it interrupted for the
+        Scheduler.
+        """
+        rewritten = _with_rollback_results(appended, reason)
+        recorded = await self._record(
+            claimed,
+            handle,
+            after.state_version,
+            SliceDecision(RunSignal.INTERRUPTED),
+            response,
+            executed_ms,
+            appended=rewritten,
+            events=(ReservedEvent(event_type=event, payload=payload),),
+            cleanup_target=target,
+            cleanup_sandbox_id=box.sandbox_id if target is not None else None,
+        )
+        if recorded is False:
+            return
+
+        sandbox = self._sandbox
+        if sandbox is None:  # pragma: no cover - caller checks
+            return
+        try:
+            await sandbox.destroy(
+                run_id=claimed.run.id, lease_id=handle.lease_id, sandbox_id=box.sandbox_id
+            )
+        except Exception:
+            # Not confirmed, so the Run must not claim a safe pause while the
+            # oversized volume may still exist (design §9 step 5).
+            logger.exception(
+                "rollback destroy unconfirmed", extra={"run_id": str(claimed.run.id)}
+            )
+            return
+        if confirm_signal is not None:
+            await self._apply(
+                claimed,
+                confirm_signal,
+                pause_reason=confirm_reason,
+                confirmed_sandbox_id=box.sandbox_id,
+            )
+
+    async def _apply(
+        self,
+        claimed: ClaimedRun,
+        signal: RunSignal,
+        *,
+        pause_reason: PauseReason | None = None,
+        confirmed_sandbox_id: UUID | None = None,
+    ) -> None:
+        async with self._sessions.begin() as session:
+            await SqlRunStore(session).apply_signal(
+                ApplySignalCommand(
+                    workspace_id=claimed.run.workspace_id,
+                    run_id=claimed.run.id,
+                    signal=signal,
+                    pause_reason=pause_reason,
+                    request_id=f"worker-{self._settings.worker_id}-{signal.value}",
+                    capabilities=PLATFORM,
+                    confirmed_sandbox_id=confirmed_sandbox_id,
                 )
             )
-        return (assistant, CanonicalMessage("tool", tuple(results))), True
 
     async def _close_sandbox(
         self,
@@ -410,13 +881,18 @@ class WorkerRuntime:
             executed_ms=0,
         )
 
-    async def _append_event(self, claimed: ClaimedRun, kind: RunEventType) -> None:
+    async def _append_event(
+        self,
+        claimed: ClaimedRun,
+        kind: RunEventType,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
         async with self._sessions.begin() as session:
             await SqlRunStore(session).append_events(
                 AppendEventsCommand(
                     workspace_id=claimed.run.workspace_id,
                     run_id=claimed.run.id,
-                    events=(ReservedEvent(event_type=kind),),
+                    events=(ReservedEvent(event_type=kind, payload=payload or {}),),
                 )
             )
 
@@ -425,6 +901,48 @@ class WorkerRuntime:
     ) -> ExecutionContext | None:
         async with self._sessions() as session:
             return await SqlRunStore(session).execution_context(workspace_id, run_id)
+
+    def _slice_command(
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        state_version: int,
+        decision: SliceDecision,
+        response: ModelResponse,
+        executed_ms: int,
+        appended: tuple[CanonicalMessage, ...],
+        events: tuple[ReservedEvent, ...] = (),
+        cleanup_target: "WorkspaceCleanupTarget | None" = None,
+        cleanup_sandbox_id: UUID | None = None,
+    ) -> RecordSliceCommand:
+        return RecordSliceCommand(
+            workspace_id=claimed.run.workspace_id,
+            run_id=claimed.run.id,
+            lease_id=handle.lease_id,
+            expected_lease_version=handle.version,
+            expected_state_version=state_version,
+            signal=decision.signal,
+            pause_reason=decision.pause_reason,
+            limit_reached=decision.limit_reached,
+            checkpoint=_checkpoint(response),
+            checkpoint_replay_safe=response.replay_safe,
+            checkpoint_effect_status=(
+                CheckpointEffectStatus.UNKNOWN
+                if response.external_effect_unknown
+                else CheckpointEffectStatus.NONE
+            ),
+            executed_ms=executed_ms,
+            model_calls=response.model_calls,
+            tokens=response.billable_tokens,
+            # A failed round said nothing the transcript should
+            # keep, so nothing is appended for it.
+            appended=appended,
+            request_id=f"worker-{self._settings.worker_id}",
+            capabilities=PLATFORM,
+            events=events,
+            workspace_cleanup_target=cleanup_target,
+            workspace_cleanup_sandbox_id=cleanup_sandbox_id,
+        )
 
     async def _record(
         self,
@@ -435,6 +953,9 @@ class WorkerRuntime:
         response: ModelResponse,
         executed_ms: int,
         appended: tuple[CanonicalMessage, ...] = (),
+        events: tuple[ReservedEvent, ...] = (),
+        cleanup_target: "WorkspaceCleanupTarget | None" = None,
+        cleanup_sandbox_id: UUID | None = None,
     ) -> bool:
         """Persist the round. Returns False when this Worker lost the Run."""
         async with self._lease_lock:
@@ -442,30 +963,17 @@ class WorkerRuntime:
                 async with self._sessions.begin() as session:
                     store = SqlRunStore(session)
                     await store.record_slice(
-                        RecordSliceCommand(
-                            workspace_id=claimed.run.workspace_id,
-                            run_id=claimed.run.id,
-                            lease_id=handle.lease_id,
-                            expected_lease_version=handle.version,
-                            expected_state_version=state_version,
-                            signal=decision.signal,
-                            pause_reason=decision.pause_reason,
-                            limit_reached=decision.limit_reached,
-                            checkpoint=_checkpoint(response),
-                            checkpoint_replay_safe=response.replay_safe,
-                            checkpoint_effect_status=(
-                                CheckpointEffectStatus.UNKNOWN
-                                if response.external_effect_unknown
-                                else CheckpointEffectStatus.NONE
-                            ),
-                            executed_ms=executed_ms,
-                            model_calls=response.model_calls,
-                            tokens=response.billable_tokens,
-                            # A failed round said nothing the transcript should
-                            # keep, so nothing is appended for it.
-                            appended=appended,
-                            request_id=f"worker-{self._settings.worker_id}",
-                            capabilities=PLATFORM,
+                        self._slice_command(
+                            claimed,
+                            handle,
+                            state_version,
+                            decision,
+                            response,
+                            executed_ms,
+                            appended,
+                            events=events,
+                            cleanup_target=cleanup_target,
+                            cleanup_sandbox_id=cleanup_sandbox_id,
                         )
                     )
                     if decision.signal is RunSignal.SAFE_CANCEL_STARTED:
@@ -510,6 +1018,35 @@ class WorkerRuntime:
                     handle.lost = True
                     return
                 handle.version = renewed.version
+
+
+def _with_rollback_results(
+    appended: tuple[CanonicalMessage, ...], reason: str
+) -> tuple[CanonicalMessage, ...]:
+    """The round's turns, with every tool answer replaced by the rollback.
+
+    Design §9 step 3: each call receives a result naming the rollback and its
+    own call ID, so resume tells the model the command was rolled back instead
+    of leaving an open call or replaying it as if nothing happened.
+    """
+    rewritten: list[CanonicalMessage] = []
+    for message in appended:
+        if message.role != "tool":
+            rewritten.append(message)
+            continue
+        replaced = tuple(
+            ToolResultBlock(
+                call_id=block.call_id,
+                output=f"rolled back: {reason}",
+                exit_code=126,
+                failed=True,
+            )
+            if isinstance(block, ToolResultBlock)
+            else block
+            for block in message.blocks
+        )
+        rewritten.append(CanonicalMessage("tool", replaced))
+    return tuple(rewritten)
 
 
 def _no_round(failure: str | None = None) -> ModelResponse:

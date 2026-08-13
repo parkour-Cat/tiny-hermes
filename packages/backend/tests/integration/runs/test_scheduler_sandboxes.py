@@ -106,6 +106,9 @@ class PersistingDestroyFailure:
     async def freeze(self, **_: Any) -> None:
         raise AssertionError("the completed Run destroys rather than freezes")
 
+    async def thaw(self, **_: Any) -> None:
+        raise AssertionError("the completed Run has nothing to thaw")
+
     async def keep(self, **_: Any) -> None:
         raise AssertionError("the completed Run is not kept warm")
 

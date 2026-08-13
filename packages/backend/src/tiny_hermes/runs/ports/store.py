@@ -161,6 +161,10 @@ class RecordSliceCommand:
     #: rollback results, so a crash in between is recoverable from rows.
     workspace_cleanup_target: WorkspaceCleanupTarget | None = None
     workspace_cleanup_sandbox_id: UUID | None = None
+    #: Facts written with the slice's own transition (workspace rollbacks name
+    #: their reason here). Only written when ``signal`` is not None — a round
+    #: that keeps the lease has no transition to attach them to.
+    events: tuple["ReservedEvent", ...] = ()
 
 
 @dataclass(frozen=True)

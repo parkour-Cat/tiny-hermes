@@ -951,7 +951,7 @@ changed data" with the transcript's own turn structure — an over-quota round
 rolls back as one step, and each of its write-capable calls receives a
 `workspace_limit_exceeded` result naming its own call ID.
 
-- [ ] **Step 1: Write the failing state-machine tests**
+- [x] **Step 1: Write the failing state-machine tests**
 
 ```python
 def test_only_a_recorded_limit_pause_may_leave_interrupted_for_paused() -> None:
@@ -970,7 +970,7 @@ And the store-level guard in `test_worker_workspace.py`: applying
 `paused_limit`, or whose recorded sandbox ID differs, raises; the Scheduler is
 the only caller.
 
-- [ ] **Step 2: Write the failing worker-flow integration tests**
+- [x] **Step 2: Write the failing worker-flow integration tests**
 
 With a fake controller and real PostgreSQL + MinIO:
 
@@ -988,7 +988,7 @@ async def test_read_only_round_creates_no_revision() -> None: ...
 async def test_shell_timeout_rolls_back_the_dirty_sandbox() -> None: ...
 ```
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Models: `RunSignal.LIMIT_CLEANUP_CONFIRMED`,
 `RunEventType.RUN_LIMIT_CLEANUP_CONFIRMED`, plus
@@ -1016,7 +1016,7 @@ in `recover_interrupted` gains the revision-equality check: observed Session
 revision differing from the Run checkpoint refuses automatic requeue and, after
 cleanup, becomes `failed`.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run the two new files, then the whole runs suite:
 
@@ -1025,6 +1025,24 @@ uv run --no-sync pytest packages/backend/tests/unit/runs packages/backend/tests/
 ```
 
 Commit as `feat: checkpoint the workspace with the words that describe it`.
+
+> Implementation notes, 2026-08-13, landed as five commits (state-machine
+> door; intent guard; stdin path; bound port; worker flows):
+> - The commit inside a write round carries `signal=None`; the round's real
+>   signal is applied *after* the frozen instance's fate is confirmed, because
+>   a completed Run whose container may still run is not completed. The
+>   rollback paths instead record `INTERRUPTED`, the workspace fact, and the
+>   §6.3 intent in one `record_slice` transaction, then destroy, then confirm.
+> - `WorkspaceRuntime` is optional on the Worker: without it, 3B behavior is
+>   bit-for-bit unchanged, which is what kept all 3B worker tests green.
+> - `recover_interrupted` now skips Runs with a recorded cleanup intent (the
+>   cleanup job owns them) and refuses replay when the Run's checkpoint names
+>   a different revision than the Session pointer.
+> - An unsupported entry interrupts (recovery restores and requeues) rather
+>   than reacquiring mid-slice; a timed-out command still checkpoints its
+>   frozen state — both simplifications noted against §10/§16.3's letter.
+> - `execute_stdin` joined the streaming actions so a `file.write` body never
+>   rides the 64 KiB control line.
 
 ### Task 13: Artifacts for output the message cannot hold
 

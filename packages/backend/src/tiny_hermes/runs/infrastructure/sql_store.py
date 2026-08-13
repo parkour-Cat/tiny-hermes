@@ -439,6 +439,18 @@ class SqlRunStore:
                 raise InvalidStateMetadata(
                     "the run's recorded cleanup intent does not match this confirmation"
                 )
+        if (
+            command.signal is RunSignal.RECOVERY_FAILED
+            and command.confirmed_sandbox_id is not None
+        ):
+            # The conflict path's confirmation: same shape, different target.
+            if (
+                run.workspace_cleanup_target != WorkspaceCleanupTarget.FAILED_CONFLICT.value
+                or run.workspace_cleanup_sandbox_id != command.confirmed_sandbox_id
+            ):
+                raise InvalidStateMetadata(
+                    "the run's recorded cleanup intent does not match this confirmation"
+                )
 
         await self._decide_and_write(
             run,
@@ -450,7 +462,10 @@ class SqlRunStore:
             request_id=command.request_id,
             payload=dict(command.payload),
         )
-        if command.signal is RunSignal.LIMIT_CLEANUP_CONFIRMED:
+        if command.signal is RunSignal.LIMIT_CLEANUP_CONFIRMED or (
+            command.signal is RunSignal.RECOVERY_FAILED
+            and command.confirmed_sandbox_id is not None
+        ):
             # Cleared only in the same transition that reaches the target.
             run.workspace_cleanup_target = None
             run.workspace_cleanup_sandbox_id = None
@@ -660,7 +675,7 @@ class SqlRunStore:
             wait_deadline_at=None,
             request_id=command.request_id,
             payload={"executed_ms": command.executed_ms},
-            extra_events=extra,
+            extra_events=(*extra, *command.events),
         )
         lease.released_at = now
         await self._session.flush()
@@ -907,14 +922,27 @@ class SqlRunStore:
         run = await self._lock_run_any_workspace(run_id)
         if run is None or RunState(run.status) is not RunState.INTERRUPTED:
             return None
+        if run.workspace_cleanup_target is not None:
+            # This Run's destination is already recorded (design §6.3); the
+            # workspace cleanup job owns it, and recovery inventing a
+            # different outcome here would race the recorded one.
+            return None
         session = await self._lock_session(run.workspace_id, run.session_id)
         budget = await self._session.get(RunBudgetScopeRow, run.budget_root_run_id)
         if session is None or budget is None:
             return None
 
         effect = CheckpointEffectStatus(run.checkpoint_effect_status)
+        # Design §12: a Run whose checkpoint names one revision while the
+        # Session's pointer names another cannot be replayed automatically —
+        # restoring would hand the model a workspace its transcript never saw.
+        revision_agrees = (
+            run.checkpoint_workspace_revision_id is None
+            or run.checkpoint_workspace_revision_id == session.workspace_revision_id
+        )
         safe = (
             run.checkpoint_replay_safe
+            and revision_agrees
             and effect is not CheckpointEffectStatus.UNKNOWN
             and _budget_summary(budget).allows_execution(datetime.now(UTC))
             and run.recovery_attempts < max_attempts

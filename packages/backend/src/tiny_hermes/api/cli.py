@@ -13,7 +13,11 @@ from tiny_hermes.runs.application.scheduler import (
     SchedulerRuntime,
     SchedulerSettings,
 )
-from tiny_hermes.runs.application.worker import WorkerRuntime, WorkerSettings
+from tiny_hermes.runs.application.worker import (
+    WorkerRuntime,
+    WorkerSettings,
+    WorkspaceRuntime,
+)
 from tiny_hermes.runs.infrastructure.deterministic_model import (
     DeterministicModelProvider,
 )
@@ -23,6 +27,8 @@ from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
 from tiny_hermes.sandbox.transport.adapter import SandboxClient
 from tiny_hermes.sandbox.transport.client import ControllerClient
+from tiny_hermes.session_workspace.domain.models import WorkspaceQuota
+from tiny_hermes.session_workspace.infrastructure.minio_store import MinioObjectStore
 from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.database import build_session_factory
 from tiny_hermes.shared.logging import configure_logging
@@ -73,6 +79,7 @@ async def _worker() -> None:
         # one cannot run a tool, and a Run that binds one fails rather than
         # running the command anywhere else.
         sandbox=_controller(settings),
+        workspace=_workspace(settings),
         settings=WorkerSettings(
             worker_id=worker_id,
             lease_seconds=settings.worker_lease_seconds,
@@ -95,6 +102,27 @@ def _controller(settings: Settings) -> SandboxClient | None:
     if not settings.sandbox_image_digest:
         return None
     return SandboxClient(ControllerClient(settings.sandbox_controller_socket))
+
+
+def _workspace(settings: Settings) -> WorkspaceRuntime | None:
+    """Persistent session files, when this deployment runs sandboxes at all."""
+    if not settings.sandbox_image_digest:
+        return None
+    return WorkspaceRuntime(
+        objects=MinioObjectStore(
+            endpoint=settings.s3_endpoint,
+            access_key=settings.s3_access_key,
+            secret_key=settings.s3_secret_key,
+            bucket=settings.s3_bucket,
+        ),
+        quota=WorkspaceQuota(
+            max_bytes=settings.workspace_max_bytes,
+            max_objects=settings.workspace_max_objects,
+        ),
+        staging_ttl_seconds=settings.workspace_staging_ttl_seconds,
+        # Tar framing adds headers and padding on top of the quota's bytes.
+        export_limit=settings.workspace_max_bytes + settings.workspace_max_objects * 2048,
+    )
 
 
 def scheduler_main() -> None:
