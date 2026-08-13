@@ -17,6 +17,7 @@ from tiny_hermes.runs.application.service import (
     RunCoordinationError,
 )
 from tiny_hermes.runs.domain.models import (
+    CanonicalMessage,
     RunSignal,
     RunSnapshot,
     SessionMode,
@@ -61,6 +62,15 @@ class SessionResponse(BaseModel):
     @classmethod
     def from_domain(cls, session: SessionSnapshot) -> "SessionResponse":
         return cls.model_validate(session.document())
+
+
+class SessionMessageResponse(BaseModel):
+    role: str
+    parts: list[dict[str, Any]]
+
+    @classmethod
+    def from_domain(cls, message: CanonicalMessage) -> "SessionMessageResponse":
+        return cls.model_validate(message.document())
 
 
 class QueueResponse(BaseModel):
@@ -211,6 +221,36 @@ def session_router(resources: ApplicationResources) -> APIRouter:
         except RunCoordinationError as error:
             raise as_app_error(error) from error
         return SessionResponse.from_domain(found)
+
+    @router.get("/{session_id}/messages", response_model=list[SessionMessageResponse])
+    async def list_session_messages(  # pyright: ignore[reportUnusedFunction]
+        session_id: UUID,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[
+            MachineIdentityService, Depends(machines_dependency, scope="function")
+        ],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        authorization: AuthorizationHeader = None,
+    ) -> list[SessionMessageResponse]:
+        caller = await resolve_workspace_caller(
+            auth,
+            machines,
+            session_token=session_token,
+            authorization=authorization,
+            csrf_token=None,
+            workspace_header=selected_workspace,
+            write=False,
+            required_scope="runs.read",
+        )
+        try:
+            messages = await runs.list_session_messages(
+                caller.workspace_id, caller.actor, session_id
+            )
+        except RunCoordinationError as error:
+            raise as_app_error(error) from error
+        return [SessionMessageResponse.from_domain(item) for item in messages]
 
     return router
 
