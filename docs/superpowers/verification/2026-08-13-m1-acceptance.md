@@ -27,18 +27,24 @@ HEAD `96015bf` (`cursor/phase-4c-secrets-c232`), not from `main`:
 | `8769a66` | Round marketed RAM so a 16 GB host is not rejected. |
 | `0f3a99e` | Feishu long-connection facts without an adapter. |
 | `887456f` | Map the thirteen M1 scenarios to evidence. |
-| this record | Public description, record pins, this verification. |
+| `308103e` | Record what 4D acceptance could and could not prove. |
+| `8e228bb` | Silent `shell.exec` keep-alive, merged up into 4D. |
+| `fbeab72` | Bind tools via the Ant Design checkbox wrapper. |
+| `fe9c5ba` | Wait for any assistant turn when a bound tool replies twice. |
+| this record | Public description, record pins, later local Compose run. |
 
 ## 2. Environment
 
 Verification ran in the Cloud Agent workspace (Linux 6.12, Python 3.12, uv).
-`nproc` is **4**. `MemTotal` is about **16 GiB**. PostgreSQL / Redis / MinIO
-may be present; the API, Web, and Worker Compose services were **not**
-running. Tokens, cookies, CSRF values, passwords, Secret plaintext, and KEK
-material are absent from this record.
+`nproc` is **4**. `MemTotal` is about **16 GiB**. Tokens, cookies, CSRF
+values, passwords, Secret plaintext, and KEK material are absent from this
+record.
 
-The Linux reference shape in product §24.1 is **8 vCPU**, 16 GB, local SSD.
-This host does not match. The benchmark must not report a pass here.
+The first 4D pass did not start API / Web / Worker. A later pass on the
+**same host** brought `deploy/compose/compose.yaml` up (sandbox image
+`tiny-hermes-sandbox:ci`) and ran Playwright plus the three drills. This
+host still is not the §24.1 Linux reference shape (8 vCPU, 16 GB, local
+SSD). The benchmark must not report a pass here.
 
 ## 3. What was verified by execution
 
@@ -67,15 +73,46 @@ are not this benchmark.
 has measured / unconfirmed / Webhook-fallback columns, the closure record has
 rows 1–13, and `pyproject.toml` description is `单 Agent 安全运行骨架`.
 
-**Regression.** Backend unit suite **639 passed** (4C's 618 plus 4D script
-and record pins). Focused 4C integration and web vitest were not re-run in
-this record.
+**Regression.** Backend unit suite **641 passed** on a later local run
+(ruff + pyright 0 errors). Integration **397 passed** against
+`tiny_hermes_test` on `127.0.0.1`. Web vitest AgentDetailPage **17 passed**
+after the unbound-tools pin.
+
+### 3.1 Later local Compose run (same 4 vCPU host)
+
+Docker socket and credential boundaries in the running stack: Controller has
+the socket and no MinIO / model key; API and Worker do not see the socket;
+Worker has MinIO credentials.
+
+`pnpm exec playwright test --config tests/e2e/playwright.config.ts`
+**7 passed** (26.4s) after two walk fixes: Ant Design 6's opacity-0 input
+does not toggle under `locator.check()`, so the builder clicks the visible
+wrapper; `continue_once` with `file.list` bound yields two assistant role
+tags, so the walk asserts an assistant turn appeared rather than uniqueness.
+
+`scripts/restart_drill.py` with `DETERMINISTIC_MODEL_DELAY_MS=3000`: all
+four scenarios held, **147.6s**.
+
+`scripts/workspace_drill.py` (main): PASS. 1 MiB commits n=12 p50=6.93s
+p95=6.95s (drill envelope 10s, not §24.1's 1s checkpoint cell). Silent
+~100 MiB commit 12.4s, worker RSS 145 MiB. Leftovers 0.
+
+`scripts/workspace_drill.py --phase quota` with `WORKSPACE_MAX_BYTES=8388608`
+on a clean stack (`DETERMINISTIC_MODEL_DELAY_MS` default 50): PASS.
+over-quota paused `reason=limit` in 0.8s; resume completed; old revision
+kept. Leftovers 0.
+
+This host's leftover `iptables-legacy` FORWARD DROP blocked compose-bridge
+ICC until `DOCKER-USER` accepted the project bridge. That is this VM's
+firewall state, not a product defect. GitHub-hosted runners are not this
+machine.
 
 ## 4. Explicitly not claimed
 
-- §24.1 thresholds passing on this host (4 vCPU; API/Web/Worker down).
-- A live generated-secret Compose `up --wait` of API/Web/Worker.
-- Playwright, restart_drill, workspace_drill re-runs.
+- §24.1 thresholds passing on this host (4 vCPU). Live `benchmark_m1.py`
+  gates were not run; `--shape-only` still exits 2.
+- GitHub Actions `compose-e2e` green. Private-repo spending limit refused
+  the runner after the silent-exec fix was pushed.
 - A Feishu WebSocket session or disconnect-gap measurement.
 - Label-enumerated volume GC (engine already lists by label; Scheduler would
   need a new Controller socket action; an orphan still requires a crash in
