@@ -11,6 +11,7 @@ import {
   Select,
   Space,
   Switch,
+  Tabs,
   Typography,
 } from "antd";
 import { useState } from "react";
@@ -314,6 +315,7 @@ export function AgentDetailPage() {
       {contextHolder}
       <div className="page-heading">
         <div>
+          <p className="page-kicker">{t("agents")}</p>
           <Typography.Title level={2}>{agent.data.name}</Typography.Title>
           <Typography.Paragraph type="secondary">{agent.data.alias}</Typography.Paragraph>
         </div>
@@ -330,39 +332,6 @@ export function AgentDetailPage() {
           </Button>
         </Space>
       </div>
-      <Card title={t("renameAgent")} variant="borderless" className="page-alert">
-        <Form<NameValues>
-          form={nameForm}
-          layout="inline"
-          requiredMark={false}
-          initialValues={{ name: agent.data.name, alias: agent.data.alias }}
-          onFinish={(values) => rename.mutate(values)}
-        >
-          <Form.Item
-            name="name"
-            label={t("agentName")}
-            rules={[
-              { required: true, whitespace: true, message: t("required") },
-              { max: 120, message: t("agentNameMaximum") },
-            ]}
-          >
-            <Input />
-          </Form.Item>
-          <Form.Item
-            name="alias"
-            label={t("agentAlias")}
-            extra={t("agentAliasHint")}
-            rules={[{ required: true, whitespace: true, message: t("required") }]}
-          >
-            <Input />
-          </Form.Item>
-          <Form.Item>
-            <Button htmlType="submit" loading={rename.isPending}>
-              {t("saveName")}
-            </Button>
-          </Form.Item>
-        </Form>
-      </Card>
       <Card variant="borderless" className="page-alert">
         <Space size="large" wrap>
           <Typography.Text strong>
@@ -411,7 +380,7 @@ export function AgentDetailPage() {
           showIcon
         />
       )}
-      <Card title={t("draftSection")} variant="borderless">
+      <Card variant="borderless">
         <Form<DraftValues>
           form={form}
           layout="vertical"
@@ -419,86 +388,172 @@ export function AgentDetailPage() {
           initialValues={valuesOf(draft.data)}
           onFinish={(values) => saveDraft.mutate(values)}
         >
-          <Form.Item
-            name="personality"
-            label={t("personality")}
-            rules={[
-              { required: true, whitespace: true, message: t("required") },
-              { max: 8192, message: t("personalityMaximum") },
+          <Tabs
+            defaultActiveKey="persona"
+            items={[
+              {
+                key: "persona",
+                label: t("builderTabPersona"),
+                forceRender: true,
+                children: (
+                  <>
+                    <Form.Item
+                      name="personality"
+                      label={t("personality")}
+                      rules={[
+                        { required: true, whitespace: true, message: t("required") },
+                        { max: 8192, message: t("personalityMaximum") },
+                      ]}
+                    >
+                      <Input.TextArea rows={8} />
+                    </Form.Item>
+                    <Form.Item name="provider" label={t("modelProvider")} rules={[{ required: true }]}>
+                      <Select
+                        options={[
+                          { value: "deterministic", label: t("modelProviderDeterministic") },
+                          { value: "openai_compatible", label: t("modelProviderEndpoint") },
+                        ]}
+                      />
+                    </Form.Item>
+                    {provider === "openai_compatible" ? (
+                      <Form.Item
+                        name="endpoint_id"
+                        label={t("modelEndpoint")}
+                        rules={[{ required: true, message: t("required") }]}
+                        extra={endpoints.data?.length === 0 ? t("modelEndpointsEmpty") : undefined}
+                      >
+                        <Select
+                          options={(endpoints.data ?? [])
+                            .filter((entry) => entry.status === "active")
+                            .map((entry) => ({ value: entry.id, label: entry.name }))}
+                          loading={endpoints.isLoading}
+                        />
+                      </Form.Item>
+                    ) : (
+                      <Form.Item name="scenario" label={t("modelScenario")} rules={[{ required: true }]}>
+                        <Select
+                          options={MODEL_SCENARIOS.map((scenario) => ({
+                            value: scenario,
+                            label: scenario,
+                          }))}
+                        />
+                      </Form.Item>
+                    )}
+                  </>
+                ),
+              },
+              {
+                key: "tools",
+                label: t("builderTabTools"),
+                forceRender: true,
+                children: (
+                  <>
+                    <Typography.Paragraph type="secondary">{t("toolsHint")}</Typography.Paragraph>
+                    <Form.Item name="tools">
+                      <Checkbox.Group
+                        options={IMPLEMENTED_TOOLS.map((name) => ({ value: name, label: name }))}
+                      />
+                    </Form.Item>
+                  </>
+                ),
+              },
+              {
+                key: "limits",
+                label: t("builderTabLimits"),
+                forceRender: true,
+                children: (
+                  <div className="limit-grid">
+                    {limits.map((limit) => (
+                      <Form.Item
+                        key={limit.name}
+                        name={limit.name}
+                        label={t(limit.label)}
+                        rules={[{ required: true, message: t("required") }]}
+                      >
+                        <InputNumber min={limit.min} max={limit.max} className="full-width" />
+                      </Form.Item>
+                    ))}
+                  </div>
+                ),
+              },
+              {
+                key: "delivery",
+                label: t("builderTabDelivery"),
+                forceRender: true,
+                children: (
+                  <>
+                    <Form.Item
+                      name="delivery_enabled"
+                      label={t("chatCompletionsEnabled")}
+                      valuePropName="checked"
+                    >
+                      <Switch />
+                    </Form.Item>
+                    {deliveryEnabled ? (
+                      <Form.Item
+                        name="sync_timeout_seconds"
+                        label={t("syncTimeoutSeconds")}
+                        rules={[{ required: true, message: t("required") }]}
+                      >
+                        <InputNumber min={1} max={60} className="full-width" />
+                      </Form.Item>
+                    ) : null}
+                  </>
+                ),
+              },
+              {
+                key: "identity",
+                label: t("builderTabIdentity"),
+                forceRender: true,
+                children: (
+                  <Form<NameValues>
+                    form={nameForm}
+                    layout="vertical"
+                    requiredMark={false}
+                    component="div"
+                    initialValues={{ name: agent.data.name, alias: agent.data.alias }}
+                    onFinish={(values) => rename.mutate(values)}
+                  >
+                    <Form.Item
+                      name="name"
+                      label={t("agentName")}
+                      rules={[
+                        { required: true, whitespace: true, message: t("required") },
+                        { max: 120, message: t("agentNameMaximum") },
+                      ]}
+                    >
+                      <Input />
+                    </Form.Item>
+                    <Form.Item
+                      name="alias"
+                      label={t("agentAlias")}
+                      extra={t("agentAliasHint")}
+                      rules={[{ required: true, whitespace: true, message: t("required") }]}
+                    >
+                      <Input />
+                    </Form.Item>
+                    <Button
+                      htmlType="button"
+                      loading={rename.isPending}
+                      onClick={() => nameForm.submit()}
+                    >
+                      {t("saveName")}
+                    </Button>
+                  </Form>
+                ),
+              },
             ]}
-          >
-            <Input.TextArea rows={6} />
-          </Form.Item>
-          <Form.Item name="provider" label={t("modelProvider")} rules={[{ required: true }]}>
-            <Select
-              options={[
-                { value: "deterministic", label: t("modelProviderDeterministic") },
-                { value: "openai_compatible", label: t("modelProviderEndpoint") },
-              ]}
-            />
-          </Form.Item>
-          {provider === "openai_compatible" ? (
-            <Form.Item
-              name="endpoint_id"
-              label={t("modelEndpoint")}
-              rules={[{ required: true, message: t("required") }]}
-              extra={endpoints.data?.length === 0 ? t("modelEndpointsEmpty") : undefined}
-            >
-              <Select
-                options={(endpoints.data ?? [])
-                  .filter((entry) => entry.status === "active")
-                  .map((entry) => ({ value: entry.id, label: entry.name }))}
-                loading={endpoints.isLoading}
-              />
-            </Form.Item>
-          ) : (
-            <Form.Item name="scenario" label={t("modelScenario")} rules={[{ required: true }]}>
-              <Select
-                options={MODEL_SCENARIOS.map((scenario) => ({ value: scenario, label: scenario }))}
-              />
-            </Form.Item>
-          )}
-          <Typography.Title level={5}>{t("limitsSection")}</Typography.Title>
-          <div className="limit-grid">
-            {limits.map((limit) => (
-              <Form.Item
-                key={limit.name}
-                name={limit.name}
-                label={t(limit.label)}
-                rules={[{ required: true, message: t("required") }]}
-              >
-                <InputNumber min={limit.min} max={limit.max} className="full-width" />
-              </Form.Item>
-            ))}
+          />
+          <div className="th-builder-actions">
+            <Space>
+              <Button type="primary" htmlType="submit" loading={saveDraft.isPending}>
+                {t("saveDraft")}
+              </Button>
+              <Button onClick={() => void reload()} loading={draft.isFetching}>
+                {t("reloadDraft")}
+              </Button>
+            </Space>
           </div>
-          <Typography.Title level={5}>{t("toolsSection")}</Typography.Title>
-          <Typography.Paragraph type="secondary">{t("toolsHint")}</Typography.Paragraph>
-          <Form.Item name="tools">
-            <Checkbox.Group
-              options={IMPLEMENTED_TOOLS.map((name) => ({ value: name, label: name }))}
-            />
-          </Form.Item>
-          <Typography.Title level={5}>{t("deliverySection")}</Typography.Title>
-          <Form.Item name="delivery_enabled" label={t("chatCompletionsEnabled")} valuePropName="checked">
-            <Switch />
-          </Form.Item>
-          {deliveryEnabled ? (
-            <Form.Item
-              name="sync_timeout_seconds"
-              label={t("syncTimeoutSeconds")}
-              rules={[{ required: true, message: t("required") }]}
-            >
-              <InputNumber min={1} max={60} className="full-width" />
-            </Form.Item>
-          ) : null}
-          <Space>
-            <Button type="primary" htmlType="submit" loading={saveDraft.isPending}>
-              {t("saveDraft")}
-            </Button>
-            <Button onClick={() => void reload()} loading={draft.isFetching}>
-              {t("reloadDraft")}
-            </Button>
-          </Space>
         </Form>
       </Card>
       {(versions.data ?? []).length === 0 ? null : (

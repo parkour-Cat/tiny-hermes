@@ -1,5 +1,5 @@
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Checkbox, Empty, Form, Input, Select, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Checkbox, Form, Input, Select, Space, Typography } from "antd";
 import { useState } from "react";
 
 import { api } from "../api/client";
@@ -11,6 +11,9 @@ import type {
 } from "../api/types";
 import { API_KEY_SCOPES, VIEWER_API_KEY_SCOPES } from "../api/types";
 import { useT } from "../i18n/locale";
+import { PageHeading } from "../layout/ConsoleChrome";
+import { EmptyState } from "../ui/EmptyState";
+import { StatusTag } from "../ui/StatusTag";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 type AccountValues = {
@@ -127,12 +130,11 @@ export function ApiKeysPage() {
 
   return (
     <>
-      <div className="page-heading">
-        <div>
-          <Typography.Title level={2}>{t("serviceAccountsTitle")}</Typography.Title>
-          <Typography.Paragraph type="secondary">{t("serviceAccountsIntro")}</Typography.Paragraph>
-        </div>
-      </div>
+      <PageHeading
+        kicker={t("workspaceTitle")}
+        title={t("serviceAccountsTitle")}
+        intro={t("serviceAccountsIntro")}
+      />
       {error === null ? null : (
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}
@@ -182,11 +184,15 @@ export function ApiKeysPage() {
           </Form.Item>
         </Form>
       </Card>
-      <Card loading={accounts.isPending} variant="borderless">
-        {(accounts.data ?? []).length === 0 ? (
-          <Empty description={t("emptyServiceAccounts")} />
-        ) : (
-          (accounts.data ?? []).map((account, index) => {
+      {accounts.isPending ? (
+        <Card loading variant="borderless" />
+      ) : (accounts.data ?? []).length === 0 ? (
+        <Card variant="borderless">
+          <EmptyState title={t("emptyServiceAccounts")} />
+        </Card>
+      ) : (
+        <Card variant="borderless">
+          {(accounts.data ?? []).map((account, index) => {
             const keys = keyQueries[index]?.data ?? [];
             const allowed = account.role === "viewer" ? VIEWER_API_KEY_SCOPES : API_KEY_SCOPES;
             return (
@@ -194,8 +200,8 @@ export function ApiKeysPage() {
                 <div className="workspace-summary">
                   <Typography.Title level={4}>{account.name}</Typography.Title>
                   <Space wrap>
-                    <Tag>{account.role}</Tag>
-                    <Tag>{account.status}</Tag>
+                    <StatusTag code={account.role} />
+                    <StatusTag code={account.status} />
                     {account.status === "active" ? (
                       <Button
                         loading={disableAccount.isPending}
@@ -215,7 +221,7 @@ export function ApiKeysPage() {
                         {key.revoked_at === null ? (
                           <Button onClick={() => revoke.mutate(key.id)}>{t("revokeKey")}</Button>
                         ) : (
-                          <Tag>{key.revoked_at}</Tag>
+                          <Typography.Text type="secondary">{key.revoked_at}</Typography.Text>
                         )}
                       </Space>
                     ))
@@ -244,9 +250,9 @@ export function ApiKeysPage() {
                 </div>
               </article>
             );
-          })
-        )}
-      </Card>
+          })}
+        </Card>
+      )}
     </>
   );
 }

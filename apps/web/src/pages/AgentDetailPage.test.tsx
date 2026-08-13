@@ -72,16 +72,23 @@ function renderDetail(): void {
   );
 }
 
+async function builderTab(name: string): Promise<void> {
+  await userEvent.click(await screen.findByRole("tab", { name }));
+}
+
 test("the loaded draft fills every field the console can edit", async () => {
   loadedAgent();
 
   renderDetail();
 
+  expect(await screen.findByRole("tab", { name: "人格与模型" })).toBeInTheDocument();
   expect(await screen.findByLabelText("人格")).toHaveValue("You answer support questions.");
   expect(screen.getByText("continue_once")).toBeInTheDocument();
+  await builderTab("工具");
   for (const tool of ["file.list", "file.read", "file.write", "shell.exec"]) {
     expect(screen.getByRole("checkbox", { name: tool })).not.toBeChecked();
   }
+  await builderTab("限额");
   expect(screen.getByLabelText("单次执行秒数上限")).toHaveValue("600");
   expect(screen.getByLabelText("总时长秒数上限")).toHaveValue("3600");
   expect(screen.getByLabelText("模型调用次数上限")).toHaveValue("12");
@@ -221,6 +228,7 @@ test("the tools checklist puts the bound names on the draft", async () => {
   );
 
   renderDetail();
+  await builderTab("工具");
   await userEvent.click(await screen.findByRole("checkbox", { name: "file.list" }));
   await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
 
@@ -355,7 +363,7 @@ test("the draft revision and the published version are two separate facts", asyn
   expect(await screen.findByText("草稿修订 3")).toBeInTheDocument();
   expect(screen.getByText("尚未发布")).toBeInTheDocument();
   expect(screen.getByText("尚未发布，没有可对比的版本。")).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "打开 Playground" })).toHaveAttribute(
+  expect(screen.getByRole("link", { name: "打开试验场" })).toHaveAttribute(
     "href",
     `/workspaces/${WORKSPACE}/agents/${AGENT}/playground`,
   );
@@ -372,6 +380,7 @@ test("enabling delivery puts the timeout on the draft", async () => {
   );
 
   renderDetail();
+  await builderTab("投递");
   await userEvent.click(await screen.findByRole("switch", { name: "启用 Chat Completions" }));
   await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
 
@@ -398,6 +407,7 @@ test("saving a name sends a patch, not a new draft revision", async () => {
   );
 
   renderDetail();
+  await builderTab("身份");
   const name = await screen.findByLabelText("名称");
   await userEvent.clear(name);
   await userEvent.type(name, "Renamed");

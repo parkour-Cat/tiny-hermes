@@ -3,7 +3,8 @@ import { useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthProvider";
-import { t } from "../i18n/zh-CN";
+import { useT } from "../i18n/locale";
+import { BrandMark } from "../layout/ConsoleChrome";
 
 type LoginValues = {
   subject: string;
@@ -11,6 +12,7 @@ type LoginValues = {
 };
 
 export function LoginPage() {
+  const t = useT();
   const auth = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
@@ -71,13 +73,16 @@ export function LoginPage() {
 }
 
 export function PublicShell({ children }: { children: React.ReactNode }) {
+  const t = useT();
   return (
     <main className="public-shell">
       <div className="brand-panel">
-        <Typography.Text className="brand-kicker">{t("appName")}</Typography.Text>
+        <BrandMark />
+        <p className="brand-kicker">{t("appKicker")}</p>
         <Typography.Title>{t("appTagline")}</Typography.Title>
+        <p className="brand-aside">{t("appAside")}</p>
       </div>
-      {children}
+      <div className="auth-slot">{children}</div>
     </main>
   );
 }

@@ -98,7 +98,7 @@ test("creating an agent sends its name and alias", async () => {
 
   renderAgents();
 
-  await userEvent.click(await screen.findByRole("button", { name: "新建 Agent" }));
+  await userEvent.click(await screen.findByRole("button", { name: "新建智能体" }));
   await userEvent.type(screen.getByLabelText("名称"), "Analyst");
   await userEvent.type(screen.getByLabelText("别名"), "analyst");
   await userEvent.click(screen.getByRole("button", { name: "创建" }));
@@ -125,7 +125,7 @@ test("a taken alias keeps the dialog open and the typed values in it", async () 
 
   renderAgents();
 
-  await userEvent.click(await screen.findByRole("button", { name: "新建 Agent" }));
+  await userEvent.click(await screen.findByRole("button", { name: "新建智能体" }));
   await userEvent.type(screen.getByLabelText("名称"), "Second");
   await userEvent.type(screen.getByLabelText("别名"), "analyst");
   await userEvent.click(screen.getByRole("button", { name: "创建" }));

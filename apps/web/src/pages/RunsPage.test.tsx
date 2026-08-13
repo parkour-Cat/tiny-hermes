@@ -92,9 +92,11 @@ function renderRuns(): void {
   );
 }
 
-/** The row a Run occupies, found by the identifier that names it. */
+/** The row a Run occupies, found by the address that names it. */
 async function rowOf(runId: string): Promise<HTMLElement> {
-  const link = await screen.findByRole("link", { name: runId });
+  const link = await screen.findByRole("link", {
+    name: (_accessible, element) => element.getAttribute("href")?.endsWith(`/runs/${runId}`) === true,
+  });
   const row = link.closest("tr");
   if (row === null) {
     throw new Error(`no row for ${runId}`);
@@ -114,7 +116,7 @@ test("a row states the Run's status, its place in the session, and its times", a
   renderRuns();
   const row = await rowOf(HEAD_RUN);
 
-  expect(within(row).getByText("completed")).toBeInTheDocument();
+  expect(within(row).getByText("已完成")).toBeInTheDocument();
   expect(within(row).getByText("1")).toBeInTheDocument();
   expect(within(row).getByText(moment("2026-08-10T02:00:00Z"))).toBeInTheDocument();
   expect(within(row).getByText(moment("2026-08-10T02:04:00Z"))).toBeInTheDocument();
@@ -148,15 +150,20 @@ test("a running Run has no end time, and the column says so", async () => {
   expect(within(await rowOf(HEAD_RUN)).getByText("—")).toBeInTheDocument();
 });
 
-test("the page neither pages the list nor hides that it cannot", async () => {
+test("the page neither pages the list nor pretends the platform can", async () => {
   listing([runRow({})]);
 
   renderRuns();
   await rowOf(HEAD_RUN);
 
   expect(
-    screen.getByText("接口一次返回全部运行记录，没有分页，也没有筛选。记录很多时列表会变慢。"),
-  ).toBeInTheDocument();
+    screen.queryByText("接口一次返回全部运行记录，没有分页，也没有筛选。记录很多时列表会变慢。"),
+  ).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Analyst · 第 1 次" })).toHaveAttribute(
+    "href",
+    `/workspaces/${WORKSPACE}/runs/${HEAD_RUN}`,
+  );
+  expect(screen.queryByRole("link", { name: HEAD_RUN })).not.toBeInTheDocument();
   // A pager over a list that arrived whole would be a control that pretends to
   // ask the platform for something.
   expect(screen.queryByRole("listitem", { name: /page/i })).not.toBeInTheDocument();
@@ -166,7 +173,7 @@ test("the page neither pages the list nor hides that it cannot", async () => {
 /** Fills in the submission dialog and presses 提交. */
 async function submitRun(message: string): Promise<void> {
   await userEvent.click(await screen.findByRole("button", { name: "提交运行" }));
-  await userEvent.click(await screen.findByLabelText("Agent"));
+  await userEvent.click(await screen.findByLabelText("智能体"));
   await userEvent.click(await screen.findByTitle("Analyst"));
   await userEvent.type(await screen.findByLabelText("输入"), message);
   await userEvent.click(screen.getByRole("button", { name: "提交" }));
@@ -226,7 +233,7 @@ test("an unpublished agent is answered with what has to happen first", async () 
   renderRuns();
   await submitRun("Summarize the incident.");
 
-  expect(await screen.findByText("该 Agent 尚未发布，请先发布后再提交运行")).toBeInTheDocument();
+  expect(await screen.findByText("该智能体尚未发布，请先发布后再提交运行")).toBeInTheDocument();
   expect(screen.queryByText("run detail")).not.toBeInTheDocument();
 });
 

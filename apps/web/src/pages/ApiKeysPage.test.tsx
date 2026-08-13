@@ -63,7 +63,7 @@ test("a minted key's plaintext is shown once and then dismissed", async () => {
   );
 
   renderKeys();
-  await userEvent.click(await screen.findByRole("button", { name: "新建 API Key" }));
+  await userEvent.click(await screen.findByRole("button", { name: "新建 API 密钥" }));
 
   expect(await screen.findByText(token)).toBeInTheDocument();
   expect(screen.getByText("thk_abcd")).toBeInTheDocument();

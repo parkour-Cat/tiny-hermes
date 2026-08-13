@@ -56,14 +56,14 @@ async function bindTool(page: Page, name: string): Promise<void> {
 /** Creates an Agent, writes the scenario into its draft, and publishes v1. */
 async function publishAgent(page: Page, scenario: string): Promise<string> {
   const name = unique(scenario);
-  await page.getByRole("link", { name: "Agent", exact: true }).click();
-  await page.getByRole("button", { name: "新建 Agent" }).click();
+  await page.getByRole("link", { name: "智能体", exact: true }).click();
+  await page.getByRole("button", { name: "新建智能体" }).click();
   await page.getByLabel("名称").fill(name);
   // The platform's alias grammar is lowercase words joined by hyphens, so a
   // scenario name with an underscore in it cannot be an alias unchanged.
   await page.getByLabel("别名").fill(name.toLowerCase().replace(/_/g, "-"));
   await page.getByRole("button", { name: "创建", exact: true }).click();
-  await expect(page.getByRole("dialog", { name: "新建 Agent" })).toBeHidden();
+  await expect(page.getByRole("dialog", { name: "新建智能体" })).toBeHidden();
   await page.getByRole("link", { name, exact: true }).click();
 
   await expect(page.getByText("草稿修订 1")).toBeVisible();
@@ -84,7 +84,7 @@ async function publishAgent(page: Page, scenario: string): Promise<string> {
 async function submitRun(page: Page, agentName: string): Promise<string> {
   await page.getByRole("link", { name: "运行", exact: true }).click();
   await page.getByRole("button", { name: "提交运行" }).click();
-  await choose(page, "Agent", agentName);
+  await choose(page, "智能体", agentName);
   await page.getByLabel("输入").fill("Say hello to the acceptance walk.");
   await page.getByRole("button", { name: "提交", exact: true }).click();
   await expect(page).toHaveURL(/\/runs\/[0-9a-f-]{36}$/);
@@ -126,7 +126,7 @@ test("draft, publish, submit, watch, retry, and be refused a foreign workspace",
   // the whole history rather than the part that happened after the reload.
   await page.reload();
 
-  await expect(summary(page).getByText("completed", { exact: true })).toBeVisible();
+  await expect(summary(page).getByText("已完成", { exact: true })).toBeVisible();
   await expect(timeline(page).getByText("run_completed")).toBeVisible();
 
   const shown = await sequences(page);
@@ -142,7 +142,7 @@ test("draft, publish, submit, watch, retry, and be refused a foreign workspace",
   // offers rather than from one the console decided to show.
   const failing = await publishAgent(page, "fail_replay_safe");
   const failedRun = await submitRun(page, failing);
-  await expect(summary(page).getByText("failed", { exact: true })).toBeVisible();
+  await expect(summary(page).getByText("失败", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "重试运行" }).click();
   await page.getByRole("button", { name: "确定" }).click();
@@ -177,16 +177,17 @@ test("the panes phase two cannot fill are absent, not empty", async ({ page }) =
 test("the builder binds a tool, playground sends, and rollback restores v1", async ({ page }) => {
   await openWorkspace(page);
   const name = unique("playground");
-  await page.getByRole("link", { name: "Agent", exact: true }).click();
-  await page.getByRole("button", { name: "新建 Agent" }).click();
+  await page.getByRole("link", { name: "智能体", exact: true }).click();
+  await page.getByRole("button", { name: "新建智能体" }).click();
   await page.getByLabel("名称").fill(name);
   await page.getByLabel("别名").fill(name.toLowerCase().replace(/_/g, "-"));
   await page.getByRole("button", { name: "创建" }).click();
-  await expect(page.getByRole("dialog", { name: "新建 Agent" })).toBeHidden();
+  await expect(page.getByRole("dialog", { name: "新建智能体" })).toBeHidden();
   await page.getByRole("link", { name, exact: true }).click();
 
   await page.getByLabel("人格").fill("A playground agent for the console acceptance walk.");
   await choose(page, "模型场景", "continue_once");
+  await page.getByRole("tab", { name: "工具" }).click();
   await bindTool(page, "file.list");
   await page.getByRole("button", { name: "保存草稿" }).click();
   await expect(page.getByText("草稿修订 2")).toBeVisible();
@@ -194,22 +195,22 @@ test("the builder binds a tool, playground sends, and rollback restores v1", asy
   await page.getByRole("button", { name: "确定" }).click();
   await expect(page.getByText("当前版本 v1")).toBeVisible();
 
-  await page.getByRole("button", { name: "打开 Playground" }).click();
+  await page.getByRole("button", { name: "打开试验场" }).click();
   await expect(page).toHaveURL(/\/playground$/);
-  await page.getByLabel("输入要发给 Agent 的消息").fill("Say hello to the playground walk.");
+  await page.getByLabel("输入要发给智能体的消息").fill("Say hello to the playground walk.");
   await page.getByRole("button", { name: "发送" }).click();
   // A bound tool yields a tool-call turn and a final turn, so there are two
   // role tags. One assistant message is the claim; uniqueness is not.
-  await expect(page.getByText("assistant", { exact: true }).first()).toBeVisible({
+  await expect(page.getByText("助手", { exact: true }).first()).toBeVisible({
     timeout: 60_000,
   });
 
   const pause = page.getByRole("button", { name: "暂停" });
   if (await pause.isVisible().catch(() => false)) {
     await pause.click();
-    await page.getByLabel("输入要发给 Agent 的消息").fill("A second turn while the head is paused.");
+    await page.getByLabel("输入要发给智能体的消息").fill("A second turn while the head is paused.");
     await page.getByRole("button", { name: "发送" }).click();
-    await expect(page.getByText("当前 Session 被队列挡住")).toBeVisible();
+    await expect(page.getByText("当前会话被队列挡住")).toBeVisible();
   }
 
   await page.getByRole("link", { name }).click();

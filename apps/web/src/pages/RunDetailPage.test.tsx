@@ -125,7 +125,7 @@ test("概要 states the Run's status, its state version, its checkpoint, and eve
   renderRun();
   const card = within(await summary());
 
-  expect(card.getByText("running")).toBeInTheDocument();
+  expect(card.getByText("执行中")).toBeInTheDocument();
   expect(card.getByText("4")).toBeInTheDocument();
   expect(card.getByText(t("yes"))).toBeInTheDocument();
   expect(card.getByText("none")).toBeInTheDocument();
@@ -256,7 +256,7 @@ test("an event re-reads the snapshot, because only the state machine knows the s
 
   renderRun();
 
-  expect(await screen.findByText("completed")).toBeInTheDocument();
+  expect(await screen.findByText("已完成")).toBeInTheDocument();
   expect(reads).toBeGreaterThan(1);
 });
 

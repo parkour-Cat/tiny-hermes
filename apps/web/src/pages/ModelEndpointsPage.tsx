@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Form, Input, InputNumber, Select, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Form, Input, InputNumber, Select, Space, Typography } from "antd";
 import { useState } from "react";
 
 import { api } from "../api/client";
@@ -11,6 +11,9 @@ import type {
 } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
 import { useT } from "../i18n/locale";
+import { PageHeading } from "../layout/ConsoleChrome";
+import { EmptyState } from "../ui/EmptyState";
+import { StatusTag } from "../ui/StatusTag";
 
 type RegisterValues = {
   name: string;
@@ -102,12 +105,11 @@ export function ModelEndpointsPage() {
 
   return (
     <>
-      <div className="page-heading">
-        <div>
-          <Typography.Title level={2}>{t("endpointsTitle")}</Typography.Title>
-          <Typography.Paragraph type="secondary">{t("endpointsIntro")}</Typography.Paragraph>
-        </div>
-      </div>
+      <PageHeading
+        kicker={t("appKicker")}
+        title={t("endpointsTitle")}
+        intro={t("endpointsIntro")}
+      />
       {error === null ? null : (
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}
@@ -187,11 +189,15 @@ export function ModelEndpointsPage() {
           </Form>
         </Card>
       ) : null}
-      <Card loading={listed.isPending} variant="borderless">
-        {(listed.data ?? []).length === 0 ? (
-          <Empty description={t("emptyEndpoints")} />
-        ) : (
-          (listed.data ?? []).map((entry) => {
+      {listed.isPending ? (
+        <Card loading variant="borderless" />
+      ) : (listed.data ?? []).length === 0 ? (
+        <Card variant="borderless">
+          <EmptyState title={t("emptyEndpoints")} />
+        </Card>
+      ) : (
+        <Card variant="borderless">
+          {(listed.data ?? []).map((entry) => {
             const detail = details.data?.[entry.id];
             return (
               <article key={entry.id} className="workspace-row">
@@ -210,7 +216,7 @@ export function ModelEndpointsPage() {
                   )}
                 </div>
                 <Space wrap>
-                  <Tag>{entry.status}</Tag>
+                  <StatusTag code={entry.status} />
                   {admin ? (
                     <>
                       <Button onClick={() => check.mutate(entry.id)} loading={check.isPending}>
@@ -234,9 +240,9 @@ export function ModelEndpointsPage() {
                 </Space>
               </article>
             );
-          })
-        )}
-      </Card>
+          })}
+        </Card>
+      )}
     </>
   );
 }

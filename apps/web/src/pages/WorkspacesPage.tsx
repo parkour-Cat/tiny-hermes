@@ -1,24 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Alert,
-  Avatar,
-  Button,
-  Card,
-  Empty,
-  Form,
-  Input,
-  Layout,
-  Modal,
-  Space,
-  Tag,
-  Typography,
-} from "antd";
+import { Alert, Avatar, Button, Card, Form, Input, Modal, Space, Tag, Typography } from "antd";
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, NavLink } from "react-router-dom";
 
 import { api } from "../api/client";
 import { useAuth } from "../auth/AuthProvider";
-import { t } from "../i18n/zh-CN";
+import { useT } from "../i18n/locale";
+import { BrandMark, ConsoleChrome, PageHeading } from "../layout/ConsoleChrome";
+import { EmptyState } from "../ui/EmptyState";
 
 type Workspace = {
   id: string;
@@ -33,6 +22,7 @@ type WorkspaceValues = {
 const WORKSPACES_QUERY = ["workspaces"] as const;
 
 export function WorkspacesPage() {
+  const t = useT();
   const auth = useAuth();
   const queryClient = useQueryClient();
   const [form] = Form.useForm<WorkspaceValues>();
@@ -62,76 +52,68 @@ export function WorkspacesPage() {
     },
   });
 
-  async function logout(): Promise<void> {
-    setActionError(null);
-    try {
-      await auth.logout();
-    } catch (caught) {
-      setActionError(caught instanceof Error ? caught.message : t("requestFailed"));
-    }
-  }
-
   return (
-    <Layout className="app-layout">
-      <Layout.Header className="app-header">
-        <Typography.Text className="header-brand">{t("appName")}</Typography.Text>
-        <Space>
-          <Avatar>{auth.user?.display_name.slice(0, 1).toUpperCase()}</Avatar>
-          <div className="user-summary">
-            <Typography.Text>{auth.user?.display_name}</Typography.Text>
-            <Typography.Text type="secondary">{auth.user?.subject}</Typography.Text>
-          </div>
-          <Button onClick={() => void logout()}>{t("logout")}</Button>
-        </Space>
-      </Layout.Header>
-      <Layout.Content className="workspace-content">
-        <div className="page-heading">
-          <div>
-            <Typography.Title level={2}>{t("workspaceTitle")}</Typography.Title>
-            <Typography.Paragraph type="secondary">{t("workspaceIntro")}</Typography.Paragraph>
-          </div>
+    <ConsoleChrome
+      sidebar={
+        <>
+          <BrandMark />
+          <div className="th-workspace-chip">{auth.user?.display_name}</div>
+          <nav className="th-nav">
+            <NavLink to="/workspaces" className="th-nav-link active">
+              {t("workspaceTitle")}
+            </NavLink>
+          </nav>
+        </>
+      }
+    >
+      <PageHeading
+        kicker={t("appKicker")}
+        title={t("workspaceTitle")}
+        intro={t("workspaceIntro")}
+        extra={
           <Button type="primary" onClick={() => setOpen(true)}>
             {t("newWorkspace")}
           </Button>
-        </div>
-        {actionError === null ? null : (
-          <Alert className="page-alert" type="error" title={actionError} showIcon />
-        )}
-        {workspaces.isError ? (
-          <Alert
-            type="error"
-            title={workspaces.error.message}
-            action={<Button onClick={() => void workspaces.refetch()}>{t("retry")}</Button>}
-            showIcon
-          />
-        ) : (
-          <Card loading={workspaces.isPending} variant="borderless">
-            {(workspaces.data ?? []).length === 0 ? (
-              <Empty description={t("emptyWorkspaces")} />
-            ) : (
-              <div className="workspace-list" role="list">
-                {(workspaces.data ?? []).map((workspace) => (
-                  <article className="workspace-row" role="listitem" key={workspace.id}>
-                    <Avatar shape="square">{workspace.name.slice(0, 1)}</Avatar>
-                    <div className="workspace-summary">
-                      <Typography.Title level={4}>
-                        <Link to={`/workspaces/${workspace.id}/agents`}>{workspace.name}</Link>
-                      </Typography.Title>
-                      <Typography.Text type="secondary">{workspace.id}</Typography.Text>
-                    </div>
-                    <Space>
-                      <Tag color="green">{t("workspaceActive")}</Tag>
-                      <Link to={`/workspaces/${workspace.id}/agents`}>
-                        <Button type="link">{t("openWorkspace")}</Button>
-                      </Link>
-                    </Space>
-                  </article>
-                ))}
-              </div>
-            )}
-          </Card>
-        )}
-      </Layout.Content>
+        }
+      />
+      {actionError === null ? null : (
+        <Alert className="page-alert" type="error" title={actionError} showIcon />
+      )}
+      {workspaces.isError ? (
+        <Alert
+          type="error"
+          title={workspaces.error.message}
+          action={<Button onClick={() => void workspaces.refetch()}>{t("retry")}</Button>}
+          showIcon
+        />
+      ) : workspaces.isPending ? (
+        <Card loading variant="borderless" />
+      ) : (workspaces.data ?? []).length === 0 ? (
+        <Card variant="borderless">
+          <EmptyState title={t("emptyWorkspaces")} />
+        </Card>
+      ) : (
+        <Card variant="borderless">
+          <div className="workspace-list" role="list">
+            {(workspaces.data ?? []).map((workspace) => (
+              <article className="workspace-row" role="listitem" key={workspace.id}>
+                <Avatar shape="square">{workspace.name.slice(0, 1)}</Avatar>
+                <div className="workspace-summary">
+                  <Typography.Title level={4}>
+                    <Link to={`/workspaces/${workspace.id}/agents`}>{workspace.name}</Link>
+                  </Typography.Title>
+                </div>
+                <Space>
+                  <Tag className="th-tag th-tag-active">{t("workspaceActive")}</Tag>
+                  <Link to={`/workspaces/${workspace.id}/agents`}>
+                    <Button type="link">{t("openWorkspace")}</Button>
+                  </Link>
+                </Space>
+              </article>
+            ))}
+          </div>
+        </Card>
+      )}
       <Modal
         open={open}
         title={t("newWorkspace")}
@@ -160,6 +142,6 @@ export function WorkspacesPage() {
           </Form.Item>
         </Form>
       </Modal>
-    </Layout>
+    </ConsoleChrome>
   );
 }
