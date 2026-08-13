@@ -3,7 +3,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID
 
 
@@ -59,6 +59,10 @@ class RunSignal(StrEnum):
     INTERRUPTED = "interrupted"
     RECOVERY_APPROVED = "recovery_approved"
     RECOVERY_FAILED = "recovery_failed"
+    #: Design §9's one narrow door: an interrupted Run whose over-limit
+    #: rollback is recorded and whose sandbox and volume are confirmed gone
+    #: may become `paused(limit)`. The Scheduler is the only sender.
+    LIMIT_CLEANUP_CONFIRMED = "limit_cleanup_confirmed"
 
 
 class SessionMode(StrEnum):
@@ -75,6 +79,19 @@ class CheckpointEffectStatus(StrEnum):
     NONE = "none"
     CONFIRMED = "confirmed"
     UNKNOWN = "unknown"
+
+
+class WorkspaceCleanupTarget(StrEnum):
+    """Where a Run must land once its sandbox and volume are confirmed gone.
+
+    Recorded in the same transaction as the rollback ToolResultBlock (design
+    §6.3), so a crash between "record the reason" and "delete the volume" is
+    recoverable without inventing state from logs.
+    """
+
+    PAUSED_LIMIT = "paused_limit"
+    QUEUED = "queued"
+    FAILED_CONFLICT = "failed_conflict"
 
 
 class WaitPolicy(StrEnum):
@@ -99,6 +116,12 @@ class RunEventType(StrEnum):
     # refuses to invent names, so this member must be written explicitly.
     RUN_LIMIT_REACHED = "run_limit_reached"
 
+    # Also not derived from a signal: it records that a slice began on a fresh
+    # writable layer, which is a fact about the sandbox rather than a state
+    # transition. Technical design §11.3 requires the Agent be told, and this
+    # is the half a person reads.
+    SANDBOX_CACHE_RESET = "sandbox_cache_reset"
+
     RUN_LEASE_ACQUIRED = "run_lease_acquired"
     RUN_SLICE_ENDED = "run_slice_ended"
     RUN_PAUSE_REQUESTED = "run_pause_requested"
@@ -118,6 +141,17 @@ class RunEventType(StrEnum):
     RUN_INTERRUPTED = "run_interrupted"
     RUN_RECOVERY_APPROVED = "run_recovery_approved"
     RUN_RECOVERY_FAILED = "run_recovery_failed"
+    RUN_LIMIT_CLEANUP_CONFIRMED = "run_limit_cleanup_confirmed"
+
+    # Workspace facts (design §8/§9), written explicitly like
+    # `sandbox_cache_reset`: each records something that happened to the
+    # Session's files rather than a state transition.
+    WORKSPACE_LIMIT_EXCEEDED = "workspace_limit_exceeded"
+    WORKSPACE_CONFLICT = "workspace_conflict"
+    WORKSPACE_CHECKPOINT_FAILED = "workspace_checkpoint_failed"
+    WORKSPACE_STORAGE_UNAVAILABLE = "workspace_storage_unavailable"
+    WORKSPACE_INTEGRITY_FAILED = "workspace_integrity_failed"
+    WORKSPACE_ENTRY_NOT_SUPPORTED = "workspace_entry_not_supported"
 
 
 def event_type_for(signal: RunSignal) -> RunEventType:
@@ -164,25 +198,177 @@ class QueueStatus(StrEnum):
     TERMINAL = "terminal"
 
 
+class CacheStateHint(StrEnum):
+    """What the Agent is told about the writable layer it just got.
+
+    Only ``RESET`` is ever sent. There is nothing to say about a cache that
+    survived, and saying it anyway would spend context on a non-event every
+    round.
+    """
+
+    RESET = "reset"
+
+
+#: Prepended to the first model call of a slice that began on a fresh layer,
+#: ahead of the conversation and behind the platform's own rules — so a later
+#: turn cannot displace it. §11.3 requires the Agent be told; this is the half
+#: the model reads.
+CACHE_RESET_HINT = (
+    "This execution slice started with a fresh sandbox. Any dependencies, "
+    "virtual environments, background processes or build caches from earlier "
+    "in this Run are gone and must be rebuilt before they are used. Files under "
+    "/workspace/data are unaffected."
+)
+
+
+@dataclass(frozen=True)
+class TextBlock:
+    text: str
+
+    def document(self) -> dict[str, Any]:
+        return {"type": "text", "text": self.text}
+
+
+@dataclass(frozen=True)
+class ToolCallBlock:
+    """The model asking for a tool, in the platform's own shape.
+
+    ``arguments`` is a decoded object rather than the provider's JSON string:
+    the adapter decodes once, at the edge, and a failure there is a failed
+    round with a named reason. Carrying the string inward would mean every
+    reader had to decode it and each one could decide differently.
+    """
+
+    call_id: str
+    name: str
+    arguments: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if not self.call_id:
+            raise ValueError("a tool call needs a call_id to be answered by")
+        if not self.name:
+            raise ValueError("a tool call needs a name")
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "type": "tool_call",
+            "call_id": self.call_id,
+            "name": self.name,
+            "arguments": dict(self.arguments),
+        }
+
+
+@dataclass(frozen=True)
+class ToolResultBlock:
+    """What came back, tied to the call that asked.
+
+    ``failed`` is separate from ``exit_code`` because they answer different
+    questions. A command that exits non-zero did what it was asked and reported
+    a result; a tool that was refused, or timed out, never ran. Collapsing them
+    would tell the model a refusal was a failing command.
+    """
+
+    call_id: str
+    output: str
+    exit_code: int
+    failed: bool
+
+    def __post_init__(self) -> None:
+        if not self.call_id:
+            raise ValueError("a tool result needs the call_id it answers")
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "type": "tool_result",
+            "call_id": self.call_id,
+            "output": self.output,
+            "exit_code": self.exit_code,
+            "failed": self.failed,
+        }
+
+
+Block = TextBlock | ToolCallBlock | ToolResultBlock
+
+
 @dataclass(frozen=True)
 class CanonicalMessage:
     """One turn of a conversation, in the shape the platform stores and sends.
 
-    Text only. Technical design §9.2 describes tool-call and tool-result blocks
-    too, and neither is declared here: no phase-3A code path produces one, and a
-    block type without a producer is a promise nothing keeps. Phase 3C widens
-    ``text`` into a list of blocks, and every reader of this field will fail
-    typechecking at that point — which is the review the widening deserves.
+    Phase 3A carried a single string and said the widening belonged to the
+    slice that had a producer. Tool calls are that producer.
 
-    The stored document already carries a ``parts`` list, so widening later
-    changes this class and not the rows written before it.
+    The stored document already carried a ``parts`` list, so rows written
+    before this change read back unchanged — asserted against a literal
+    document in `test_message_blocks.py`, because that is a promise about bytes
+    already in a database rather than about a shape today's code round-trips.
     """
 
-    role: Literal["user", "assistant"]
-    text: str
+    role: Literal["user", "assistant", "tool"]
+    blocks: tuple[Block, ...]
+
+    def __post_init__(self) -> None:
+        if not self.blocks:
+            # An empty turn is not a turn. Storing one puts a row in the
+            # transcript that means nothing and that every later round skips.
+            raise ValueError("a message needs at least one block")
+
+    @property
+    def text(self) -> str:
+        """The words, for anything showing this to a person.
+
+        Deliberately lossy: it drops calls and results. Anything rebuilding a
+        request walks `blocks` instead, which is why the provider adapter does.
+        """
+        return "".join(block.text for block in self.blocks if isinstance(block, TextBlock))
 
     def document(self) -> dict[str, Any]:
-        return {"role": self.role, "parts": [{"type": "text", "text": self.text}]}
+        return {"role": self.role, "parts": [block.document() for block in self.blocks]}
+
+
+def message_from_document(document: dict[str, Any]) -> CanonicalMessage:
+    """Read a stored row back, tolerating one written by a later version.
+
+    An unknown block type is dropped rather than guessed at: this version
+    cannot render or replay it honestly, and a placeholder would put words in
+    the Agent's mouth. A row with nothing readable becomes one empty text block
+    rather than raising, because a bad row is a bad row and not a reason to
+    fail a Run that has nothing to do with it.
+    """
+    raw: Any = document.get("parts")
+    blocks: list[Block] = []
+    for entry in cast(list[Any], raw) if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        part = cast(dict[str, Any], entry)
+        kind = part.get("type")
+        if kind == "text":
+            blocks.append(TextBlock(text=str(part.get("text", ""))))
+        elif kind == "tool_call":
+            arguments: Any = part.get("arguments")
+            blocks.append(
+                ToolCallBlock(
+                    call_id=str(part.get("call_id", "")),
+                    name=str(part.get("name", "")),
+                    arguments=cast(dict[str, Any], arguments)
+                    if isinstance(arguments, dict)
+                    else {},
+                )
+            )
+        elif kind == "tool_result":
+            blocks.append(
+                ToolResultBlock(
+                    call_id=str(part.get("call_id", "")),
+                    output=str(part.get("output", "")),
+                    exit_code=int(part.get("exit_code") or 0),
+                    failed=bool(part.get("failed")),
+                )
+            )
+
+    role = str(document.get("role", "user"))
+    return CanonicalMessage(
+        role=role if role in ("user", "assistant", "tool") else "user",  # pyright: ignore[reportArgumentType]
+        blocks=tuple(blocks) or (TextBlock(text=""),),
+    )
 
 
 @dataclass(frozen=True)

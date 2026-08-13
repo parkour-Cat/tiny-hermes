@@ -15,11 +15,17 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[5]
 
-#: The only places allowed to construct a client or a socket. `outbound` is the
-#: guarded path itself; the other two are clients *of* this platform rather than
-#: parts of it, and neither ships.
+#: Every path exempt from TID251. `outbound` and `sandbox/infrastructure` are
+#: the two guarded paths themselves; the other two are clients *of* this
+#: platform rather than parts of it, and neither ships.
+#:
+#: TID251 is one code, so an exemption lifts every ban configured under it.
+#: `test_process_ban.py` asserts that neither guarded module uses the other's
+#: licence — a sandbox that built an HTTP client, or an outbound module that
+#: started a process, would pass the linter and fail there.
 EXEMPT = {
     "packages/backend/src/tiny_hermes/outbound/**/*.py",
+    "packages/backend/src/tiny_hermes/sandbox/infrastructure/**/*.py",
     "packages/backend/tests/**/*.py",
     "scripts/**/*.py",
 }
@@ -68,8 +74,8 @@ def test_the_outbound_module_is_allowed_to() -> None:
     assert result.returncode == 0, result.stdout
 
 
-def test_the_exemption_list_is_exactly_three_paths() -> None:
-    """Pinned, because quietly adding a fourth is how a ban stops meaning anything."""
+def test_the_exemption_list_is_exactly_these_paths() -> None:
+    """Pinned, because quietly adding one is how a ban stops meaning anything."""
     config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     ignores = config["tool"]["ruff"]["lint"]["per-file-ignores"]
     exempted = {path for path, codes in ignores.items() if "TID251" in codes}

@@ -66,6 +66,22 @@ async def test_an_ordinary_request_reaches_the_endpoint(
     assert app.last().method == "POST"
 
 
+async def test_an_ambient_proxy_cannot_replace_the_vetted_connection(
+    stand_in: tuple[StandIn, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Address checks are meaningless if an inherited proxy makes the connection."""
+    _, url = stand_in
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+
+    async with build() as client:
+        response = await client.post(f"{url}/ok", json={"say": "direct"})
+
+    assert response.status_code == 200
+
+
 async def test_consults_the_real_policy(stand_in: tuple[StandIn, str]) -> None:
     """With nothing relaxed, the stand-in is unreachable and never contacted.
 

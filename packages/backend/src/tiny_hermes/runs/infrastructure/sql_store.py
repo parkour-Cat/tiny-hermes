@@ -1,7 +1,7 @@
 import hashlib
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, func, select, text, update
@@ -48,7 +48,9 @@ from tiny_hermes.runs.domain.models import (
     SessionMode,
     SessionSnapshot,
     StateDecision,
+    WorkspaceCleanupTarget,
     event_type_for,
+    message_from_document,
 )
 from tiny_hermes.runs.domain.state_machine import (
     InvalidStateMetadata,
@@ -425,6 +427,31 @@ class SqlRunStore:
         if session is None:
             raise UnknownSession
 
+        if command.signal is RunSignal.LIMIT_CLEANUP_CONFIRMED:
+            # Design §6.3: the door opens only for the Run whose rollback
+            # recorded this exact destination and this exact sandbox. The
+            # Scheduler is the only caller that can name both.
+            if (
+                run.workspace_cleanup_target != WorkspaceCleanupTarget.PAUSED_LIMIT.value
+                or run.workspace_cleanup_sandbox_id is None
+                or run.workspace_cleanup_sandbox_id != command.confirmed_sandbox_id
+            ):
+                raise InvalidStateMetadata(
+                    "the run's recorded cleanup intent does not match this confirmation"
+                )
+        if (
+            command.signal is RunSignal.RECOVERY_FAILED
+            and command.confirmed_sandbox_id is not None
+        ):
+            # The conflict path's confirmation: same shape, different target.
+            if (
+                run.workspace_cleanup_target != WorkspaceCleanupTarget.FAILED_CONFLICT.value
+                or run.workspace_cleanup_sandbox_id != command.confirmed_sandbox_id
+            ):
+                raise InvalidStateMetadata(
+                    "the run's recorded cleanup intent does not match this confirmation"
+                )
+
         await self._decide_and_write(
             run,
             session,
@@ -435,6 +462,13 @@ class SqlRunStore:
             request_id=command.request_id,
             payload=dict(command.payload),
         )
+        if command.signal is RunSignal.LIMIT_CLEANUP_CONFIRMED or (
+            command.signal is RunSignal.RECOVERY_FAILED
+            and command.confirmed_sandbox_id is not None
+        ):
+            # Cleared only in the same transition that reaches the target.
+            run.workspace_cleanup_target = None
+            run.workspace_cleanup_sandbox_id = None
         return await self._snapshot(run, command.capabilities)
 
     async def _decide_and_write(
@@ -592,21 +626,24 @@ class SqlRunStore:
         run.checkpoint_replay_safe = command.checkpoint_replay_safe
         run.checkpoint_effect_status = command.checkpoint_effect_status.value
         run.updated_at = now
+        if command.workspace_cleanup_target is not None:
+            # Design §6.3: the destination and the sandbox to confirm, written
+            # in the same transaction as the rollback results they belong to.
+            run.workspace_cleanup_target = command.workspace_cleanup_target.value
+            run.workspace_cleanup_sandbox_id = command.workspace_cleanup_sandbox_id
         # In this transaction and not a second one. A round whose text was
         # produced but not recorded would leave the transcript short, and the
         # next round would then build a different conversation than the one that
         # actually happened.
-        if command.assistant_text is not None:
+        for message in command.appended:
             self._session.add(
                 SessionMessageRow(
                     id=uuid4(),
                     session_id=session.id,
                     workspace_id=command.workspace_id,
                     sequence=session.next_message_sequence,
-                    role="assistant",
-                    content=CanonicalMessage(
-                        role="assistant", text=command.assistant_text
-                    ).document(),
+                    role=message.role,
+                    content=message.document(),
                     source_run_id=run.id,
                     redacted=False,
                     created_at=now,
@@ -638,7 +675,7 @@ class SqlRunStore:
             wait_deadline_at=None,
             request_id=command.request_id,
             payload={"executed_ms": command.executed_ms},
-            extra_events=extra,
+            extra_events=(*extra, *command.events),
         )
         lease.released_at = now
         await self._session.flush()
@@ -885,14 +922,27 @@ class SqlRunStore:
         run = await self._lock_run_any_workspace(run_id)
         if run is None or RunState(run.status) is not RunState.INTERRUPTED:
             return None
+        if run.workspace_cleanup_target is not None:
+            # This Run's destination is already recorded (design §6.3); the
+            # workspace cleanup job owns it, and recovery inventing a
+            # different outcome here would race the recorded one.
+            return None
         session = await self._lock_session(run.workspace_id, run.session_id)
         budget = await self._session.get(RunBudgetScopeRow, run.budget_root_run_id)
         if session is None or budget is None:
             return None
 
         effect = CheckpointEffectStatus(run.checkpoint_effect_status)
+        # Design §12: a Run whose checkpoint names one revision while the
+        # Session's pointer names another cannot be replayed automatically —
+        # restoring would hand the model a workspace its transcript never saw.
+        revision_agrees = (
+            run.checkpoint_workspace_revision_id is None
+            or run.checkpoint_workspace_revision_id == session.workspace_revision_id
+        )
         safe = (
             run.checkpoint_replay_safe
+            and revision_agrees
             and effect is not CheckpointEffectStatus.UNKNOWN
             and _budget_summary(budget).allows_execution(datetime.now(UTC))
             and run.recovery_attempts < max_attempts
@@ -1657,25 +1707,13 @@ def _usage_quality(checkpoint: dict[str, Any] | None) -> str | None:
 
 
 def _to_message(row: SessionMessageRow) -> CanonicalMessage:
-    role = "assistant" if row.role == "assistant" else "user"
-    return CanonicalMessage(role=role, text=_message_text(row))
+    """Through the document reader, so a stored tool block survives the trip.
 
-
-def _message_text(row: SessionMessageRow | None) -> str:
-    """Flatten a stored message back to the text one round is given."""
-    if row is None:
-        return ""
-    parts: Any = row.content.get("parts", [])
-    if not isinstance(parts, list):
-        return ""
-    texts: list[str] = []
-    for part in cast(list[Any], parts):
-        if not isinstance(part, dict):
-            continue
-        fields = cast(dict[str, Any], part)
-        if fields.get("type") == "text":
-            texts.append(str(fields.get("text", "")))
-    return "\n".join(texts)
+    Reconstructing the message here from `row.role` and flattened text would
+    silently drop every block this version does understand, which is worse than
+    the version that could not represent them at all.
+    """
+    return message_from_document({"role": row.role, **row.content})
 
 
 def _scan_lock_key(name: str) -> int:

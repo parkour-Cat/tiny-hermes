@@ -121,8 +121,8 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
     @router.get("", response_model=list[AgentResponse])
     async def list_agents(  # pyright: ignore[reportUnusedFunction]
         request: Request,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        catalog: Annotated[AgentCatalog, Depends(catalog_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[AgentCatalog, Depends(catalog_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
     ) -> list[AgentResponse]:
@@ -140,8 +140,8 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
     async def create_agent(  # pyright: ignore[reportUnusedFunction]
         payload: CreateAgentRequest,
         request: Request,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        catalog: Annotated[AgentCatalog, Depends(catalog_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[AgentCatalog, Depends(catalog_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
@@ -164,8 +164,8 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
     async def get_agent(  # pyright: ignore[reportUnusedFunction]
         agent_id: UUID,
         request: Request,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        catalog: Annotated[AgentCatalog, Depends(catalog_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[AgentCatalog, Depends(catalog_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
     ) -> AgentResponse:
@@ -183,8 +183,8 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
     async def get_draft(  # pyright: ignore[reportUnusedFunction]
         agent_id: UUID,
         request: Request,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        catalog: Annotated[AgentCatalog, Depends(catalog_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[AgentCatalog, Depends(catalog_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
     ) -> AgentDraftResponse:
@@ -203,8 +203,8 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
         agent_id: UUID,
         payload: ReplaceDraftRequest,
         request: Request,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        catalog: Annotated[AgentCatalog, Depends(catalog_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[AgentCatalog, Depends(catalog_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
@@ -228,8 +228,8 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
     async def list_versions(  # pyright: ignore[reportUnusedFunction]
         agent_id: UUID,
         request: Request,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        catalog: Annotated[AgentCatalog, Depends(catalog_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[AgentCatalog, Depends(catalog_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
     ) -> list[AgentVersionResponse]:
@@ -249,8 +249,8 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
         payload: PublishRequest,
         request: Request,
         response: Response,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        catalog: Annotated[AgentCatalog, Depends(catalog_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[AgentCatalog, Depends(catalog_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
@@ -277,8 +277,8 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
         agent_id: UUID,
         payload: RollbackRequest,
         request: Request,
-        auth: Annotated[AuthService, Depends(auth_dependency)],
-        catalog: Annotated[AgentCatalog, Depends(catalog_dependency)],
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[AgentCatalog, Depends(catalog_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,

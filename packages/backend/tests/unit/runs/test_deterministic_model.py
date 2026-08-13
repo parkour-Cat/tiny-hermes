@@ -1,6 +1,10 @@
 import pytest
 from tiny_hermes.agents.domain.models import AgentSpec
-from tiny_hermes.runs.domain.models import CanonicalMessage
+from tiny_hermes.runs.domain.models import (
+    CanonicalMessage,
+    TextBlock,
+    ToolResultBlock,
+)
 from tiny_hermes.runs.infrastructure.deterministic_model import (
     DeterministicModelProvider,
 )
@@ -18,7 +22,7 @@ def _request(scenario: str, round_index: int) -> ModelRequest:
     return ModelRequest(
         policy=spec.model_policy,
         personality=spec.personality,
-        messages=(CanonicalMessage(role="user", text="do the thing"),),
+        messages=(CanonicalMessage(role="user", blocks=(TextBlock(text="do the thing"),)),),
         round_index=round_index,
     )
 
@@ -62,6 +66,59 @@ async def test_continue_once_never_continues_forever() -> None:
         assert response.stop_reason is StopReason.COMPLETED
 
 
+async def test_shell_once_asks_for_a_long_command_then_reads_its_real_output() -> None:
+    values = {
+        **valid_spec(),
+        "model_policy": {"provider": "deterministic", "scenario": "shell_once"},
+        "tools": ["shell.exec"],
+    }
+    spec = AgentSpec.model_validate(values)
+    provider = DeterministicModelProvider(delay_ms=0)
+    user = CanonicalMessage(role="user", blocks=(TextBlock(text="run the drill"),))
+
+    first = await provider.complete(
+        ModelRequest(
+            policy=spec.model_policy,
+            personality=spec.personality,
+            messages=(user,),
+            round_index=1,
+            tools=({"type": "function", "function": {"name": "shell.exec"}},),
+        )
+    )
+
+    assert first.stop_reason is StopReason.TOOL_CALL
+    assert first.tool_calls[0].name == "shell.exec"
+    assert "sleep 20" in str(first.tool_calls[0].arguments["command"])
+
+    call = first.tool_calls[0]
+    second = await provider.complete(
+        ModelRequest(
+            policy=spec.model_policy,
+            personality=spec.personality,
+            messages=(
+                user,
+                CanonicalMessage(role="assistant", blocks=(call,)),
+                CanonicalMessage(
+                    role="tool",
+                    blocks=(
+                        ToolResultBlock(
+                            call_id=call.call_id,
+                            output="drill-started\ndrill-finished\n",
+                            exit_code=0,
+                            failed=False,
+                        ),
+                    ),
+                ),
+            ),
+            round_index=2,
+            tools=({"type": "function", "function": {"name": "shell.exec"}},),
+        )
+    )
+
+    assert second.stop_reason is StopReason.COMPLETED
+    assert "drill-finished" in second.text
+
+
 async def test_the_provider_is_pure_for_the_same_round() -> None:
     provider = DeterministicModelProvider(delay_ms=0)
 
@@ -74,7 +131,7 @@ async def test_the_provider_is_pure_for_the_same_round() -> None:
 async def test_every_response_reports_one_model_call_and_some_usage() -> None:
     provider = DeterministicModelProvider(delay_ms=0)
 
-    for scenario in ("complete", "fail_replay_safe", "continue_once"):
+    for scenario in ("complete", "fail_replay_safe", "continue_once", "shell_once"):
         response = await provider.complete(_request(scenario, 1))
         assert response.model_calls == 1
         assert response.billable_tokens > 0

@@ -35,6 +35,9 @@ ALLOWED = {
     (RunState.INTERRUPTED, RunSignal.RECOVERY_APPROVED): RunState.QUEUED,
     (RunState.INTERRUPTED, RunSignal.RECOVERY_FAILED): RunState.FAILED,
     (RunState.INTERRUPTED, RunSignal.CANCEL_REQUESTED): RunState.CANCELLED,
+    # Design §9's narrow door, added in phase 3C with the store-level guard on
+    # the recorded cleanup intent.
+    (RunState.INTERRUPTED, RunSignal.LIMIT_CLEANUP_CONFIRMED): RunState.PAUSED,
 }
 
 REQUEST_ONLY = {
@@ -47,6 +50,8 @@ def _decide(
     machine: RunStateMachine, view: RunStateView, signal: RunSignal
 ) -> StateDecision:
     if signal is RunSignal.SAFE_PAUSE_REACHED:
+        return machine.decide(view, signal, pause_reason=PauseReason.LIMIT)
+    if signal is RunSignal.LIMIT_CLEANUP_CONFIRMED:
         return machine.decide(view, signal, pause_reason=PauseReason.LIMIT)
     if signal is RunSignal.APPROVAL_PAUSED:
         return machine.decide(view, signal, pause_reason=PauseReason.APPROVAL_EXPIRED)

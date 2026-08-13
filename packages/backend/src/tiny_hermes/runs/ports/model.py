@@ -7,10 +7,14 @@ in advance what round two will say and cannot be enough for anything else.
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 
 from tiny_hermes.agents.domain.models import ModelPolicy
-from tiny_hermes.runs.domain.models import CanonicalMessage
+from tiny_hermes.runs.domain.models import (
+    CacheStateHint,
+    CanonicalMessage,
+    ToolCallBlock,
+)
 
 
 class StopReason(StrEnum):
@@ -18,6 +22,9 @@ class StopReason(StrEnum):
 
     COMPLETED = "completed"
     CONTINUE = "continue"
+    #: The model asked for a tool. The round produced a request rather than an
+    #: answer, so the loop executes it and comes back rather than finishing.
+    TOOL_CALL = "tool_call"
     FAILED = "failed"
 
 
@@ -43,6 +50,13 @@ class ModelRequest:
     #: The conversation so far, oldest first, ending with what the caller asked.
     messages: tuple[CanonicalMessage, ...]
     round_index: int
+    #: The tools this AgentVersion bound, as provider schemas. §10.2's first
+    #: step: an Agent that bound none advertises none.
+    tools: tuple[dict[str, Any], ...] = ()
+    #: Set when this slice began on a fresh writable layer. The provider places
+    #: it with the platform's own rules rather than in the conversation, so a
+    #: later turn cannot talk over it.
+    cache_hint: CacheStateHint | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +79,10 @@ class ModelResponse:
     input_tokens: int | None = None
     output_tokens: int | None = None
     usage_quality: UsageQuality = UsageQuality.PROVIDER
+    #: Present only when ``stop_reason`` is ``tool_call``. A tuple rather than
+    #: one call, because a model may ask for two things at once and answering
+    #: only the first leaves a question the model believes it asked.
+    tool_calls: tuple[ToolCallBlock, ...] = ()
     replay_safe: bool = True
     external_effect_unknown: bool = False
     #: A normalized reason when ``stop_reason`` is ``failed``.

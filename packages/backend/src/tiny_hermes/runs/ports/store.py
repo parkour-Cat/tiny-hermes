@@ -18,6 +18,7 @@ from tiny_hermes.runs.domain.models import (
     RunSnapshot,
     SessionMode,
     SessionSnapshot,
+    WorkspaceCleanupTarget,
 )
 from tiny_hermes.tenancy.domain.models import Role
 
@@ -88,6 +89,9 @@ class ApplySignalCommand:
     wait_kind: str | None = None
     wait_deadline_at: datetime | None = None
     payload: dict[str, Any] = field(default_factory=dict[str, Any])
+    #: For `LIMIT_CLEANUP_CONFIRMED` only: the sandbox the caller confirmed
+    #: gone, compared against the Run's recorded cleanup intent.
+    confirmed_sandbox_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -142,12 +146,25 @@ class RecordSliceCommand:
     executed_ms: int
     model_calls: int
     tokens: int
-    #: What the Agent said this round, appended to the Session in the same
-    #: transaction. ``None`` for a round that failed: the transcript holds what
-    #: the Agent said, never what it tried to say.
-    assistant_text: str | None
     request_id: str
     capabilities: RunCapabilities
+    #: Whole messages appended to the Session in this transaction: the
+    #: assistant's turn, and a tool turn when the round called one. Empty for a
+    #: round that failed — the transcript holds what the Agent said, never what
+    #: it tried to say.
+    #:
+    #: Phase 3A carried a single string here, which could not express a round
+    #: that acted rather than answered.
+    appended: tuple[CanonicalMessage, ...] = ()
+    #: Design §6.3: where the Run must go after this exact sandbox and its
+    #: volume are confirmed gone. Recorded in the same transaction as the
+    #: rollback results, so a crash in between is recoverable from rows.
+    workspace_cleanup_target: WorkspaceCleanupTarget | None = None
+    workspace_cleanup_sandbox_id: UUID | None = None
+    #: Facts written with the slice's own transition (workspace rollbacks name
+    #: their reason here). Only written when ``signal`` is not None — a round
+    #: that keeps the lease has no transition to attach them to.
+    events: tuple["ReservedEvent", ...] = ()
 
 
 @dataclass(frozen=True)

@@ -25,6 +25,7 @@ from tiny_hermes.runs.domain.models import (
     RunState,
     SessionMode,
     WaitPolicy,
+    WorkspaceCleanupTarget,
 )
 from tiny_hermes.shared.database import Base, CreatedAtMixin, IdMixin
 
@@ -114,6 +115,11 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
             _in_enum("checkpoint_effect_status", CheckpointEffectStatus),
             name="ck_runs_checkpoint_effect_status",
         ),
+        CheckConstraint(
+            "workspace_cleanup_target IS NULL OR "
+            f"{_in_enum('workspace_cleanup_target', WorkspaceCleanupTarget)}",
+            name="ck_runs_workspace_cleanup_target",
+        ),
         CheckConstraint("state_version > 0", name="ck_runs_state_version_positive"),
         CheckConstraint("recovery_attempts >= 0", name="ck_runs_recovery_attempts"),
         CheckConstraint("next_event_sequence > 0", name="ck_runs_next_event_sequence"),
@@ -176,6 +182,13 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Design §6.3: where the Run must go after its sandbox and volume are
+    # confirmed gone. Cleared only in the same transition that reaches the
+    # target.
+    workspace_cleanup_target: Mapped[str | None] = mapped_column(
+        String(20), nullable=True
+    )
+    workspace_cleanup_sandbox_id: Mapped[UUID | None] = mapped_column(nullable=True)
 
 
 class RunBudgetScopeRow(Base):

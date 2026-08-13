@@ -361,7 +361,7 @@ enforced the way the HTTP ban is — `subprocess`, `os.system`, and
 | `sandbox_cpu_limit` | 1.0 | |
 | `sandbox_memory_mb` | 1024 | |
 | `sandbox_pids_limit` | 128 | |
-| `sandbox_disk_mb` | 2048 | |
+| `sandbox_disk_mb` | 2048 | **removed in phase 3C**: never enforced by Docker; its successor is the `workspace_max_bytes` *checkpoint quota* plus kernel-bounded `sandbox_cache_mb`/`sandbox_cache_inodes` — see the [3C design](2026-08-11-m1-session-workspace-design.md) §9 |
 | `sandbox_tmp_mb` | 256 | |
 | `shell_timeout_seconds` | 60 | per call ceiling |
 | `shell_output_bytes` | 1048576 | into the message |

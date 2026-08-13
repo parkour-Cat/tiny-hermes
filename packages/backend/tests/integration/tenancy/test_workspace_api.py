@@ -22,6 +22,8 @@ async def test_workspace_header_and_cross_tenant_boundaries(
         redis_url="redis://localhost:6379/0",
         s3_endpoint="http://localhost:9000",
         s3_bucket="tiny-hermes",
+        s3_access_key="test-access-key",
+        s3_secret_key="test-secret-key",
         session_cookie_secret="test-cookie-secret-with-32-characters",
         bootstrap_token="a" * 32,
     )

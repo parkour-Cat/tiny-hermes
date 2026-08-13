@@ -11,18 +11,38 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from tiny_hermes.api.app import create_app
+from tiny_hermes.artifacts.infrastructure import tables as artifact_tables
+from tiny_hermes.sandbox.infrastructure import tables as sandbox_tables
+from tiny_hermes.session_workspace.infrastructure import tables as workspace_tables
 from tiny_hermes.shared.config import Settings
+from tiny_hermes.shared.database import Base
 
 from integration.support import EventsUrl, ReadStream
 
+# Imported for the side effect of registering their tables on `Base.metadata`,
+# which is what makes the derived TRUNCATE complete. `create_app` reaches every
+# other module; these tables have no route yet and would otherwise be absent
+# from the metadata and therefore never truncated.
+assert sandbox_tables.SandboxReservationRow.__tablename__
+assert workspace_tables.ObjectUploadRow.__tablename__
+assert artifact_tables.ArtifactRow.__tablename__
+
 STREAM_TIMEOUT = 20
 
-TRUNCATE = (
-    "TRUNCATE idempotency_records, worker_leases, run_events, run_budget_scopes, "
-    "session_messages, runs, sessions, agent_versions, agent_drafts, agents, "
-    "model_endpoints, audit_events, memberships, workspaces, auth_sessions, "
-    "auth_identities, users CASCADE"
-)
+def _truncate_every_table() -> str:
+    """Derived from the metadata rather than listed by hand.
+
+    This was a hand-written list, and the phase-3B sandbox tables were added
+    without it. The symptom was not "the new tables are dirty" — it was an
+    unrelated test failing on a row some earlier test had left behind, which is
+    a bad afternoon for whoever meets it next. Deriving it means a new table
+    cannot be forgotten. CASCADE handles the ordering.
+    """
+    names = ", ".join(sorted(table.name for table in Base.metadata.sorted_tables))
+    return f"TRUNCATE {names} CASCADE"
+
+
+TRUNCATE = _truncate_every_table()
 
 VALID_SPEC: dict[str, Any] = {
     "schema_version": 1,
@@ -74,8 +94,10 @@ def settings(database_url: str, redis_url: str) -> Settings:
     return Settings(
         database_url=database_url,
         redis_url=redis_url,
-        s3_endpoint="http://localhost:9000",
-        s3_bucket="tiny-hermes",
+        s3_endpoint=os.environ.get("S3_ENDPOINT", "http://localhost:9000"),
+        s3_bucket=os.environ.get("S3_BUCKET", "tiny-hermes-test"),
+        s3_access_key=os.environ.get("S3_ACCESS_KEY", "tiny-hermes-local"),
+        s3_secret_key=os.environ.get("S3_SECRET_KEY", "tiny-hermes-local-password"),
         session_cookie_secret="test-cookie-secret-with-32-characters",
         bootstrap_token=BOOTSTRAP_TOKEN,
     )
@@ -308,7 +330,10 @@ async def browser(
     del scope  # ordering only: the login must happen before the cookies are read
     cookies = {name: value for name, value in client.cookies.items()}
     async with httpx.AsyncClient(
-        base_url=live_server, cookies=cookies, timeout=STREAM_TIMEOUT
+        base_url=live_server,
+        cookies=cookies,
+        timeout=STREAM_TIMEOUT,
+        trust_env=False,
     ) as value:
         yield value
 

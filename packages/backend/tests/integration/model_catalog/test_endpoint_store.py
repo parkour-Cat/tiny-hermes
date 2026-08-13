@@ -1,6 +1,8 @@
 from uuid import uuid4
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from tiny_hermes.model_catalog.domain.models import (
@@ -116,7 +118,15 @@ async def test_no_column_holds_a_credential(engine: AsyncEngine) -> None:
 
 
 async def test_the_migration_created_the_table_not_the_metadata(engine: AsyncEngine) -> None:
-    """The test database is migrated, so a table only SQLAlchemy knows about would fail here."""
+    """The test database is migrated, so a table only SQLAlchemy knows about would fail here.
+
+    Compared against Alembic's own head rather than a literal revision. The
+    literal was correct and had to be edited by every slice that added a
+    migration, which makes it a chore that eventually gets bumped without being
+    read. Asking Alembic what head is keeps the check — an unmigrated database
+    still fails — and removes the maintenance.
+    """
+    head = ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
     async with engine.connect() as connection:
         version = await connection.execute(text("SELECT version_num FROM alembic_version"))
-        assert version.scalar_one() == "20260811_0004"
+        assert version.scalar_one() == head

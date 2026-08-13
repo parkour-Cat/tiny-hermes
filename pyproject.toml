@@ -6,11 +6,13 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "alembic>=1.19.1",
     "asyncpg>=0.31.0",
+    "docker>=7.2.0",
     "email-validator>=2.3.0",
     "fastapi>=0.141.1",
     # A runtime dependency since phase 3A: `tiny_hermes.outbound` is the one
     # place allowed to build an HTTP client, and it is production code.
     "httpx>=0.28.1",
+    "minio>=7.2.20",
     "pwdlib[argon2]>=0.3.0",
     "pydantic-settings>=2.15.0",
     "python-multipart>=0.0.32",
@@ -24,6 +26,7 @@ dependencies = [
 tiny-hermes-api = "tiny_hermes.api.cli:main"
 tiny-hermes-worker = "tiny_hermes.api.cli:worker_main"
 tiny-hermes-scheduler = "tiny_hermes.api.cli:scheduler_main"
+tiny-hermes-controller = "tiny_hermes.sandbox.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -60,10 +63,32 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "TID251"]
 "socket.socket".msg = "Outbound requests go through tiny_hermes.outbound.client."
 "socket.create_connection".msg = "Outbound requests go through tiny_hermes.outbound.client."
 "urllib.request.urlopen".msg = "Outbound requests go through tiny_hermes.outbound.client."
+# Product design §16: 沙箱失败时不得回退宿主机执行. Nothing in this platform
+# starts a process on the host — a tool runs in a container or it does not run.
+"subprocess.run".msg = "Commands run in a sandbox container, never on this host."
+"subprocess.Popen".msg = "Commands run in a sandbox container, never on this host."
+"subprocess.call".msg = "Commands run in a sandbox container, never on this host."
+# Design §14.3: trusted-process code never extracts archives locally. The
+# daemon extracts inside containers; this process only streams and hashes.
+"tarfile.TarFile.extractall".msg = "No local archive extraction; scan the stream instead."
+"tarfile.TarFile.extract".msg = "No local archive extraction; scan the stream instead."
+"shutil.unpack_archive".msg = "No local archive extraction; scan the stream instead."
+"subprocess.check_call".msg = "Commands run in a sandbox container, never on this host."
+"subprocess.check_output".msg = "Commands run in a sandbox container, never on this host."
+"os.system".msg = "Commands run in a sandbox container, never on this host."
+"os.popen".msg = "Commands run in a sandbox container, never on this host."
+"asyncio.create_subprocess_exec".msg = "Commands run in a sandbox container, never on this host."
+"asyncio.create_subprocess_shell".msg = "Commands run in a sandbox container, never on this host."
+# Exactly one module holds the handle to the daemon.
+"docker.from_env".msg = "Only tiny_hermes.sandbox.infrastructure talks to Docker."
+"docker.DockerClient".msg = "Only tiny_hermes.sandbox.infrastructure talks to Docker."
 
 [tool.ruff.lint.per-file-ignores]
-# The guarded path itself.
+# The two guarded paths themselves. TID251 is a single code, so exempting a
+# module lifts both bans there; `test_process_ban.py` asserts that neither
+# module uses the other's licence.
 "packages/backend/src/tiny_hermes/outbound/**/*.py" = ["TID251"]
+"packages/backend/src/tiny_hermes/sandbox/infrastructure/**/*.py" = ["TID251"]
 # Tests and the restart drill are clients of this platform rather than parts of
 # it, and neither ships.
 "packages/backend/tests/**/*.py" = ["S101", "S104", "S106", "TID251"]
@@ -72,6 +97,12 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "TID251"]
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
+# Checked against the platform this is deployed on, not the one it is written
+# on. `asyncio.open_unix_connection` and friends do not exist in Python on
+# Windows, so checking as Windows would report the Controller's transport as
+# undefined while it is the only supported target. The tests that genuinely
+# branch on the host platform do so at runtime.
+pythonPlatform = "Linux"
 include = ["packages/backend/src", "packages/backend/tests", "scripts"]
 extraPaths = ["packages/backend/src", "packages/backend/tests"]
 venvPath = "."
@@ -83,5 +114,7 @@ dev = [
     "pyright>=1.1.411",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "pyyaml>=6.0.3",
     "ruff>=0.16.2",
+    "types-pyyaml>=6.0.12.20260724",
 ]

@@ -13,6 +13,16 @@ class Settings(BaseSettings):
     redis_url: str
     s3_endpoint: str
     s3_bucket: str
+    #: Required since phase 3C: the platform writes real objects, so a
+    #: deployment without credentials must fail at startup rather than at the
+    #: first checkpoint. The Controller process never receives these — it has
+    #: Docker and must not gain MinIO.
+    # Required to be *present*, allowed to be empty: the controller runs with
+    # both deliberately blank — it must never hold an object-store credential
+    # (design §14.6) — while a deployment that forgot to set them at all still
+    # fails at startup instead of at its first checkpoint.
+    s3_access_key: str
+    s3_secret_key: str
     session_cookie_secret: str = Field(min_length=32)
     bootstrap_token: str = Field(min_length=32)
     session_ttl_seconds: int = Field(default=28_800, ge=300, le=604_800)
@@ -46,6 +56,54 @@ class Settings(BaseSettings):
     #: this; nothing may raise it.
     model_max_attempts: int = Field(default=3, ge=1, le=3)
     model_retry_base_ms: int = Field(default=250, ge=10, le=5_000)
+
+    #: The Sandbox Controller's socket, in the volume the Worker and Scheduler
+    #: share with it. They mount this and nothing else; the Docker socket is the
+    #: Controller's alone.
+    sandbox_controller_socket: str = "/run/tiny-hermes/controller.sock"
+    #: The group the platform's own processes run as, from the application
+    #: image. The Controller runs as root and hands the socket to this group so
+    #: the Worker and the Scheduler can open it without it being world-writable.
+    sandbox_socket_gid: int = 10001
+    #: The approved runtime image, by digest. Empty by default, and an empty
+    #: allowlist approves nothing — a deployment that has not chosen an image
+    #: cannot run a tool, which is the correct way for this to fail.
+    sandbox_image_digest: str = ""
+    #: How long a frozen instance stays warm for its own Run. §11.4 allows
+    #: 0–30 minutes and lets a workspace lower it, never raise it.
+    sandbox_idle_ttl_seconds: int = Field(default=300, ge=0, le=1_800)
+    #: The cache tmpfs ceilings (design §9). Kernel-enforced; the profile the
+    #: controller hands Docker is built from these at startup.
+    sandbox_cache_mb: int = Field(default=512, ge=64, le=4_096)
+    sandbox_cache_inodes: int = Field(default=200_000, ge=10_000, le=1_000_000)
+    sandbox_start_attempts: int = Field(default=3, ge=1, le=5)
+    shell_timeout_seconds: int = Field(default=60, ge=1, le=900)
+    shell_output_bytes: int = Field(default=1_048_576, ge=1_024, le=10_485_760)
+
+    # The SessionWorkspace, design §15. `workspace_max_bytes` and
+    # `workspace_max_objects` are a **checkpoint quota** — content over them
+    # cannot become a committed revision. They are not a physical host-disk
+    # limit while an arbitrary command is still running, and no document may
+    # describe them as one.
+    workspace_max_bytes: int = Field(default=2_147_483_648, ge=1_048_576, le=1_099_511_627_776)
+    workspace_max_objects: int = Field(default=100_000, ge=100, le=10_000_000)
+    workspace_file_list_entries: int = Field(default=1_000, ge=10, le=10_000)
+    workspace_file_read_bytes: int = Field(default=1_048_576, ge=1_024, le=104_857_600)
+    workspace_file_write_bytes: int = Field(default=16_777_216, ge=1_024, le=1_073_741_824)
+    workspace_staging_ttl_seconds: int = Field(default=86_400, ge=3_600, le=604_800)
+    #: Total deadline for one workspace import or export. Execute has its own
+    #: command timeout and is not bounded by this, so a legal silent 15-minute
+    #: command is not killed by a transfer rule.
+    workspace_transfer_timeout_seconds: int = Field(default=300, ge=30, le=1_800)
+    controller_stream_frame_bytes: int = Field(default=1_048_576, ge=4_096, le=1_048_576)
+    controller_stream_credit_bytes: int = Field(default=8_388_608, ge=1_048_576, le=67_108_864)
+    controller_stream_idle_seconds: int = Field(default=30, ge=5, le=300)
+    artifact_max_bytes: int = Field(default=104_857_600, ge=1_048_576, le=1_073_741_824)
+    run_artifact_max_bytes: int = Field(default=524_288_000, ge=1_048_576, le=10_737_418_240)
+
+    @property
+    def approved_image_digests(self) -> tuple[str, ...]:
+        return (self.sandbox_image_digest,) if self.sandbox_image_digest else ()
 
     @field_validator("outbound_allowed_cidrs")
     @classmethod

@@ -13,6 +13,7 @@ response never arrived — a transport question, decided by the outbound client.
 """
 
 import asyncio
+import json
 import logging
 import random
 from collections.abc import Awaitable, Callable
@@ -24,7 +25,14 @@ from tiny_hermes.model_catalog.domain.models import ModelEndpointSpec
 from tiny_hermes.model_catalog.infrastructure import credentials
 from tiny_hermes.outbound.client import SafeOutboundClient
 from tiny_hermes.outbound.errors import OutboundError, OutboundRefused
-from tiny_hermes.runs.domain.models import CanonicalMessage
+from tiny_hermes.runs.domain.models import (
+    CACHE_RESET_HINT,
+    CacheStateHint,
+    CanonicalMessage,
+    TextBlock,
+    ToolCallBlock,
+    ToolResultBlock,
+)
 from tiny_hermes.runs.ports.model import (
     ModelRequest,
     ModelResponse,
@@ -103,18 +111,18 @@ def normalize(body: dict[str, Any]) -> ModelResponse:
         return _failed("malformed_choice")
     entry = cast(dict[str, Any], first)
 
+    message_any: Any = entry.get("message")
     finish: Any = entry.get("finish_reason")
     if finish == "tool_calls":
-        # No tool is bound and the model was told about none, so a request for
-        # one has left the contract. Inventing a result or silently returning
-        # whatever text came alongside would both be worse than stopping.
-        return _failed("tool_use_not_supported")
+        # Phase 3A refused this, because no tool was bound and a model asking
+        # for one had left the contract. One is bound now, so it is a parse.
+        return _tool_round(body, message_any)
     if finish == "length":
         return _failed("max_output_reached")
     if finish not in ("stop", None):
         return _failed("unsupported_stop_reason")
 
-    message: Any = entry.get("message")
+    message: Any = message_any
     if not isinstance(message, dict):
         return _failed("malformed_choice")
     content: Any = cast(dict[str, Any], message).get("content")
@@ -132,7 +140,63 @@ def normalize(body: dict[str, Any]) -> ModelResponse:
     )
 
 
-def build_payload(spec: ModelEndpointSpec, request: ModelRequest) -> dict[str, Any]:
+def _tool_round(body: dict[str, Any], message: Any) -> ModelResponse:
+    """A round that asked for tools rather than answering."""
+    if not isinstance(message, dict):
+        return _failed("malformed_choice")
+    fields = cast(dict[str, Any], message)
+    raw: Any = fields.get("tool_calls")
+    if not isinstance(raw, list) or not raw:
+        return _failed("malformed_tool_call")
+
+    calls: list[ToolCallBlock] = []
+    for entry in cast(list[Any], raw):
+        if not isinstance(entry, dict):
+            return _failed("malformed_tool_call")
+        call = cast(dict[str, Any], entry)
+        function: Any = call.get("function")
+        if not isinstance(function, dict):
+            return _failed("malformed_tool_call")
+        signature = cast(dict[str, Any], function)
+        try:
+            # Decoded once, here at the edge. Carrying the provider's JSON
+            # string inward would make every reader decode it, and each one
+            # could decide differently what a malformed one means.
+            arguments: Any = json.loads(str(signature.get("arguments") or "{}"))
+        except ValueError:
+            return _failed("malformed_tool_arguments")
+        if not isinstance(arguments, dict):
+            return _failed("malformed_tool_arguments")
+        try:
+            calls.append(
+                ToolCallBlock(
+                    call_id=str(call.get("id") or ""),
+                    name=str(signature.get("name") or ""),
+                    arguments=cast(dict[str, Any], arguments),
+                )
+            )
+        except ValueError:
+            # A call with no id cannot be answered and one with no name cannot
+            # be dispatched. Either is a failed round, not a guess.
+            return _failed("malformed_tool_call")
+
+    content: Any = fields.get("content")
+    prompt_tokens, completion_tokens, quality = _usage(body)
+    return ModelResponse(
+        stop_reason=StopReason.TOOL_CALL,
+        text=content if isinstance(content, str) else "",
+        tool_calls=tuple(calls),
+        input_tokens=prompt_tokens,
+        output_tokens=completion_tokens,
+        usage_quality=quality,
+    )
+
+
+def build_payload(
+    spec: ModelEndpointSpec,
+    request: ModelRequest,
+    tools: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """The request body, with the platform's rules ahead of the Agent's persona.
 
     An Agent placed underneath the preamble cannot talk its way past it.
@@ -142,16 +206,26 @@ def build_payload(spec: ModelEndpointSpec, request: ModelRequest) -> dict[str, A
     minimum here means a later change to that check cannot turn into a request
     the endpoint was never approved for.
     """
-    messages: list[dict[str, str]] = [
+    messages: list[dict[str, Any]] = [
         {"role": "system", "content": SAFETY_PREAMBLE},
         {"role": "system", "content": request.personality},
     ]
-    messages.extend(_as_message(entry) for entry in request.messages)
+    if request.cache_hint is CacheStateHint.RESET:
+        # With the platform's rules rather than in the conversation, so a later
+        # turn cannot talk over it. §11.3 calls it a protected runtime hint.
+        messages.append({"role": "system", "content": CACHE_RESET_HINT})
+    for entry in request.messages:
+        messages.extend(_as_messages(entry))
     payload: dict[str, Any] = {
         "model": spec.model,
         "messages": messages,
         "max_tokens": spec.max_output_tokens,
     }
+    advertised = tools if tools is not None else list(request.tools)
+    if advertised:
+        # §10.2's first step: a model told about no tool cannot correctly ask
+        # for one, so an Agent that binds none advertises none.
+        payload["tools"] = advertised
     policy = request.policy
     if isinstance(policy, EndpointModelPolicy):
         if policy.max_output_tokens is not None:
@@ -161,8 +235,47 @@ def build_payload(spec: ModelEndpointSpec, request: ModelRequest) -> dict[str, A
     return payload
 
 
-def _as_message(message: CanonicalMessage) -> dict[str, str]:
-    return {"role": message.role, "content": message.text}
+def _as_messages(message: CanonicalMessage) -> list[dict[str, Any]]:
+    """One canonical turn, as the one-or-more messages the API expects.
+
+    It walks `blocks` rather than `message.text`. The text accessor still
+    exists and still compiles, so an adapter that used it would send a
+    conversation with every call and result missing — and the model would then
+    answer as though it had never acted, which is the worst possible way for
+    this to be wrong.
+    """
+    results = [b for b in message.blocks if isinstance(b, ToolResultBlock)]
+    if results:
+        # One message per call id: the API ties each result to the call it
+        # answers, and merging them would leave a call unanswered.
+        return [
+            {"role": "tool", "tool_call_id": block.call_id, "content": block.output}
+            for block in results
+        ]
+
+    text = "".join(b.text for b in message.blocks if isinstance(b, TextBlock))
+    calls = [b for b in message.blocks if isinstance(b, ToolCallBlock)]
+    if not calls:
+        return [{"role": message.role, "content": text}]
+    return [
+        {
+            "role": "assistant",
+            # Null rather than empty when the model acted without speaking,
+            # which is what the API expects and what actually happened.
+            "content": text or None,
+            "tool_calls": [
+                {
+                    "id": block.call_id,
+                    "type": "function",
+                    "function": {
+                        "name": block.name,
+                        "arguments": json.dumps(block.arguments),
+                    },
+                }
+                for block in calls
+            ],
+        }
+    ]
 
 
 class OpenAICompatibleProvider:
