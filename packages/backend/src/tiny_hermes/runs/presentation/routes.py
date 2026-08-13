@@ -3,7 +3,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Cookie, Depends, Header, Request, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.identity.application.auth_service import AuthService
@@ -66,6 +66,24 @@ class SessionResponse(BaseModel):
 class QueueResponse(BaseModel):
     position: int
     status: str
+    blocked_by_run_id: UUID | None = None
+    head_status: str | None = None
+    head_reason: dict[str, Any] | None = None
+    available_actions: list[str] | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_head_fields_unless_blocked(self, serializer: Any) -> dict[str, Any]:
+        """Head/pending/terminal stay the short object existing clients already parse."""
+        data = serializer(self)
+        if data.get("status") != "session_blocked":
+            for key in (
+                "blocked_by_run_id",
+                "head_status",
+                "head_reason",
+                "available_actions",
+            ):
+                data.pop(key, None)
+        return data
 
 
 class RunResponse(BaseModel):

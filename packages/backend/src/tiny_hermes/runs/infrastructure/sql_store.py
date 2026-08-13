@@ -1494,6 +1494,9 @@ class SqlRunStore:
         )
         blocker = await self._retry_blocker(run, session, summary)
         retry_allowed = capabilities.can_retry and blocker is None
+        head_status, head_pause, head_wait, head_deadline, head_actions = (
+            await self._blocked_head_fields(queue_status, run, capabilities)
+        )
         return RunSnapshot(
             id=run.id,
             workspace_id=run.workspace_id,
@@ -1521,6 +1524,54 @@ class SqlRunStore:
             created_at=run.created_at,
             started_at=run.started_at,
             finished_at=run.finished_at,
+            head_status=head_status,
+            head_pause_reason=head_pause,
+            head_wait_kind=head_wait,
+            head_wait_deadline_at=head_deadline,
+            queue_available_actions=head_actions,
+        )
+
+    async def _blocked_head_fields(
+        self,
+        queue_status: QueueStatus,
+        run: RunRow,
+        capabilities: RunCapabilities,
+    ) -> tuple[RunState | None, PauseReason | None, str | None, datetime | None, tuple[str, ...]]:
+        """Name the blocking head only when this snapshot is the blocked pending Run.
+
+        `queue.available_actions` is the head's list for this caller, not this
+        pending Run's. The two answers different questions: what can I do to
+        the thing in the way, versus what can I do to the thing I just queued.
+        """
+        empty: tuple[str, ...] = ()
+        if queue_status is not QueueStatus.SESSION_BLOCKED or run.blocked_by_run_id is None:
+            return None, None, None, None, empty
+        head = await self._session.get(RunRow, run.blocked_by_run_id)
+        if head is None:
+            return None, None, None, None, empty
+        budget_row = await self._session.get(RunBudgetScopeRow, head.budget_root_run_id)
+        if budget_row is None:
+            return None, None, None, None, empty
+        head_summary = _budget_summary(budget_row)
+        head_state = RunState(head.status)
+        head_reason = None if head.pause_reason is None else PauseReason(head.pause_reason)
+        head_view = RunStateView(
+            state=head_state,
+            pause_reason=head_reason,
+            wait_kind=head.wait_kind,
+            wait_deadline_at=head.wait_deadline_at,
+            pause_requested=head.pause_requested_at is not None,
+            cancel_requested=head.cancel_requested_at is not None,
+            budget_allows_execution=head_summary.allows_execution(datetime.now(UTC)),
+        )
+        return (
+            head_state,
+            head_reason,
+            head.wait_kind,
+            head.wait_deadline_at,
+            self._machine.available_actions(
+                head_view, can_control=capabilities.can_control, can_retry=False
+            ),
         )
 
     async def _retry_blocker(

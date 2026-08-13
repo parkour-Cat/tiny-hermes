@@ -85,6 +85,14 @@ export type SessionResponse = {
 export type QueueResponse = {
   position: number;
   status: string;
+  blocked_by_run_id?: string | null;
+  head_status?: string;
+  head_reason?: {
+    pause_reason: string | null;
+    wait_kind: string | null;
+    wait_deadline_at: string | null;
+  };
+  available_actions?: string[];
 };
 
 export type BudgetDocument = {
