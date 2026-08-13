@@ -1,5 +1,46 @@
 name: tiny-hermes
 
+# Two environment shapes on purpose. The base carries no credential of any
+# kind; the app shape adds the MinIO keys and the model-key passthrough. The
+# controller keeps only the base: it holds the Docker socket, and a process
+# holding Docker must not also hold object-storage credentials or model keys —
+# design §14.6 makes both directions of that separation an assertion.
+x-base-env: &base-env
+  DATABASE_URL: postgresql+asyncpg://tiny_hermes:local-only@postgres:5432/tiny_hermes
+  REDIS_URL: redis://redis:6379/0
+  S3_ENDPOINT: http://minio:9000
+  S3_BUCKET: tiny-hermes
+  SESSION_COOKIE_SECRET: ${SESSION_COOKIE_SECRET:-local-cookie-secret-with-32-characters}
+  BOOTSTRAP_TOKEN: ${BOOTSTRAP_TOKEN:-local-bootstrap-token-with-32-characters}
+  # How long the deterministic model pretends to think. The default keeps a
+  # Run short enough to watch; the restart drill raises it, because a Run
+  # that finishes in a blink cannot have a restart land inside it.
+  DETERMINISTIC_MODEL_DELAY_MS: ${DETERMINISTIC_MODEL_DELAY_MS:-50}
+  # Outbound safety. The default approves nothing, so only public addresses
+  # are reachable; an enterprise private endpoint needs its range named here.
+  OUTBOUND_ALLOWED_CIDRS: ${OUTBOUND_ALLOWED_CIDRS:-}
+  OUTBOUND_READ_TIMEOUT_SECONDS: ${OUTBOUND_READ_TIMEOUT_SECONDS:-60}
+  MODEL_MAX_ATTEMPTS: ${MODEL_MAX_ATTEMPTS:-3}
+  # The sandbox. The image allowlist is empty by default, which is how a
+  # deployment that has not chosen an image fails: no tool can run at all.
+  SANDBOX_IMAGE_DIGEST: ${SANDBOX_IMAGE_DIGEST:-}
+  SANDBOX_CONTROLLER_SOCKET: /run/tiny-hermes/controller.sock
+  SANDBOX_IDLE_TTL_SECONDS: ${SANDBOX_IDLE_TTL_SECONDS:-300}
+  # Present-but-empty for the controller: Settings requires the fields so a
+  # credentialless API deployment fails at startup, and empty is exactly what
+  # the controller is entitled to.
+  S3_ACCESS_KEY: ""
+  S3_SECRET_KEY: ""
+
+x-app-env: &app-env
+  <<: *base-env
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:-tiny-hermes-local}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:-tiny-hermes-local-password}
+  # Model endpoint credentials are passed through by name. Each registered
+  # endpoint's `credential_ref` must match a variable the deployment sets;
+  # nothing is stored in the database.
+  TINY_HERMES_MODEL_KEY_EXAMPLE: ${TINY_HERMES_MODEL_KEY_EXAMPLE:-}
+
 services:
   postgres:
     image: postgres:17.6-alpine
@@ -47,33 +88,7 @@ services:
       context: ../..
       dockerfile: apps/api/Dockerfile
     command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
-    environment: &app-env
-      DATABASE_URL: postgresql+asyncpg://tiny_hermes:local-only@postgres:5432/tiny_hermes
-      REDIS_URL: redis://redis:6379/0
-      S3_ENDPOINT: http://minio:9000
-      S3_BUCKET: tiny-hermes
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-tiny-hermes-local}
-      S3_SECRET_KEY: ${S3_SECRET_KEY:-tiny-hermes-local-password}
-      SESSION_COOKIE_SECRET: ${SESSION_COOKIE_SECRET:-local-cookie-secret-with-32-characters}
-      BOOTSTRAP_TOKEN: ${BOOTSTRAP_TOKEN:-local-bootstrap-token-with-32-characters}
-      # How long the deterministic model pretends to think. The default keeps a
-      # Run short enough to watch; the restart drill raises it, because a Run
-      # that finishes in a blink cannot have a restart land inside it.
-      DETERMINISTIC_MODEL_DELAY_MS: ${DETERMINISTIC_MODEL_DELAY_MS:-50}
-      # Outbound safety. The default approves nothing, so only public addresses
-      # are reachable; an enterprise private endpoint needs its range named here.
-      OUTBOUND_ALLOWED_CIDRS: ${OUTBOUND_ALLOWED_CIDRS:-}
-      OUTBOUND_READ_TIMEOUT_SECONDS: ${OUTBOUND_READ_TIMEOUT_SECONDS:-60}
-      MODEL_MAX_ATTEMPTS: ${MODEL_MAX_ATTEMPTS:-3}
-      # Model endpoint credentials are passed through by name. Each registered
-      # endpoint's `credential_ref` must match a variable the deployment sets;
-      # nothing is stored in the database.
-      TINY_HERMES_MODEL_KEY_EXAMPLE: ${TINY_HERMES_MODEL_KEY_EXAMPLE:-}
-      # The sandbox. The image allowlist is empty by default, which is how a
-      # deployment that has not chosen an image fails: no tool can run at all.
-      SANDBOX_IMAGE_DIGEST: ${SANDBOX_IMAGE_DIGEST:-}
-      SANDBOX_CONTROLLER_SOCKET: /run/tiny-hermes/controller.sock
-      SANDBOX_IDLE_TTL_SECONDS: ${SANDBOX_IDLE_TTL_SECONDS:-300}
+    environment: *app-env
     depends_on:
       postgres:
         condition: service_healthy
@@ -117,7 +132,9 @@ services:
       context: ../..
       dockerfile: apps/api/Dockerfile
     command: ["/app/.venv/bin/tiny-hermes-controller"]
-    environment: *app-env
+    # The base only: no MinIO credential and no model key may reach the one
+    # process that holds the Docker socket (design §14.6).
+    environment: *base-env
     # Root inside its own container, because the socket is root:root 0660 and
     # no group id is portable between Docker Desktop and a Linux host.
     #

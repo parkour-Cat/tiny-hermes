@@ -68,6 +68,11 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "TID251"]
 "subprocess.run".msg = "Commands run in a sandbox container, never on this host."
 "subprocess.Popen".msg = "Commands run in a sandbox container, never on this host."
 "subprocess.call".msg = "Commands run in a sandbox container, never on this host."
+# Design §14.3: trusted-process code never extracts archives locally. The
+# daemon extracts inside containers; this process only streams and hashes.
+"tarfile.TarFile.extractall".msg = "No local archive extraction; scan the stream instead."
+"tarfile.TarFile.extract".msg = "No local archive extraction; scan the stream instead."
+"shutil.unpack_archive".msg = "No local archive extraction; scan the stream instead."
 "subprocess.check_call".msg = "Commands run in a sandbox container, never on this host."
 "subprocess.check_output".msg = "Commands run in a sandbox container, never on this host."
 "os.system".msg = "Commands run in a sandbox container, never on this host."

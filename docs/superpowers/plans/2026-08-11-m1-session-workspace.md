@@ -1164,7 +1164,7 @@ Focused GC tests plus `tests/integration/runs/test_scheduler.py`. Commit as
 - Modify: `pyproject.toml` (architecture bans)
 - Create: `packages/backend/tests/unit/test_archive_ban.py`
 
-- [ ] **Step 1: Write the failing boundary tests**
+- [x] **Step 1: Write the failing boundary tests**
 
 ```python
 def test_no_trusted_process_extracts_archives() -> None:
@@ -1173,7 +1173,7 @@ def test_no_trusted_process_extracts_archives() -> None:
 def test_minio_client_is_constructed_in_exactly_one_module() -> None: ...
 ```
 
-- [ ] **Step 2: Split the compose environment**
+- [x] **Step 2: Split the compose environment**
 
 The `&app-env` anchor splits: a base anchor without credentials, an
 `&api-env` adding `S3_ACCESS_KEY`/`S3_SECRET_KEY` (api, worker, scheduler,
@@ -1186,7 +1186,7 @@ docker compose -f deploy/compose/compose.yaml exec -T controller sh -c '! env | 
 docker compose -f deploy/compose/compose.yaml exec -T worker sh -c 'test ! -e /var/run/docker.sock'
 ```
 
-- [ ] **Step 3: Wire CI**
+- [x] **Step 3: Wire CI**
 
 `backend-integration` gains a `minio` service container (same image as compose,
 health-checked), `S3_*` env, and the new alembic downgrade step
@@ -1195,10 +1195,19 @@ health-checked), `S3_*` env, and the new alembic downgrade step
 `shutil.unpack_archive`. The repeat-regression list gains
 `test_checkpoint_commit.py`.
 
-- [ ] **Step 4: Verify on a real remote and commit**
+- [x] **Step 4: Verify on a real remote and commit**
 
 Push the branch and watch the full CI run green, including Docker jobs.
 Commit as `ci: give the tests an object store and the controller nothing`.
+
+> Implementation notes, 2026-08-13: the controller's environment carries the
+> S3 fields present-but-empty — `Settings` requires them so a credentialless
+> API deployment fails at startup, and empty is exactly what the controller
+> is entitled to; the e2e boundary step asserts emptiness. MinIO joins the
+> integration job as a plain `docker run` step because GitHub service
+> containers cannot pass the image its `server /data` arguments. A third
+> archive assertion landed beyond the plan: `tarfile` may be imported only by
+> the three modules the design names.
 
 ### Task 16: The workspace drill and the performance gates
 

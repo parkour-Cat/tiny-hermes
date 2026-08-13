@@ -55,6 +55,10 @@ jobs:
       DATABASE_URL: postgresql+asyncpg://tiny_hermes:local-only@localhost:5432/tiny_hermes_test
       TEST_DATABASE_URL: postgresql+asyncpg://tiny_hermes:local-only@localhost:5432/tiny_hermes_test
       REDIS_URL: redis://localhost:6379/0
+      S3_ENDPOINT: http://localhost:9000
+      S3_BUCKET: tiny-hermes-test
+      S3_ACCESS_KEY: tiny-hermes-local
+      S3_SECRET_KEY: tiny-hermes-local-password
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -72,6 +76,18 @@ jobs:
       # image is reported as such; the fixture's second build is cache-backed.
       - name: Build the sandbox runtime image
         run: docker build -t tiny-hermes-sandbox:test -f deploy/sandbox/Dockerfile deploy/sandbox
+      # A plain step rather than a service container: the minio image needs
+      # its `server /data` arguments, and GitHub services cannot pass any.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=tiny-hermes-local \
+            -e MINIO_ROOT_PASSWORD=tiny-hermes-local-password \
+            minio/minio:RELEASE.2025-07-23T15-54-02Z server /data
+          for attempt in $(seq 1 30); do
+            curl -sf http://localhost:9000/minio/health/live && break
+            sleep 1
+          done
       - run: uv run alembic upgrade head
       - run: uv run pytest packages/backend/tests/integration -v
       - name: Repeat concurrency regressions
@@ -83,7 +99,8 @@ jobs:
               packages/backend/tests/integration/runs/test_run_coordination.py \
               packages/backend/tests/integration/runs/test_run_retry.py \
               packages/backend/tests/integration/runs/test_scheduler.py \
-              packages/backend/tests/integration/runs/test_execution_flow.py -q
+              packages/backend/tests/integration/runs/test_execution_flow.py \
+              packages/backend/tests/integration/session_workspace/test_checkpoint_commit.py -q
           done
       - name: Integration suite with the wake-up channel unreachable
         # Redis buys latency, never correctness. Pointing REDIS_URL at a port
@@ -94,6 +111,10 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6399/0
         run: uv run pytest packages/backend/tests/integration -q
       - run: uv run alembic check
+      - run: uv run alembic downgrade 20260811_0007
+      - run: uv run alembic upgrade head
+      - run: uv run alembic downgrade 20260811_0006
+      - run: uv run alembic upgrade head
       - run: uv run alembic downgrade 20260811_0005
       - run: uv run alembic upgrade head
       - run: uv run alembic downgrade 20260811_0004
@@ -158,6 +179,14 @@ jobs:
           docker compose -f deploy/compose/compose.yaml exec -T controller sh -c 'test -S /var/run/docker.sock'
           docker compose -f deploy/compose/compose.yaml exec -T api sh -c 'test ! -e /var/run/docker.sock'
           docker compose -f deploy/compose/compose.yaml exec -T worker sh -c 'test ! -e /var/run/docker.sock'
+      # The other half of design §14.6: the one process holding Docker holds
+      # no MinIO credential and no model key, and the processes holding those
+      # never see the socket.
+      - name: Prove the credential boundary in the running stack
+        run: |
+          docker compose -f deploy/compose/compose.yaml exec -T controller sh -c 'test -z "$S3_ACCESS_KEY" && test -z "$S3_SECRET_KEY"'
+          docker compose -f deploy/compose/compose.yaml exec -T controller sh -c 'test -z "$TINY_HERMES_MODEL_KEY_EXAMPLE"'
+          docker compose -f deploy/compose/compose.yaml exec -T worker sh -c 'test -n "$S3_ACCESS_KEY"'
       - run: pnpm exec playwright test --config tests/e2e/playwright.config.ts
       # The drill restarts processes in the middle of a Run, so a Run has to be
       # long enough to be interrupted. The stack is recreated with a slower
