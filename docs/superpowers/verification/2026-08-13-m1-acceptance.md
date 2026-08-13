@@ -111,6 +111,8 @@ machine.
 
 - §24.1 thresholds passing on this host (4 vCPU). Live `benchmark_m1.py`
   gates were not run; `--shape-only` still exits 2.
+- A live `generate_local_secrets.py` Compose `up --wait` (the later stack
+  used the compose file's default interpolations).
 - GitHub Actions `compose-e2e` green. Private-repo spending limit refused
   the runner after the silent-exec fix was pushed.
 - A Feishu WebSocket session or disconnect-gap measurement.
