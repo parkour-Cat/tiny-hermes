@@ -13,6 +13,8 @@ class RoundOutcome:
     pause_requested: bool
     budget_allows: bool
     slice_expired: bool
+    hold_slice: bool = False
+    compat_window_expired: bool = False
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,10 @@ def decide_after_round(outcome: RoundOutcome) -> SliceDecision:
         return SliceDecision(RunSignal.COMPLETED)
     if outcome.stop_reason is StopReason.FAILED:
         return SliceDecision(RunSignal.FAILED)
+    if outcome.compat_window_expired:
+        return SliceDecision(RunSignal.SAFE_PAUSE_REACHED, PauseReason.COMPAT_TIMEOUT)
     if outcome.slice_expired:
+        if outcome.hold_slice:
+            return SliceDecision(None)
         return SliceDecision(RunSignal.SLICE_ENDED)
     return SliceDecision(None)

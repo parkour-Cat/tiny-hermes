@@ -36,6 +36,7 @@ from tiny_hermes.runs.domain.models import (
     CallerType,
     CanonicalMessage,
     CheckpointEffectStatus,
+    DeliveryMode,
     PauseReason,
     QueueStatus,
     RunCapabilities,
@@ -219,6 +220,7 @@ class SqlRunStore:
             checkpoint_replay_safe=True,
             checkpoint_effect_status=CheckpointEffectStatus.NONE.value,
             checkpoint_workspace_revision_id=session.workspace_revision_id,
+            delivery_mode=command.delivery_mode,
             created_at=now,
             updated_at=now,
         )
@@ -563,14 +565,19 @@ class SqlRunStore:
         if owning is None or owning.session_mode == SessionMode.EPHEMERAL.value:
             scoped = scoped.where(SessionMessageRow.source_run_id == run.id)
         found = await self._session.scalars(scoped.order_by(SessionMessageRow.sequence))
+        spec = AgentSpec.model_validate(version.spec)
+        deadline = None
+        if run.delivery_mode == DeliveryMode.CHAT_COMPLETIONS.value:
+            deadline = run.created_at + timedelta(seconds=spec.delivery.sync_timeout_seconds)
         return ExecutionContext(
             run_id=run.id,
             state_version=run.state_version,
-            spec=AgentSpec.model_validate(version.spec),
+            spec=spec,
             messages=tuple(_to_message(row) for row in found),
             cancel_requested=run.cancel_requested_at is not None,
             pause_requested=run.pause_requested_at is not None,
             budget=_budget_summary(budget),
+            compat_deadline_at=deadline,
         )
 
     async def renew_lease(self, command: RenewLeaseCommand) -> RenewedLease | None:
@@ -1051,6 +1058,40 @@ class SqlRunStore:
         )
         return list(rows.all())
 
+    async def aged_compat_timeout_runs(self, now: datetime, limit: int) -> Sequence[UUID]:
+        cutoff = now - timedelta(hours=24)
+        rows = await self._session.scalars(
+            select(RunRow.id)
+            .where(
+                RunRow.status == RunState.PAUSED.value,
+                RunRow.pause_reason == PauseReason.COMPAT_TIMEOUT.value,
+                RunRow.updated_at <= cutoff,
+            )
+            .order_by(RunRow.updated_at)
+            .limit(limit)
+        )
+        return list(rows.all())
+
+    async def cancel_aged_compat_timeout(self, run_id: UUID, request_id: str) -> None:
+        run = await self._lock_run_any_workspace(run_id)
+        if run is None or RunState(run.status) is not RunState.PAUSED:
+            return
+        if run.pause_reason != PauseReason.COMPAT_TIMEOUT.value:
+            return
+        session = await self._lock_session(run.workspace_id, run.session_id)
+        if session is None:
+            return
+        await self._decide_and_write(
+            run,
+            session,
+            RunSignal.CANCEL_REQUESTED,
+            pause_reason=None,
+            wait_kind=None,
+            wait_deadline_at=None,
+            request_id=request_id,
+            payload={"reason": "compat_timeout_aged_out"},
+        )
+
     async def time_out_external_wait(self, run_id: UUID, request_id: str) -> None:
         run = await self._lock_run_any_workspace(run_id)
         if run is None or RunState(run.status) is not RunState.WAITING_EXTERNAL:
@@ -1260,6 +1301,7 @@ class SqlRunStore:
             checkpoint_replay_safe=True,
             checkpoint_effect_status=CheckpointEffectStatus.NONE.value,
             checkpoint_workspace_revision_id=session.workspace_revision_id,
+            delivery_mode=source.delivery_mode,
             created_at=now,
             updated_at=now,
         )

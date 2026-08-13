@@ -46,6 +46,7 @@ class AcceptRunCommand:
     request_fingerprint: str
     message: CanonicalMessage
     request_id: str
+    delivery_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -188,6 +189,9 @@ class ExecutionContext:
     cancel_requested: bool
     pause_requested: bool
     budget: BudgetSummary
+    #: When set, this Run was admitted by Chat Completions and the Worker must
+    #: not emit ``SLICE_ENDED`` for an ordinary slice boundary before it.
+    compat_deadline_at: datetime | None = None
 
 
 @dataclass(frozen=True)

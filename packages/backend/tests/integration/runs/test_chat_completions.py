@@ -42,11 +42,13 @@ def _mint(client: TestClient, scope: dict[str, str], name: str = "completer") ->
     return str(issued["token"])
 
 
-def _enabled_spec() -> dict[str, Any]:
+def _enabled_spec(
+    *, scenario: str = "complete", timeout: int = 15
+) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "personality": "You are concise.",
-        "model_policy": {"provider": "deterministic", "scenario": "complete"},
+        "model_policy": {"provider": "deterministic", "scenario": scenario},
         "tools": [],
         "limits": {
             "max_execution_seconds": 900,
@@ -55,11 +57,18 @@ def _enabled_spec() -> dict[str, Any]:
             "max_tool_calls": 50,
             "max_derived_retries": 3,
         },
-        "delivery": {"enabled": True, "sync_timeout_seconds": 15},
+        "delivery": {"enabled": True, "sync_timeout_seconds": timeout},
     }
 
 
-def _publish_enabled(client: TestClient, scope: dict[str, str], alias: str) -> str:
+def _publish_enabled(
+    client: TestClient,
+    scope: dict[str, str],
+    alias: str,
+    *,
+    scenario: str = "complete",
+    timeout: int = 15,
+) -> str:
     agent_id = str(
         client.post(
             "/api/v1/agents",
@@ -70,7 +79,7 @@ def _publish_enabled(client: TestClient, scope: dict[str, str], alias: str) -> s
     draft = client.put(
         f"/api/v1/agents/{agent_id}/draft",
         headers=scope,
-        json={"expected_revision": 1, "spec": _enabled_spec()},
+        json={"expected_revision": 1, "spec": _enabled_spec(scenario=scenario, timeout=timeout)},
     )
     assert draft.status_code == 200
     published = client.post(
@@ -92,17 +101,22 @@ async def _count_runs(engine: AsyncEngine) -> int:
 
 
 @contextlib.asynccontextmanager
-async def _worker_pump(engine: AsyncEngine) -> AsyncGenerator[None]:
+async def _worker_pump(
+    engine: AsyncEngine,
+    *,
+    max_slice_seconds: int = 30,
+    delay_ms: int = 0,
+) -> AsyncGenerator[None]:
     """Claim work on this event loop so Completions can wait without blocking it."""
     stop = asyncio.Event()
     worker = WorkerRuntime(
         session_factory=async_sessionmaker(engine, expire_on_commit=False),
-        model=DeterministicModelProvider(delay_ms=0),
+        model=DeterministicModelProvider(delay_ms=delay_ms),
         notifier=NullWakeUpNotifier(),
         settings=WorkerSettings(
             worker_id="completions-worker",
             lease_seconds=30,
-            max_slice_seconds=30,
+            max_slice_seconds=max_slice_seconds,
             idle_poll_seconds=1,
         ),
     )
@@ -336,3 +350,59 @@ async def test_idempotency_replays_and_rejects_a_different_body(
         == "idempotency_key_reused"
     )
     assert await _count_runs(engine) == 1
+
+
+async def test_a_completions_run_does_not_requeue_inside_the_sync_window(
+    concurrent_client: httpx.AsyncClient,
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+) -> None:
+    token = _mint(client, scope, "slicer")
+    _publish_enabled(client, scope, "slicer", scenario="continue_once")
+    async with _worker_pump(engine, max_slice_seconds=0):
+        response = await concurrent_client.post(
+            COMPLETIONS,
+            headers={**_bearer(token), "Idempotency-Key": "slice"},
+            json=_body("slicer"),
+        )
+    assert response.status_code == 200
+    async with engine.connect() as connection:
+        status = (
+            await connection.execute(text("SELECT status FROM runs"))
+        ).scalar_one()
+        slices = (
+            await connection.execute(
+                text("SELECT count(*) FROM run_events WHERE event_type = 'run_slice_ended'")
+            )
+        ).scalar_one()
+        mode = (
+            await connection.execute(text("SELECT delivery_mode FROM runs"))
+        ).scalar_one()
+    assert status == "completed"
+    assert int(slices) == 0
+    assert mode == "chat_completions"
+
+
+async def test_a_tiny_sync_window_pauses_with_compat_timeout(
+    concurrent_client: httpx.AsyncClient,
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+) -> None:
+    token = _mint(client, scope, "slow")
+    _publish_enabled(client, scope, "slow", scenario="continue_once", timeout=1)
+    async with _worker_pump(engine, delay_ms=1500):
+        response = await concurrent_client.post(
+            COMPLETIONS,
+            headers={**_bearer(token), "Idempotency-Key": "slow"},
+            json=_body("slow"),
+        )
+    assert response.status_code == 409
+    assert cast(dict[str, Any], response.json())["error"]["code"] == "compat_timeout"
+    async with engine.connect() as connection:
+        row = (
+            await connection.execute(text("SELECT status, pause_reason FROM runs"))
+        ).one()
+    assert row[0] == "paused"
+    assert row[1] == "compat_timeout"

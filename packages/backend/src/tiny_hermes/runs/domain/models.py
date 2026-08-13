@@ -70,6 +70,12 @@ class SessionMode(StrEnum):
     PERSISTENT = "persistent"
 
 
+class DeliveryMode(StrEnum):
+    """How a Run was admitted. Absent means the asynchronous Runs API."""
+
+    CHAT_COMPLETIONS = "chat_completions"
+
+
 class CallerType(StrEnum):
     USER = "user"
     SERVICE_ACCOUNT = "service_account"

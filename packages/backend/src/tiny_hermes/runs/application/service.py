@@ -7,6 +7,7 @@ from tiny_hermes.runs.domain.models import (
     CallerIdentity,
     CallerType,
     CanonicalMessage,
+    DeliveryMode,
     RunCapabilities,
     RunSignal,
     RunSnapshot,
@@ -167,6 +168,7 @@ class RunCoordination:
         text: str,
         idempotency_key: str | None,
         request_id: str,
+        delivery_mode: DeliveryMode | None = None,
     ) -> AcceptedRun:
         role = await self._require_role(workspace_id, actor, WRITERS)
         key = _require_idempotency_key(idempotency_key)
@@ -184,6 +186,7 @@ class RunCoordination:
                 ),
                 message=message,
                 request_id=request_id,
+                delivery_mode=None if delivery_mode is None else delivery_mode.value,
             )
         )
 

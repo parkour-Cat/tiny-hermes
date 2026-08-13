@@ -33,6 +33,7 @@ LEASES = "leases"
 RECOVERY = "recovery"
 HEADS = "heads"
 WAITS = "waits"
+COMPAT = "compat_timeouts"
 RETENTION = "retention"
 UPLOADS = "workspace_uploads"
 ARTIFACTS = "artifact_retention"
@@ -98,6 +99,7 @@ class SchedulerRuntime:
         await self._recover_interrupted()
         await self._repair_session_heads()
         await self._time_out_waits(now)
+        await self._cancel_aged_compat_timeouts(now)
         await self._collect_expired_records(now)
         await self._collect_upload_garbage(now)
         await self._expire_artifacts(now)
@@ -286,6 +288,18 @@ class SchedulerRuntime:
                 return
             for run_id in await store.expired_wait_runs(now, self._settings.batch_size):
                 await store.time_out_external_wait(run_id, "scheduler-wait-timeout")
+
+    async def _cancel_aged_compat_timeouts(self, now: datetime) -> None:
+        async with self._sessions.begin() as session:
+            store = SqlRunStore(session)
+            if not await store.try_scan_lock(COMPAT):
+                return
+            for run_id in await store.aged_compat_timeout_runs(
+                now, self._settings.batch_size
+            ):
+                await store.cancel_aged_compat_timeout(
+                    run_id, "scheduler-compat-timeout"
+                )
 
     async def _collect_expired_records(self, now: datetime) -> None:
         cutoff = now - timedelta(hours=self._settings.event_retention_hours)

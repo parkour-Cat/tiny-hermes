@@ -259,6 +259,11 @@ class WorkerRuntime:
                 after = await self._read_context(workspace_id, claimed.run.id)
                 if after is None or handle.lost:
                     return
+                now = datetime.now(UTC)
+                compat_expired = (
+                    after.compat_deadline_at is not None
+                    and now >= after.compat_deadline_at
+                )
                 decision = decide_after_round(
                     RoundOutcome(
                         stop_reason=response.stop_reason,
@@ -267,6 +272,10 @@ class WorkerRuntime:
                         budget_allows=_budget_after(after, response, executed_ms),
                         slice_expired=(monotonic() - started)
                         >= self._settings.max_slice_seconds,
+                        hold_slice=(
+                            after.compat_deadline_at is not None and not compat_expired
+                        ),
+                        compat_window_expired=compat_expired,
                     )
                 )
 

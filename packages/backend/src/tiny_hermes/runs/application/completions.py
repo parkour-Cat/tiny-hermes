@@ -30,7 +30,13 @@ from tiny_hermes.runs.application.service import (
     RunCoordination,
     UnknownSession,
 )
-from tiny_hermes.runs.domain.models import RunSnapshot, RunState, SessionMode
+from tiny_hermes.runs.domain.models import (
+    DeliveryMode,
+    PauseReason,
+    RunSnapshot,
+    RunState,
+    SessionMode,
+)
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
 from tiny_hermes.tenancy.domain.models import Actor
@@ -172,6 +178,7 @@ async def complete_chat(
             text,
             str(uuid4()),
             request_id,
+            delivery_mode=DeliveryMode.CHAT_COMPLETIONS,
         )
         await session.commit()
 
@@ -180,7 +187,7 @@ async def complete_chat(
         sessions, workspace_id, actor, accepted.run_id, timeout
     )
     if snapshot.state is not RunState.COMPLETED:
-        raise _unfinished(snapshot.state, accepted.run_id)
+        raise _unfinished(snapshot, accepted.run_id)
     document = await _completion_document(
         sessions, workspace_id, actor, model, session_id, accepted.run_id
     )
@@ -283,7 +290,7 @@ async def _wait_for_run(
     run_id: UUID,
     timeout_seconds: int,
 ) -> RunSnapshot:
-    deadline = monotonic() + timeout_seconds
+    deadline = monotonic() + timeout_seconds + 5
     while True:
         async with sessions() as session:
             runs = RunCoordination(SqlRunStore(session))
@@ -300,8 +307,18 @@ async def _wait_for_run(
         await asyncio.sleep(POLL_SECONDS)
 
 
-def _unfinished(state: RunState, run_id: UUID) -> CompletionsError:
-    if state in BLOCKING_HEAD_STATES:
+def _unfinished(snapshot: RunSnapshot, run_id: UUID) -> CompletionsError:
+    if (
+        snapshot.state is RunState.PAUSED
+        and snapshot.pause_reason is PauseReason.COMPAT_TIMEOUT
+    ):
+        return CompletionsError(
+            409,
+            "compat_timeout",
+            "The sync window elapsed before the run finished.",
+            run_id=str(run_id),
+        )
+    if snapshot.state in BLOCKING_HEAD_STATES:
         return CompletionsError(
             409,
             "requires_runs_api",
