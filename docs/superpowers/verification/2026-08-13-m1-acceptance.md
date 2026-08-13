@@ -67,10 +67,9 @@ are not this benchmark.
 has measured / unconfirmed / Webhook-fallback columns, the closure record has
 rows 1–13, and `pyproject.toml` description is `单 Agent 安全运行骨架`.
 
-**Regression.** Focused 4D unit tests above. Full backend unit / integration /
-web suites were the 4C verification's last green run (618 unit, 35 focused
-integration, 88 vitest) and are not re-claimed as freshly executed in this
-record unless a later commit says so.
+**Regression.** Backend unit suite **639 passed** (4C's 618 plus 4D script
+and record pins). Focused 4C integration and web vitest were not re-run in
+this record.
 
 ## 4. Explicitly not claimed
 
