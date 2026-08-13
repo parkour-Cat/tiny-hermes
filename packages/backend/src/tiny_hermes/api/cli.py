@@ -54,6 +54,8 @@ async def _worker() -> None:
     worker_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
     notifier = _notifier(settings)
     sessions = build_session_factory(settings)
+    workspace = _workspace(settings)
+    await _ensure_bucket(workspace)
     # One provider port, two providers behind it. Which one answers is decided
     # per round by the Agent Version the Run fixed at creation, so the Worker
     # never learns that endpoints exist.
@@ -79,7 +81,7 @@ async def _worker() -> None:
         # one cannot run a tool, and a Run that binds one fails rather than
         # running the command anywhere else.
         sandbox=_controller(settings),
-        workspace=_workspace(settings),
+        workspace=workspace,
         settings=WorkerSettings(
             worker_id=worker_id,
             lease_seconds=settings.worker_lease_seconds,
@@ -102,6 +104,22 @@ def _controller(settings: Settings) -> SandboxClient | None:
     if not settings.sandbox_image_digest:
         return None
     return SandboxClient(ControllerClient(settings.sandbox_controller_socket))
+
+
+async def _ensure_bucket(workspace: WorkspaceRuntime | None) -> None:
+    """Idempotent bucket creation at boot, so the first checkpoint is not the
+    request that discovers a fresh MinIO. A failure here is logged rather than
+    fatal: the store may simply not be up yet, and every later operation
+    reports `workspace_storage_unavailable` honestly."""
+    if workspace is None:
+        return
+    ensure = getattr(workspace.objects, "ensure_bucket", None)
+    if ensure is None:
+        return
+    try:
+        await ensure()
+    except Exception:
+        logger.exception("object-store bucket check failed at startup")
 
 
 def _workspace(settings: Settings) -> WorkspaceRuntime | None:
@@ -134,6 +152,7 @@ async def _scheduler() -> None:
     settings = get_settings()
     notifier = _notifier(settings)
     workspace = _workspace(settings)
+    await _ensure_bucket(workspace)
     runtime = SchedulerRuntime(
         session_factory=build_session_factory(settings),
         notifier=notifier,
