@@ -101,6 +101,13 @@ class Settings(BaseSettings):
     artifact_max_bytes: int = Field(default=104_857_600, ge=1_048_576, le=1_073_741_824)
     run_artifact_max_bytes: int = Field(default=524_288_000, ge=1_048_576, le=10_737_418_240)
 
+    #: Envelope KEK. Empty is legal at process boot (Workers unwrap at call
+    #: time). The API ready check refuses an empty or invalid value.
+    tiny_hermes_kek: str = ""
+    tiny_hermes_kek_id: str = "v1"
+    tiny_hermes_previous_kek: str = ""
+    tiny_hermes_previous_kek_id: str = ""
+
     @property
     def approved_image_digests(self) -> tuple[str, ...]:
         return (self.sandbox_image_digest,) if self.sandbox_image_digest else ()

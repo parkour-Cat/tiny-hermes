@@ -17,6 +17,20 @@ class SecretStatus(StrEnum):
 
 
 @dataclass(frozen=True)
+class SecretView:
+    """What HTTP may return: identity and a mask, never plaintext."""
+
+    id: UUID
+    name: str
+    scope: SecretScope
+    workspace_id: UUID | None
+    status: SecretStatus
+    mask: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
 class SecretRecord:
     """A stored envelope. Ciphertext lives here; plaintext never does."""
 

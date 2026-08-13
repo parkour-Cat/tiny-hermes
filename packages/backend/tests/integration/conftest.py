@@ -102,6 +102,7 @@ def settings(database_url: str, redis_url: str) -> Settings:
         s3_secret_key=os.environ.get("S3_SECRET_KEY", "tiny-hermes-local-password"),
         session_cookie_secret="test-cookie-secret-with-32-characters",
         bootstrap_token=BOOTSTRAP_TOKEN,
+        tiny_hermes_kek="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
     )
 
 

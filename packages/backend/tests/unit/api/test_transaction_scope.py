@@ -9,6 +9,7 @@ TRANSACTIONAL_DEPENDENCIES = {
     "auth_service",
     "model_endpoints",
     "run_coordination",
+    "secret_service",
     "workspace_service",
 }
 
