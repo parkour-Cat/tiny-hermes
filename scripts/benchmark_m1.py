@@ -274,15 +274,24 @@ def measured_fail(gate: Gate, why: str) -> dict[str, Any]:
     }
 
 
+_live_module: Any = None
+
+
 def drive_gate(gate: Gate, seconds: int | None) -> dict[str, Any]:
     """Run one live driver. Tests replace this; the default loads benchmark_live."""
-    path = Path(__file__).resolve().with_name("benchmark_live.py")
-    spec = spec_from_file_location("tiny_hermes_benchmark_live", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {path}")
-    module = module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.run_driver(gate, seconds, evaluate=evaluate, sample_type=Sample)
+    global _live_module
+    if _live_module is None:
+        path = Path(__file__).resolve().with_name("benchmark_live.py")
+        spec = spec_from_file_location("tiny_hermes_benchmark_live", path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"cannot load {path}")
+        module = module_from_spec(spec)
+        # dataclasses look up sys.modules[cls.__module__] while the class body
+        # runs; leaving the name unset is AttributeError on None.__dict__.
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        _live_module = module
+    return _live_module.run_driver(gate, seconds, evaluate=evaluate, sample_type=Sample)
 
 
 def main(argv: list[str] | None = None) -> None:

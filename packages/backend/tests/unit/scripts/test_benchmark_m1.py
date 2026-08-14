@@ -241,3 +241,14 @@ def test_a_driver_exception_is_a_measured_failure_not_a_skip(
     with pytest.raises(SystemExit) as refused:
         benchmark.main(["--gate", "create_run"])
     assert refused.value.code == 1
+
+
+def test_drive_gate_can_exec_the_live_module_without_an_import_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SANDBOX_IMAGE_DIGEST", raising=False)
+    result = benchmark.drive_gate(benchmark.SANDBOX_COLD, None)
+    assert result["status"] == "measured"
+    assert result["passed"] is False
+    assert any("SANDBOX_IMAGE_DIGEST" in reason for reason in result["reasons"])
+    assert all("AttributeError" not in reason for reason in result["reasons"])
