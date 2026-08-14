@@ -36,6 +36,7 @@ export function SessionRail({
         disabled={creating || newChatDisabled}
         onClick={onNewChat}
       >
+        <span aria-hidden>+</span>
         {t("newChat")}
       </button>
       <p className="rail-kicker">{t("sessions")}</p>

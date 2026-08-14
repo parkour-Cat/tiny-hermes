@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 
 import { problemMessage } from "../api/messages";
 import { useAuth } from "../auth/AuthProvider";
-import { agentLabel } from "../chat/published";
+import type { ListedAgent } from "../chat/published";
 import { usePublishedAgents } from "../chat/usePublishedAgents";
 import {
   loadDefaultAgent,
@@ -12,6 +12,27 @@ import {
   type DefaultAgentRef,
 } from "../i18n/defaultAgent";
 import { useT } from "../i18n/locale";
+
+function groupByWorkspace(rows: ListedAgent[]): Array<{
+  workspaceId: string;
+  workspaceName: string;
+  rows: ListedAgent[];
+}> {
+  const groups: Array<{ workspaceId: string; workspaceName: string; rows: ListedAgent[] }> = [];
+  for (const row of rows) {
+    const current = groups.find((group) => group.workspaceId === row.workspace.id);
+    if (current === undefined) {
+      groups.push({
+        workspaceId: row.workspace.id,
+        workspaceName: row.workspace.name,
+        rows: [row],
+      });
+    } else {
+      current.rows.push(row);
+    }
+  }
+  return groups;
+}
 
 export function SettingsPage() {
   const t = useT();
@@ -55,31 +76,38 @@ export function SettingsPage() {
           <p className="settings-hint">{t("emptyAgents")}</p>
         ) : null}
         {listed.rows.length > 0 ? (
-          <ul className="settings-agent-list">
-            {listed.rows.map((row) => {
-              const ref: DefaultAgentRef = {
-                workspaceId: row.workspace.id,
-                agentId: row.agent.id,
-              };
-              const selected = sameDefaultAgent(preferred, ref);
-              return (
-                <li key={`${row.workspace.id}:${row.agent.id}`}>
-                  <button
-                    type="button"
-                    className={selected ? "is-on" : undefined}
-                    aria-pressed={selected}
-                    onClick={() => {
-                      saveDefaultAgent(ref);
-                      setPreferred(ref);
-                    }}
-                  >
-                    <strong>{agentLabel(row, listed.rows)}</strong>
-                    <span>{row.workspace.name}</span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
+          <div className="settings-agent-groups">
+            {groupByWorkspace(listed.rows).map((group) => (
+              <section key={group.workspaceId} className="settings-agent-group">
+                <h3>{group.workspaceName}</h3>
+                <ul className="settings-agent-list">
+                  {group.rows.map((row) => {
+                    const ref: DefaultAgentRef = {
+                      workspaceId: row.workspace.id,
+                      agentId: row.agent.id,
+                    };
+                    const selected = sameDefaultAgent(preferred, ref);
+                    return (
+                      <li key={`${row.workspace.id}:${row.agent.id}`}>
+                        <button
+                          type="button"
+                          className={selected ? "is-on" : undefined}
+                          aria-pressed={selected}
+                          onClick={() => {
+                            saveDefaultAgent(ref);
+                            setPreferred(ref);
+                          }}
+                        >
+                          <strong>{row.agent.name}</strong>
+                          <span>{row.agent.alias}</span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </section>
+            ))}
+          </div>
         ) : null}
       </section>
       <section className="settings-about">
