@@ -53,6 +53,9 @@ export function ConsoleChrome({
       </Layout.Sider>
       <Layout className="th-main">
         <Layout.Header className="th-topbar">
+          <Link to="/chat" className="th-chat-link">
+            {t("useAgent")}
+          </Link>
           <Select
             aria-label={t("language")}
             value={locale}

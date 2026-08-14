@@ -224,6 +224,31 @@ h4,
   padding: 40px 0 72px;
 }
 
+.th-chat-topbar.ant-layout-header {
+  justify-content: flex-start;
+}
+
+.th-chat-spacer {
+  flex: 1;
+}
+
+.th-chat-title {
+  font-weight: 650;
+}
+
+.th-chat-link {
+  color: var(--th-ink-soft);
+  font-size: 13px;
+}
+
+.th-chat-link:hover {
+  color: var(--th-copper);
+}
+
+.th-chat-content.th-content {
+  width: min(760px, calc(100% - 48px));
+}
+
 .page-heading {
   display: flex;
   align-items: flex-start;

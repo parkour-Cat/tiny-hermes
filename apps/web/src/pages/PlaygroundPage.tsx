@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Button, Card, Input, Modal, Space, Typography } from "antd";
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router-dom";
 
 import { downloadArtifact } from "../api/artifacts";
 import { api } from "../api/client";
@@ -40,6 +40,7 @@ export function PlaygroundPage() {
   const t = useT();
   const workspaceId = useWorkspaceId();
   const { agentId = "" } = useParams();
+  const chat = useLocation().pathname.startsWith("/chat");
   const auth = useAuth();
   const queryClient = useQueryClient();
   const [modal, contextHolder] = Modal.useModal();
@@ -210,13 +211,21 @@ export function PlaygroundPage() {
       {contextHolder}
       <div className="page-heading">
         <div>
-          <p className="page-kicker">{t("agents")}</p>
-          <Typography.Title level={2}>{t("playground")}</Typography.Title>
-          <Typography.Paragraph type="secondary">{t("playgroundIntro")}</Typography.Paragraph>
+          <p className="page-kicker">{chat ? t("chatKicker") : t("agents")}</p>
+          <Typography.Title level={2}>{chat ? agent.data.name : t("playground")}</Typography.Title>
+          {chat ? null : (
+            <Typography.Paragraph type="secondary">{t("playgroundIntro")}</Typography.Paragraph>
+          )}
           <Typography.Paragraph type="secondary">
-            <Link to={`/workspaces/${workspaceId}/agents/${agentId}`}>{agent.data.name}</Link>
-            {" · "}
-            <Typography.Text>{session.data.id}</Typography.Text>
+            {chat ? (
+              <Link to="/chat">{t("switchAgent")}</Link>
+            ) : (
+              <>
+                <Link to={`/workspaces/${workspaceId}/agents/${agentId}`}>{agent.data.name}</Link>
+                {" · "}
+                <Typography.Text>{session.data.id}</Typography.Text>
+              </>
+            )}
           </Typography.Paragraph>
         </div>
         <Button loading={openSession.isPending} onClick={() => openSession.mutate()}>

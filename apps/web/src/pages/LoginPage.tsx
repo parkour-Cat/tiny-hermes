@@ -25,7 +25,13 @@ export function LoginPage() {
     setError(null);
     try {
       await auth.login(values);
-      navigate("/workspaces", { replace: true });
+      const from = (location.state as { from?: string } | null)?.from;
+      navigate(
+        typeof from === "string" && from.startsWith("/") && !from.startsWith("//")
+          ? from
+          : "/workspaces",
+        { replace: true },
+      );
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : t("loginFailed"));
     } finally {
@@ -65,6 +71,7 @@ export function LoginPage() {
               {t("login")}
             </Button>
           </Form>
+          <Link to="/chat">{t("useAgent")}</Link>
           <Link to="/bootstrap">{t("bootstrapLink")}</Link>
         </Space>
       </Card>
