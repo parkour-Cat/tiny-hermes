@@ -20,6 +20,7 @@ import os
 import platform
 import sys
 from dataclasses import dataclass
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from typing import Any
 
@@ -163,7 +164,15 @@ def api_ready() -> bool:
     return answer.status_code == 200
 
 
-def evaluate(gate: Gate, sample: Sample) -> dict[str, Any]:
+def evaluate(
+    gate: Gate,
+    sample: Sample,
+    *,
+    elapsed_s: float | None = None,
+    achieved_rps: float | None = None,
+    sampled_s: float | None = None,
+    extra_reasons: list[str] | None = None,
+) -> dict[str, Any]:
     p50 = percentile(sample.latencies_ms, 50.0)
     p95 = percentile(sample.latencies_ms, 95.0)
     p99 = percentile(sample.latencies_ms, 99.0)
@@ -175,6 +184,14 @@ def evaluate(gate: Gate, sample: Sample) -> dict[str, Any]:
         reasons.append(f"error rate {rate:.4f} exceeds {gate.error_rate}")
     if gate.max_loss is not None and sample.errors > gate.max_loss:
         reasons.append(f"lost {sample.errors} events; max_loss is {gate.max_loss}")
+    if gate.max_s is not None and elapsed_s is not None and elapsed_s > gate.max_s:
+        reasons.append(f"elapsed {elapsed_s:.2f}s exceeds {gate.max_s}s")
+    if gate.rps is not None and achieved_rps is not None and achieved_rps < gate.rps:
+        reasons.append(f"achieved {achieved_rps:.1f}/s below {gate.rps}/s")
+    if gate.duration_s is not None and sampled_s is not None and sampled_s < gate.duration_s:
+        reasons.append(f"sampled {sampled_s:.1f}s, gate requires {gate.duration_s}s")
+    if extra_reasons:
+        reasons.extend(extra_reasons)
     return {
         "name": gate.name,
         "status": "measured",
@@ -238,10 +255,46 @@ def report(
     }
 
 
+def measured_fail(gate: Gate, why: str) -> dict[str, Any]:
+    return {
+        "name": gate.name,
+        "status": "measured",
+        "passed": False,
+        "p50_ms": None,
+        "p95_ms": None,
+        "p99_ms": None,
+        "error_rate": None,
+        "reasons": [why],
+        "gate": {
+            "p95_ms": gate.p95_ms,
+            "error_rate": gate.error_rate,
+            "max_loss": gate.max_loss,
+            "max_s": gate.max_s,
+        },
+    }
+
+
+def drive_gate(gate: Gate, seconds: int | None) -> dict[str, Any]:
+    """Run one live driver. Tests replace this; the default loads benchmark_live."""
+    path = Path(__file__).resolve().with_name("benchmark_live.py")
+    spec = spec_from_file_location("tiny_hermes_benchmark_live", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {path}")
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.run_driver(gate, seconds, evaluate=evaluate, sample_type=Sample)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--shape-only", action="store_true")
     parser.add_argument("--gate", action="append", dest="only")
+    parser.add_argument(
+        "--seconds",
+        type=int,
+        default=None,
+        help="Cap duration-gate sampling. A shorter sample cannot pass §24.1.",
+    )
     args = parser.parse_args(argv)
     shape = host_shape()
     sha = git_sha()
@@ -260,13 +313,19 @@ def main(argv: list[str] | None = None) -> None:
         return
     selected = [gate for gate in GATES if args.only is None or gate.name in args.only]
     ready = api_ready()
-    why = (
-        "API /health/ready is not 200; live gates need Compose on the Linux "
-        "reference shape (8 vCPU, 16 GiB, 50 ms deterministic delay, 100k events)"
-        if not ready
-        else "live driver for this gate is not executed in this invocation"
-    )
-    gates = {gate.name: not_run(gate, why) for gate in selected}
+    if not ready:
+        why = (
+            "API /health/ready is not 200; live gates need Compose on the Linux "
+            "reference shape (8 vCPU, 16 GiB, 50 ms deterministic delay, 100k events)"
+        )
+        gates = {gate.name: not_run(gate, why) for gate in selected}
+    else:
+        gates = {}
+        for gate in selected:
+            try:
+                gates[gate.name] = drive_gate(gate, args.seconds)
+            except Exception as error:  # noqa: BLE001 - a driver crash is a failed gate
+                gates[gate.name] = measured_fail(gate, f"{type(error).__name__}: {error}")
     document = report(
         shape=shape,
         sha=sha,
@@ -279,7 +338,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(2)
     if not ready:
         raise SystemExit(3)
-    raise SystemExit(1)
+    if not document["passed"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

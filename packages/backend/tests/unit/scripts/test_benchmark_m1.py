@@ -6,6 +6,7 @@ import sys
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -143,3 +144,100 @@ def test_main_does_not_report_pass_when_the_api_is_down(
     with pytest.raises(SystemExit) as refused:
         benchmark.main([])
     assert refused.value.code != 0
+
+
+def test_evaluate_fails_when_recovery_exceeds_max_s() -> None:
+    result = benchmark.evaluate(
+        benchmark.WORKER_RECOVERY,
+        benchmark.Sample(latencies_ms=(31_000.0,), errors=0, total=1),
+        elapsed_s=31.0,
+    )
+    assert result["passed"] is False
+    assert result["status"] == "measured"
+
+
+def test_evaluate_fails_when_the_write_rate_is_below_the_gate() -> None:
+    result = benchmark.evaluate(
+        benchmark.RUN_EVENT,
+        benchmark.Sample(latencies_ms=(10.0,) * 100, errors=0, total=100),
+        achieved_rps=120.0,
+        sampled_s=300.0,
+    )
+    assert result["passed"] is False
+
+
+def test_a_short_sample_cannot_pass_a_duration_gate() -> None:
+    result = benchmark.evaluate(
+        benchmark.CREATE_RUN,
+        benchmark.Sample(latencies_ms=(10.0,) * 100, errors=0, total=100),
+        sampled_s=10.0,
+    )
+    assert result["passed"] is False
+    assert result["status"] == "measured"
+
+
+def test_main_runs_live_drivers_when_the_api_is_up(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    called: list[str] = []
+
+    def fake_drive(gate: Any, seconds: int | None) -> dict[str, object]:
+        name = gate.name
+        called.append(name)
+        return {
+            "name": name,
+            "status": "measured",
+            "passed": True,
+            "p50_ms": 1.0,
+            "p95_ms": 2.0,
+            "p99_ms": 3.0,
+            "error_rate": 0.0,
+            "reasons": [],
+            "gate": {},
+        }
+
+    monkeypatch.setattr(
+        benchmark,
+        "host_shape",
+        lambda: benchmark.Shape(os="linux", vcpu=8, ram_gib=16.0),
+    )
+    monkeypatch.setattr(benchmark, "git_sha", lambda: "livebeef")
+    monkeypatch.setattr(benchmark, "api_ready", lambda: True)
+    monkeypatch.setattr(
+        benchmark,
+        "process_usage",
+        lambda: SimpleNamespace(cpu_percent=1.0, rss_mib=10.0),
+    )
+    monkeypatch.setattr(benchmark, "drive_gate", fake_drive)
+    try:
+        benchmark.main(["--gate", "create_run"])
+        code = 0
+    except SystemExit as done:
+        code = int(done.code or 0)
+    assert code == 0
+    assert called == ["create_run"]
+    assert "live driver for this gate is not executed" not in capsys.readouterr().out
+
+
+def test_a_driver_exception_is_a_measured_failure_not_a_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(gate: object, seconds: int | None) -> dict[str, object]:
+        raise RuntimeError("compose exploded")
+
+    monkeypatch.setattr(
+        benchmark,
+        "host_shape",
+        lambda: benchmark.Shape(os="linux", vcpu=8, ram_gib=16.0),
+    )
+    monkeypatch.setattr(benchmark, "git_sha", lambda: "deadbeef")
+    monkeypatch.setattr(benchmark, "api_ready", lambda: True)
+    monkeypatch.setattr(
+        benchmark,
+        "process_usage",
+        lambda: SimpleNamespace(cpu_percent=1.0, rss_mib=10.0),
+    )
+    monkeypatch.setattr(benchmark, "drive_gate", boom)
+    with pytest.raises(SystemExit) as refused:
+        benchmark.main(["--gate", "create_run"])
+    assert refused.value.code == 1

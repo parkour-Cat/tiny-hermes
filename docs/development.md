@@ -112,7 +112,9 @@ are in the header nav; there is no Approvals page.
 
 The §24.1 benchmark is `uv run --no-sync python scripts/benchmark_m1.py`. It
 refuses to report a pass unless the host is Linux with at least 8 vCPU and
-16 GiB RAM. Do not edit its thresholds to make a run green.
+16 GiB RAM. When `/health/ready` is 200 it runs the ten live drivers in
+`scripts/benchmark_live.py`. `--seconds` may shorten a duration gate's sample;
+a shorter sample cannot pass. Do not edit its thresholds to make a run green.
 
 ## Local tests
 
