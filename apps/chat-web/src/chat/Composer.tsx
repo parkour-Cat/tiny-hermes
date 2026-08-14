@@ -1,6 +1,11 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { useT } from "../i18n/locale";
+
+function fit(area: HTMLTextAreaElement): void {
+  area.style.height = "0";
+  area.style.height = `${Math.min(area.scrollHeight, 168)}px`;
+}
 
 export function Composer({
   disabled,
@@ -12,6 +17,7 @@ export function Composer({
   onSend: (text: string) => void;
 }) {
   const t = useT();
+  const area = useRef<HTMLTextAreaElement>(null);
   const [input, setInput] = useState("");
   const ready = input.trim() !== "" && !disabled && !sending;
 
@@ -22,6 +28,9 @@ export function Composer({
     }
     onSend(text);
     setInput("");
+    if (area.current !== null) {
+      area.current.style.height = "";
+    }
   }
 
   return (
@@ -33,12 +42,16 @@ export function Composer({
       }}
     >
       <textarea
+        ref={area}
         aria-label={t("composerPlaceholder")}
         placeholder={t("composerPlaceholder")}
         rows={1}
         value={input}
         disabled={disabled}
-        onChange={(event) => setInput(event.target.value)}
+        onChange={(event) => {
+          setInput(event.target.value);
+          fit(event.target);
+        }}
         onKeyDown={(event) => {
           if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
@@ -46,10 +59,12 @@ export function Composer({
           }
         }}
       />
-      <button type="submit" disabled={!ready}>
-        {t("sendMessage")}
-      </button>
-      <p className="composer-hint">{t("composerHint")}</p>
+      <div className="composer-bar">
+        <p className="composer-hint">{t("composerHint")}</p>
+        <button type="submit" disabled={!ready}>
+          {t("sendMessage")}
+        </button>
+      </div>
     </form>
   );
 }

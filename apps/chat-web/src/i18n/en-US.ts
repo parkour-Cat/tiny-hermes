@@ -27,6 +27,7 @@ export const enUS: Record<MessageKey, string> = {
   composerPlaceholder: "Message the agent",
   composerHint: "Enter to send · Shift+Enter for a new line",
   sendMessage: "Send",
+  greeting: "Hello",
   emptyIntro: "Say what you need. The agent works inside its limits, and the work shows up in this thread.",
   emptyAgents: "No published agent to talk to yet. Publish one from the operator console first.",
   invalidAddress: "This address is not valid. Nothing was sent to the platform.",

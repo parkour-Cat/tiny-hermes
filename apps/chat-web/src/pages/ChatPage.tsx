@@ -24,6 +24,9 @@ import { useT } from "../i18n/locale";
 import { RUN_ACTIONS } from "../runs/actions";
 import { runQueryOptions, useRunEvents } from "../runs/useRunEvents";
 import { isLiveStatus, statusLabel } from "../status";
+import { HermesMark } from "../ui/HermesMark";
+
+const CHROME_ACTIONS = new Set(["pause", "resume", "cancel"]);
 
 export function ChatPage() {
   const t = useT();
@@ -241,14 +244,20 @@ export function ChatPage() {
       />
       <section className="chat-main">
         <header className="chat-head">
-          <div>
-            <h1>{agent.data.name}</h1>
-            {run === undefined || run.finished_at !== null ? null : (
-              <p className="chat-status">{statusLabel(run.status, t)}</p>
-            )}
+          <div className="chat-identity">
+            <HermesMark size={28} />
+            <div>
+              <h1>{agent.data.name}</h1>
+              {run === undefined || run.finished_at !== null ? null : (
+                <p className="chat-status">{statusLabel(run.status, t)}</p>
+              )}
+            </div>
           </div>
           <div className="chat-actions">
-            {(blocked ? headActions : (run?.available_actions ?? [])).map((action) => {
+            {(blocked ? headActions : live ? (run?.available_actions ?? []) : []).map((action) => {
+              if (!CHROME_ACTIONS.has(action)) {
+                return null;
+              }
               const offer = RUN_ACTIONS[action];
               const target = blocked ? headId : run?.id;
               return offer === undefined || target === null || target === undefined ? null : (
@@ -281,7 +290,6 @@ export function ChatPage() {
         ) : null}
         <div className="chat-scroll">
           <Transcript
-            agentName={agent.data.name}
             turns={messages.data ?? []}
             optimistic={optimistic}
             live={Boolean(live)}

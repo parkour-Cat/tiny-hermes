@@ -25,6 +25,7 @@ export const zhCN = {
   composerPlaceholder: "写给智能体",
   composerHint: "Enter 发送 · Shift+Enter 换行",
   sendMessage: "发送",
+  greeting: "你好",
   emptyIntro: "直接说要做什么。智能体会在限额内完成，过程会出现在这条对话里。",
   emptyAgents: "还没有可对话的智能体。请先在管理后台发布一个。",
   invalidAddress: "地址无效，没有向平台发出请求。",

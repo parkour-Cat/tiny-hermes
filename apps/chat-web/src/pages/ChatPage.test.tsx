@@ -272,6 +272,34 @@ test("a blocked queue shows the wait in the thread, not a completions refusal", 
   expect(resumes[0]?.body).toEqual({ expected_state_version: 4 });
 });
 
+test("a finished turn does not put retry in the page chrome", async () => {
+  loadedChat([
+    { role: "user", parts: [{ type: "text", text: "Summarize yesterday" }] },
+    { role: "assistant", parts: [{ type: "text", text: "Here is the summary." }] },
+  ]);
+  server.use(
+    http.get("/api/v1/sessions", () =>
+      HttpResponse.json([sessionRow({ head_run_id: PENDING })]),
+    ),
+    http.get(`/api/v1/runs/${PENDING}`, () =>
+      HttpResponse.json(
+        runRow(PENDING, {
+          status: "completed",
+          finished_at: "2026-08-10T02:01:00Z",
+          available_actions: ["retry"],
+          queue: { position: 1, status: "terminal" },
+        }),
+      ),
+    ),
+    http.get(`/api/v1/runs/${PENDING}/events`, () => held()),
+    http.get(`/api/v1/runs/${PENDING}/artifacts`, () => HttpResponse.json([])),
+  );
+
+  renderChat();
+  expect(await screen.findByText("Here is the summary.")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+});
+
 test("新对话 posts another persistent session", async () => {
   loadedChat();
   document.cookie = "tiny_hermes_csrf=token-value";
