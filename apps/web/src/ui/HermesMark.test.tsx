@@ -3,7 +3,7 @@ import { expect, test } from "vitest";
 
 import { HermesMark } from "./HermesMark";
 
-test("the mark is the circular lockup artwork", () => {
+test("the mark is the circular artwork without the word", () => {
   const { container } = render(<HermesMark />);
   const img = container.querySelector("img.th-hermes-mark");
   expect(img).not.toBeNull();
