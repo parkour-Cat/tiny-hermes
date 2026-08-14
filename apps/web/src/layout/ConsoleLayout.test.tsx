@@ -91,7 +91,6 @@ test("both sections stay inside the workspace the address names", async () => {
     "href",
     `/workspaces/${WORKSPACE}/secrets`,
   );
-  expect(screen.getByRole("link", { name: "使用智能体" })).toHaveAttribute("href", "/chat");
   expect(document.querySelector(".th-sider")).not.toBeNull();
   expect(document.querySelector("img.th-hermes-mark")).not.toBeNull();
   expect(document.querySelector(".th-mark")).toBeNull();

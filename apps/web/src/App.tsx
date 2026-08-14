@@ -1,6 +1,6 @@
 import { Alert, Button, Spin } from "antd";
 import { lazy, Suspense } from "react";
-import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import { QueryProvider } from "./api/QueryProvider";
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
@@ -46,33 +46,10 @@ const ModelEndpointsPage = lazy(() =>
 const SecretsPage = lazy(() =>
   import("./pages/SecretsPage").then((module) => ({ default: module.SecretsPage })),
 );
-const ChatHomePage = lazy(() =>
-  import("./pages/ChatHomePage").then((module) => ({ default: module.ChatHomePage })),
-);
-const ChatSessionPage = lazy(() =>
-  import("./pages/ChatSessionPage").then((module) => ({ default: module.ChatSessionPage })),
-);
-
-function RequireAuth({ children }: { children: React.ReactNode }) {
-  const auth = useAuth();
-  const location = useLocation();
-  if (auth.user === null) {
-    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
-  }
-  return children;
-}
-
-function loginDestination(from: unknown): string {
-  return typeof from === "string" && from.startsWith("/") && !from.startsWith("//")
-    ? from
-    : "/workspaces";
-}
 
 function AppRoutes() {
   const t = useT();
   const auth = useAuth();
-  const location = useLocation();
-  const from = (location.state as { from?: string } | null)?.from;
   if (auth.loading) {
     return <Spin fullscreen description={t("loading")} />;
   }
@@ -95,29 +72,7 @@ function AppRoutes() {
         <Route path="/bootstrap" element={<BootstrapPage />} />
         <Route
           path="/login"
-          element={
-            auth.user === null ? (
-              <LoginPage />
-            ) : (
-              <Navigate to={loginDestination(from)} replace />
-            )
-          }
-        />
-        <Route
-          path="/chat"
-          element={
-            <RequireAuth>
-              <ChatHomePage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/chat/:workspaceId/agents/:agentId"
-          element={
-            <RequireAuth>
-              <ChatSessionPage />
-            </RequireAuth>
-          }
+          element={auth.user === null ? <LoginPage /> : <Navigate to="/workspaces" replace />}
         />
         <Route
           path="/workspaces"
