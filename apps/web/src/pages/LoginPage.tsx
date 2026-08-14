@@ -77,7 +77,7 @@ export function PublicShell({ children }: { children: React.ReactNode }) {
   return (
     <main className="public-shell">
       <div className="brand-panel">
-        <HermesMark size={196} variant="hero" />
+        <HermesMark size={220} variant="hero" />
         <p className="th-word brand-word">{t("appName")}</p>
         <p className="brand-kicker">{t("appKicker")}</p>
         <Typography.Title>{t("appTagline")}</Typography.Title>
