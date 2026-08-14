@@ -7,10 +7,8 @@ const LOCKUP = "/tiny-hermes-lockup.png";
 const ICON = "/tiny-hermes-icon.png";
 
 /**
- * The two artworks sit as a badge, not a square tile.
- *
- * The mark is clipped to a circle. The named lockup keeps the
- * pill under the ring; only the field around the badge is gone.
+ * The two files the operator put in public/: lockup with the
+ * word, icon without. They sit as a badge, not a square tile.
  */
 export function HermesMark({ size = 28, variant = "mark" }: HermesMarkProps) {
   const lockup = variant !== "mark";
