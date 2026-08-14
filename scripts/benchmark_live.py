@@ -422,13 +422,10 @@ def _drive_sse_held(
         headers = {"Accept": "text/event-stream"}
         cookies = console.cookies()
 
-        def worker(index: int) -> None:
-            _subscribe(
-                harness, url, headers, cookies, None, stop, buckets[index]
-            )
-
-        with ThreadPoolExecutor(max_workers=connections) as pool:
-            futures = [pool.submit(worker, index) for index in range(connections)]
+        subscribers = _start_subscribers(
+            harness, url, headers, cookies, stop, buckets
+        )
+        try:
             attach_deadline = harness.monotonic() + 30.0
             while harness.monotonic() < attach_deadline:
                 caught = sum(
@@ -491,8 +488,9 @@ def _drive_sse_held(
                     extra.append(f"reconnect skipped {gap} committed event(s)")
             stop.set()
             store.write_one(run_id, workspace)
-            for future in futures:
-                future.result(timeout=20)
+            subscribers.join(timeout=20)
+        finally:
+            stop.set()
         elapsed = harness.monotonic() - started
         _log(
             f"sse connections={connections} {elapsed:.1f}s "
@@ -1028,6 +1026,86 @@ def _measure_thaw(
                 return latency, warm_reasons(original_id, container_id, resets > 1)
         harness.sleep(0.01)
     return None, ["warm reacquire never observed freeze then thaw"]
+
+
+def _start_subscribers(
+    harness: Harness,
+    url: str,
+    headers: dict[str, str],
+    cookies: dict[str, str],
+    stop: threading.Event,
+    buckets: list[list[tuple[float, int]]],
+) -> threading.Thread:
+    """Read 500 streams on one loop. 500 OS threads on 8 vCPU starve the hold."""
+
+    def runner() -> None:
+        if harness.subscribe is not None:
+            with ThreadPoolExecutor(max_workers=len(buckets)) as pool:
+                futures = [
+                    pool.submit(
+                        harness.subscribe,
+                        url,
+                        headers,
+                        cookies,
+                        None,
+                        stop,
+                        buckets[index],
+                    )
+                    for index in range(len(buckets))
+                ]
+                for future in futures:
+                    future.result()
+            return
+        asyncio.run(_subscribe_many(url, headers, cookies, stop, buckets))
+
+    thread = threading.Thread(target=runner, name="sse-subscribers", daemon=True)
+    thread.start()
+    return thread
+
+
+async def _subscribe_many(
+    url: str,
+    headers: dict[str, str],
+    cookies: dict[str, str],
+    stop: threading.Event,
+    buckets: list[list[tuple[float, int]]],
+) -> None:
+    limits = httpx.Limits(
+        max_connections=len(buckets) + 8,
+        max_keepalive_connections=len(buckets),
+    )
+    async with httpx.AsyncClient(
+        timeout=900.0, trust_env=False, cookies=cookies, limits=limits
+    ) as client:
+        await asyncio.gather(
+            *(
+                _subscribe_async(client, url, headers, None, stop, buckets[index])
+                for index in range(len(buckets))
+            )
+        )
+
+
+async def _subscribe_async(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    last_event_id: str | None,
+    stop: threading.Event,
+    into: list[tuple[float, int]],
+) -> None:
+    request_headers = dict(headers)
+    if last_event_id:
+        request_headers["Last-Event-ID"] = last_event_id
+    async with client.stream("GET", url, headers=request_headers) as response:
+        response.raise_for_status()
+        async for line in response.aiter_lines():
+            if stop.is_set():
+                return
+            parsed = parse_sse_id(line)
+            if parsed is not None:
+                into.append((time.monotonic(), parsed))
+            if last_event_id is not None and parsed is not None:
+                return
 
 
 def _subscribe(

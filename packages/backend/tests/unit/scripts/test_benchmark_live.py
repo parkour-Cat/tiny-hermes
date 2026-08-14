@@ -364,6 +364,12 @@ def test_event_writer_uses_the_same_allocator_as_the_store() -> None:
     assert "relax" not in text.lower()
 
 
+def test_sse_subscribers_share_one_asyncio_loop() -> None:
+    text = (_SCRIPTS / "benchmark_live.py").read_text(encoding="utf-8")
+    assert "asyncio.run(_subscribe_many" in text
+    assert "ThreadPoolExecutor(max_workers=connections)" not in text
+
+
 def test_run_driver_names_every_section_24_1_gate() -> None:
     assert set(live.DRIVERS) == {gate.name for gate in benchmark.GATES}
 
