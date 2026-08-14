@@ -147,6 +147,9 @@ jobs:
       - run: pnpm web:lint
       - run: pnpm web:test
       - run: pnpm web:build
+      - run: pnpm chat:lint
+      - run: pnpm chat:test
+      - run: pnpm chat:build
 
   compose-e2e:
     runs-on: ubuntu-latest
