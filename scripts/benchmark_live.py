@@ -159,14 +159,16 @@ def missed_cadence(
     every: float,
     slack: float,
     *,
-    skip_first: int = 1,
+    after: float | None = None,
+    skip_first: int = 0,
 ) -> bool:
     """True when a live gap exceeds 5s + slack.
 
-    The first interval is setup: history replay and the subscriber joining.
-    The product cell is the hold after that, not the connect storm.
+    History replay and the 500-connection attach wait are setup. Pass
+    ``after`` as the hold start so a 30s join gap is not a cadence miss.
     """
-    live = stamps[skip_first:]
+    live = [stamp for stamp in stamps if after is None or stamp >= after]
+    live = live[skip_first:]
     if len(live) < 2:
         return True
     return any(
@@ -450,7 +452,9 @@ def _drive_sse_held(
                         f"connection {index} received {len(bucket)} events, "
                         f"expected >= {expected}"
                     )
-                if missed_cadence(stamps, SSE_CADENCE_S, SSE_CADENCE_SLACK_S):
+                if missed_cadence(
+                    stamps, SSE_CADENCE_S, SSE_CADENCE_SLACK_S, after=started
+                ):
                     extra.append(f"connection {index} missed the 5s cadence")
                 lost = sequence_loss(seqs)
                 if lost:

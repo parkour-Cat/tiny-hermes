@@ -348,7 +348,12 @@ def test_sse_reconnect_rejects_a_gap() -> None:
     assert live.reconnect_gap(last_seen=4, first_replayed=5) == 0
     assert live.missed_cadence([0.0, 5.0, 10.0], every=5.0, slack=2.0) is False
     assert live.missed_cadence([0.0, 5.0, 20.0], every=5.0, slack=2.0) is True
-    assert live.missed_cadence([0.0, 12.0, 17.0, 22.0], every=5.0, slack=2.0) is False
+    assert live.missed_cadence(
+        [0.0, 0.01, 0.02, 30.0, 35.0, 40.0], every=5.0, slack=2.0, after=30.0
+    ) is False
+    assert live.missed_cadence(
+        [0.0, 0.01, 30.0, 35.0, 50.0], every=5.0, slack=2.0, after=30.0
+    ) is True
 
 
 def test_event_writer_uses_the_same_allocator_as_the_store() -> None:
