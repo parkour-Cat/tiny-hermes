@@ -18,6 +18,7 @@ from tiny_hermes.identity.infrastructure.sql_store import SqlAuthStore
 from tiny_hermes.model_catalog.application.service import ModelEndpointService
 from tiny_hermes.model_catalog.infrastructure.sql_store import SqlModelEndpointStore
 from tiny_hermes.outbound.client import SafeOutboundClient
+from tiny_hermes.runs.application.event_stream import EventStreamHub, Poll
 from tiny_hermes.runs.application.service import RunCoordination
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
@@ -40,12 +41,18 @@ class ApplicationResources:
         self._session_factory: async_sessionmaker[AsyncSession] | None = None
         self._notifier: WakeUpNotifier | None = None
         self._object_store: MinioObjectStore | None = None
+        self._event_hub: EventStreamHub | None = None
 
     @property
     def settings(self) -> Settings:
         if self._settings is None:
             self._settings = get_settings()
         return self._settings
+
+    def event_stream_hub(self, poll: Poll) -> EventStreamHub:
+        if self._event_hub is None:
+            self._event_hub = EventStreamHub(poll)
+        return self._event_hub
 
     def session_factory(self) -> async_sessionmaker[AsyncSession]:
         if self._session_factory is None:
