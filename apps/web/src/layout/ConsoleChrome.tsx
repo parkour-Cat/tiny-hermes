@@ -12,7 +12,7 @@ export function BrandMark() {
   const { t } = useLocale();
   return (
     <Link to="/workspaces" className="th-brand">
-      <HermesMark size={36} />
+      <HermesMark size={40} />
       <span className="th-word">{t("appName")}</span>
     </Link>
   );

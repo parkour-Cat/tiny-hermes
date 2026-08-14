@@ -60,16 +60,11 @@ h4,
 }
 
 .brand-panel .th-hermes {
-  margin-bottom: 28px;
-}
-
-.brand-word {
-  margin: 0 0 18px;
-  font-size: 22px;
+  margin-bottom: 20px;
 }
 
 .brand-kicker {
-  margin: 0;
+  margin: 8px 0 0;
   color: var(--th-copper);
   font-size: 13px;
   font-weight: 700;
@@ -119,50 +114,75 @@ h4,
   flex: none;
 }
 
+.th-hermes-field,
+.th-hermes-face,
+.th-hermes-paper,
+.th-hermes-banner {
+  fill: #f6f1e8;
+}
+
 .th-hermes-ink,
 .th-hermes-bangs,
+.th-hermes-eye,
+.th-hermes-pause {
+  fill: #1a1612;
+}
+
 .th-hermes-cup {
-  fill: var(--th-copper);
+  fill: #fff;
 }
 
-.th-hermes-face,
-.th-hermes-paper {
-  fill: var(--th-paper);
+.th-hermes-cup-edge {
+  fill: #c45c26;
 }
 
+.th-hermes-ring,
+.th-hermes-banner {
+  stroke: #c45c26;
+}
+
+.th-hermes-ring {
+  fill: none;
+  stroke-width: 10;
+}
+
+.th-hermes-banner {
+  stroke-width: 4;
+}
+
+.th-hermes-band-edge,
 .th-hermes-band,
 .th-hermes-lash {
   fill: none;
   stroke-linecap: round;
 }
 
-.th-hermes-band {
-  stroke: var(--th-copper);
-  stroke-width: 4.2;
+.th-hermes-band-edge {
+  stroke: #c45c26;
+  stroke-width: 13;
 }
 
-.th-hermes-eye {
-  fill: var(--th-copper);
+.th-hermes-band {
+  stroke: #fff;
+  stroke-width: 8;
 }
 
 .th-hermes-lash {
-  stroke: var(--th-copper);
-  stroke-width: 1.1;
+  stroke: #1a1612;
+  stroke-width: 2.4;
 }
 
-.th-hermes-hero .th-hermes-ink,
-.th-hermes-hero .th-hermes-bangs,
-.th-hermes-hero .th-hermes-eye {
-  fill: var(--th-ink);
+.th-hermes-star {
+  fill: #c45c26;
 }
 
-.th-hermes-hero .th-hermes-face,
-.th-hermes-hero .th-hermes-paper {
-  fill: var(--th-paper);
-}
-
-.th-hermes-hero .th-hermes-lash {
-  stroke: var(--th-ink);
+.th-hermes-lockup {
+  fill: #1a1612;
+  font-family: Syne, "Noto Sans SC", sans-serif;
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-anchor: middle;
 }
 
 .th-word {
