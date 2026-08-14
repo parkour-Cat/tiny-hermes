@@ -54,6 +54,7 @@ x-app-env: &app-env
 services:
   postgres:
     image: postgres:17.6-alpine
+    command: ["postgres", "-c", "max_connections=200"]
     environment:
       POSTGRES_DB: tiny_hermes
       POSTGRES_USER: tiny_hermes

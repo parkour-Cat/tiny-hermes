@@ -29,6 +29,8 @@ EXECUTION_BOUNDS = [
     ("max_recovery_attempts", 3, 0, 10),
     ("event_retention_hours", 168, 1, 8760),
     ("sse_heartbeat_seconds", 15, 5, 60),
+    ("database_pool_size", 80, 5, 200),
+    ("database_max_overflow", 40, 0, 200),
     ("deterministic_model_delay_ms", 50, 0, 5000),
 ]
 

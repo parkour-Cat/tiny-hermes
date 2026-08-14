@@ -57,7 +57,10 @@ class ApplicationResources:
     def database_engine(self) -> AsyncEngine:
         if self._engine is None:
             self._engine = create_async_engine(
-                self.settings.database_url, pool_pre_ping=True
+                self.settings.database_url,
+                pool_pre_ping=True,
+                pool_size=self.settings.database_pool_size,
+                max_overflow=self.settings.database_max_overflow,
             )
         return self._engine
 

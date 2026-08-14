@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     max_recovery_attempts: int = Field(default=3, ge=0, le=10)
     event_retention_hours: int = Field(default=168, ge=1, le=8_760)
     sse_heartbeat_seconds: int = Field(default=15, ge=5, le=60)
+    #: The API process holds one pool. §24.1 keeps 500 SSE subscribers, each
+    #: polling committed rows; the default SQLAlchemy pool of 15 serialises
+    #: those polls into multi-second gaps. Worker and Scheduler do not read
+    #: this — they keep the small engine default.
+    database_pool_size: int = Field(default=80, ge=5, le=200)
+    database_max_overflow: int = Field(default=40, ge=0, le=200)
     deterministic_model_delay_ms: int = Field(default=50, ge=0, le=5_000)
 
     # Outbound calls. The read timeout is what actually bounds one model round:
