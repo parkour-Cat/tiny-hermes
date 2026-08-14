@@ -102,7 +102,47 @@ under that cell for this one sample. It is still not the official
 - GitHub Actions `compose-e2e` green.
 - A Feishu WebSocket session.
 
-The Compose listeners were bound on the public interfaces of this
-instance. The stack was **stopped** after the drills so those ports
-did not stay open. Destroy or firewall the instance; rotate the
-login that was used to reach it.
+The Compose listeners were bound on the public interfaces of each
+instance. Each stack was **stopped** after the drills. Destroy or
+firewall the instances; rotate the logins that were used to reach them.
+
+## 6. Second host (8 vCPU / ~30 GiB) — same day
+
+A second operator Linux spot instance. Same Ubuntu 26.04, Docker 29.1.3,
+Compose 2.40.3, uv 0.11.26, CPython 3.12.13. `vda` 50 GiB, `ROTA=1`.
+MemTotal 31951588 kB ≈ **30.47 GiB**. `nproc` 8.
+
+`--shape-only` set `shape_ok: true` (exit 0 for the shape check;
+overall `passed` stays false because `--shape-only` emits no gates).
+`scripts/benchmark_m1.py` against a healthy API exited **1**: every
+§24.1 gate is still `not_run` / `live driver for this gate is not
+executed in this invocation`. Git SHA on that tree:
+`d244a86edd9f5076b5595c24f828c9346980c7ba` (this record's first
+commits on top of 4D).
+
+Generated-secret Compose came up healthy. Workspace drill **PASS**:
+
+```
+1MiB commits           runs=12  p50=0.57s  p95=0.61s
+large commit           files=501  bytes=~100MiB  took=8.5s  worker_rss=102MiB
+next run               status=completed  took=2.2s
+leftovers              containers=0  volumes=0
+```
+
+Worker crash in that drill: `recovered_in=29.8s` to `completed`.
+
+Restart drill **PASS**, 149.0 s. Lease expired to `queued` in 27.29 s.
+
+Informational vs the product table (still not a §24.1 pass): 1 MiB
+whole-Run P95 0.61 s is under 1 s; ~100 MiB 8.5 s is under 15 s;
+next-run 2.2 s is under 3 s; queued-after-kill 27.29 s is under 30 s.
+
+```json
+{
+  "git_sha": "d244a86edd9f5076b5595c24f828c9346980c7ba",
+  "shape": {"os": "linux", "vcpu": 8, "ram_gib": 30.47140884399414},
+  "reference_shape": {"os": "linux", "vcpu": 8, "ram_gib": 16},
+  "shape_ok": true,
+  "passed": false
+}
+```
