@@ -414,6 +414,8 @@ def _drive_sse_held(
         if run_id is None or status >= 400:
             return _fail(gate, evaluate, sample_type, f"could not create a run ({status})")
         store.write_one(run_id, workspace)
+        known = store.sequences(run_id)
+        anchor = known[-1] if known else 0
         stop = threading.Event()
         buckets: list[list[tuple[float, int]]] = [[] for _ in range(connections)]
         url = f"{harness.api}/api/v1/runs/{run_id}/events?workspace_id={workspace}"
@@ -429,8 +431,12 @@ def _drive_sse_held(
             futures = [pool.submit(worker, index) for index in range(connections)]
             attach_deadline = harness.monotonic() + 30.0
             while harness.monotonic() < attach_deadline:
-                attached = sum(1 for bucket in buckets if bucket)
-                if attached >= connections:
+                caught = sum(
+                    1
+                    for bucket in buckets
+                    if any(sequence == anchor for _, sequence in bucket)
+                )
+                if caught >= connections:
                     break
                 harness.sleep(0.05)
             started = harness.monotonic()
@@ -444,6 +450,8 @@ def _drive_sse_held(
                 if now < target and now < deadline:
                     harness.sleep(min(target - now, deadline - now))
             expected = max(1, int(duration / SSE_CADENCE_S))
+            worst_gap = 0.0
+            missed = 0
             for index, bucket in enumerate(buckets):
                 stamps = [stamp for stamp, _ in bucket]
                 seqs = [sequence for _, sequence in bucket]
@@ -452,10 +460,18 @@ def _drive_sse_held(
                         f"connection {index} received {len(bucket)} events, "
                         f"expected >= {expected}"
                     )
+                hold = [stamp for stamp in stamps if stamp >= started]
                 if missed_cadence(
                     stamps, SSE_CADENCE_S, SSE_CADENCE_SLACK_S, after=started
                 ):
+                    missed += 1
                     extra.append(f"connection {index} missed the 5s cadence")
+                    if len(hold) >= 2:
+                        gap = max(
+                            later - earlier
+                            for earlier, later in zip(hold, hold[1:], strict=False)
+                        )
+                        worst_gap = max(worst_gap, gap)
                 lost = sequence_loss(seqs)
                 if lost:
                     extra.append(f"connection {index} had a committed gap of {lost}")
@@ -478,7 +494,11 @@ def _drive_sse_held(
             for future in futures:
                 future.result(timeout=20)
         elapsed = harness.monotonic() - started
-        _log(f"sse connections={connections} {elapsed:.1f}s reasons={len(extra)}")
+        _log(
+            f"sse connections={connections} {elapsed:.1f}s "
+            f"reasons={len(extra)} missed_cadence={missed} "
+            f"worst_hold_gap={worst_gap:.1f}s"
+        )
         return evaluate(
             gate,
             sample_type(
