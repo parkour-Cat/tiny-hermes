@@ -67,6 +67,67 @@ test("sign-in opens a conversation surface", async () => {
   expect(screen.queryByText("试验场")).toBeNull();
 });
 
+test("home opens the default agent stored on this device", async () => {
+  const newton = "99999999-aaaa-4bbb-8ccc-dddddddddddd";
+  window.localStorage.setItem(
+    "tiny-hermes-chat-default-agent",
+    JSON.stringify({ workspaceId: WORKSPACE, agentId: newton }),
+  );
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(USER)),
+    http.get("/api/v1/workspaces", () =>
+      HttpResponse.json([{ id: WORKSPACE, name: "Acme", status: "active" }]),
+    ),
+    http.get("/api/v1/agents", () =>
+      HttpResponse.json([
+        {
+          id: AGENT,
+          name: "Darwin",
+          alias: "darwin",
+          status: "published",
+          current_version_id: "v1",
+          created_at: "2026-08-10T00:00:00Z",
+        },
+        {
+          id: newton,
+          name: "Newton",
+          alias: "newton",
+          status: "published",
+          current_version_id: "v1",
+          created_at: "2026-08-10T00:00:00Z",
+        },
+      ]),
+    ),
+    http.get(`/api/v1/agents/${AGENT}`, () =>
+      HttpResponse.json({
+        id: AGENT,
+        name: "Darwin",
+        alias: "darwin",
+        status: "published",
+        current_version_id: "v1",
+        created_at: "2026-08-10T00:00:00Z",
+      }),
+    ),
+    http.get(`/api/v1/agents/${newton}`, () =>
+      HttpResponse.json({
+        id: newton,
+        name: "Newton",
+        alias: "newton",
+        status: "published",
+        current_version_id: "v1",
+        created_at: "2026-08-10T00:00:00Z",
+      }),
+    ),
+    http.get("/api/v1/sessions", () => HttpResponse.json([])),
+  );
+
+  window.history.pushState({}, "", "/");
+  render(<App />);
+
+  expect(await screen.findByRole("heading", { name: "Newton" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Darwin" })).toBeNull();
+});
+
 test("a session the platform has already ended returns the user to sign-in", async () => {
   window.history.pushState({}, "", `/${WORKSPACE}/${AGENT}`);
   server.use(

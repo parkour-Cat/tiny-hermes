@@ -165,7 +165,7 @@ button:disabled {
 
 .chat-app {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
+  grid-template-columns: 244px minmax(0, 1fr);
   height: 100dvh;
   background: var(--th-paper);
 }
@@ -173,9 +173,9 @@ button:disabled {
 .rail {
   display: flex;
   flex-direction: column;
-  gap: 10px;
   min-height: 0;
-  padding: 14px 12px 12px;
+  overflow: visible;
+  padding: 12px 10px 10px;
   background: var(--th-sider);
   border-right: 1px solid var(--th-line);
 }
@@ -183,8 +183,13 @@ button:disabled {
 .rail-brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 2px 6px 6px;
+  gap: 8px;
+  min-height: 32px;
+  padding: 2px 8px 14px;
+}
+
+.rail-brand .th-word {
+  font-size: 13px;
 }
 
 .menu-anchor {
@@ -201,10 +206,18 @@ button:disabled {
   border: 0;
   border-radius: 10px;
   padding: 8px 10px;
-  background: var(--th-paper-raised);
+  background: transparent;
   color: var(--th-ink);
   text-align: left;
   font-weight: 650;
+}
+
+.menu-trigger {
+  background: var(--th-paper-raised);
+}
+
+.rail-user:hover {
+  background: rgb(26 22 18 / 6%);
 }
 
 .menu-trigger span:first-child,
@@ -213,6 +226,140 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.title-picker-wrap {
+  position: relative;
+}
+
+.title-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  border: 0;
+  border-radius: 10px;
+  padding: 4px 8px 4px 2px;
+  background: transparent;
+  color: var(--th-ink);
+}
+
+.title-picker:hover {
+  background: rgb(26 22 18 / 5%);
+}
+
+.title-picker h1 {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.title-picker-menu {
+  right: auto;
+  min-width: 220px;
+}
+
+.user-card-wrap {
+  position: relative;
+}
+
+.user-card {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + 8px);
+  left: 0;
+  width: min(280px, calc(100vw - 24px));
+  padding: 12px;
+  border: 1px solid var(--th-line);
+  border-radius: 16px;
+  background: var(--th-paper-raised);
+  box-shadow: var(--th-shadow);
+}
+
+.user-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 2px 12px;
+  border-bottom: 1px solid var(--th-line);
+}
+
+.user-card-head .rail-avatar {
+  width: 36px;
+  height: 36px;
+  font-size: 15px;
+}
+
+.user-card-head strong {
+  display: block;
+  font-size: 14px;
+}
+
+.user-card-head p {
+  margin: 2px 0 0;
+  color: var(--th-ink-soft);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.user-card-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 2px 0;
+  color: var(--th-ink-soft);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.choice-pills {
+  display: flex;
+  gap: 6px;
+}
+
+.choice-pills button {
+  flex: 1;
+  border: 1px solid var(--th-line);
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: transparent;
+  color: var(--th-ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.choice-pills button.is-on {
+  border-color: var(--th-ink);
+  background: var(--th-ink);
+  color: var(--th-paper);
+}
+
+.user-card-actions {
+  display: grid;
+  gap: 2px;
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--th-line);
+}
+
+.user-card-actions a,
+.user-card-actions button {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--th-ink);
+  text-align: left;
+  text-decoration: none;
+  font-weight: 650;
+}
+
+.user-card-actions a:hover,
+.user-card-actions button:hover {
+  background: var(--th-sider);
 }
 
 .menu-caret {
@@ -261,18 +408,34 @@ button:disabled {
 }
 
 .rail-new {
-  width: 100%;
-  border: 1px solid var(--th-ink);
+  width: calc(100% - 4px);
+  margin: 0 2px 18px;
+  border: 0;
   border-radius: 10px;
-  padding: 8px 12px;
-  background: transparent;
-  color: var(--th-ink);
+  padding: 10px 12px;
+  background: var(--th-ink);
+  color: var(--th-paper);
   font-weight: 650;
 }
 
 .rail-new:hover:not(:disabled) {
-  background: var(--th-ink);
-  color: var(--th-paper);
+  background: var(--th-copper-deep);
+}
+
+.rail-kicker {
+  margin: 0 0 6px;
+  padding: 0 10px;
+  color: var(--th-ink-soft);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rail-empty {
+  margin: 8px 10px 0;
+  color: var(--th-ink-soft);
+  font-size: 13px;
 }
 
 .rail-sessions {
@@ -311,7 +474,9 @@ button:disabled {
 }
 
 .rail-foot {
-  padding-top: 10px;
+  position: relative;
+  margin-top: 8px;
+  padding-top: 8px;
   border-top: 1px solid var(--th-line);
 }
 
@@ -345,19 +510,80 @@ button:disabled {
 }
 
 .settings-intro,
-.settings-fact {
+.settings-fact,
+.settings-hint {
   margin: 0 0 8px;
   color: var(--th-ink-soft);
   line-height: 1.5;
 }
 
 .settings section {
-  margin-top: 28px;
+  margin-top: 32px;
 }
 
 .settings h2 {
   margin: 0 0 10px;
   font-size: 15px;
+}
+
+.settings-dl {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.settings-dl div {
+  display: grid;
+  gap: 2px;
+}
+
+.settings-dl dt {
+  color: var(--th-ink-soft);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.settings-dl dd {
+  margin: 0;
+}
+
+.settings-agent-list {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings-agent-list button {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  border: 1px solid var(--th-line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: var(--th-paper-raised);
+  text-align: left;
+}
+
+.settings-agent-list button span {
+  color: var(--th-ink-soft);
+  font-size: 13px;
+}
+
+.settings-agent-list button.is-on {
+  border-color: var(--th-ink);
+  box-shadow: inset 2px 0 0 var(--th-copper);
+}
+
+.settings-about {
+  padding-top: 8px;
+}
+
+.settings-meta {
+  margin: 8px 0 0;
+  color: var(--th-ink-soft);
+  font-size: 12px;
 }
 
 .choice-row {
@@ -396,8 +622,9 @@ button:disabled {
 
 .chat-identity {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
   min-width: 0;
 }
 
@@ -643,7 +870,9 @@ html[data-theme="dark"] {
   --th-shadow: 0 18px 50px rgb(0 0 0 / 35%);
 }
 
-html[data-theme="dark"] .rail-sessions button:hover {
+html[data-theme="dark"] .rail-sessions button:hover,
+html[data-theme="dark"] .rail-user:hover,
+html[data-theme="dark"] .title-picker:hover {
   background: rgb(243 236 227 / 6%);
 }
 

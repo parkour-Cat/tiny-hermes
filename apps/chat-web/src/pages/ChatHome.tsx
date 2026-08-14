@@ -3,6 +3,7 @@ import { Navigate } from "react-router-dom";
 import { problemMessage } from "../api/messages";
 import { SessionRail } from "../chat/SessionRail";
 import { usePublishedAgents } from "../chat/usePublishedAgents";
+import { chooseDefaultAgent, loadDefaultAgent } from "../i18n/defaultAgent";
 import { useT } from "../i18n/locale";
 
 export function ChatHome() {
@@ -22,22 +23,20 @@ export function ChatHome() {
       </p>
     );
   }
-  const first = listed.rows[0];
-  if (first !== undefined) {
-    return <Navigate to={`/${first.workspace.id}/${first.agent.id}`} replace />;
+  const chosen = chooseDefaultAgent(listed.rows, loadDefaultAgent());
+  if (chosen !== undefined) {
+    return <Navigate to={`/${chosen.workspace.id}/${chosen.agent.id}`} replace />;
   }
 
   return (
     <div className="chat-app">
       <SessionRail
-        agents={[]}
-        agentKey=""
         sessions={[]}
         activeSessionId={null}
-        onAgent={() => undefined}
         onSession={() => undefined}
         onNewChat={() => undefined}
         creating={false}
+        newChatDisabled
       />
       <section className="chat-main">
         <div className="thread-empty">

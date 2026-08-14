@@ -1,5 +1,3 @@
-import { AgentPicker } from "./AgentPicker";
-import type { ListedAgent } from "./published";
 import { UserMenu } from "./UserMenu";
 import { useT } from "../i18n/locale";
 import { HermesMark } from "../ui/HermesMark";
@@ -10,37 +8,39 @@ export type RailSession = {
 };
 
 export function SessionRail({
-  agents,
-  agentKey,
   sessions,
   activeSessionId,
-  onAgent,
   onSession,
   onNewChat,
   creating,
+  newChatDisabled = false,
 }: {
-  agents: ListedAgent[];
-  agentKey: string;
   sessions: RailSession[];
   activeSessionId: string | null;
-  onAgent: (key: string) => void;
   onSession: (id: string) => void;
   onNewChat: () => void;
   creating: boolean;
+  newChatDisabled?: boolean;
 }) {
   const t = useT();
 
   return (
     <aside className="rail">
       <div className="rail-brand">
-        <HermesMark size={32} />
+        <HermesMark size={22} />
         <span className="th-word">{t("appName")}</span>
       </div>
-      <AgentPicker agents={agents} agentKey={agentKey} onAgent={onAgent} />
-      <button type="button" className="rail-new" disabled={creating} onClick={onNewChat}>
+      <button
+        type="button"
+        className="rail-new"
+        disabled={creating || newChatDisabled}
+        onClick={onNewChat}
+      >
         {t("newChat")}
       </button>
+      <p className="rail-kicker">{t("sessions")}</p>
       <nav className="rail-sessions" aria-label={t("sessions")}>
+        {sessions.length === 0 ? <p className="rail-empty">{t("emptySessions")}</p> : null}
         {sessions.map((session) => (
           <button
             type="button"

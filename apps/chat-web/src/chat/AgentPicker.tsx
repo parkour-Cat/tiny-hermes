@@ -8,10 +8,12 @@ export function AgentPicker({
   agents,
   agentKey,
   onAgent,
+  fallback,
 }: {
   agents: ListedAgent[];
   agentKey: string;
   onAgent: (key: string) => void;
+  fallback?: string;
 }) {
   const t = useT();
   const root = useRef<HTMLDivElement>(null);
@@ -20,29 +22,29 @@ export function AgentPicker({
   useDismiss(open, close, root);
 
   const current = agents.find((row) => `${row.workspace.id}:${row.agent.id}` === agentKey);
-  const label = current === undefined ? t("pickAgent") : agentLabel(current, agents);
+  const label = current === undefined ? (fallback ?? t("pickAgent")) : agentLabel(current, agents);
 
   if (agents.length === 0) {
-    return null;
+    return <h1>{fallback ?? t("pickAgent")}</h1>;
   }
 
   return (
-    <div className="menu-anchor" ref={root}>
+    <div className="title-picker-wrap" ref={root}>
       <button
         type="button"
-        className="menu-trigger"
+        className="title-picker"
         aria-label={t("pickAgent")}
         aria-haspopup="listbox"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        <span>{label}</span>
+        <h1>{label}</h1>
         <span className="menu-caret" aria-hidden>
           ▾
         </span>
       </button>
       {open ? (
-        <ul className="menu-panel" role="listbox" aria-label={t("pickAgent")}>
+        <ul className="menu-panel title-picker-menu" role="listbox" aria-label={t("pickAgent")}>
           {agents.map((row) => {
             const key = `${row.workspace.id}:${row.agent.id}`;
             const selected = key === agentKey;

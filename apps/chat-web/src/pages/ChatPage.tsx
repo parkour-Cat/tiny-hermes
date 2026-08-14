@@ -13,6 +13,7 @@ import type {
   SessionResponse,
 } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
+import { AgentPicker } from "../chat/AgentPicker";
 import { asId } from "../chat/ids";
 import { matchingSessions } from "../chat/published";
 import { Composer } from "../chat/Composer";
@@ -24,7 +25,6 @@ import { useT } from "../i18n/locale";
 import { RUN_ACTIONS } from "../runs/actions";
 import { runQueryOptions, useRunEvents } from "../runs/useRunEvents";
 import { isLiveStatus, statusLabel } from "../status";
-import { HermesMark } from "../ui/HermesMark";
 
 const CHROME_ACTIONS = new Set(["pause", "resume", "cancel"]);
 
@@ -228,16 +228,8 @@ export function ChatPage() {
   return (
     <div className="chat-app">
       <SessionRail
-        agents={listed.rows}
-        agentKey={`${workspaceId}:${agentId}`}
         sessions={railSessions}
         activeSessionId={activeSessionId}
-        onAgent={(key) => {
-          const [nextWorkspace, nextAgent] = key.split(":");
-          if (nextWorkspace !== undefined && nextAgent !== undefined) {
-            navigate(`/${nextWorkspace}/${nextAgent}`);
-          }
-        }}
         onSession={(id) => navigate(`/${workspaceId}/${agentId}/${id}`)}
         onNewChat={() => openSession.mutate()}
         creating={openSession.isPending}
@@ -245,13 +237,20 @@ export function ChatPage() {
       <section className="chat-main">
         <header className="chat-head">
           <div className="chat-identity">
-            <HermesMark size={28} />
-            <div>
-              <h1>{agent.data.name}</h1>
-              {run === undefined || run.finished_at !== null ? null : (
-                <p className="chat-status">{statusLabel(run.status, t)}</p>
-              )}
-            </div>
+            <AgentPicker
+              agents={listed.rows}
+              agentKey={`${workspaceId}:${agentId}`}
+              fallback={agent.data.name}
+              onAgent={(key) => {
+                const [nextWorkspace, nextAgent] = key.split(":");
+                if (nextWorkspace !== undefined && nextAgent !== undefined) {
+                  navigate(`/${nextWorkspace}/${nextAgent}`);
+                }
+              }}
+            />
+            {run === undefined || run.finished_at !== null ? null : (
+              <p className="chat-status">{statusLabel(run.status, t)}</p>
+            )}
           </div>
           <div className="chat-actions">
             {(blocked ? headActions : live ? (run?.available_actions ?? []) : []).map((action) => {

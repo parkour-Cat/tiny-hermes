@@ -38,7 +38,12 @@ Object.defineProperty(window, "matchMedia", {
   }),
 });
 
-afterEach(() => mediaMatches.clear());
+afterEach(() => {
+  mediaMatches.clear();
+  window.localStorage.removeItem("tiny-hermes-chat-default-agent");
+  window.localStorage.removeItem("tiny-hermes-chat-theme");
+  window.localStorage.removeItem("tiny-hermes-chat-locale");
+});
 
 class ResizeObserverStub {
   observe(): void {}

@@ -34,6 +34,7 @@ function readStoredTheme(): ThemeChoice | null {
 
 type ThemeValue = {
   dark: boolean;
+  setTheme: (choice: ThemeChoice) => void;
   toggle: () => void;
 };
 
@@ -52,18 +53,21 @@ export function ChatTheme({ children }: { children: ReactNode }) {
   const [stored, setStored] = useState<ThemeChoice | null>(readStoredTheme);
   const dark = stored === null ? systemDark : stored === "dark";
   const value = useMemo<ThemeValue>(
-    () => ({
-      dark,
-      toggle: () => {
-        const next: ThemeChoice = dark ? "light" : "dark";
-        setStored(next);
+    () => {
+      const setTheme = (choice: ThemeChoice) => {
+        setStored(choice);
         try {
-          window.localStorage.setItem(STORAGE_KEY, next);
+          window.localStorage.setItem(STORAGE_KEY, choice);
         } catch {
           // A blocked store still lets this session switch.
         }
-      },
-    }),
+      };
+      return {
+        dark,
+        setTheme,
+        toggle: () => setTheme(dark ? "light" : "dark"),
+      };
+    },
     [dark],
   );
 
