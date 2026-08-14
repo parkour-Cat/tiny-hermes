@@ -5,6 +5,7 @@ import { HermesMark } from "./HermesMark";
 
 test("the mark is the circular artwork without the word", () => {
   const { container } = render(<HermesMark />);
+  expect(container.querySelector(".th-hermes-wrap-mark")).not.toBeNull();
   const img = container.querySelector("img.th-hermes-mark");
   expect(img).not.toBeNull();
   expect(img).toHaveAttribute("src", "/tiny-hermes-icon.png");
@@ -13,6 +14,8 @@ test("the mark is the circular artwork without the word", () => {
 
 test("the hero and empty states use the named lockup", () => {
   const hero = render(<HermesMark variant="hero" />);
+  expect(hero.container.querySelector(".th-hermes-wrap-hero")).not.toBeNull();
+  expect(hero.container.querySelector(".th-hermes-wrap-mark")).toBeNull();
   const heroImg = hero.container.querySelector("img.th-hermes-hero");
   expect(heroImg).toHaveAttribute("src", "/tiny-hermes-lockup.png");
   expect(hero.getByAltText("TINY-HERMES")).toBeInTheDocument();
