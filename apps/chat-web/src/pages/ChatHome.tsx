@@ -1,6 +1,7 @@
 import { Navigate } from "react-router-dom";
 
 import { problemMessage } from "../api/messages";
+import { chatPath } from "../chat/paths";
 import { emptySessionPrefs } from "../chat/sessionPrefs";
 import { SessionRail } from "../chat/SessionRail";
 import { usePublishedAgents } from "../chat/usePublishedAgents";
@@ -26,7 +27,7 @@ export function ChatHome() {
   }
   const chosen = chooseDefaultAgent(listed.rows, loadDefaultAgent());
   if (chosen !== undefined) {
-    return <Navigate to={`/${chosen.workspace.id}/${chosen.agent.id}`} replace />;
+    return <Navigate to={chatPath(chosen, listed.rows)} replace />;
   }
 
   return (

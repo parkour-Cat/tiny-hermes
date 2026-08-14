@@ -957,6 +957,34 @@ button:disabled {
   line-height: 1.5;
 }
 
+.composer-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.composer-files li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--th-line);
+  border-radius: 999px;
+  padding: 4px 8px 4px 10px;
+  background: var(--th-paper);
+  font-size: 12px;
+}
+
+.composer-files button {
+  border: 0;
+  border-radius: 50%;
+  padding: 0 5px;
+  background: transparent;
+  color: var(--th-ink-soft);
+}
+
 .composer-bar {
   display: flex;
   align-items: center;
@@ -964,7 +992,32 @@ button:disabled {
   gap: 12px;
 }
 
-.composer button[type="submit"] {
+.composer-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.composer-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0;
+  background: transparent;
+  color: var(--th-ink-soft);
+}
+
+.composer-icon:hover:not(:disabled) {
+  background: var(--th-sider);
+  color: var(--th-ink);
+}
+
+.composer button[type="submit"],
+.composer-stop {
   border: 0;
   border-radius: 999px;
   padding: 7px 14px;
@@ -973,14 +1026,24 @@ button:disabled {
   font-weight: 650;
 }
 
-.composer button[type="submit"]:hover:not(:disabled) {
+.composer button[type="submit"]:hover:not(:disabled),
+.composer-stop:hover {
   background: var(--th-copper-deep);
 }
 
-.composer-hint {
+.composer-stop {
+  background: var(--th-ink);
+}
+
+.composer-hint,
+.composer-note {
   margin: 0;
   color: var(--th-ink-soft);
   font-size: 12px;
+}
+
+.composer-note {
+  color: var(--th-copper-deep);
 }
 
 html[data-theme="dark"] {

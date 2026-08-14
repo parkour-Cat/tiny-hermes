@@ -138,8 +138,9 @@ function renderChat(path = `/${WORKSPACE}/${AGENT}`): void {
             <AuthProvider>
               <Routes>
                 <Route path="/settings" element={<SettingsPage />} />
-                <Route path="/:workspaceId/:agentId/:sessionId" element={<ChatPage />} />
-                <Route path="/:workspaceId/:agentId" element={<ChatPage />} />
+                <Route path="/:left/:middle/:right" element={<ChatPage />} />
+                <Route path="/:left/:middle" element={<ChatPage />} />
+                <Route path="/:left" element={<ChatPage />} />
               </Routes>
             </AuthProvider>
           </MemoryRouter>
@@ -155,6 +156,7 @@ test("the page is a conversation, not a playground or a console", async () => {
 
   expect(await screen.findByRole("heading", { name: "Darwin" })).toBeInTheDocument();
   expect(screen.getByLabelText("写给智能体")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "附件" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "新对话" })).toBeInTheDocument();
   expect(screen.getByText(/直接说要做什么/)).toBeInTheDocument();
   expect(screen.queryByText("试验场")).toBeNull();
@@ -165,6 +167,14 @@ test("the page is a conversation, not a playground or a console", async () => {
   expect(document.querySelector(".ant-card")).toBeNull();
   expect(document.querySelector("select")).toBeNull();
   expect(screen.queryByText(SESSION)).toBeNull();
+});
+
+test("conversation addresses use the agent alias, not stacked uuids", async () => {
+  loadedChat();
+  renderChat("/darwin");
+
+  expect(await screen.findByRole("heading", { name: "Darwin" })).toBeInTheDocument();
+  expect(screen.getByLabelText("写给智能体")).toBeInTheDocument();
 });
 
 test("unpublished agents are not offered in the picker", async () => {

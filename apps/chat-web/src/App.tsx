@@ -41,11 +41,15 @@ function AppRoutes() {
         element={auth.user === null ? <Navigate to="/login" replace /> : <SettingsPage />}
       />
       <Route
-        path="/:workspaceId/:agentId/:sessionId"
+        path="/:left/:middle/:right"
         element={auth.user === null ? <Navigate to="/login" replace /> : <ChatPage />}
       />
       <Route
-        path="/:workspaceId/:agentId"
+        path="/:left/:middle"
+        element={auth.user === null ? <Navigate to="/login" replace /> : <ChatPage />}
+      />
+      <Route
+        path="/:left"
         element={auth.user === null ? <Navigate to="/login" replace /> : <ChatPage />}
       />
       <Route path="*" element={<Navigate to={auth.user === null ? "/login" : "/"} replace />} />

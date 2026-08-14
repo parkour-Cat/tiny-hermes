@@ -1,6 +1,6 @@
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { downloadArtifact } from "../api/artifacts";
 import { api } from "../api/client";
@@ -14,7 +14,7 @@ import type {
 } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
 import { AgentPicker } from "../chat/AgentPicker";
-import { asId } from "../chat/ids";
+import { chatPath, matchSessionId, resolveChatRoute } from "../chat/paths";
 import { matchingSessions } from "../chat/published";
 import { Composer } from "../chat/Composer";
 import { loadSessionPrefs, saveSessionPrefs } from "../chat/sessionPrefs";
@@ -33,19 +33,39 @@ export function ChatPage() {
   const t = useT();
   const auth = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
   const params = useParams();
-  const workspaceId = asId(params.workspaceId);
-  const agentId = asId(params.agentId);
-  const routedSession = asId(params.sessionId);
   const listed = usePublishedAgents();
+  const route = resolveChatRoute(params, listed.rows);
+  const workspaceId = route.kind === "ok" ? route.workspaceId : null;
+  const agentId = route.kind === "ok" ? route.agentId : null;
+  const sessionRef = route.kind === "ok" ? route.sessionRef : null;
   const [runId, setRunId] = useState<string | null>(null);
+  const [openedId, setOpenedId] = useState<string | null>(null);
   const [optimistic, setOptimistic] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [prefs, setPrefs] = useState(loadSessionPrefs);
   const scope = { workspace: workspaceId ?? "" };
   const enabled = workspaceId !== null && agentId !== null && auth.user !== null;
+
+  function go(sessionId?: string | null): void {
+    const row = listed.rows.find(
+      (item) => item.workspace.id === workspaceId && item.agent.id === agentId,
+    );
+    if (row !== undefined) {
+      navigate(chatPath(row, listed.rows, sessionId));
+      return;
+    }
+    if (workspaceId !== null && agentId !== null) {
+      navigate(
+        sessionId === undefined || sessionId === null
+          ? `/${workspaceId}/${agentId}`
+          : `/${workspaceId}/${agentId}/${sessionId}`,
+      );
+    }
+  }
 
   const agent = useQuery({
     queryKey: ["agent", workspaceId, agentId] as const,
@@ -60,6 +80,14 @@ export function ChatPage() {
   const mine = matchingSessions(sessions.data ?? [], agentId ?? "", auth.user?.id ?? "").filter(
     (session) => !prefs.hidden.includes(session.id),
   );
+  const routedSession =
+    matchSessionId(
+      [...mine.map((session) => session.id), openedId].filter((id): id is string => id !== null),
+      sessionRef,
+    ) ??
+    (openedId !== null && (sessionRef === null || openedId.startsWith(sessionRef))
+      ? openedId
+      : null);
   const routedVisible =
     routedSession !== null && !prefs.hidden.includes(routedSession) ? routedSession : null;
   const activeSessionId = routedVisible ?? mine[0]?.id ?? null;
@@ -115,6 +143,22 @@ export function ChatPage() {
     }
   }, [messages.data, optimistic]);
 
+  useEffect(() => {
+    if (workspaceId === null || agentId === null || listed.rows.length === 0) {
+      return;
+    }
+    const row = listed.rows.find(
+      (item) => item.workspace.id === workspaceId && item.agent.id === agentId,
+    );
+    if (row === undefined) {
+      return;
+    }
+    const next = chatPath(row, listed.rows, activeSessionId);
+    if (location.pathname !== next) {
+      navigate(next, { replace: true });
+    }
+  }, [workspaceId, agentId, listed.rows, activeSessionId, location.pathname, navigate]);
+
   const openSession = useMutation({
     mutationFn: () =>
       api<SessionResponse>("/api/v1/sessions", {
@@ -124,10 +168,11 @@ export function ChatPage() {
       }),
     onSuccess: (created) => {
       void queryClient.invalidateQueries({ queryKey: ["sessions", workspaceId, agentId] });
+      setOpenedId(created.id);
       setRunId(null);
       setOptimistic(null);
       setError(null);
-      navigate(`/${workspaceId}/${agentId}/${created.id}`);
+      go(created.id);
     },
     onError: (caught) => setError(problemMessage(caught)),
   });
@@ -142,8 +187,9 @@ export function ChatPage() {
           body: JSON.stringify({ agent_id: agentId, session_mode: "persistent" }),
         });
         sessionId = created.id;
+        setOpenedId(created.id);
         await queryClient.invalidateQueries({ queryKey: ["sessions", workspaceId, agentId] });
-        navigate(`/${workspaceId}/${agentId}/${created.id}`);
+        go(created.id);
       }
       return api<RunResponse>("/api/v1/runs", {
         ...scope,
@@ -199,7 +245,10 @@ export function ChatPage() {
     void control.mutateAsync({ target, action }).catch(() => undefined);
   }
 
-  if (workspaceId === null || agentId === null) {
+  if (route.kind === "pending") {
+    return <p className="centered">{t("loading")}</p>;
+  }
+  if (route.kind === "invalid" || workspaceId === null || agentId === null) {
     return <p className="centered">{t("invalidAddress")}</p>;
   }
 
@@ -241,7 +290,7 @@ export function ChatPage() {
           saveSessionPrefs(next);
           setPrefs(next);
         }}
-        onSession={(id) => navigate(`/${workspaceId}/${agentId}/${id}`)}
+        onSession={(id) => go(id)}
         onNewChat={() => {
           const unused = mine.find((session, index) => {
             if (prefs.archived.includes(session.id)) {
@@ -253,14 +302,14 @@ export function ChatPage() {
             setRunId(null);
             setOptimistic(null);
             setError(null);
-            navigate(`/${workspaceId}/${agentId}/${unused.id}`);
+            go(unused.id);
             return;
           }
           openSession.mutate();
         }}
         onHidden={(id) => {
           if (id === activeSessionId) {
-            navigate(`/${workspaceId}/${agentId}`);
+            go(null);
           }
         }}
         creating={openSession.isPending}
@@ -274,8 +323,11 @@ export function ChatPage() {
               fallback={agent.data.name}
               onAgent={(key) => {
                 const [nextWorkspace, nextAgent] = key.split(":");
-                if (nextWorkspace !== undefined && nextAgent !== undefined) {
-                  navigate(`/${nextWorkspace}/${nextAgent}`);
+                const next = listed.rows.find(
+                  (item) => item.workspace.id === nextWorkspace && item.agent.id === nextAgent,
+                );
+                if (next !== undefined) {
+                  navigate(chatPath(next, listed.rows));
                 }
               }}
             />
@@ -331,7 +383,25 @@ export function ChatPage() {
             }}
           />
         </div>
-        <Composer disabled={false} sending={send.isPending} onSend={(text) => send.mutate(text)} />
+        <Composer
+          disabled={false}
+          sending={send.isPending}
+          live={Boolean(live)}
+          onSend={(text) => send.mutate(text)}
+          onStop={() => {
+            if (run === undefined) {
+              return;
+            }
+            const action = (run.available_actions ?? []).includes("cancel")
+              ? "cancel"
+              : (run.available_actions ?? []).includes("pause")
+                ? "pause"
+                : null;
+            if (action !== null) {
+              void control.mutateAsync({ target: run.id, action }).catch(() => undefined);
+            }
+          }}
+        />
       </section>
     </div>
   );
