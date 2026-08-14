@@ -43,6 +43,7 @@ afterEach(() => {
   window.localStorage.removeItem("tiny-hermes-chat-default-agent");
   window.localStorage.removeItem("tiny-hermes-chat-theme");
   window.localStorage.removeItem("tiny-hermes-chat-locale");
+  window.localStorage.removeItem("tiny-hermes-chat-session-prefs");
 });
 
 class ResizeObserverStub {

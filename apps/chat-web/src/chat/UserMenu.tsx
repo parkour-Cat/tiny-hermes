@@ -37,6 +37,9 @@ export function UserMenu() {
           {initial}
         </span>
         <span>{name}</span>
+        <span className="menu-caret" aria-hidden>
+          ▾
+        </span>
       </button>
       {open ? (
         <div className="user-card" role="dialog" aria-label={name}>

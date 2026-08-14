@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 
 import { ChatPage } from "./ChatPage";
 import { SettingsPage } from "./SettingsPage";
@@ -206,6 +206,30 @@ test("account actions stay behind the user name", async () => {
   expect(screen.queryByRole("group", { name: "语言" })).toBeNull();
   expect(screen.queryByText("成员")).toBeNull();
   expect(document.querySelector("select")).toBeNull();
+});
+
+test("session actions stay behind the row menu", async () => {
+  loadedChat([{ role: "user", parts: [{ type: "text", text: "Summarize yesterday" }] }]);
+  renderChat();
+  expect(await screen.findByRole("button", { name: "Summarize yesterday" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "置顶" })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "会话操作" }));
+  expect(screen.getByRole("dialog", { name: "会话操作" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "置顶" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "归档" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "删除" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "置顶" }));
+  expect(screen.queryByRole("dialog", { name: "会话操作" })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "会话操作" }));
+  expect(screen.getByRole("button", { name: "取消置顶" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "归档" }));
+  expect(screen.getByText("已归档")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "会话操作" }));
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  await userEvent.click(screen.getByRole("button", { name: "删除" }));
+  expect(confirm).toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: "Summarize yesterday" })).toBeNull();
+  confirm.mockRestore();
 });
 
 test("a thread uses the first user line as the session title", async () => {

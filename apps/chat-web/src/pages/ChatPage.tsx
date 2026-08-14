@@ -17,6 +17,7 @@ import { AgentPicker } from "../chat/AgentPicker";
 import { asId } from "../chat/ids";
 import { matchingSessions } from "../chat/published";
 import { Composer } from "../chat/Composer";
+import { loadSessionPrefs, saveSessionPrefs } from "../chat/sessionPrefs";
 import { SessionRail } from "../chat/SessionRail";
 import { sessionTitle } from "../chat/sessionTitle";
 import { Transcript } from "../chat/Transcript";
@@ -42,6 +43,7 @@ export function ChatPage() {
   const [optimistic, setOptimistic] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [prefs, setPrefs] = useState(loadSessionPrefs);
   const scope = { workspace: workspaceId ?? "" };
   const enabled = workspaceId !== null && agentId !== null && auth.user !== null;
 
@@ -55,8 +57,12 @@ export function ChatPage() {
     queryFn: () => api<SessionResponse[]>("/api/v1/sessions", scope),
     enabled,
   });
-  const mine = matchingSessions(sessions.data ?? [], agentId ?? "", auth.user?.id ?? "");
-  const activeSessionId = routedSession ?? mine[0]?.id ?? null;
+  const mine = matchingSessions(sessions.data ?? [], agentId ?? "", auth.user?.id ?? "").filter(
+    (session) => !prefs.hidden.includes(session.id),
+  );
+  const routedVisible =
+    routedSession !== null && !prefs.hidden.includes(routedSession) ? routedSession : null;
+  const activeSessionId = routedVisible ?? mine[0]?.id ?? null;
   const active = mine.find((session) => session.id === activeSessionId) ?? null;
 
   const titleQueries = useQueries({
@@ -230,8 +236,18 @@ export function ChatPage() {
       <SessionRail
         sessions={railSessions}
         activeSessionId={activeSessionId}
+        prefs={prefs}
+        onPrefs={(next) => {
+          saveSessionPrefs(next);
+          setPrefs(next);
+        }}
         onSession={(id) => navigate(`/${workspaceId}/${agentId}/${id}`)}
         onNewChat={() => openSession.mutate()}
+        onHidden={(id) => {
+          if (id === activeSessionId) {
+            navigate(`/${workspaceId}/${agentId}`);
+          }
+        }}
         creating={openSession.isPending}
       />
       <section className="chat-main">

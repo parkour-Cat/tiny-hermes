@@ -1,6 +1,7 @@
 import { Navigate } from "react-router-dom";
 
 import { problemMessage } from "../api/messages";
+import { emptySessionPrefs } from "../chat/sessionPrefs";
 import { SessionRail } from "../chat/SessionRail";
 import { usePublishedAgents } from "../chat/usePublishedAgents";
 import { chooseDefaultAgent, loadDefaultAgent } from "../i18n/defaultAgent";
@@ -33,6 +34,8 @@ export function ChatHome() {
       <SessionRail
         sessions={[]}
         activeSessionId={null}
+        prefs={emptySessionPrefs()}
+        onPrefs={() => undefined}
         onSession={() => undefined}
         onNewChat={() => undefined}
         creating={false}
