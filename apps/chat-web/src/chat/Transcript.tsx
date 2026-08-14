@@ -1,5 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
+import { copyText } from "./clipboard";
 import type { ArtifactResponse, CanonicalMessage } from "../api/types";
 import { useT } from "../i18n/locale";
 import { mergeArtifacts, textOf, toolsOf } from "../runs/transcript";
@@ -15,21 +16,41 @@ function Prose({ text }: { text: string }) {
   );
 }
 
+function lastVisibleAssistant(turns: CanonicalMessage[]): number {
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const message = turns[index];
+    if (message === undefined || message.role !== "assistant") {
+      continue;
+    }
+    if (textOf(message) !== "" || toolsOf([message]).length > 0) {
+      return index;
+    }
+  }
+  return -1;
+}
+
 export function Transcript({
   turns,
   optimistic,
   live,
   artifacts,
+  canRetry,
   onDownload,
+  onRetry,
 }: {
   turns: CanonicalMessage[];
   optimistic: string | null;
   live: boolean;
   artifacts: ArtifactResponse[];
+  canRetry: boolean;
   onDownload: (id: string, filename: string) => void;
+  onRetry: () => void;
 }) {
   const t = useT();
   const end = useRef<HTMLDivElement>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+  const [confirmRetry, setConfirmRetry] = useState(false);
+  const retryAt = lastVisibleAssistant(turns);
   const files = mergeArtifacts(
     artifacts,
     turns.flatMap((message) =>
@@ -40,6 +61,12 @@ export function Transcript({
   useEffect(() => {
     end.current?.scrollIntoView?.({ block: "end" });
   }, [turns, optimistic, live, files.length]);
+
+  async function copy(key: string, text: string): Promise<void> {
+    if (await copyText(text)) {
+      setCopied(key);
+    }
+  }
 
   if (turns.length === 0 && optimistic === null) {
     return (
@@ -60,10 +87,17 @@ export function Transcript({
     <div className="thread">
       {turns.map((message, index) => {
         if (message.role === "user") {
+          const text = textOf(message);
+          const key = `user-${index}`;
           return (
-            <article className="bubble-user" key={`user-${index}`}>
-              {textOf(message)}
-            </article>
+            <div className="bubble-wrap" key={key}>
+              <article className="bubble-user">{text}</article>
+              <div className="msg-actions">
+                <button type="button" onClick={() => void copy(key, text)}>
+                  {copied === key ? t("copied") : t("copyMessage")}
+                </button>
+              </div>
+            </div>
           );
         }
         const text = textOf(message);
@@ -71,8 +105,10 @@ export function Transcript({
         if (text === "" && tools.length === 0) {
           return null;
         }
+        const key = `agent-${index}`;
+        const showRetry = canRetry && !live && index === retryAt;
         return (
-          <article className="turn-agent" key={`agent-${index}`}>
+          <article className="turn-agent" key={key}>
             <HermesMark size={22} />
             <div className="turn-body">
               {text === "" ? null : <Prose text={text} />}
@@ -85,6 +121,35 @@ export function Transcript({
                   {tool.output === "" ? null : <pre>{tool.output}</pre>}
                 </details>
               ))}
+              <div className="msg-actions">
+                {text === "" ? null : (
+                  <button type="button" onClick={() => void copy(key, text)}>
+                    {copied === key ? t("copied") : t("copyMessage")}
+                  </button>
+                )}
+                {showRetry && confirmRetry ? (
+                  <>
+                    <span className="msg-hint">{t("retryRunWarning")}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setConfirmRetry(false);
+                        onRetry();
+                      }}
+                    >
+                      {t("retryRunNow")}
+                    </button>
+                    <button type="button" onClick={() => setConfirmRetry(false)}>
+                      {t("cancel")}
+                    </button>
+                  </>
+                ) : null}
+                {showRetry && !confirmRetry ? (
+                  <button type="button" onClick={() => setConfirmRetry(true)}>
+                    {t("retryRun")}
+                  </button>
+                ) : null}
+              </div>
             </div>
           </article>
         );

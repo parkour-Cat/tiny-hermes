@@ -1,6 +1,11 @@
 import { expect, test } from "vitest";
 
-import { canInlineAttachment, composeWithAttachments } from "./attachments";
+import {
+  canInlineAttachment,
+  composeWithAttachments,
+  mergeStaged,
+  stagedFromList,
+} from "./attachments";
 
 test("text attachments are inlined and binaries are skipped", async () => {
   expect(canInlineAttachment({ name: "note.txt", type: "text/plain" })).toBe(true);
@@ -23,4 +28,12 @@ test("text attachments are inlined and binaries are skipped", async () => {
   expect(composed.text).toContain("附件 note.txt:");
   expect(composed.text).toContain("hello");
   expect(composed.skipped).toEqual(["photo.png"]);
+});
+
+test("dropped files are staged and capped", () => {
+  const first = new File(["a"], "a.txt", { type: "text/plain" });
+  const second = new File(["b"], "b.txt", { type: "text/plain" });
+  const staged = stagedFromList([first, second]);
+  expect(staged.map((item) => item.name)).toEqual(["a.txt", "b.txt"]);
+  expect(mergeStaged(staged, stagedFromList([first]), 2)).toHaveLength(2);
 });

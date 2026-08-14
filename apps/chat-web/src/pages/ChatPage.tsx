@@ -14,9 +14,10 @@ import type {
 } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
 import { AgentPicker } from "../chat/AgentPicker";
+import { Composer } from "../chat/Composer";
+import { downloadMarkdown, exportFilename, transcriptMarkdown } from "../chat/exportTranscript";
 import { chatPath, matchSessionId, resolveChatRoute } from "../chat/paths";
 import { matchingSessions } from "../chat/published";
-import { Composer } from "../chat/Composer";
 import { loadSessionPrefs, saveSessionPrefs } from "../chat/sessionPrefs";
 import { SessionRail } from "../chat/SessionRail";
 import { isBlankSession, sessionTitle } from "../chat/sessionTitle";
@@ -376,10 +377,16 @@ export function ChatPage() {
             optimistic={optimistic}
             live={Boolean(live)}
             artifacts={artifacts.data ?? []}
+            canRetry={!live && (run?.available_actions ?? []).includes("retry")}
             onDownload={(id, filename) => {
               void downloadArtifact(id, filename, workspaceId).catch((caught) =>
                 setError(problemMessage(caught)),
               );
+            }}
+            onRetry={() => {
+              if (run !== undefined) {
+                void control.mutateAsync({ target: run.id, action: "retry" }).catch(() => undefined);
+              }
             }}
           />
         </div>
@@ -387,7 +394,21 @@ export function ChatPage() {
           disabled={false}
           sending={send.isPending}
           live={Boolean(live)}
+          canExport={(messages.data ?? []).length > 0}
           onSend={(text) => send.mutate(text)}
+          onExport={() => {
+            const turns = messages.data ?? [];
+            if (turns.length === 0) {
+              return;
+            }
+            downloadMarkdown(
+              exportFilename(agent.data.alias, activeSessionId),
+              transcriptMarkdown(agent.data.name, turns, {
+                user: t("userRole"),
+                agent: t("agentRole"),
+              }),
+            );
+          }}
           onStop={() => {
             if (run === undefined) {
               return;

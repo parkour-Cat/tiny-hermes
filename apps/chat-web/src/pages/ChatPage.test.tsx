@@ -156,7 +156,11 @@ test("the page is a conversation, not a playground or a console", async () => {
 
   expect(await screen.findByRole("heading", { name: "Darwin" })).toBeInTheDocument();
   expect(screen.getByLabelText("写给智能体")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "附件" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "更多" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "更多" }));
+  expect(screen.getByRole("menuitem", { name: "附件" })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: "从剪贴板粘贴" })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: "导出对话" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "新对话" })).toBeInTheDocument();
   expect(screen.getByText(/直接说要做什么/)).toBeInTheDocument();
   expect(screen.queryByText("试验场")).toBeNull();
@@ -262,6 +266,8 @@ test("a thread uses the first user line as the session title", async () => {
   expect(await screen.findByRole("button", { name: "Summarize yesterday" })).toBeInTheDocument();
   expect(screen.getByText("Here is the summary.")).toBeInTheDocument();
   expect(screen.getByText("file.read")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "更多" }));
+  expect(screen.getByRole("menuitem", { name: "导出对话" })).toBeEnabled();
   expect(screen.queryByRole("heading", { name: "工具" })).toBeNull();
   expect(screen.queryByRole("heading", { name: "产物" })).toBeNull();
 });
@@ -339,7 +345,7 @@ test("a blocked queue shows the wait in the thread, not a completions refusal", 
   expect(resumes[0]?.body).toEqual({ expected_state_version: 4 });
 });
 
-test("a finished turn does not put retry in the page chrome", async () => {
+test("a finished turn retries from the last message, not the page chrome", async () => {
   loadedChat([
     { role: "user", parts: [{ type: "text", text: "Summarize yesterday" }] },
     { role: "assistant", parts: [{ type: "text", text: "Here is the summary." }] },
@@ -362,9 +368,26 @@ test("a finished turn does not put retry in the page chrome", async () => {
     http.get(`/api/v1/runs/${PENDING}/artifacts`, () => HttpResponse.json([])),
   );
 
+  const retries: { url: string; body: unknown }[] = [];
+  document.cookie = "tiny_hermes_csrf=token-value";
+  server.use(
+    http.post(`/api/v1/runs/${PENDING}/retry`, async ({ request }) => {
+      retries.push({ url: request.url, body: await request.json() });
+      return HttpResponse.json(
+        runRow(PENDING, { status: "queued", state_version: 5, available_actions: ["cancel"] }),
+      );
+    }),
+  );
+
   renderChat();
   expect(await screen.findByText("Here is the summary.")).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+  expect(document.querySelector(".chat-actions")?.textContent ?? "").not.toContain("重试");
+  expect(screen.getAllByRole("button", { name: "复制" }).length).toBeGreaterThan(0);
+  await userEvent.click(screen.getByRole("button", { name: "重试" }));
+  await userEvent.click(screen.getByRole("button", { name: "确认重试" }));
+  await waitFor(() => expect(retries).toHaveLength(1));
+  expect(retries[0]?.url).toContain(`/api/v1/runs/${PENDING}/retry`);
+  expect(retries[0]?.body).toEqual({ expected_state_version: 4 });
 });
 
 test("新对话 reuses the unused session instead of posting another", async () => {

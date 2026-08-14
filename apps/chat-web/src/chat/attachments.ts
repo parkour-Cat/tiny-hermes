@@ -22,6 +22,18 @@ export function canInlineAttachment(file: Pick<File, "name" | "type">): boolean 
   return TEXT_TYPES.has(file.type) || TEXT_NAMES.test(file.name);
 }
 
+export function stagedFile(file: File): StagedFile {
+  return { name: file.name, size: file.size, type: file.type, file };
+}
+
+export function stagedFromList(list: FileList | File[] | null | undefined): StagedFile[] {
+  return [...(list ?? [])].map(stagedFile);
+}
+
+export function mergeStaged(current: StagedFile[], incoming: StagedFile[], limit = 8): StagedFile[] {
+  return [...current, ...incoming].slice(0, limit);
+}
+
 export async function composeWithAttachments(
   text: string,
   files: StagedFile[],

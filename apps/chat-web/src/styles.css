@@ -840,6 +840,14 @@ button:disabled {
   line-height: 1.55;
 }
 
+.bubble-wrap {
+  align-self: flex-end;
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+  max-width: 68%;
+}
+
 .bubble-user {
   align-self: flex-end;
   max-width: 68%;
@@ -848,6 +856,10 @@ button:disabled {
   background: var(--th-user);
   line-height: 1.5;
   white-space: pre-wrap;
+}
+
+.bubble-wrap .bubble-user {
+  max-width: 100%;
 }
 
 .turn-agent {
@@ -890,6 +902,32 @@ button:disabled {
   margin: 8px 0 0;
   white-space: pre-wrap;
   color: var(--th-ink-soft);
+}
+
+.msg-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.msg-actions button {
+  border: 0;
+  border-radius: 6px;
+  padding: 2px 6px;
+  background: transparent;
+  color: var(--th-ink-soft);
+  font-size: 12px;
+}
+
+.msg-actions button:hover {
+  background: var(--th-sider);
+  color: var(--th-ink);
+}
+
+.msg-hint {
+  color: var(--th-ink-soft);
+  font-size: 12px;
 }
 
 .live-dot {
@@ -935,6 +973,7 @@ button:disabled {
 }
 
 .composer {
+  position: relative;
   width: min(720px, calc(100% - 40px));
   margin: 0 auto 18px;
   display: grid;
@@ -944,6 +983,18 @@ button:disabled {
   border-radius: 18px;
   background: var(--th-paper-raised);
   box-shadow: var(--th-shadow);
+}
+
+.composer.is-drop {
+  border-color: var(--th-copper);
+}
+
+.composer-drop {
+  margin: 0;
+  padding: 4px 2px 0;
+  color: var(--th-copper);
+  font-size: 13px;
+  font-weight: 650;
 }
 
 .composer textarea {
@@ -1011,9 +1062,52 @@ button:disabled {
   color: var(--th-ink-soft);
 }
 
-.composer-icon:hover:not(:disabled) {
+.composer-icon:hover:not(:disabled),
+.composer-icon.is-on {
   background: var(--th-sider);
   color: var(--th-ink);
+}
+
+.composer-icon.is-on {
+  color: var(--th-copper);
+}
+
+.composer-plus {
+  position: relative;
+}
+
+.composer-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  z-index: 20;
+  display: grid;
+  gap: 2px;
+  width: 188px;
+  padding: 6px;
+  border: 1px solid var(--th-line);
+  border-radius: 12px;
+  background: var(--th-paper-raised);
+  box-shadow: var(--th-shadow);
+}
+
+.composer-menu button {
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--th-ink);
+  text-align: left;
+  font-weight: 650;
+}
+
+.composer-menu button:hover:not(:disabled) {
+  background: var(--th-sider);
+}
+
+.composer-menu button:disabled {
+  color: var(--th-ink-soft);
 }
 
 .composer button[type="submit"],
