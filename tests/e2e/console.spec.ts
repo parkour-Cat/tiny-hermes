@@ -67,7 +67,7 @@ async function publishAgent(page: Page, scenario: string): Promise<string> {
   await page.getByRole("link", { name, exact: true }).click();
 
   await expect(page.getByText("草稿修订 1")).toBeVisible();
-  await page.getByLabel("人格").fill(`A ${scenario} agent for the console acceptance walk.`);
+  await page.getByRole("textbox", { name: "人格" }).fill(`A ${scenario} agent for the console acceptance walk.`);
   await choose(page, "模型场景", scenario);
   await page.getByRole("button", { name: "保存草稿" }).click();
   await expect(page.getByText("草稿修订 2")).toBeVisible();
@@ -185,7 +185,7 @@ test("the builder binds a tool, playground sends, and rollback restores v1", asy
   await expect(page.getByRole("dialog", { name: "新建智能体" })).toBeHidden();
   await page.getByRole("link", { name, exact: true }).click();
 
-  await page.getByLabel("人格").fill("A playground agent for the console acceptance walk.");
+  await page.getByRole("textbox", { name: "人格" }).fill("A playground agent for the console acceptance walk.");
   await choose(page, "模型场景", "continue_once");
   await page.getByRole("tab", { name: "工具" }).click();
   await bindTool(page, "file.list");
@@ -214,7 +214,7 @@ test("the builder binds a tool, playground sends, and rollback restores v1", asy
   }
 
   await page.getByRole("link", { name }).click();
-  await page.getByLabel("人格").fill("A second published voice.");
+  await page.getByRole("textbox", { name: "人格" }).fill("A second published voice.");
   await page.getByRole("button", { name: "保存草稿" }).click();
   await expect(page.getByText("草稿修订 3")).toBeVisible();
   await page.getByRole("button", { name: "发布" }).click();
