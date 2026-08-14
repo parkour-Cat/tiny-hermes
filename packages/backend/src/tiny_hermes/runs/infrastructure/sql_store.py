@@ -474,6 +474,13 @@ class SqlRunStore:
             # Cleared only in the same transition that reaches the target.
             run.workspace_cleanup_target = None
             run.workspace_cleanup_sandbox_id = None
+        # record_slice releases the lease when it writes a signal. The
+        # committed-checkpoint path applies the real signal here after a
+        # signal=None commit, and must do the same: a queued Run whose
+        # WorkerLease is still held cannot be claimed until expiry, so the
+        # warm thaw waits out the remaining lease instead of 300ms.
+        if RunState(run.status) is not RunState.RUNNING:
+            await self._release_lease(run.id)
         return await self._snapshot(run, command.capabilities)
 
     async def _decide_and_write(

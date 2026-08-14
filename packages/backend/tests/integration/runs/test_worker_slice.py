@@ -15,6 +15,7 @@ from tiny_hermes.runs.domain.models import (
 )
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.store import (
+    ApplySignalCommand,
     ClaimedRun,
     ClaimRunCommand,
     RecordSliceCommand,
@@ -374,3 +375,40 @@ async def test_a_slice_that_keeps_the_lease_records_progress_without_a_signal(
     )
     assert lease[0] is True
     assert budget[0] == 1_200
+
+
+async def test_apply_signal_slice_ended_releases_the_lease_like_record_slice(
+    submitted_run: dict[str, Any], scope: dict[str, str], engine: AsyncEngine
+) -> None:
+    """The committed-checkpoint path applies SLICE_ENDED after record_slice(None).
+
+    Product design: the Run returns to queued and the WorkerLease is released
+    so the next slice can thaw the kept instance. Leaving the lease held until
+    expiry makes warm reacquire wait ~26s instead of 300ms.
+    """
+    del submitted_run
+    claimed = await _claim(engine, scope["X-Workspace-Id"])
+
+    async with _factory(engine).begin() as session:
+        await SqlRunStore(session).record_slice(
+            _slice(claimed, scope["X-Workspace-Id"], None)
+        )
+        snapshot = await SqlRunStore(session).apply_signal(
+            ApplySignalCommand(
+                workspace_id=UUID(scope["X-Workspace-Id"]),
+                run_id=claimed.run.id,
+                signal=RunSignal.SLICE_ENDED,
+                request_id="slice-apply",
+                capabilities=FULL,
+            )
+        )
+
+    assert snapshot.state.value == "queued"
+    lease = await _row(
+        engine,
+        "SELECT released_at IS NOT NULL FROM worker_leases WHERE id = :id",
+        id=claimed.lease_id,
+    )
+    assert lease[0] is True
+    again = await _claim(engine, scope["X-Workspace-Id"], worker_id="worker-b")
+    assert again.run.id == claimed.run.id
