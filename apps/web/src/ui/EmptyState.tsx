@@ -17,7 +17,7 @@ export function EmptyState({
 }) {
   return (
     <div className="th-empty" role="status">
-      <HermesMark size={88} variant="empty" />
+      <HermesMark size={128} variant="empty" />
       <p className="th-empty-title">{title}</p>
       {action === undefined ? null : <div className="th-empty-action">{action}</div>}
     </div>

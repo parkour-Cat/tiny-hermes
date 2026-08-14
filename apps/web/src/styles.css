@@ -112,77 +112,8 @@ h4,
 .th-hermes {
   display: block;
   flex: none;
-}
-
-.th-hermes-field,
-.th-hermes-face,
-.th-hermes-paper,
-.th-hermes-banner {
-  fill: #f6f1e8;
-}
-
-.th-hermes-ink,
-.th-hermes-bangs,
-.th-hermes-eye,
-.th-hermes-pause {
-  fill: #1a1612;
-}
-
-.th-hermes-cup {
-  fill: #fff;
-}
-
-.th-hermes-cup-edge {
-  fill: #c45c26;
-}
-
-.th-hermes-ring,
-.th-hermes-banner {
-  stroke: #c45c26;
-}
-
-.th-hermes-ring {
-  fill: none;
-  stroke-width: 10;
-}
-
-.th-hermes-banner {
-  stroke-width: 4;
-}
-
-.th-hermes-band-edge,
-.th-hermes-band,
-.th-hermes-lash {
-  fill: none;
-  stroke-linecap: round;
-}
-
-.th-hermes-band-edge {
-  stroke: #c45c26;
-  stroke-width: 13;
-}
-
-.th-hermes-band {
-  stroke: #fff;
-  stroke-width: 8;
-}
-
-.th-hermes-lash {
-  stroke: #1a1612;
-  stroke-width: 2.4;
-}
-
-.th-hermes-star {
-  fill: #c45c26;
-}
-
-.th-hermes-lockup {
-  fill: #1a1612;
-  font-family: Syne, "Noto Sans SC", sans-serif;
-  font-size: 20px;
-  font-weight: 800;
-  letter-spacing: 0.1em;
-  text-anchor: middle;
+  height: auto;
+  object-fit: contain;
 }
 
 .th-word {

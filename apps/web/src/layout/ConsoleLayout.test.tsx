@@ -92,7 +92,7 @@ test("both sections stay inside the workspace the address names", async () => {
     `/workspaces/${WORKSPACE}/secrets`,
   );
   expect(document.querySelector(".th-sider")).not.toBeNull();
-  expect(document.querySelector("svg.th-hermes-mark")).not.toBeNull();
+  expect(document.querySelector("img.th-hermes-mark")).not.toBeNull();
   expect(document.querySelector(".th-mark")).toBeNull();
   expect(document.querySelector(".th-topbar")?.querySelector("a.th-nav-link")).toBeNull();
   expect(screen.queryByRole("link", { name: "Approvals" })).not.toBeInTheDocument();

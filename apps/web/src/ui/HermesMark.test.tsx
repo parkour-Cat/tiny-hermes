@@ -3,24 +3,22 @@ import { expect, test } from "vitest";
 
 import { HermesMark } from "./HermesMark";
 
-test("the mark is a ringed listener with a pause cup", () => {
+test("the mark is the circular lockup artwork", () => {
   const { container } = render(<HermesMark />);
-  expect(container.querySelector("svg.th-hermes-mark")).not.toBeNull();
-  expect(container.querySelector(".th-hermes-ring")).not.toBeNull();
-  expect(container.querySelector(".th-hermes-ink")).not.toBeNull();
-  expect(container.querySelector(".th-hermes-face")).not.toBeNull();
-  expect(container.querySelectorAll("circle.th-hermes-cup")).toHaveLength(2);
-  expect(container.querySelectorAll("rect.th-hermes-pause")).toHaveLength(2);
-  expect(container.querySelector(".th-hermes-banner")).toBeNull();
+  const img = container.querySelector("img.th-hermes-mark");
+  expect(img).not.toBeNull();
+  expect(img).toHaveAttribute("src", "/tiny-hermes-icon.png");
+  expect(img).toHaveAttribute("alt", "");
 });
 
-test("the hero lockup names the product; the tiny mark does not", () => {
+test("the hero and empty states use the named lockup", () => {
   const hero = render(<HermesMark variant="hero" />);
-  expect(hero.container.querySelector(".th-hermes-banner")).not.toBeNull();
-  expect(hero.container.querySelector(".th-hermes-fine")).not.toBeNull();
-  expect(hero.getByText("TINY-HERMES")).toBeInTheDocument();
+  const heroImg = hero.container.querySelector("img.th-hermes-hero");
+  expect(heroImg).toHaveAttribute("src", "/tiny-hermes-lockup.png");
+  expect(hero.getByAltText("TINY-HERMES")).toBeInTheDocument();
 
-  const mark = render(<HermesMark variant="mark" />).container;
-  expect(mark.querySelector(".th-hermes-banner")).toBeNull();
-  expect(mark.querySelector(".th-hermes-fine")).toBeNull();
+  const empty = render(<HermesMark variant="empty" size={128} />).container;
+  const emptyImg = empty.querySelector("img.th-hermes-empty");
+  expect(emptyImg).toHaveAttribute("src", "/tiny-hermes-lockup.png");
+  expect(emptyImg).toHaveAttribute("alt", "");
 });
