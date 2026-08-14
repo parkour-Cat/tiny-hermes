@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useDismiss } from "./useDismiss";
 import { useT } from "../i18n/locale";
 
-const CARD_WIDTH = 168;
+const CARD_WIDTH = 200;
 
 export function SessionItem({
   session,
@@ -27,8 +27,12 @@ export function SessionItem({
   const t = useT();
   const root = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [box, setBox] = useState({ top: 0, left: 0 });
-  const close = useCallback(() => setOpen(false), []);
+  const close = useCallback(() => {
+    setOpen(false);
+    setConfirming(false);
+  }, []);
   useDismiss(open, close, root);
 
   useEffect(() => {
@@ -36,11 +40,11 @@ export function SessionItem({
       return;
     }
     function onScroll(): void {
-      setOpen(false);
+      close();
     }
     document.addEventListener("scroll", onScroll, true);
     return () => document.removeEventListener("scroll", onScroll, true);
-  }, [open]);
+  }, [close, open]);
 
   return (
     <div
@@ -65,14 +69,15 @@ export function SessionItem({
         onClick={(event) => {
           event.stopPropagation();
           if (open) {
-            setOpen(false);
+            close();
             return;
           }
           const rect = event.currentTarget.getBoundingClientRect();
           setBox({
-            top: Math.min(rect.top, window.innerHeight - 168),
+            top: Math.min(rect.top, window.innerHeight - 200),
             left: Math.min(rect.right + 6, window.innerWidth - CARD_WIDTH - 8),
           });
+          setConfirming(false);
           setOpen(true);
         }}
       >
@@ -84,38 +89,50 @@ export function SessionItem({
           role="dialog"
           aria-label={t("sessionActions")}
           style={{ top: box.top, left: box.left }}
+          onMouseDown={(event) => event.stopPropagation()}
         >
-          <button
-            type="button"
-            onClick={() => {
-              onPin(!pinned);
-              setOpen(false);
-            }}
-          >
-            {pinned ? t("unpinSession") : t("pinSession")}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              onArchive(!archived);
-              setOpen(false);
-            }}
-          >
-            {archived ? t("unarchiveSession") : t("archiveSession")}
-          </button>
-          <button
-            type="button"
-            className="is-danger"
-            onClick={() => {
-              if (!window.confirm(t("forgetSessionConfirm"))) {
-                return;
-              }
-              onForget();
-              setOpen(false);
-            }}
-          >
-            {t("forgetSession")}
-          </button>
+          {confirming ? (
+            <>
+              <p className="session-card-hint">{t("forgetSessionConfirm")}</p>
+              <button
+                type="button"
+                className="is-danger"
+                onClick={() => {
+                  onForget();
+                  close();
+                }}
+              >
+                {t("forgetSessionNow")}
+              </button>
+              <button type="button" onClick={() => setConfirming(false)}>
+                {t("cancel")}
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  onPin(!pinned);
+                  close();
+                }}
+              >
+                {pinned ? t("unpinSession") : t("pinSession")}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onArchive(!archived);
+                  close();
+                }}
+              >
+                {archived ? t("unarchiveSession") : t("archiveSession")}
+              </button>
+              <button type="button" className="is-danger" onClick={() => setConfirming(true)}>
+                {t("forgetSession")}
+              </button>
+            </>
+          )}
         </div>
       ) : null}
     </div>

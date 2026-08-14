@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { expect, test, vi } from "vitest";
+import { expect, test } from "vitest";
 
 import { ChatPage } from "./ChatPage";
 import { SettingsPage } from "./SettingsPage";
@@ -225,11 +225,10 @@ test("session actions stay behind the row menu", async () => {
   await userEvent.click(screen.getByRole("button", { name: "归档" }));
   expect(screen.getByText("已归档")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "会话操作" }));
-  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
   await userEvent.click(screen.getByRole("button", { name: "删除" }));
-  expect(confirm).toHaveBeenCalled();
+  expect(screen.getByText(/从这台设备的列表拿掉/)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "确认删除" }));
   expect(screen.queryByRole("button", { name: "Summarize yesterday" })).toBeNull();
-  confirm.mockRestore();
 });
 
 test("a thread uses the first user line as the session title", async () => {

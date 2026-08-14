@@ -552,12 +552,20 @@ button:disabled {
   z-index: 30;
   display: grid;
   gap: 2px;
-  width: 168px;
+  width: 200px;
   padding: 6px;
   border: 1px solid var(--th-line);
   border-radius: 12px;
   background: var(--th-paper-raised);
   box-shadow: var(--th-shadow);
+}
+
+.session-card-hint {
+  margin: 0;
+  padding: 6px 10px 8px;
+  color: var(--th-ink-soft);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .session-card button {
