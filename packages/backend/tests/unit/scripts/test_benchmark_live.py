@@ -100,6 +100,7 @@ class FakeConsole:
         self.agent_scenario = ""
         self.agent_tools: list[str] = []
         self.inputs: list[str] = []
+        self.cancelled: list[str] = []
         self._lock = threading.Lock()
 
     def sign_in(self) -> None:
@@ -150,6 +151,10 @@ class FakeConsole:
 
     def csrf(self) -> str:
         return "csrf"
+
+    def cancel(self, workspace: str, run: str) -> None:
+        del workspace
+        self.cancelled.append(run)
 
 
 def _harness(
@@ -298,6 +303,8 @@ def test_worker_recovery_waits_for_queued_not_completed() -> None:
     assert "queued" in console.wanted
     assert "completed" not in console.wanted
     assert ("kill", "worker") in calls
+    assert ("restart", "scheduler") not in calls
+    assert console.cancelled
     assert result["status"] == "measured"
     assert result["passed"] is True
 
@@ -341,6 +348,7 @@ def test_sse_reconnect_rejects_a_gap() -> None:
     assert live.reconnect_gap(last_seen=4, first_replayed=5) == 0
     assert live.missed_cadence([0.0, 5.0, 10.0], every=5.0, slack=2.0) is False
     assert live.missed_cadence([0.0, 5.0, 20.0], every=5.0, slack=2.0) is True
+    assert live.missed_cadence([0.0, 12.0, 17.0, 22.0], every=5.0, slack=2.0) is False
 
 
 def test_event_writer_uses_the_same_allocator_as_the_store() -> None:

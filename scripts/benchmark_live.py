@@ -110,6 +110,15 @@ class BenchmarkConsole(WorkspaceConsole):
     def csrf(self) -> str:
         return unquote(self._client.cookies.get(CSRF_COOKIE) or "")
 
+    def cancel(self, workspace: str, run: str) -> None:
+        version = int(self.read(workspace, run)["state_version"])
+        answer = self._client.post(
+            f"/api/v1/runs/{run}/cancel",
+            headers=self._headers(workspace),
+            json={"expected_state_version": version},
+        )
+        answer.raise_for_status()
+
 
 @dataclass
 class Harness:
@@ -145,12 +154,24 @@ def reconnect_gap(last_seen: int, first_replayed: int) -> int:
     return max(0, first_replayed - last_seen - 1)
 
 
-def missed_cadence(stamps: list[float], every: float, slack: float) -> bool:
-    if len(stamps) < 2:
+def missed_cadence(
+    stamps: list[float],
+    every: float,
+    slack: float,
+    *,
+    skip_first: int = 1,
+) -> bool:
+    """True when a live gap exceeds 5s + slack.
+
+    The first interval is setup: history replay and the subscriber joining.
+    The product cell is the hold after that, not the connect storm.
+    """
+    live = stamps[skip_first:]
+    if len(live) < 2:
         return True
     return any(
         later - earlier > every + slack
-        for earlier, later in zip(stamps, stamps[1:], strict=False)
+        for earlier, later in zip(live, live[1:], strict=False)
     )
 
 
@@ -402,16 +423,24 @@ def _drive_sse_held(
                 harness, url, headers, cookies, None, stop, buckets[index]
             )
 
-        started = harness.monotonic()
         with ThreadPoolExecutor(max_workers=connections) as pool:
             futures = [pool.submit(worker, index) for index in range(connections)]
+            attach_deadline = harness.monotonic() + 30.0
+            while harness.monotonic() < attach_deadline:
+                attached = sum(1 for bucket in buckets if bucket)
+                if attached >= connections:
+                    break
+                harness.sleep(0.05)
+            started = harness.monotonic()
             deadline = started + duration
+            tick = 0
             while harness.monotonic() < deadline:
                 store.write_one(run_id, workspace)
-                remaining = deadline - harness.monotonic()
-                if remaining <= 0:
-                    break
-                harness.sleep(min(SSE_CADENCE_S, remaining))
+                tick += 1
+                target = started + tick * SSE_CADENCE_S
+                now = harness.monotonic()
+                if now < target and now < deadline:
+                    harness.sleep(min(target - now, deadline - now))
             expected = max(1, int(duration / SSE_CADENCE_S))
             for index, bucket in enumerate(buckets):
                 stamps = [stamp for stamp, _ in bucket]
@@ -742,9 +771,10 @@ def drive_worker_recovery(
         except SystemExit as error:
             return _fail(gate, evaluate, sample_type, str(error))
         started = harness.monotonic()
+        # Do not restart the Scheduler: compose recreates it through migrate
+        # and leaves nobody scanning while the lease is expiring. The cell is
+        # "kill the Worker → queued", with the already-healthy Scheduler.
         harness.compose("kill", "worker")
-        harness.compose("restart", "scheduler")
-        harness.await_healthy("scheduler")
         try:
             snapshot, waited = console.await_status(
                 workspace, run_id, ("queued",), 120.0
@@ -756,6 +786,10 @@ def drive_worker_recovery(
         elapsed = max(harness.monotonic() - started, waited)
         if snapshot.get("status") != "queued":
             extra.append(f"run re-entered {snapshot.get('status')!r}, not queued")
+        try:
+            console.cancel(workspace, run_id)
+        except Exception as error:  # noqa: BLE001 - leftover work must not hide the gate
+            _log(f"worker_recovery cancel failed: {error}")
         try:
             harness.compose("start", "worker")
             harness.await_healthy("worker")
@@ -779,6 +813,7 @@ def drive_service_recovery(
     harness: Harness,
 ) -> dict[str, Any]:
     extra: list[str] = []
+    cap = gate.max_s or 60.0
     started = harness.monotonic()
     harness.compose("restart", "api")
     harness.await_healthy("api")
@@ -795,10 +830,16 @@ def drive_service_recovery(
         if run_id is None or status >= 400:
             extra.append("new run was not accepted after the API restart")
         else:
-            try:
-                console.await_status(workspace, run_id, ("running", "completed"), 60.0)
-            except SystemExit as error:
-                extra.append(str(error))
+            remaining = cap - (harness.monotonic() - started)
+            if remaining <= 0:
+                extra.append("health check consumed the recovery window")
+            else:
+                try:
+                    console.await_status(
+                        workspace, run_id, ("running", "completed"), remaining
+                    )
+                except SystemExit as error:
+                    extra.append(str(error))
     elapsed = harness.monotonic() - started
     _log(f"service_recovery elapsed={elapsed:.2f}s")
     return evaluate(
@@ -929,17 +970,35 @@ def _measure_thaw(
     run_id: str,
     original_id: str,
 ) -> tuple[float | None, list[str]]:
+    """Time keep → thaw after the slice ends, not the first freeze of the Run.
+
+    A cold acquire may freeze for workspace restore. Starting the clock there
+    measures the rest of `sleep 35`, not the warm reacquire.
+    """
     deadline = harness.monotonic() + 90.0
-    phase = "wait_freeze"
-    started: float | None = None
+    while harness.monotonic() < deadline:
+        if "run_slice_ended" in store.event_types_after(run_id, 0):
+            break
+        harness.sleep(0.05)
+    else:
+        return None, ["slice never ended; warm reacquire was not exercised"]
+    # The first slice is still `running` until freeze+keep commit. Starting
+    # the clock on that row measures leftover command time, not the thaw.
+    while harness.monotonic() < deadline:
+        parked = store.sandbox(run_id)
+        if parked is not None and (
+            parked[1] == "frozen" or parked[3] == "kept"
+        ):
+            break
+        harness.sleep(0.01)
+    else:
+        return None, ["slice ended but the instance was never kept warm"]
+    started = time.perf_counter()
     while harness.monotonic() < deadline:
         row = store.sandbox(run_id)
         if row is not None:
             container_id, instance_status, _digest, _reservation = row
-            if phase == "wait_freeze" and instance_status == "frozen":
-                phase = "wait_thaw"
-                started = time.perf_counter()
-            elif phase == "wait_thaw" and instance_status == "running" and started is not None:
+            if instance_status == "running":
                 latency = (time.perf_counter() - started) * 1000.0
                 resets = store.event_types_after(run_id, 0).count("sandbox_cache_reset")
                 return latency, warm_reasons(original_id, container_id, resets > 1)
