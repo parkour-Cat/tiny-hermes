@@ -46,6 +46,9 @@ The first 4D pass did not start API / Web / Worker. A later pass on the
 host still is not the §24.1 Linux reference shape (8 vCPU, 16 GB, local
 SSD). The benchmark must not report a pass here.
 
+A later operator Linux host (8 vCPU) is
+`docs/superpowers/verification/2026-08-14-m1-reference-host.md`.
+
 ## 3. What was verified by execution
 
 **Generated secrets.** `uv run --no-sync pytest
