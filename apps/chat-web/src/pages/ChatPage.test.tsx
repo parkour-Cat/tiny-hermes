@@ -6,6 +6,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { expect, test } from "vitest";
 
 import { ChatPage } from "./ChatPage";
+import { SettingsPage } from "./SettingsPage";
 import { AuthProvider } from "../auth/AuthProvider";
 import { LocaleProvider } from "../i18n/locale";
 import { server } from "../test/server";
@@ -136,6 +137,7 @@ function renderChat(path = `/${WORKSPACE}/${AGENT}`): void {
           <MemoryRouter initialEntries={[path]}>
             <AuthProvider>
               <Routes>
+                <Route path="/settings" element={<SettingsPage />} />
                 <Route path="/:workspaceId/:agentId/:sessionId" element={<ChatPage />} />
                 <Route path="/:workspaceId/:agentId" element={<ChatPage />} />
               </Routes>
@@ -161,6 +163,7 @@ test("the page is a conversation, not a playground or a console", async () => {
   expect(screen.queryByText("机密")).toBeNull();
   expect(screen.queryByText("消息")).toBeNull();
   expect(document.querySelector(".ant-card")).toBeNull();
+  expect(document.querySelector("select")).toBeNull();
   expect(screen.queryByText(SESSION)).toBeNull();
 });
 
@@ -172,6 +175,26 @@ test("unpublished agents are not offered in the picker", async () => {
   const picker = screen.getByLabelText("智能体");
   expect(picker).toHaveTextContent("Darwin");
   expect(picker).not.toHaveTextContent("Draft");
+  await userEvent.click(picker);
+  expect(screen.getByRole("option", { name: "Darwin" })).toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: "Draft" })).toBeNull();
+});
+
+test("account actions stay behind the user name", async () => {
+  loadedChat();
+  renderChat();
+  await screen.findByRole("heading", { name: "Darwin" });
+  expect(screen.queryByRole("button", { name: "深色" })).toBeNull();
+  expect(screen.queryByRole("menuitem", { name: "设置" })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "Dev" }));
+  expect(screen.getByRole("menuitem", { name: "设置" })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: "退出" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("menuitem", { name: "设置" }));
+  expect(await screen.findByRole("heading", { name: "设置" })).toBeInTheDocument();
+  expect(screen.getByRole("group", { name: "外观" })).toBeInTheDocument();
+  expect(screen.getByRole("group", { name: "语言" })).toBeInTheDocument();
+  expect(screen.queryByText("成员")).toBeNull();
+  expect(document.querySelector("select")).toBeNull();
 });
 
 test("a thread uses the first user line as the session title", async () => {

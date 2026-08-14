@@ -16,6 +16,13 @@ export function publishedIn(
   );
 }
 
+export function agentLabel(row: ListedAgent, agents: ListedAgent[]): string {
+  const clash = agents.some(
+    (other) => other.agent.name === row.agent.name && other.workspace.id !== row.workspace.id,
+  );
+  return clash ? `${row.agent.name} · ${row.workspace.name}` : row.agent.name;
+}
+
 export function matchingSessions(
   listed: SessionResponse[],
   agentId: string,

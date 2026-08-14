@@ -187,17 +187,77 @@ button:disabled {
   padding: 2px 6px 6px;
 }
 
-.rail-agent {
-  appearance: none;
+.menu-anchor {
+  position: relative;
+}
+
+.menu-trigger,
+.rail-user {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
+  min-width: 0;
   border: 0;
   border-radius: 10px;
-  padding: 9px 28px 9px 12px;
-  background:
-    var(--th-paper-raised)
-    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='%235c5348' d='M1 1.5 L6 6.5 L11 1.5'/></svg>")
-    no-repeat right 12px center;
+  padding: 8px 10px;
+  background: var(--th-paper-raised);
+  color: var(--th-ink);
+  text-align: left;
   font-weight: 650;
+}
+
+.menu-trigger span:first-child,
+.rail-user span:nth-child(2) {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-caret {
+  color: var(--th-ink-soft);
+  font-size: 11px;
+}
+
+.menu-panel {
+  position: absolute;
+  z-index: 8;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  border: 1px solid var(--th-line);
+  border-radius: 12px;
+  background: var(--th-paper-raised);
+  box-shadow: var(--th-shadow);
+}
+
+.menu-panel-up {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
+.menu-panel button {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--th-ink);
+  text-align: left;
+}
+
+.menu-panel button:hover,
+.menu-panel button.is-selected {
+  background: var(--th-sider);
+}
+
+.menu-panel button.is-selected {
+  box-shadow: inset 2px 0 0 var(--th-copper);
 }
 
 .rail-new {
@@ -251,27 +311,8 @@ button:disabled {
 }
 
 .rail-foot {
-  display: grid;
-  gap: 8px;
   padding-top: 10px;
   border-top: 1px solid var(--th-line);
-}
-
-.rail-user {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  padding: 0 2px;
-  color: var(--th-ink);
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.rail-user span:last-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .rail-avatar {
@@ -285,24 +326,56 @@ button:disabled {
   font-size: 11px;
 }
 
-.rail-tools {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+.settings {
+  min-height: 100dvh;
+  width: min(560px, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 36px 0 64px;
 }
 
-.rail-tools button {
-  border: 0;
-  border-radius: 999px;
-  padding: 4px 8px;
-  background: transparent;
+.settings-back {
+  color: var(--th-copper);
+  text-decoration: none;
+  font-weight: 650;
+}
+
+.settings h1 {
+  margin: 16px 0 8px;
+  font-size: 32px;
+}
+
+.settings-intro,
+.settings-fact {
+  margin: 0 0 8px;
   color: var(--th-ink-soft);
-  font-size: 12px;
+  line-height: 1.5;
 }
 
-.rail-tools button:hover {
+.settings section {
+  margin-top: 28px;
+}
+
+.settings h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+.choice-row {
+  display: flex;
+  gap: 8px;
+}
+
+.choice-row button {
+  border: 1px solid var(--th-line);
+  border-radius: 999px;
+  padding: 8px 14px;
   background: var(--th-paper-raised);
-  color: var(--th-ink);
+}
+
+.choice-row button.is-selected {
+  border-color: var(--th-ink);
+  background: var(--th-ink);
+  color: var(--th-paper);
 }
 
 .chat-main {

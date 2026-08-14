@@ -6,6 +6,7 @@ import { LocaleProvider, useT } from "./i18n/locale";
 import { ChatHome } from "./pages/ChatHome";
 import { ChatPage } from "./pages/ChatPage";
 import { LoginPage } from "./pages/LoginPage";
+import { SettingsPage } from "./pages/SettingsPage";
 import { ChatTheme } from "./theme/ChatTheme";
 
 function AppRoutes() {
@@ -34,6 +35,10 @@ function AppRoutes() {
       <Route
         path="/"
         element={auth.user === null ? <Navigate to="/login" replace /> : <ChatHome />}
+      />
+      <Route
+        path="/settings"
+        element={auth.user === null ? <Navigate to="/login" replace /> : <SettingsPage />}
       />
       <Route
         path="/:workspaceId/:agentId/:sessionId"
