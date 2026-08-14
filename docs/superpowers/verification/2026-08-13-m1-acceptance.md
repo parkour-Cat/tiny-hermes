@@ -109,8 +109,12 @@ machine.
 
 ## 4. Explicitly not claimed
 
-- §24.1 thresholds passing on this host (4 vCPU). Live `benchmark_m1.py`
-  gates were not run; `--shape-only` still exits 2.
+- §24.1 thresholds passing. A later operator Linux host (8 vCPU,
+  MemTotal ≈ 15.12 GiB) is recorded in
+  `2026-08-14-m1-reference-host.md`: `--shape-only` still exits 2, and
+  every live gate remains `not_run` because the drivers were never
+  written. Workspace and restart drills passed on that host. That is
+  not a §24.1 pass.
 - A live `generate_local_secrets.py` Compose `up --wait` (the later stack
   used the compose file's default interpolations).
 - GitHub Actions `compose-e2e` green. Private-repo spending limit refused
