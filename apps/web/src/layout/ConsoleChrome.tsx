@@ -5,13 +5,14 @@ import { Link } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthProvider";
 import { useLocale } from "../i18n/locale";
+import { HermesMark } from "../ui/HermesMark";
 import { useConsoleTheme } from "./ConsoleTheme";
 
 export function BrandMark() {
   const { t } = useLocale();
   return (
     <Link to="/workspaces" className="th-brand">
-      <span className="th-mark" aria-hidden="true" />
+      <HermesMark size={34} />
       <span className="th-word">{t("appName")}</span>
     </Link>
   );

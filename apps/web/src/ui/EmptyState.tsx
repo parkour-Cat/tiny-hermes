@@ -1,10 +1,12 @@
 import type { ReactNode } from "react";
 
+import { HermesMark } from "./HermesMark";
+
 /**
  * The one empty surface the console uses.
  *
  * Ant Design's default illustration and a Card skeleton are two different
- * claims about the same absence. This mark is the only one.
+ * claims about the same absence. The listener is the only mark.
  */
 export function EmptyState({
   title,
@@ -15,10 +17,7 @@ export function EmptyState({
 }) {
   return (
     <div className="th-empty" role="status">
-      <div className="th-empty-mark" aria-hidden="true">
-        <span className="th-empty-ring" />
-        <span className="th-empty-cut" />
-      </div>
+      <HermesMark size={64} variant="empty" />
       <p className="th-empty-title">{title}</p>
       {action === undefined ? null : <div className="th-empty-action">{action}</div>}
     </div>
