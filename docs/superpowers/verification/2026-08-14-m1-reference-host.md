@@ -138,7 +138,11 @@ whole-Run P95 0.61 s is under 1 s; ~100 MiB 8.5 s is under 15 s;
 next-run 2.2 s is under 3 s; queued-after-kill 27.29 s is under 30 s.
 
 A later same-day run on this host executed the live drivers. Raw
-official JSON: `2026-08-14-m1-benchmark-live.md`. Still not a pass.
+official JSON: `2026-08-14-m1-benchmark-live.md`. Runs 2 and 3 still
+failed SSE cadence and worker_recovery. Run 4 is the first official
+`passed: true`: `2026-08-14-m1-benchmark-live-4.md`.
+
+First-run shape (still `passed: false` on that JSON):
 
 ```json
 {
@@ -149,3 +153,6 @@ official JSON: `2026-08-14-m1-benchmark-live.md`. Still not a pass.
   "passed": false
 }
 ```
+
+Run 4 official document: `passed: true`. Full table in
+`2026-08-14-m1-benchmark-live-4.md`.

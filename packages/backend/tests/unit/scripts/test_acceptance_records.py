@@ -29,6 +29,7 @@ def test_product_closure_record_has_thirteen_scenarios() -> None:
     assert "2026-08-14-m1-benchmark-live.md" in text
     assert "2026-08-14-m1-benchmark-live-2.md" in text
     assert "2026-08-14-m1-benchmark-live-3.md" in text
+    assert "2026-08-14-m1-benchmark-live-4.md" in text
 
 
 def test_public_description_is_the_m1_phrase() -> None:
