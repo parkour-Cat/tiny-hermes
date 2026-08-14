@@ -26,6 +26,7 @@ def test_product_closure_record_has_thirteen_scenarios() -> None:
     assert indexes == list(range(1, 14))
     assert "scripts/benchmark_m1.py" in text
     assert "2026-08-13-m1-feishu.md" in text
+    assert "2026-08-14-m1-benchmark-live.md" in text
 
 
 def test_public_description_is_the_m1_phrase() -> None:

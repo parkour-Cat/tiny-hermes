@@ -137,6 +137,9 @@ Informational vs the product table (still not a §24.1 pass): 1 MiB
 whole-Run P95 0.61 s is under 1 s; ~100 MiB 8.5 s is under 15 s;
 next-run 2.2 s is under 3 s; queued-after-kill 27.29 s is under 30 s.
 
+A later same-day run on this host executed the live drivers. Raw
+official JSON: `2026-08-14-m1-benchmark-live.md`. Still not a pass.
+
 ```json
 {
   "git_sha": "d244a86edd9f5076b5595c24f828c9346980c7ba",

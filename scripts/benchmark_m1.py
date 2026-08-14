@@ -188,7 +188,11 @@ def evaluate(
         reasons.append(f"elapsed {elapsed_s:.2f}s exceeds {gate.max_s}s")
     if gate.rps is not None and achieved_rps is not None and achieved_rps < gate.rps:
         reasons.append(f"achieved {achieved_rps:.1f}/s below {gate.rps}/s")
-    if gate.duration_s is not None and sampled_s is not None and sampled_s < gate.duration_s:
+    if (
+        gate.duration_s is not None
+        and sampled_s is not None
+        and sampled_s + 0.5 < float(gate.duration_s)
+    ):
         reasons.append(f"sampled {sampled_s:.1f}s, gate requires {gate.duration_s}s")
     if extra_reasons:
         reasons.extend(extra_reasons)

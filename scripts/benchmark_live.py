@@ -15,7 +15,7 @@ import threading
 import time
 from collections.abc import Callable, Generator, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -154,9 +154,16 @@ def missed_cadence(stamps: list[float], every: float, slack: float) -> bool:
     )
 
 
+def same_container(left: str, right: str) -> bool:
+    """Docker ps may print a 12-char prefix of the inspect id."""
+    if not left or not right:
+        return False
+    return left == right or left.startswith(right) or right.startswith(left)
+
+
 def warm_reasons(before_id: str, after_id: str, reset_after_first: bool) -> list[str]:
     reasons: list[str] = []
-    if before_id != after_id:
+    if not same_container(before_id, after_id):
         reasons.append(f"container id changed {before_id} -> {after_id}")
     if reset_after_first:
         reasons.append("second acquire wrote sandbox_cache_reset (not a warm reuse)")
@@ -842,7 +849,7 @@ def default_harness() -> Harness:
     return Harness(
         open_console=_open_console,
         open_store=_open_store,
-        compose=compose,
+        compose=_compose,
         await_healthy=await_healthy,
         digest=lambda: os.environ.get("SANDBOX_IMAGE_DIGEST", ""),
         containers=containers_for_drill,
@@ -851,6 +858,12 @@ def default_harness() -> Harness:
         sleep=time.sleep,
         api=API,
     )
+
+
+def _compose(*arguments: str) -> None:
+    """Compose chatter goes to stderr so the official JSON stays parseable."""
+    with redirect_stdout(sys.stderr):
+        compose(*arguments)
 
 
 @contextmanager

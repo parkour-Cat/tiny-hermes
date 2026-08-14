@@ -327,6 +327,13 @@ def test_sandbox_warm_fails_when_the_container_id_changes() -> None:
     assert any("container" in reason for reason in reasons)
     assert any("sandbox_cache_reset" in reason for reason in reasons)
     assert live.warm_reasons("same", "same", False) == []
+    full = "6c63cf01565c597b33402b8db515eebda64501b40250b66d6d69f71cf4b2f2d0"
+    assert live.same_container("6c63cf01565c", full)
+    assert live.warm_reasons(
+        "6c63cf01565c",
+        "6c63cf01565c597b33402b8db515eebda64501b40250b66d6d69f71cf4b2f2d0",
+        False,
+    ) == []
 
 
 def test_sse_reconnect_rejects_a_gap() -> None:

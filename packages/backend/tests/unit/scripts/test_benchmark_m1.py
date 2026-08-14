@@ -166,6 +166,16 @@ def test_evaluate_fails_when_the_write_rate_is_below_the_gate() -> None:
     assert result["passed"] is False
 
 
+def test_a_full_duration_sample_is_not_rejected_for_clock_jitter() -> None:
+    result = benchmark.evaluate(
+        benchmark.RUN_EVENT,
+        benchmark.Sample(latencies_ms=(10.0,) * 100, errors=0, total=100),
+        achieved_rps=500.0,
+        sampled_s=299.96,
+    )
+    assert result["passed"] is True
+
+
 def test_a_short_sample_cannot_pass_a_duration_gate() -> None:
     result = benchmark.evaluate(
         benchmark.CREATE_RUN,
