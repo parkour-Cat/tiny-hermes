@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 
-import { sessionTitle } from "./sessionTitle";
+import { isBlankSession, sessionTitle } from "./sessionTitle";
 
 test("uses the first user line, not a session id", () => {
   expect(
@@ -16,6 +16,16 @@ test("uses the first user line, not a session id", () => {
 
 test("an empty thread keeps the empty label", () => {
   expect(sessionTitle([], "未命名对话")).toBe("未命名对话");
+});
+
+test("a session is blank until the user has spoken", () => {
+  const unused = { head_run_id: null, next_run_sequence: 1 };
+  expect(isBlankSession(unused)).toBe(true);
+  expect(isBlankSession({ head_run_id: "run-1", next_run_sequence: 2 })).toBe(false);
+  expect(isBlankSession({ head_run_id: "run-1", next_run_sequence: 2 }, [])).toBe(true);
+  expect(
+    isBlankSession(unused, [{ role: "user", parts: [{ type: "text", text: "Hello" }] }]),
+  ).toBe(false);
 });
 
 test("long first lines are clipped for the rail", () => {

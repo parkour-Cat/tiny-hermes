@@ -358,8 +358,29 @@ test("a finished turn does not put retry in the page chrome", async () => {
   expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
 });
 
-test("新对话 posts another persistent session", async () => {
+test("新对话 reuses the unused session instead of posting another", async () => {
   loadedChat();
+  document.cookie = "tiny_hermes_csrf=token-value";
+  const posts: unknown[] = [];
+  server.use(
+    http.post("/api/v1/sessions", async ({ request }) => {
+      posts.push(await request.json());
+      return HttpResponse.json(sessionRow({ id: "66666666-7777-4888-8999-aaaaaaaaaaaa" }), {
+        status: 201,
+      });
+    }),
+  );
+
+  renderChat(`/${WORKSPACE}/${AGENT}/${SESSION}`);
+  await screen.findByRole("heading", { name: "Darwin" });
+  await userEvent.click(screen.getByRole("button", { name: "新对话" }));
+
+  expect(posts).toEqual([]);
+  expect(screen.getByRole("button", { name: "未命名对话" })).toHaveAttribute("aria-current", "true");
+});
+
+test("新对话 posts only when every session already has a turn", async () => {
+  loadedChat([{ role: "user", parts: [{ type: "text", text: "Summarize yesterday" }] }]);
   document.cookie = "tiny_hermes_csrf=token-value";
   const created = sessionRow({
     id: "66666666-7777-4888-8999-aaaaaaaaaaaa",
@@ -367,6 +388,9 @@ test("新对话 posts another persistent session", async () => {
   });
   const posts: unknown[] = [];
   server.use(
+    http.get("/api/v1/sessions", () =>
+      HttpResponse.json([sessionRow({ next_run_sequence: 2, head_run_id: PENDING })]),
+    ),
     http.post("/api/v1/sessions", async ({ request }) => {
       posts.push(await request.json());
       return HttpResponse.json(created, { status: 201 });

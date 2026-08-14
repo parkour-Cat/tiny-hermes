@@ -19,7 +19,7 @@ import { matchingSessions } from "../chat/published";
 import { Composer } from "../chat/Composer";
 import { loadSessionPrefs, saveSessionPrefs } from "../chat/sessionPrefs";
 import { SessionRail } from "../chat/SessionRail";
-import { sessionTitle } from "../chat/sessionTitle";
+import { isBlankSession, sessionTitle } from "../chat/sessionTitle";
 import { Transcript } from "../chat/Transcript";
 import { usePublishedAgents } from "../chat/usePublishedAgents";
 import { useT } from "../i18n/locale";
@@ -242,7 +242,22 @@ export function ChatPage() {
           setPrefs(next);
         }}
         onSession={(id) => navigate(`/${workspaceId}/${agentId}/${id}`)}
-        onNewChat={() => openSession.mutate()}
+        onNewChat={() => {
+          const unused = mine.find((session, index) => {
+            if (prefs.archived.includes(session.id)) {
+              return false;
+            }
+            return isBlankSession(session, titleQueries[index]?.data);
+          });
+          if (unused !== undefined) {
+            setRunId(null);
+            setOptimistic(null);
+            setError(null);
+            navigate(`/${workspaceId}/${agentId}/${unused.id}`);
+            return;
+          }
+          openSession.mutate();
+        }}
         onHidden={(id) => {
           if (id === activeSessionId) {
             navigate(`/${workspaceId}/${agentId}`);
