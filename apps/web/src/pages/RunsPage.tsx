@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Form, Input, Modal, Select, Table, Tag, Typography } from "antd";
+import { Alert, Button, Card, Form, Input, Modal, Select, Table, Typography } from "antd";
 import { useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
@@ -7,7 +7,11 @@ import { api } from "../api/client";
 import { problemMessage } from "../api/messages";
 import type { AgentResponse, RunResponse, SessionResponse } from "../api/types";
 import { moment } from "../i18n/moment";
-import { t } from "../i18n/zh-CN";
+import { useT } from "../i18n/locale";
+import { PageHeading } from "../layout/ConsoleChrome";
+import { statusLabel } from "../status";
+import { EmptyState } from "../ui/EmptyState";
+import { StatusTag } from "../ui/StatusTag";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 type SubmitValues = {
@@ -31,7 +35,20 @@ type Attempt = {
   sessionId: string | null;
 };
 
+function runCaption(
+  run: RunResponse,
+  agents: AgentResponse[] | undefined,
+  t: (key: "runUnknownAgent" | "runTurnPrefix" | "runTurnSuffix") => string,
+): { name: string; turn: string } {
+  const agent = (agents ?? []).find((entry) => entry.current_version_id === run.agent_version_id);
+  return {
+    name: agent?.name ?? t("runUnknownAgent"),
+    turn: `${t("runTurnPrefix")}${String(run.session_sequence)}${t("runTurnSuffix")}`,
+  };
+}
+
 export function RunsPage() {
+  const t = useT();
   const workspaceId = useWorkspaceId();
   const navigate = useNavigate();
   const [form] = Form.useForm<SubmitValues>();
@@ -48,9 +65,7 @@ export function RunsPage() {
   const agents = useQuery({
     queryKey: ["agents", workspaceId] as const,
     queryFn: () => api<AgentResponse[]>("/api/v1/agents", scope),
-    // Only the submission dialog needs the agent list; asking for it on every
-    // visit to the Run list would be a request nobody made.
-    enabled: open && workspaceId !== null,
+    enabled: workspaceId !== null,
   });
 
   const submit = useMutation({
@@ -110,25 +125,31 @@ export function RunsPage() {
     {
       title: t("runColumn"),
       key: "id",
-      render: (_: unknown, run: RunResponse) => (
-        // The whole identifier: it is what the address bar, the API and the
-        // logs all use, and half of one matches none of them.
-        <Link to={`/workspaces/${workspaceId ?? ""}/runs/${run.id}`}>{run.id}</Link>
-      ),
+      render: (_: unknown, run: RunResponse) => {
+        const caption = runCaption(run, agents.data, t);
+        return (
+          <Link
+            className="th-run-link"
+            to={`/workspaces/${workspaceId ?? ""}/runs/${run.id}`}
+            aria-label={`${caption.name} · ${caption.turn}`}
+          >
+            <span className="th-run-name">{caption.name}</span>
+            <span className="th-run-meta">{caption.turn}</span>
+          </Link>
+        );
+      },
     },
     {
       title: t("runStatus"),
       key: "status",
-      // The state machine's own name for the state. Translating it would put a
-      // second vocabulary between the user and the events they are reading.
-      render: (_: unknown, run: RunResponse) => <Tag>{run.status}</Tag>,
+      render: (_: unknown, run: RunResponse) => <StatusTag code={run.status} />,
     },
     {
       title: t("runQueue"),
       key: "queue",
       render: (_: unknown, run: RunResponse) => (
         <>
-          <Typography.Text>{run.queue.status}</Typography.Text>
+          <Typography.Text>{statusLabel(run.queue.status, t)}</Typography.Text>
           {run.queue.status === "head" ? null : (
             <Typography.Paragraph type="secondary" className="fact-note">
               {`${t("queuePositionPrefix")}${run.queue.position}${t("queuePositionSuffix")}`}
@@ -155,30 +176,36 @@ export function RunsPage() {
     },
   ];
 
+  const rows = runs.data ?? [];
+
   return (
     <>
-      <div className="page-heading">
-        <div>
-          <Typography.Title level={2}>{t("runsTitle")}</Typography.Title>
-          <Typography.Paragraph type="secondary">{t("runsIntro")}</Typography.Paragraph>
-        </div>
-        <Button type="primary" onClick={() => setOpen(true)}>
-          {t("newRun")}
-        </Button>
-      </div>
-      {/* Said out loud rather than papered over with a pager the platform
-          cannot honour: the route takes no page or cursor, so any control here
-          would sort a list that already arrived whole. */}
-      <Alert className="page-alert" type="info" title={t("runsUnpaginated")} showIcon />
-      <Card loading={runs.isPending} variant="borderless">
-        <Table<RunResponse>
-          rowKey="id"
-          columns={columns}
-          dataSource={runs.data ?? []}
-          pagination={false}
-          locale={{ emptyText: <Empty description={t("emptyRuns")} /> }}
-        />
-      </Card>
+      <PageHeading
+        kicker={t("workspaceTitle")}
+        title={t("runsTitle")}
+        intro={t("runsIntro")}
+        extra={
+          <Button type="primary" onClick={() => setOpen(true)}>
+            {t("newRun")}
+          </Button>
+        }
+      />
+      {runs.isPending ? (
+        <Card loading variant="borderless" />
+      ) : rows.length === 0 ? (
+        <Card variant="borderless">
+          <EmptyState title={t("emptyRuns")} />
+        </Card>
+      ) : (
+        <Card variant="borderless">
+          <Table<RunResponse>
+            rowKey="id"
+            columns={columns}
+            dataSource={rows}
+            pagination={false}
+          />
+        </Card>
+      )}
       <Modal
         open={open}
         title={t("newRun")}

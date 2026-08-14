@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Avatar, Button, Card, Empty, Form, Input, Modal, Tag, Typography } from "antd";
+import { Alert, Avatar, Button, Card, Form, Input, Modal, Tag, Typography } from "antd";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -7,6 +7,8 @@ import { api } from "../api/client";
 import { problemField, problemMessage } from "../api/messages";
 import type { AgentResponse } from "../api/types";
 import { useT } from "../i18n/locale";
+import { PageHeading } from "../layout/ConsoleChrome";
+import { EmptyState } from "../ui/EmptyState";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 type AgentValues = {
@@ -63,19 +65,24 @@ export function AgentsPage() {
 
   return (
     <>
-      <div className="page-heading">
-        <div>
-          <Typography.Title level={2}>{t("agentsTitle")}</Typography.Title>
-          <Typography.Paragraph type="secondary">{t("agentsIntro")}</Typography.Paragraph>
-        </div>
-        <Button type="primary" onClick={() => setOpen(true)}>
-          {t("newAgent")}
-        </Button>
-      </div>
-      <Card loading={agents.isPending} variant="borderless">
-        {(agents.data ?? []).length === 0 ? (
-          <Empty description={t("emptyAgents")} />
-        ) : (
+      <PageHeading
+        kicker={t("workspaceTitle")}
+        title={t("agentsTitle")}
+        intro={t("agentsIntro")}
+        extra={
+          <Button type="primary" onClick={() => setOpen(true)}>
+            {t("newAgent")}
+          </Button>
+        }
+      />
+      {agents.isPending ? (
+        <Card loading variant="borderless" />
+      ) : (agents.data ?? []).length === 0 ? (
+        <Card variant="borderless">
+          <EmptyState title={t("emptyAgents")} />
+        </Card>
+      ) : (
+        <Card variant="borderless">
           <div className="workspace-list" role="list">
             {(agents.data ?? []).map((entry) => (
               <article className="workspace-row" role="listitem" aria-label={entry.name} key={entry.id}>
@@ -91,14 +98,16 @@ export function AgentsPage() {
                     </Link>
                   </div>
                 </div>
-                <Tag color={entry.current_version_id === null ? "default" : "green"}>
+                <Tag
+                  className={`th-tag ${entry.current_version_id === null ? "" : "th-tag-active"}`}
+                >
                   {entry.current_version_id === null ? t("agentUnpublished") : t("agentPublished")}
                 </Tag>
               </article>
             ))}
           </div>
-        )}
-      </Card>
+        </Card>
+      )}
       <Modal
         open={open}
         title={t("newAgent")}

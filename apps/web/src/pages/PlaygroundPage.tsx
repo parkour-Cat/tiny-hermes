@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Input, Modal, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Input, Modal, Space, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
@@ -18,6 +18,8 @@ import { useT } from "../i18n/locale";
 import { RUN_ACTIONS } from "../runs/actions";
 import { mergeArtifacts, textOf, toolsOf, artifactIdsIn } from "../runs/transcript";
 import { runQueryOptions, useRunEvents } from "../runs/useRunEvents";
+import { EmptyState } from "../ui/EmptyState";
+import { StatusTag } from "../ui/StatusTag";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 function matchingSessions(
@@ -208,6 +210,7 @@ export function PlaygroundPage() {
       {contextHolder}
       <div className="page-heading">
         <div>
+          <p className="page-kicker">{t("agents")}</p>
           <Typography.Title level={2}>{t("playground")}</Typography.Title>
           <Typography.Paragraph type="secondary">{t("playgroundIntro")}</Typography.Paragraph>
           <Typography.Paragraph type="secondary">
@@ -234,7 +237,7 @@ export function PlaygroundPage() {
           title={t("sessionBlocked")}
           description={
             <Space wrap>
-              {run.queue.head_status === undefined ? null : <Tag>{run.queue.head_status}</Tag>}
+              {run.queue.head_status === undefined ? null : <StatusTag code={run.queue.head_status} />}
               {headActions.map((action) => {
                 const offer = RUN_ACTIONS[action];
                 return offer === undefined || headId === null ? null : (
@@ -254,8 +257,8 @@ export function PlaygroundPage() {
       ) : null}
       {run === undefined ? null : (
         <Space wrap className="page-alert">
-          <Tag>{run.status}</Tag>
-          <Tag>{run.queue.status}</Tag>
+          <StatusTag code={run.status} />
+          <StatusTag code={run.queue.status} />
           {run.available_actions.map((action) => {
             const offer = RUN_ACTIONS[action];
             return offer === undefined ? null : (
@@ -272,11 +275,11 @@ export function PlaygroundPage() {
       )}
       <Card title={t("messagesSection")} variant="borderless" className="page-alert">
         {turns.length === 0 ? (
-          <Empty description={t("emptyPlayground")} />
+          <EmptyState title={t("emptyPlayground")} />
         ) : (
           turns.map((message, index) => (
             <article className="workspace-row" key={`${message.role}-${index}`}>
-              <Tag>{message.role}</Tag>
+              <StatusTag code={message.role} />
               <Typography.Paragraph className="fact-note">{textOf(message)}</Typography.Paragraph>
             </article>
           ))
@@ -284,7 +287,7 @@ export function PlaygroundPage() {
       </Card>
       <Card title={t("toolsCallsSection")} variant="borderless" className="page-alert">
         {toolsOf(turns).length === 0 ? (
-          <Empty description={t("emptyTools")} />
+          <EmptyState title={t("emptyTools")} />
         ) : (
           toolsOf(turns).map((round) => (
             <article className="workspace-row" key={round.callId || round.name}>
@@ -299,7 +302,7 @@ export function PlaygroundPage() {
       </Card>
       <Card title={t("filesSection")} variant="borderless" className="page-alert">
         {files.length === 0 ? (
-          <Empty description={t("emptyFiles")} />
+          <EmptyState title={t("emptyFiles")} />
         ) : (
           files.map((file) => (
             <Space key={file.id} className="workspace-row">

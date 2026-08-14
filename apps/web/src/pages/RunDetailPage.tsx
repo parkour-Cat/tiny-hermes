@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Descriptions, Empty, Modal, Space, Tag, Timeline, Typography } from "antd";
+import { Alert, Button, Card, Descriptions, Modal, Space, Timeline, Typography } from "antd";
 import type { DescriptionsProps } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -14,6 +14,9 @@ import type { MessageKey } from "../i18n/zh-CN";
 import { RUN_ACTIONS } from "../runs/actions";
 import { artifactIdsIn, mergeArtifacts, textOf, toolsOf } from "../runs/transcript";
 import { runQueryOptions, useRunEvents } from "../runs/useRunEvents";
+import { statusLabel } from "../status";
+import { EmptyState } from "../ui/EmptyState";
+import { StatusTag } from "../ui/StatusTag";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 /** Consumed against its limit, in the unit the limit is written in. */
@@ -187,8 +190,8 @@ export function RunDetailPage() {
   }
 
   const facts: Rows = [
-    { key: "status", label: t("runStatus"), children: <Tag>{run.status}</Tag> },
-    { key: "queue", label: t("runQueue"), children: run.queue.status },
+    { key: "status", label: t("runStatus"), children: <StatusTag code={run.status} /> },
+    { key: "queue", label: t("runQueue"), children: statusLabel(run.queue.status, t) },
     { key: "session-sequence", label: t("runSessionSequence"), children: run.session_sequence },
     { key: "state-version", label: t("runStateVersion"), children: run.state_version },
     {
@@ -272,6 +275,7 @@ export function RunDetailPage() {
       {contextHolder}
       <div className="page-heading">
         <div>
+          <p className="page-kicker">{t("runs")}</p>
           <Typography.Title level={2}>{t("runDetailTitle")}</Typography.Title>
           <Typography.Paragraph type="secondary">{run.id}</Typography.Paragraph>
         </div>
@@ -304,11 +308,11 @@ export function RunDetailPage() {
       </Card>
       <Card title={t("messagesSection")} variant="borderless" className="page-alert">
         {turns.length === 0 ? (
-          <Empty description={t("emptyMessages")} />
+          <EmptyState title={t("emptyMessages")} />
         ) : (
           turns.map((message, index) => (
             <article className="workspace-row" key={`${message.role}-${index}`}>
-              <Tag>{message.role}</Tag>
+              <StatusTag code={message.role} />
               <Typography.Paragraph className="fact-note">{textOf(message)}</Typography.Paragraph>
             </article>
           ))
@@ -316,7 +320,7 @@ export function RunDetailPage() {
       </Card>
       <Card title={t("toolsCallsSection")} variant="borderless" className="page-alert">
         {rounds.length === 0 ? (
-          <Empty description={t("emptyTools")} />
+          <EmptyState title={t("emptyTools")} />
         ) : (
           rounds.map((round) => (
             <article className="workspace-row" key={round.callId || round.name}>
@@ -345,7 +349,7 @@ export function RunDetailPage() {
       </Card>
       <Card title={t("filesSection")} variant="borderless" className="page-alert">
         {files.length === 0 ? (
-          <Empty description={t("emptyFiles")} />
+          <EmptyState title={t("emptyFiles")} />
         ) : (
           files.map((file) => (
             <Space key={file.id} className="workspace-row">
@@ -365,7 +369,7 @@ export function RunDetailPage() {
       </Card>
       <Card title={t("timelineSection")} variant="borderless">
         {timeline.length === 0 ? (
-          <Empty description={t("emptyTimeline")} />
+          <EmptyState title={t("emptyTimeline")} />
         ) : (
           <Timeline items={timeline} />
         )}

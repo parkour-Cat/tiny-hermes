@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Form, Input, Modal, Select, Space, Typography } from "antd";
+import { Alert, Button, Card, Form, Input, Modal, Select, Space, Typography } from "antd";
 import { useState } from "react";
 
 import { api } from "../api/client";
@@ -7,6 +7,8 @@ import { problemMessage } from "../api/messages";
 import type { WorkspaceMemberResponse } from "../api/types";
 import { useT } from "../i18n/locale";
 import type { MessageKey } from "../i18n/zh-CN";
+import { PageHeading } from "../layout/ConsoleChrome";
+import { EmptyState } from "../ui/EmptyState";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 type InviteValues = {
@@ -105,11 +107,7 @@ export function MembersPage() {
   return (
     <>
       {contextHolder}
-      <div className="page-heading">
-        <div>
-          <Typography.Title level={2}>{t("members")}</Typography.Title>
-        </div>
-      </div>
+      <PageHeading kicker={t("workspaceTitle")} title={t("members")} />
       {error === null ? null : (
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}
@@ -141,11 +139,15 @@ export function MembersPage() {
           </Form.Item>
         </Form>
       </Card>
-      <Card loading={members.isPending} variant="borderless">
-        {(members.data ?? []).length === 0 ? (
-          <Empty description={t("emptyMembers")} />
-        ) : (
-          (members.data ?? []).map((member) => (
+      {members.isPending ? (
+        <Card loading variant="borderless" />
+      ) : (members.data ?? []).length === 0 ? (
+        <Card variant="borderless">
+          <EmptyState title={t("emptyMembers")} />
+        </Card>
+      ) : (
+        <Card variant="borderless">
+          {(members.data ?? []).map((member) => (
             <Space key={member.user_id} className="workspace-row" wrap>
               <div className="workspace-summary">
                 <Typography.Text strong>{member.display_name}</Typography.Text>
@@ -173,9 +175,9 @@ export function MembersPage() {
                 {t("removeMember")}
               </Button>
             </Space>
-          ))
-        )}
-      </Card>
+          ))}
+        </Card>
+      )}
     </>
   );
 }

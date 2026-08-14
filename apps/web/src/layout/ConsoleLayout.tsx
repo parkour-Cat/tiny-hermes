@@ -1,13 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
-import { Alert, Avatar, Button, Layout, Select, Space, Typography } from "antd";
-import { useState } from "react";
+import { Alert, Button } from "antd";
 import { Link, NavLink, Outlet } from "react-router-dom";
 
 import { api } from "../api/client";
-import { useAuth } from "../auth/AuthProvider";
 import { useLocale } from "../i18n/locale";
+import type { MessageKey } from "../i18n/zh-CN";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
-import { useConsoleTheme } from "./ConsoleTheme";
+import { BrandMark, ConsoleChrome } from "./ConsoleChrome";
 
 type WorkspaceSummary = {
   id: string;
@@ -17,13 +16,19 @@ type WorkspaceSummary = {
 
 const WORKSPACES_QUERY = ["workspaces"] as const;
 
+const NAV: { to: string; label: MessageKey }[] = [
+  { to: "agents", label: "agents" },
+  { to: "runs", label: "runs" },
+  { to: "members", label: "members" },
+  { to: "model-endpoints", label: "modelEndpoints" },
+  { to: "api-keys", label: "apiKeys" },
+  { to: "secrets", label: "secrets" },
+];
+
 export function ConsoleLayout() {
   const workspaceId = useWorkspaceId();
-  const auth = useAuth();
-  const { t, locale, setLocale } = useLocale();
-  const theme = useConsoleTheme();
-  const [actionError, setActionError] = useState<string | null>(null);
-  // Only to put a name on the header. Membership is the server's answer, never
+  const { t } = useLocale();
+  // Only to put a name on the sider. Membership is the server's answer, never
   // this list's: a Workspace missing from it still gets its requests sent and
   // its refusal shown, because a console that pre-filters is a console that can
   // disagree with the platform about who may see what.
@@ -53,62 +58,32 @@ export function ConsoleLayout() {
 
   const current = (workspaces.data ?? []).find((workspace) => workspace.id === workspaceId);
 
-  async function logout(): Promise<void> {
-    setActionError(null);
-    try {
-      await auth.logout();
-    } catch (caught) {
-      setActionError(caught instanceof Error ? caught.message : t("requestFailed"));
-    }
-  }
-
   return (
-    <Layout className="app-layout">
-      <Layout.Header className="app-header">
-        <div className="console-identity">
-          <Link to="/workspaces" className="header-brand">
-            {t("appName")}
-          </Link>
-          <Typography.Text className="console-workspace" ellipsis>
-            {current?.name ?? workspaceId}
-          </Typography.Text>
-          <nav className="console-nav">
-            <NavLink to={`/workspaces/${workspaceId}/agents`}>{t("agents")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/runs`}>{t("runs")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/members`}>{t("members")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/model-endpoints`}>{t("modelEndpoints")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/api-keys`}>{t("apiKeys")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/secrets`}>{t("secrets")}</NavLink>
-          </nav>
-        </div>
-        <Space wrap>
-          <Select
-            aria-label={t("language")}
-            value={locale}
-            onChange={(next) => setLocale(next)}
-            options={[
-              { value: "zh-CN", label: t("localeZh") },
-              { value: "en-US", label: t("localeEn") },
-            ]}
-            popupMatchSelectWidth={false}
-          />
-          <Button onClick={() => theme.toggle()}>
-            {theme.dark ? t("themeLight") : t("themeDark")}
-          </Button>
-          <Avatar>{auth.user?.display_name.slice(0, 1).toUpperCase()}</Avatar>
-          <div className="user-summary">
-            <Typography.Text>{auth.user?.display_name}</Typography.Text>
-            <Typography.Text type="secondary">{auth.user?.subject}</Typography.Text>
+    <ConsoleChrome
+      sidebar={
+        <>
+          <BrandMark />
+          <div className="th-workspace-chip" title={workspaceId}>
+            {current?.name ?? t("workspaceTitle")}
           </div>
-          <Button onClick={() => void logout()}>{t("logout")}</Button>
-        </Space>
-      </Layout.Header>
-      <Layout.Content className="workspace-content">
-        {actionError === null ? null : (
-          <Alert className="page-alert" type="error" title={actionError} showIcon />
-        )}
-        <Outlet />
-      </Layout.Content>
-    </Layout>
+          <nav className="th-nav">
+            {NAV.map((item) => (
+              <NavLink
+                key={item.to}
+                to={`/workspaces/${workspaceId}/${item.to}`}
+                className={({ isActive }) => (isActive ? "th-nav-link active" : "th-nav-link")}
+              >
+                {t(item.label)}
+              </NavLink>
+            ))}
+          </nav>
+          <Link to="/workspaces" className="th-nav-foot">
+            {t("backToWorkspaces")}
+          </Link>
+        </>
+      }
+    >
+      <Outlet />
+    </ConsoleChrome>
   );
 }

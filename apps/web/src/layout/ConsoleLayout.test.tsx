@@ -8,7 +8,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, test } from "vitest";
 
 import { ConsoleLayout } from "./ConsoleLayout";
-import { ConsoleTheme } from "./ConsoleTheme";
+import { ConsoleTheme, consoleDesignToken } from "./ConsoleTheme";
 import { AuthProvider } from "../auth/AuthProvider";
 import { TestTheme } from "../test/TestTheme";
 import { mediaMatches } from "../test/setup";
@@ -67,7 +67,7 @@ function renderShell(path: string, hits = { count: 0 }): { hits: { count: number
 test("both sections stay inside the workspace the address names", async () => {
   renderShell(`/workspaces/${WORKSPACE}/agents`);
 
-  expect(await screen.findByRole("link", { name: "Agent" })).toHaveAttribute(
+  expect(await screen.findByRole("link", { name: "智能体" })).toHaveAttribute(
     "href",
     `/workspaces/${WORKSPACE}/agents`,
   );
@@ -83,14 +83,18 @@ test("both sections stay inside the workspace the address names", async () => {
     "href",
     `/workspaces/${WORKSPACE}/model-endpoints`,
   );
-  expect(screen.getByRole("link", { name: "API Keys" })).toHaveAttribute(
+  expect(screen.getByRole("link", { name: "API 密钥" })).toHaveAttribute(
     "href",
     `/workspaces/${WORKSPACE}/api-keys`,
   );
-  expect(screen.getByRole("link", { name: "Secrets" })).toHaveAttribute(
+  expect(screen.getByRole("link", { name: "机密" })).toHaveAttribute(
     "href",
     `/workspaces/${WORKSPACE}/secrets`,
   );
+  expect(document.querySelector(".th-sider")).not.toBeNull();
+  expect(document.querySelector("img.th-hermes-mark")).not.toBeNull();
+  expect(document.querySelector(".th-mark")).toBeNull();
+  expect(document.querySelector(".th-topbar")?.querySelector("a.th-nav-link")).toBeNull();
   expect(screen.queryByRole("link", { name: "Approvals" })).not.toBeInTheDocument();
   expect(screen.queryByText("审批")).not.toBeInTheDocument();
   expect(await screen.findByText("Acme")).toBeInTheDocument();
@@ -138,14 +142,20 @@ test("a dark system preference selects the dark algorithm", () => {
 
   renderThemed(<ThemeProbe />);
 
-  const dark = theme.getDesignToken({ algorithm: theme.darkAlgorithm });
+  const dark = theme.getDesignToken({
+    algorithm: theme.darkAlgorithm,
+    token: consoleDesignToken(true),
+  });
   expect(screen.getByTestId("container")).toHaveTextContent(dark.colorBgContainer);
 });
 
 test("a light system preference keeps the default algorithm", () => {
   renderThemed(<ThemeProbe />);
 
-  const light = theme.getDesignToken({ algorithm: theme.defaultAlgorithm });
+  const light = theme.getDesignToken({
+    algorithm: theme.defaultAlgorithm,
+    token: consoleDesignToken(false),
+  });
   expect(screen.getByTestId("container")).toHaveTextContent(light.colorBgContainer);
 });
 
@@ -154,7 +164,10 @@ test("a stored dark theme wins over a light system preference", () => {
 
   renderThemed(<ThemeProbe />);
 
-  const dark = theme.getDesignToken({ algorithm: theme.darkAlgorithm });
+  const dark = theme.getDesignToken({
+    algorithm: theme.darkAlgorithm,
+    token: consoleDesignToken(true),
+  });
   expect(screen.getByTestId("container")).toHaveTextContent(dark.colorBgContainer);
 });
 

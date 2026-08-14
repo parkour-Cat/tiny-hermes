@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Form, Input, Select, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Form, Input, Select, Space, Typography } from "antd";
 import { useState } from "react";
 
 import { api } from "../api/client";
@@ -7,6 +7,9 @@ import { problemMessage } from "../api/messages";
 import type { RewrapResponse, SecretResponse } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
 import { useT } from "../i18n/locale";
+import { PageHeading } from "../layout/ConsoleChrome";
+import { EmptyState } from "../ui/EmptyState";
+import { StatusTag } from "../ui/StatusTag";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 type CreateValues = {
@@ -91,12 +94,11 @@ export function SecretsPage() {
 
   return (
     <>
-      <div className="page-heading">
-        <div>
-          <Typography.Title level={2}>{t("secretsTitle")}</Typography.Title>
-          <Typography.Paragraph type="secondary">{t("secretsIntro")}</Typography.Paragraph>
-        </div>
-      </div>
+      <PageHeading
+        kicker={t("workspaceTitle")}
+        title={t("secretsTitle")}
+        intro={t("secretsIntro")}
+      />
       {error === null ? null : (
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}
@@ -147,17 +149,21 @@ export function SecretsPage() {
           </Button>
         </Card>
       ) : null}
-      <Card loading={listed.isPending} variant="borderless">
-        {(listed.data ?? []).length === 0 ? (
-          <Empty description={t("emptySecrets")} />
-        ) : (
-          (listed.data ?? []).map((secret) => (
+      {listed.isPending ? (
+        <Card loading variant="borderless" />
+      ) : (listed.data ?? []).length === 0 ? (
+        <Card variant="borderless">
+          <EmptyState title={t("emptySecrets")} />
+        </Card>
+      ) : (
+        <Card variant="borderless">
+          {(listed.data ?? []).map((secret) => (
             <article key={secret.id} className="workspace-row">
               <div className="workspace-summary">
                 <Typography.Title level={4}>{secret.name}</Typography.Title>
                 <Space wrap>
-                  <Tag>{secret.scope}</Tag>
-                  <Tag>{secret.status}</Tag>
+                  <StatusTag code={secret.scope} />
+                  <StatusTag code={secret.status} />
                   <Typography.Text code>{secret.mask}</Typography.Text>
                   {secret.status === "active" ? (
                     <Button
@@ -170,9 +176,9 @@ export function SecretsPage() {
                 </Space>
               </div>
             </article>
-          ))
-        )}
-      </Card>
+          ))}
+        </Card>
+      )}
     </>
   );
 }
