@@ -3,6 +3,7 @@ import { useCallback, useRef, useState } from "react";
 import { agentLabel, type ListedAgent } from "./published";
 import { useDismiss } from "./useDismiss";
 import { useT } from "../i18n/locale";
+import { ChevronDown } from "../ui/ChevronDown";
 
 export function AgentPicker({
   agents,
@@ -39,9 +40,7 @@ export function AgentPicker({
         onClick={() => setOpen((value) => !value)}
       >
         <h1>{label}</h1>
-        <span className="menu-caret" aria-hidden>
-          ▾
-        </span>
+        <ChevronDown />
       </button>
       {open ? (
         <ul className="menu-panel title-picker-menu" role="listbox" aria-label={t("pickAgent")}>

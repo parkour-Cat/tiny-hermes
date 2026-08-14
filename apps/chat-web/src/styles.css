@@ -362,14 +362,15 @@ button:disabled {
   background: var(--th-sider);
 }
 
-.menu-caret {
+.chevron {
+  flex: none;
+  display: block;
   color: var(--th-ink-soft);
-  font-size: 11px;
 }
 
-.rail-user .menu-caret {
-  flex: none;
-  font-size: 12px;
+.rail-user[aria-expanded="true"] .chevron,
+.title-picker[aria-expanded="true"] .chevron {
+  transform: rotate(180deg);
 }
 
 .menu-panel {
@@ -486,7 +487,10 @@ button:disabled {
 
 .rail-session.is-active {
   background: var(--th-paper-raised);
-  box-shadow: inset 2px 0 0 var(--th-copper);
+}
+
+.rail-session.is-active .rail-session-open {
+  font-weight: 650;
 }
 
 .rail-session-open {

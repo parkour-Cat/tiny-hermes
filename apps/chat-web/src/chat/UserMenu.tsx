@@ -5,6 +5,7 @@ import { useDismiss } from "./useDismiss";
 import { useAuth } from "../auth/AuthProvider";
 import { useLocale } from "../i18n/locale";
 import { useChatTheme } from "../theme/ChatTheme";
+import { ChevronDown } from "../ui/ChevronDown";
 
 export function UserMenu() {
   const auth = useAuth();
@@ -37,9 +38,7 @@ export function UserMenu() {
           {initial}
         </span>
         <span>{name}</span>
-        <span className="menu-caret" aria-hidden>
-          ▾
-        </span>
+        <ChevronDown />
       </button>
       {open ? (
         <div className="user-card" role="dialog" aria-label={name}>
