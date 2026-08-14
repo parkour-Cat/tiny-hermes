@@ -4,7 +4,6 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthProvider";
 import { useT } from "../i18n/locale";
-import { BrandMark } from "../layout/ConsoleChrome";
 import { HermesMark } from "../ui/HermesMark";
 
 type LoginValues = {
@@ -78,15 +77,11 @@ export function PublicShell({ children }: { children: React.ReactNode }) {
   return (
     <main className="public-shell">
       <div className="brand-panel">
-        <div className="brand-copy">
-          <BrandMark />
-          <p className="brand-kicker">{t("appKicker")}</p>
-          <Typography.Title>{t("appTagline")}</Typography.Title>
-          <p className="brand-aside">{t("appAside")}</p>
-        </div>
-        <div className="brand-hero" aria-hidden="true">
-          <HermesMark size={280} variant="hero" />
-        </div>
+        <HermesMark size={196} variant="hero" />
+        <p className="th-word brand-word">{t("appName")}</p>
+        <p className="brand-kicker">{t("appKicker")}</p>
+        <Typography.Title>{t("appTagline")}</Typography.Title>
+        <p className="brand-aside">{t("appAside")}</p>
       </div>
       <div className="auth-slot">{children}</div>
     </main>
