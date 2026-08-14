@@ -30,11 +30,14 @@ class Settings(BaseSettings):
     # Execution tuning. Every bound is explicit so an operator cannot configure
     # a lease shorter than a slice, or a retention window that silently
     # discards events a live subscriber still needs.
-    worker_lease_seconds: int = Field(default=30, ge=10, le=300)
+    # §24.1: after the Worker is killed, a retry-safe Run is queued in 30s.
+    # A 30s lease plus a 5s scan cannot meet that cell: expiry is already
+    # the whole window. 20s + 1s scan fits; the lease is not a §24.1 number.
+    worker_lease_seconds: int = Field(default=20, ge=10, le=300)
     worker_max_slice_seconds: int = Field(default=30, ge=10, le=300)
     worker_idle_poll_seconds: int = Field(default=2, ge=1, le=30)
     worker_shutdown_grace_seconds: int = Field(default=20, ge=5, le=120)
-    scheduler_interval_seconds: int = Field(default=5, ge=1, le=60)
+    scheduler_interval_seconds: int = Field(default=1, ge=1, le=60)
     max_recovery_attempts: int = Field(default=3, ge=0, le=10)
     event_retention_hours: int = Field(default=168, ge=1, le=8_760)
     sse_heartbeat_seconds: int = Field(default=15, ge=5, le=60)

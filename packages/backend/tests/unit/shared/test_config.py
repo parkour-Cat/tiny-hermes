@@ -21,11 +21,11 @@ def _settings(**overrides: Any) -> Settings:
 
 
 EXECUTION_BOUNDS = [
-    ("worker_lease_seconds", 30, 10, 300),
+    ("worker_lease_seconds", 20, 10, 300),
     ("worker_max_slice_seconds", 30, 10, 300),
     ("worker_idle_poll_seconds", 2, 1, 30),
     ("worker_shutdown_grace_seconds", 20, 5, 120),
-    ("scheduler_interval_seconds", 5, 1, 60),
+    ("scheduler_interval_seconds", 1, 1, 60),
     ("max_recovery_attempts", 3, 0, 10),
     ("event_retention_hours", 168, 1, 8760),
     ("sse_heartbeat_seconds", 15, 5, 60),
