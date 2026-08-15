@@ -28,6 +28,14 @@ API = os.environ.get("TINY_HERMES_API", "http://127.0.0.1:8000")
 
 REFERENCE_VCPU = 8
 REFERENCE_RAM_GIB = 16
+# A host sold as 16 GB never reports 16 GiB of MemTotal: the kernel image,
+# firmware reservations and the hypervisor's own pages never reach the
+# allocator, and the gap runs from a few hundred MiB to nearly a GiB. The
+# 8 vCPU machine in 2026-08-14-m1-reference-host.md reported 15.12 GiB and
+# was refused, which is a measurement floor set too high, not a small host.
+# Nothing sold as 8 or 12 GB comes near this floor, so the reference shape
+# still means 8 vCPU / 16 GB.
+MIN_REFERENCE_RAM_GIB = 15.0
 DETERMINISTIC_DELAY_MS = 50
 PRELOAD_RUN_EVENTS = 100_000
 
@@ -111,10 +119,11 @@ def percentile(values: tuple[float, ...] | list[float], p: float) -> float:
 
 
 def matches_reference(shape: Shape) -> bool:
-    # MemTotal is a few hundred MiB short of the marketed size. Compare the
-    # rounded GiB so a 16 GB reference host is not rejected for kernel pages.
-    ram = int(shape.ram_gib + 0.5)
-    return shape.os == "linux" and shape.vcpu >= REFERENCE_VCPU and ram >= REFERENCE_RAM_GIB
+    return (
+        shape.os == "linux"
+        and shape.vcpu >= REFERENCE_VCPU
+        and shape.ram_gib >= MIN_REFERENCE_RAM_GIB
+    )
 
 
 def host_shape() -> Shape:
@@ -252,9 +261,7 @@ def report(
         "rss_mib": rss_mib,
         "gates": gates,
         "passed": bool(
-            matches_reference(shape)
-            and gates
-            and all(item["passed"] for item in gates.values())
+            matches_reference(shape) and gates and all(item["passed"] for item in gates.values())
         ),
     }
 

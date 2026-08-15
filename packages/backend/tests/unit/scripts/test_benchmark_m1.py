@@ -43,6 +43,7 @@ def test_thresholds_are_the_product_24_1_cells() -> None:
     assert benchmark.DETERMINISTIC_DELAY_MS == 50
     assert benchmark.REFERENCE_VCPU == 8
     assert benchmark.REFERENCE_RAM_GIB == 16
+    assert benchmark.MIN_REFERENCE_RAM_GIB == 15.0
 
 
 def test_percentile_is_stable_at_the_edges() -> None:
@@ -86,6 +87,19 @@ def test_linux_8_vcpu_16_gib_is_the_reference_shape() -> None:
 def test_marketed_16_gib_is_not_rejected_for_kernel_pages() -> None:
     shape = benchmark.Shape(os="linux", vcpu=8, ram_gib=15.64)
     assert benchmark.matches_reference(shape) is True
+
+
+def test_the_recorded_16_gb_host_is_the_reference_shape() -> None:
+    # 2026-08-14-m1-reference-host.md: MemTotal 15850224 kB on a 16 GB host.
+    # Rounding that to whole GiB gave 15 and refused the machine, which is
+    # why the §24.1 run moved to a 30 GiB host it never needed.
+    shape = benchmark.Shape(os="linux", vcpu=8, ram_gib=15850224.0 / 1024.0 / 1024.0)
+    assert benchmark.matches_reference(shape) is True
+
+
+def test_a_12_gb_host_is_still_refused() -> None:
+    shape = benchmark.Shape(os="linux", vcpu=8, ram_gib=11.6)
+    assert benchmark.matches_reference(shape) is False
 
 
 def test_shape_only_exits_nonzero_when_the_host_is_too_small(
