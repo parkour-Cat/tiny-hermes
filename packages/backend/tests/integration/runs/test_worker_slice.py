@@ -118,6 +118,47 @@ async def test_renewing_a_lease_extends_it_and_records_a_heartbeat(
     assert row[0] is True
 
 
+async def test_a_round_that_outlived_its_own_renewal_still_records(
+    submitted_run: dict[str, Any], scope: dict[str, str], engine: AsyncEngine
+) -> None:
+    """The holder's own renewal must not read as somebody else's claim.
+
+    A round builds its slice command before the work and records it after.
+    A checkpoint long enough to span one renewal interval — 100 MiB under a
+    20s lease — therefore presents a lease version the renewal has already
+    moved on. Rejecting that write left the Run running on a lease nobody
+    would extend until the Scheduler interrupted it, four times, silently.
+    """
+    del submitted_run
+    claimed = await _claim(engine, scope["X-Workspace-Id"])
+
+    async with _factory(engine).begin() as session:
+        renewed = await SqlRunStore(session).renew_lease(
+            RenewLeaseCommand(
+                workspace_id=UUID(scope["X-Workspace-Id"]),
+                run_id=claimed.run.id,
+                lease_id=claimed.lease_id,
+                expected_version=1,
+                lease_seconds=60,
+            )
+        )
+    assert renewed is not None
+    assert renewed.version == 2
+
+    async with _factory(engine).begin() as session:
+        snapshot = await SqlRunStore(session).record_slice(
+            _slice(claimed, scope["X-Workspace-Id"], None, lease_version=1)
+        )
+
+    assert snapshot.state.value == "running"
+    row = await _row(
+        engine,
+        "SELECT released_at IS NOT NULL FROM worker_leases WHERE id = :id",
+        id=claimed.lease_id,
+    )
+    assert row[0] is True
+
+
 async def test_renewing_a_reclaimed_lease_returns_nothing_and_writes_nothing(
     submitted_run: dict[str, Any], scope: dict[str, str], engine: AsyncEngine
 ) -> None:
