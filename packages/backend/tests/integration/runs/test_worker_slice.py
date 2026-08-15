@@ -1,6 +1,6 @@
 import asyncio
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
@@ -52,7 +52,6 @@ def _slice(
     workspace_id: str,
     signal: RunSignal | None,
     *,
-    lease_version: int = 1,
     executed_ms: int = 1_200,
     model_calls: int = 1,
     tokens: int = 32,
@@ -63,7 +62,6 @@ def _slice(
         workspace_id=UUID(workspace_id),
         run_id=claimed.run.id,
         lease_id=claimed.lease_id,
-        expected_lease_version=lease_version,
         expected_state_version=claimed.run.state_version,
         signal=signal,
         pause_reason=None,
@@ -147,16 +145,19 @@ async def test_a_round_that_outlived_its_own_renewal_still_records(
 
     async with _factory(engine).begin() as session:
         snapshot = await SqlRunStore(session).record_slice(
-            _slice(claimed, scope["X-Workspace-Id"], None, lease_version=1)
+            _slice(claimed, scope["X-Workspace-Id"], None)
         )
 
     assert snapshot.state.value == "running"
     row = await _row(
         engine,
-        "SELECT released_at IS NOT NULL FROM worker_leases WHERE id = :id",
-        id=claimed.lease_id,
+        "SELECT b.consumed_execution_ms, l.version FROM runs r "
+        "JOIN run_budget_scopes b ON b.root_run_id = r.budget_root_run_id "
+        "JOIN worker_leases l ON l.run_id = r.id WHERE r.id = :id",
+        id=claimed.run.id,
     )
-    assert row[0] is True
+    assert row[0] == 1_200
+    assert row[1] == 2
 
 
 async def test_renewing_a_reclaimed_lease_returns_nothing_and_writes_nothing(
@@ -317,21 +318,27 @@ async def test_a_limit_pause_writes_the_safety_valve_event_contiguously(
     assert [item[0] for item in events] == [1, 2, 3, 4]
 
 
-async def test_a_stale_lease_version_is_refused_and_changes_nothing(
+async def test_a_lease_that_no_longer_owns_the_run_is_refused(
     submitted_run: dict[str, Any], scope: dict[str, str], engine: AsyncEngine
 ) -> None:
+    """Ownership is the lease id, and a re-claim mints a new one.
+
+    This is the fence the renewal counter used to be asked to provide: a
+    Worker that lost the Run writes nothing, because the id it holds is not
+    the id the row carries.
+    """
     del submitted_run
     claimed = await _claim(engine, scope["X-Workspace-Id"])
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE worker_leases SET id = :fresh WHERE id = :stale"),
+            {"fresh": uuid4(), "stale": claimed.lease_id},
+        )
 
     with pytest.raises(LeaseLost):
         async with _factory(engine).begin() as session:
             await SqlRunStore(session).record_slice(
-                _slice(
-                    claimed,
-                    scope["X-Workspace-Id"],
-                    RunSignal.COMPLETED,
-                    lease_version=99,
-                )
+                _slice(claimed, scope["X-Workspace-Id"], RunSignal.COMPLETED)
             )
 
     row = await _row(

@@ -111,16 +111,13 @@ def _soon() -> Any:
     return datetime.now(UTC) + timedelta(hours=1)
 
 
-def slice_command(claimed: Any, *, lease_version: int | None = None) -> RecordSliceCommand:
+def slice_command(claimed: Any, *, lease_id: Any | None = None) -> RecordSliceCommand:
     from tiny_hermes.runs.domain.models import CanonicalMessage, TextBlock  # noqa: PLC0415
 
     return RecordSliceCommand(
         workspace_id=claimed.run.workspace_id,
         run_id=claimed.run.id,
-        lease_id=claimed.lease_id,
-        expected_lease_version=(
-            claimed.lease_version if lease_version is None else lease_version
-        ),
+        lease_id=claimed.lease_id if lease_id is None else lease_id,
         expected_state_version=claimed.run.state_version,
         signal=RunSignal.COMPLETED,
         pause_reason=None,
@@ -199,16 +196,16 @@ async def test_commit_transaction_is_atomic_across_all_five_tables(
 ) -> None:
     """Sabotage the middle of the transaction and watch nothing move.
 
-    A stale lease version makes `record_slice` refuse *after* the revision row
-    and pointer were staged in the same transaction. If any of the five tables
-    changed, the transaction leaked.
+    A lease id that no longer owns the Run makes `record_slice` refuse
+    *after* the revision row and pointer were staged in the same transaction.
+    If any of the five tables changed, the transaction leaked.
     """
     registration, revision_id = await _ready_upload(ledger, sessions, claimed)
     poisoned = _commit(
         registration,
         revision_id,
         claimed,
-        slice_command=slice_command(claimed, lease_version=claimed.lease_version + 7),
+        slice_command=slice_command(claimed, lease_id=uuid.uuid4()),
     )
 
     with pytest.raises(LeaseLost):
