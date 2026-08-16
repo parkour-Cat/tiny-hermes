@@ -3,6 +3,10 @@ name: ci
 on:
   push:
   pull_request:
+  # Run the suite on demand, without a commit to hang it on. A job that fails
+  # once and passes the next time is not evidence either way, and the only way
+  # to tell a flake from a fix is to run the same tree several times.
+  workflow_dispatch:
 
 permissions:
   contents: read
