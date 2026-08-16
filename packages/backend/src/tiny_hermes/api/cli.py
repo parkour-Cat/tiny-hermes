@@ -144,6 +144,9 @@ def _workspace(settings: Settings) -> WorkspaceRuntime | None:
         staging_ttl_seconds=settings.workspace_staging_ttl_seconds,
         # Tar framing adds headers and padding on top of the quota's bytes.
         export_limit=settings.workspace_max_bytes + settings.workspace_max_objects * 2048,
+        artifact_max_bytes=settings.artifact_max_bytes,
+        run_artifact_max_bytes=settings.run_artifact_max_bytes,
+        preview_bytes=settings.shell_output_bytes,
     )
 
 

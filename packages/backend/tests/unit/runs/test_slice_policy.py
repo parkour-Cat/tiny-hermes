@@ -113,6 +113,55 @@ def test_a_continuing_round_inside_budget_and_slice_keeps_the_lease() -> None:
     assert decision.limit_reached is False
 
 
+def test_a_completions_run_keeps_the_lease_across_an_ordinary_slice_boundary() -> None:
+    decision = decide_after_round(
+        RoundOutcome(
+            stop_reason=StopReason.CONTINUE,
+            cancel_requested=False,
+            pause_requested=False,
+            budget_allows=True,
+            slice_expired=True,
+            hold_slice=True,
+        )
+    )
+
+    assert decision.signal is None
+    assert decision.keeps_lease is True
+
+
+def test_compat_window_expiry_pauses_instead_of_requeueing() -> None:
+    decision = decide_after_round(
+        RoundOutcome(
+            stop_reason=StopReason.CONTINUE,
+            cancel_requested=False,
+            pause_requested=False,
+            budget_allows=True,
+            slice_expired=True,
+            hold_slice=True,
+            compat_window_expired=True,
+        )
+    )
+
+    assert decision.signal is RunSignal.SAFE_PAUSE_REACHED
+    assert decision.pause_reason is PauseReason.COMPAT_TIMEOUT
+
+
+def test_a_finished_model_still_wins_over_the_compat_window() -> None:
+    decision = decide_after_round(
+        RoundOutcome(
+            stop_reason=StopReason.COMPLETED,
+            cancel_requested=False,
+            pause_requested=False,
+            budget_allows=True,
+            slice_expired=False,
+            compat_window_expired=True,
+        )
+    )
+
+    assert decision.signal is RunSignal.COMPLETED
+    assert decision.pause_reason is None
+
+
 def test_only_the_limit_pause_records_the_safety_valve_event() -> None:
     limited = decide_after_round(
         RoundOutcome(
@@ -193,6 +242,10 @@ def test_every_combination_returns_a_documented_outcome(
     assert decision.signal in DOCUMENTED_SIGNALS
     assert decision.keeps_lease is False
     if decision.signal is RunSignal.SAFE_PAUSE_REACHED:
-        assert decision.pause_reason in {PauseReason.MANUAL, PauseReason.LIMIT}
+        assert decision.pause_reason in {
+            PauseReason.MANUAL,
+            PauseReason.LIMIT,
+            PauseReason.COMPAT_TIMEOUT,
+        }
     else:
         assert decision.pause_reason is None

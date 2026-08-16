@@ -147,3 +147,34 @@ def test_a_fresh_uuid_makes_a_different_agent() -> None:
         )[1]
         != normalize_agent_spec(endpoint_spec())[1]
     )
+
+
+def test_default_delivery_is_omitted_so_existing_hashes_hold() -> None:
+    spec = AgentSpec.model_validate(valid_spec())
+    explicit = AgentSpec.model_validate(
+        {
+            **valid_spec(),
+            "delivery": {"enabled": False, "sync_timeout_seconds": 60},
+        }
+    )
+    document, content_hash = normalize_agent_spec(spec)
+    assert "delivery" not in document
+    assert content_hash == DETERMINISTIC_HASH
+    assert normalize_agent_spec(explicit) == (document, content_hash)
+
+
+def test_enabling_chat_completions_changes_the_hash_and_bounds_the_timeout() -> None:
+    enabled = AgentSpec.model_validate(
+        {**valid_spec(), "delivery": {"enabled": True, "sync_timeout_seconds": 15}}
+    )
+    document, content_hash = normalize_agent_spec(enabled)
+    assert document["delivery"] == {"enabled": True, "sync_timeout_seconds": 15}
+    assert content_hash != DETERMINISTIC_HASH
+    with pytest.raises(ValidationError):
+        AgentSpec.model_validate(
+            {**valid_spec(), "delivery": {"enabled": True, "sync_timeout_seconds": 0}}
+        )
+    with pytest.raises(ValidationError):
+        AgentSpec.model_validate(
+            {**valid_spec(), "delivery": {"enabled": True, "sync_timeout_seconds": 61}}
+        )

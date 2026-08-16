@@ -8,6 +8,7 @@ from tiny_hermes.agents.domain.models import AgentSpec
 from tiny_hermes.runs.domain.models import (
     BudgetSummary,
     CallerIdentity,
+    CallerType,
     CanonicalMessage,
     CheckpointEffectStatus,
     PauseReason,
@@ -45,6 +46,7 @@ class AcceptRunCommand:
     request_fingerprint: str
     message: CanonicalMessage
     request_id: str
+    delivery_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -187,6 +189,9 @@ class ExecutionContext:
     cancel_requested: bool
     pause_requested: bool
     budget: BudgetSummary
+    #: When set, this Run was admitted by Chat Completions and the Worker must
+    #: not emit ``SLICE_ENDED`` for an ordinary slice boundary before it.
+    compat_deadline_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -318,3 +323,28 @@ class RunStore(Protocol):
     ) -> RepairResult: ...
 
     async def derive_retry(self, command: RetryRunCommand) -> AcceptedRun: ...
+
+    async def list_session_messages(
+        self, workspace_id: UUID, session_id: UUID
+    ) -> Sequence[CanonicalMessage]: ...
+
+    async def claim_idempotency(
+        self,
+        workspace_id: UUID,
+        caller_type: CallerType,
+        caller_id: UUID,
+        endpoint: str,
+        idempotency_key: str,
+        fingerprint: str,
+    ) -> AcceptedRun | None: ...
+
+    async def store_idempotency_response(
+        self,
+        workspace_id: UUID,
+        caller_type: CallerType,
+        caller_id: UUID,
+        endpoint: str,
+        idempotency_key: str,
+        run_id: UUID,
+        document: dict[str, Any],
+    ) -> None: ...

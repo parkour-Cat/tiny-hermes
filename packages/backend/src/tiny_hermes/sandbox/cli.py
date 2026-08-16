@@ -41,6 +41,11 @@ from tiny_hermes.shared.logging import configure_logging
 
 logger = logging.getLogger(__name__)
 
+#: docker-py's HTTP timeout, including a silent exec's hijacked stream.
+#: Design §5.3: tools cap 900s plus a 30-second drain grace. The library
+#: default of 60s is why a quiet large commit could die mid-write.
+_DOCKER_CALL_TIMEOUT_SECONDS = 930
+
 
 def main() -> None:
     configure_logging()
@@ -57,7 +62,7 @@ async def _serve() -> None:
         cache_mb=settings.sandbox_cache_mb,
         cache_inodes=settings.sandbox_cache_inodes,
     )
-    client: Any = docker.from_env()  # noqa: TID251 - the one place, by design
+    client: Any = docker.from_env(timeout=_DOCKER_CALL_TIMEOUT_SECONDS)  # noqa: TID251 - the one place, by design
 
     async def dispatch(action: str, payload: dict[str, Any]) -> dict[str, Any]:
         """One session per call.
@@ -303,9 +308,15 @@ async def _invoke_stream(
     cap = min(int(payload["artifact_limit"]), int(settings.artifact_max_bytes))
     await channel.start_send(total_limit=cap)
     sink = _ChannelSink(channel, artifact_limit=cap)
-    result = await controller.engine.execute_streamed(
-        ticket.container_id, command, sink
-    )
+    stop = asyncio.Event()
+    heartbeat = asyncio.create_task(channel.keep_alive(stop))
+    try:
+        result = await controller.engine.execute_streamed(
+            ticket.container_id, command, sink
+        )
+    finally:
+        stop.set()
+        await asyncio.gather(heartbeat, return_exceptions=True)
     await channel.finish_send()
     return {
         "exit_code": result.exit_code,

@@ -81,6 +81,10 @@ class ArtifactService:
         return self._objects.get_stream(ObjectRef(key=artifact.object_key))
 
     async def _require_reader(self, workspace_id: UUID, actor: Actor) -> None:
+        if actor.is_service_account:
+            if actor.role is None or actor.role not in READERS:
+                raise ArtifactForbidden
+            return
         role = await self._store.role_for(workspace_id, actor.id)
         if role is not None:
             if role not in READERS:

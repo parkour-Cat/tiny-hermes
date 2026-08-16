@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from typing import Any
 from uuid import UUID
 
 from tiny_hermes.runs.domain.event_cursor import cursor_is_stale
@@ -6,6 +7,7 @@ from tiny_hermes.runs.domain.models import (
     CallerIdentity,
     CallerType,
     CanonicalMessage,
+    DeliveryMode,
     RunCapabilities,
     RunSignal,
     RunSnapshot,
@@ -166,6 +168,7 @@ class RunCoordination:
         text: str,
         idempotency_key: str | None,
         request_id: str,
+        delivery_mode: DeliveryMode | None = None,
     ) -> AcceptedRun:
         role = await self._require_role(workspace_id, actor, WRITERS)
         key = _require_idempotency_key(idempotency_key)
@@ -183,6 +186,7 @@ class RunCoordination:
                 ),
                 message=message,
                 request_id=request_id,
+                delivery_mode=None if delivery_mode is None else delivery_mode.value,
             )
         )
 
@@ -299,9 +303,58 @@ class RunCoordination:
     async def repair_session_head(self, session_id: UUID, request_id: str) -> RepairResult:
         return await self._store.repair_session_head(session_id, request_id)
 
+    async def list_session_messages(
+        self, workspace_id: UUID, actor: Actor, session_id: UUID
+    ) -> Sequence[CanonicalMessage]:
+        await self._require_role(workspace_id, actor, READERS)
+        return await self._store.list_session_messages(workspace_id, session_id)
+
+    async def claim_idempotency(
+        self,
+        workspace_id: UUID,
+        actor: Actor,
+        endpoint: str,
+        idempotency_key: str,
+        fingerprint: str,
+    ) -> AcceptedRun | None:
+        await self._require_role(workspace_id, actor, WRITERS)
+        return await self._store.claim_idempotency(
+            workspace_id,
+            _caller(actor).caller_type,
+            _caller(actor).caller_id,
+            endpoint,
+            idempotency_key,
+            fingerprint,
+        )
+
+    async def store_idempotency_response(
+        self,
+        workspace_id: UUID,
+        actor: Actor,
+        endpoint: str,
+        idempotency_key: str,
+        run_id: UUID,
+        document: dict[str, Any],
+    ) -> None:
+        await self._require_role(workspace_id, actor, WRITERS)
+        caller = _caller(actor)
+        await self._store.store_idempotency_response(
+            workspace_id,
+            caller.caller_type,
+            caller.caller_id,
+            endpoint,
+            idempotency_key,
+            run_id,
+            document,
+        )
+
     async def _require_role(
         self, workspace_id: UUID, actor: Actor, allowed: set[Role]
     ) -> Role:
+        if actor.is_service_account:
+            if actor.role is None or actor.role not in allowed:
+                raise ForbiddenRunAction
+            return actor.role
         role = await self._store.role_for(workspace_id, actor.id)
         if role is not None:
             if role not in allowed:
@@ -313,7 +366,8 @@ class RunCoordination:
 
 
 def _caller(actor: Actor) -> CallerIdentity:
-    return CallerIdentity(CallerType.USER, actor.id)
+    kind = CallerType.SERVICE_ACCOUNT if actor.is_service_account else CallerType.USER
+    return CallerIdentity(kind, actor.id)
 
 
 def _capabilities(role: Role) -> RunCapabilities:

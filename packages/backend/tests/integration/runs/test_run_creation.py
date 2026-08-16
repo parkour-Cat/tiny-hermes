@@ -209,3 +209,39 @@ async def test_run_list_and_detail_report_queue_order(
     assert detail.status_code == 200
     assert detail.json()["queue"] == {"position": 2, "status": "pending"}
     assert detail.json()["available_actions"] == ["pause", "cancel"]
+
+
+async def test_a_paused_head_names_itself_on_the_blocked_pending_snapshot(
+    client: TestClient, scope: dict[str, str], session_id: str
+) -> None:
+    first = _submit(client, scope, session_id, "head", "first")
+    assert first.status_code == 201
+    head = first.json()
+    paused = client.post(
+        f"/api/v1/runs/{head['id']}/pause",
+        headers=scope,
+        json={"expected_state_version": head["state_version"]},
+    )
+    assert paused.status_code == 200
+    assert paused.json()["status"] == "paused"
+    assert paused.json()["pause_reason"] == "manual"
+
+    second = _submit(client, scope, session_id, "blocked", "second")
+    assert second.status_code == 201
+    body = second.json()
+    queue = body["queue"]
+
+    assert queue["status"] == "session_blocked"
+    assert queue["blocked_by_run_id"] == head["id"]
+    assert queue["position"] == 2
+    assert queue["head_status"] == "paused"
+    assert queue["head_reason"] == {
+        "pause_reason": "manual",
+        "wait_kind": None,
+        "wait_deadline_at": None,
+    }
+    assert set(queue["available_actions"]) == {"resume", "cancel"}
+    assert "pause" in body["available_actions"] or "cancel" in body["available_actions"]
+    assert body["blocked_by_run_id"] == head["id"]
+    assert "head_status" not in paused.json()["queue"]
+    assert paused.json()["queue"] == {"position": 1, "status": "head"}

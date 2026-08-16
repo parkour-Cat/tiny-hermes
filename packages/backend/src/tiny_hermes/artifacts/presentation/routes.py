@@ -19,20 +19,20 @@ from tiny_hermes.artifacts.application.service import (
     ArtifactService,
 )
 from tiny_hermes.identity.application.auth_service import AuthService
+from tiny_hermes.identity.application.machine_service import MachineIdentityService
 from tiny_hermes.identity.presentation.dependencies import (
     SESSION_COOKIE,
-    authenticate_browser_user,
     forbidden,
-    require_workspace_id,
+    resolve_workspace_caller,
 )
 from tiny_hermes.shared.errors import AppError
-from tiny_hermes.tenancy.domain.models import Actor
 
 if TYPE_CHECKING:
     from tiny_hermes.api.resources import ApplicationResources
 
 WorkspaceHeader = Annotated[str | None, Header(alias="X-Workspace-Id")]
 SessionCookie = Annotated[str | None, Cookie(alias=SESSION_COOKIE)]
+AuthorizationHeader = Annotated[str | None, Header()]
 
 
 class ArtifactResponse(BaseModel):
@@ -59,20 +59,31 @@ def _not_found() -> AppError:
 def artifact_router(resources: "ApplicationResources") -> APIRouter:
     router = APIRouter(prefix="/api/v1/artifacts", tags=["artifacts"])
     auth_dependency = resources.auth_service
+    machines_dependency = resources.machine_identity_service
     artifacts_dependency = resources.artifact_service
 
     async def _authorized(
         auth: AuthService,
+        machines: MachineIdentityService,
         artifacts: ArtifactService,
         raw_workspace: str | None,
         session_token: str | None,
+        authorization: str | None,
         artifact_id: UUID,
     ):  # noqa: ANN202 - Artifact, but the annotation would import the domain here
-        user = await authenticate_browser_user(auth, session_token)
-        workspace_id = require_workspace_id(raw_workspace)
+        caller = await resolve_workspace_caller(
+            auth,
+            machines,
+            session_token=session_token,
+            authorization=authorization,
+            csrf_token=None,
+            workspace_header=raw_workspace,
+            write=False,
+            required_scope="runs.read",
+        )
         try:
             return await artifacts.metadata(
-                workspace_id, Actor(user.id, user.is_platform_admin), artifact_id
+                caller.workspace_id, caller.actor, artifact_id
             )
         except ArtifactNotFound as missing:
             raise _not_found() from missing
@@ -83,14 +94,24 @@ def artifact_router(resources: "ApplicationResources") -> APIRouter:
     async def artifact_metadata(  # pyright: ignore[reportUnusedFunction]
         artifact_id: UUID,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[
+            MachineIdentityService, Depends(machines_dependency, scope="function")
+        ],
         artifacts: Annotated[
             ArtifactService, Depends(artifacts_dependency, scope="function")
         ],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
+        authorization: AuthorizationHeader = None,
     ) -> ArtifactResponse:
         found = await _authorized(
-            auth, artifacts, selected_workspace, session_token, artifact_id
+            auth,
+            machines,
+            artifacts,
+            selected_workspace,
+            session_token,
+            authorization,
+            artifact_id,
         )
         return ArtifactResponse(
             id=found.id,
@@ -108,14 +129,24 @@ def artifact_router(resources: "ApplicationResources") -> APIRouter:
     async def artifact_content(  # pyright: ignore[reportUnusedFunction]
         artifact_id: UUID,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[
+            MachineIdentityService, Depends(machines_dependency, scope="function")
+        ],
         artifacts: Annotated[
             ArtifactService, Depends(artifacts_dependency, scope="function")
         ],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
+        authorization: AuthorizationHeader = None,
     ) -> StreamingResponse:
         found = await _authorized(
-            auth, artifacts, selected_workspace, session_token, artifact_id
+            auth,
+            machines,
+            artifacts,
+            selected_workspace,
+            session_token,
+            authorization,
+            artifact_id,
         )
         return StreamingResponse(
             artifacts.content(found),

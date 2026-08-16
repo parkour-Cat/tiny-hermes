@@ -11,14 +11,20 @@ is interrupted can be recovered, while a Run told "the sandbox is broken" would
 have the model politely try again forever.
 """
 
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 from uuid import UUID
 
+from tiny_hermes.artifacts.domain.models import Artifact
 from tiny_hermes.runs.domain.models import ToolCallBlock, ToolResultBlock
 from tiny_hermes.sandbox.application.controller import SandboxRefused
-from tiny_hermes.sandbox.domain.command import CommandResult, SandboxCommand
+from tiny_hermes.sandbox.domain.command import (
+    CommandResult,
+    SandboxCommand,
+    StreamedResult,
+)
 from tiny_hermes.tools.domain.files import FILE_ARGUMENTS, TRUNCATED_EXIT
-from tiny_hermes.tools.domain.registry import ToolRefused, authorize
+from tiny_hermes.tools.domain.registry import DEFAULT_OUTPUT_BYTES, ToolRefused, authorize
 
 
 class CommandRunner(Protocol):
@@ -34,6 +40,37 @@ class CommandRunner(Protocol):
     ) -> CommandResult: ...
 
 
+class StreamedCommandRunner(Protocol):
+    """The Controller's framed execute, as the Worker holds it over the socket.
+
+    Distinct from `SandboxController.execute_stream`, which only authorizes and
+    returns a ticket: this one takes a sink and drains, matching `SandboxClient`.
+    """
+
+    async def execute_stream(
+        self,
+        *,
+        run_id: UUID,
+        lease_id: UUID,
+        sandbox_id: UUID,
+        command: SandboxCommand,
+        artifact_limit: int,
+        sink: Callable[[bytes], Awaitable[None]],
+    ) -> StreamedResult: ...
+
+
+class ArtifactUpload(Protocol):
+    """The recorder's write half, as this module needs it.
+
+    Registration happens on the first `deliver`; `finish` either returns the
+    committed Artifact or leaves the debt for the collector.
+    """
+
+    async def deliver(self, chunk: bytes) -> None: ...
+
+    async def finish(self, *, truncated: bool) -> Artifact | None: ...
+
+
 async def run_tool_call(
     *,
     controller: CommandRunner,
@@ -42,11 +79,28 @@ async def run_tool_call(
     sandbox_id: UUID,
     bound: tuple[str, ...],
     call: ToolCallBlock,
+    streamer: StreamedCommandRunner | None = None,
+    open_artifact: Callable[[], ArtifactUpload] | None = None,
+    preview_limit: int = DEFAULT_OUTPUT_BYTES,
+    artifact_limit: int | None = None,
 ) -> ToolResultBlock:
     try:
         authorized = authorize(bound=bound, call=call)
     except ToolRefused as refused:
         return _refusal(call.call_id, refused.reason.value, refused.detail)
+
+    if streamer is not None and authorized.name not in FILE_ARGUMENTS:
+        return await _run_streamed(
+            streamer=streamer,
+            run_id=run_id,
+            lease_id=lease_id,
+            sandbox_id=sandbox_id,
+            call_id=call.call_id,
+            command=authorized.command,
+            open_artifact=open_artifact,
+            preview_limit=preview_limit,
+            artifact_limit=artifact_limit,
+        )
 
     try:
         result = await controller.execute(
@@ -61,28 +115,171 @@ async def run_tool_call(
         # something wrong, but the model still needs an answer.
         return _refusal(call.call_id, refused.reason.value, "")
 
+    return _from_command(call.call_id, authorized.name, authorized.command, result)
+
+
+async def _run_streamed(
+    *,
+    streamer: StreamedCommandRunner,
+    run_id: UUID,
+    lease_id: UUID,
+    sandbox_id: UUID,
+    call_id: str,
+    command: SandboxCommand,
+    open_artifact: Callable[[], ArtifactUpload] | None,
+    preview_limit: int,
+    artifact_limit: int | None,
+) -> ToolResultBlock:
+    cap = artifact_limit if artifact_limit is not None else preview_limit
+    if open_artifact is not None and artifact_limit is None:
+        cap = max(preview_limit, 104_857_600)
+    sink = PreviewingSink(
+        preview_limit=preview_limit,
+        artifact_limit=cap,
+        open_artifact=open_artifact,
+    )
+    try:
+        streamed = await streamer.execute_stream(
+            run_id=run_id,
+            lease_id=lease_id,
+            sandbox_id=sandbox_id,
+            command=command,
+            artifact_limit=sink.artifact_limit,
+            sink=sink.deliver,
+        )
+    except SandboxRefused as refused:
+        return _refusal(call_id, refused.reason.value, "")
+
+    artifact = await sink.finish(truncated=streamed.truncated)
+    return _from_stream(
+        call_id,
+        bytes(sink.preview),
+        streamed,
+        command.timeout_seconds,
+        artifact,
+        store_failed=sink.store_failed,
+    )
+
+
+def _from_command(
+    call_id: str, name: str, command: SandboxCommand, result: CommandResult
+) -> ToolResultBlock:
     if result.timed_out:
         # Not `failed`: the command ran, and how long to allow is a decision the
         # loop makes with the rest of the budget in view.
         return ToolResultBlock(
-            call_id=call.call_id,
+            call_id=call_id,
             output=(
                 f"{result.output}\n[the command timed out after "
-                f"{authorized.command.timeout_seconds}s and was stopped]"
+                f"{command.timeout_seconds}s and was stopped]"
             ).strip(),
             exit_code=result.exit_code,
             failed=False,
         )
 
-    if authorized.name in FILE_ARGUMENTS:
-        return _file_result(call.call_id, result)
+    if name in FILE_ARGUMENTS:
+        return _file_result(call_id, result)
 
     return ToolResultBlock(
-        call_id=call.call_id,
+        call_id=call_id,
         output=result.output,
         exit_code=result.exit_code,
         failed=False,
     )
+
+
+def _from_stream(
+    call_id: str,
+    preview: bytes,
+    streamed: StreamedResult,
+    timeout_seconds: int,
+    artifact: Artifact | None,
+    *,
+    store_failed: bool,
+) -> ToolResultBlock:
+    output = preview.decode("utf-8", errors="replace")
+    notes: list[str] = []
+    if streamed.timed_out:
+        notes.append(
+            f"[the command timed out after {timeout_seconds}s and was stopped]"
+        )
+    if store_failed:
+        notes.append("artifact_store_failed")
+    elif artifact is not None:
+        notes.append(f"artifact_id={artifact.id}")
+        truncated = artifact.truncated or streamed.truncated
+        notes.append(f"artifact_truncated={'true' if truncated else 'false'}")
+    elif streamed.truncated:
+        notes.append("[output truncated by the platform]")
+    if notes:
+        output = f"{output.rstrip()}\n" + "\n".join(notes) if output else "\n".join(notes)
+    return ToolResultBlock(
+        call_id=call_id,
+        output=output,
+        exit_code=streamed.exit_code,
+        failed=False,
+    )
+
+
+class PreviewingSink:
+    """Keeps the inline preview, and opens an Artifact only once it overflows.
+
+    Design §11: the first 1 MiB stays in the tool result; bytes past it are
+    registered before they are uploaded. The engine's ceiling is the Artifact
+    cap, not the preview, so a noisy child is drained rather than blocked.
+    """
+
+    def __init__(
+        self,
+        *,
+        preview_limit: int,
+        artifact_limit: int,
+        open_artifact: Callable[[], ArtifactUpload] | None,
+    ) -> None:
+        self.preview = bytearray()
+        self.store_failed = False
+        self.artifact_limit = artifact_limit
+        self._preview_limit = preview_limit
+        self._open = open_artifact
+        self._recorder: ArtifactUpload | None = None
+
+    async def deliver(self, chunk: bytes) -> None:
+        if self.store_failed:
+            return
+        if self._recorder is not None:
+            await self._push(chunk)
+            return
+        room = self._preview_limit - len(self.preview)
+        if len(chunk) <= room:
+            self.preview.extend(chunk)
+            return
+        self.preview.extend(chunk[:room])
+        leftover = bytes(chunk[room:])
+        if self._open is None:
+            return
+        self._recorder = self._open()
+        await self._push(bytes(self.preview))
+        if leftover:
+            await self._push(leftover)
+
+    async def _push(self, chunk: bytes) -> None:
+        recorder = self._recorder
+        if recorder is None or self.store_failed:
+            return
+        try:
+            await recorder.deliver(chunk)
+        except Exception:  # noqa: BLE001 - any store failure keeps the preview
+            self.store_failed = True
+
+    async def finish(self, *, truncated: bool) -> Artifact | None:
+        recorder = self._recorder
+        if recorder is None:
+            return None
+        try:
+            return await recorder.finish(truncated=truncated)
+        except Exception:  # noqa: BLE001 - the preview is the answer we still have
+            self.store_failed = True
+            return None
 
 
 def _file_result(call_id: str, result: CommandResult) -> ToolResultBlock:

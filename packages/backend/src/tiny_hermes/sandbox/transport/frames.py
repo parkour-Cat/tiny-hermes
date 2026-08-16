@@ -30,6 +30,10 @@ MAX_FRAME_PAYLOAD = 1_048_576
 RECEIVE_CREDIT = 8_388_608
 #: Without a DATA or PROGRESS frame for this long, the stream is dead.
 IDLE_SECONDS = 30
+#: How often a silent exec must speak. Design §5.3: at least every 15 seconds
+#: while Docker is still running the command, so a legal quiet 15-minute job
+#: is not killed by the idle rule.
+PROGRESS_SECONDS = 15
 
 _HEADER_BYTES = 13  # 4 length + 1 type + 8 sequence
 _MAX_SEQUENCE = 2**64 - 1

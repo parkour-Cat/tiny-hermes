@@ -378,3 +378,32 @@ async def test_a_passed_wait_deadline_pauses_an_externally_waiting_run(
         ).one()
     assert row[0] == "paused"
     assert row[1] == "external_timeout"
+
+
+async def test_a_compat_timeout_pause_older_than_a_day_is_cancelled(
+    client: TestClient, scope: dict[str, str], session_id: str, engine: AsyncEngine
+) -> None:
+    created = client.post(
+        "/api/v1/runs",
+        headers={**scope, "Idempotency-Key": "compat-age"},
+        json={"session_id": session_id, "input": "age out"},
+    ).json()
+    paused = client.post(
+        f"/api/v1/runs/{created['id']}/pause",
+        headers=scope,
+        json={"expected_state_version": created["state_version"]},
+    )
+    assert paused.status_code == 200
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "UPDATE runs SET pause_reason = 'compat_timeout', "
+                "updated_at = now() - interval '25 hours' WHERE id = :id"
+            ),
+            {"id": created["id"]},
+        )
+
+    await _scheduler(engine).run_once()
+
+    aged = client.get(f"/api/v1/runs/{created['id']}", headers=scope).json()
+    assert aged["status"] == "cancelled"

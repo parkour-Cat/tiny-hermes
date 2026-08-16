@@ -70,6 +70,12 @@ class SessionMode(StrEnum):
     PERSISTENT = "persistent"
 
 
+class DeliveryMode(StrEnum):
+    """How a Run was admitted. Absent means the asynchronous Runs API."""
+
+    CHAT_COMPLETIONS = "chat_completions"
+
+
 class CallerType(StrEnum):
     USER = "user"
     SERVICE_ACCOUNT = "service_account"
@@ -485,6 +491,14 @@ class RunSnapshot:
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    #: Head facts for a `session_blocked` pending Run. Omitted from the
+    #: document when this Run is itself the head, an ordinary pending, or
+    #: terminal — Playground only needs them to explain why it cannot start.
+    head_status: RunState | None = None
+    head_pause_reason: PauseReason | None = None
+    head_wait_kind: str | None = None
+    head_wait_deadline_at: datetime | None = None
+    queue_available_actions: tuple[str, ...] = ()
 
     def document(self) -> dict[str, Any]:
         return {
@@ -501,7 +515,7 @@ class RunSnapshot:
             "retry_of_run_id": _optional_id(self.retry_of_run_id),
             "budget_root_run_id": str(self.budget_root_run_id),
             "last_event_sequence": self.last_event_sequence,
-            "queue": {"position": self.queue_position, "status": self.queue_status.value},
+            "queue": self._queue_document(),
             "budget": self.budget.document(),
             "available_actions": list(self.available_actions),
             "checkpoint_replay_safe": self.checkpoint_replay_safe,
@@ -511,6 +525,25 @@ class RunSnapshot:
             "started_at": _optional_time(self.started_at),
             "finished_at": _optional_time(self.finished_at),
         }
+
+    def _queue_document(self) -> dict[str, Any]:
+        queue: dict[str, Any] = {
+            "position": self.queue_position,
+            "status": self.queue_status.value,
+        }
+        if self.queue_status is not QueueStatus.SESSION_BLOCKED:
+            return queue
+        queue["blocked_by_run_id"] = _optional_id(self.blocked_by_run_id)
+        queue["head_status"] = None if self.head_status is None else self.head_status.value
+        queue["head_reason"] = {
+            "pause_reason": (
+                None if self.head_pause_reason is None else self.head_pause_reason.value
+            ),
+            "wait_kind": self.head_wait_kind,
+            "wait_deadline_at": _optional_time(self.head_wait_deadline_at),
+        }
+        queue["available_actions"] = list(self.queue_available_actions)
+        return queue
 
 
 @dataclass(frozen=True)

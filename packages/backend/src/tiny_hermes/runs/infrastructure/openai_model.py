@@ -1,10 +1,9 @@
 """An OpenAI-compatible endpoint, as one of this platform's model providers.
 
-Not streaming. `stream` is not sent and no merge path exists, because nothing in
-phase 3A consumes partial text: the console renders Run events, not tokens. The
-merge belongs with Chat Completions in phase four, where it has a consumer that
-can hold it to account. This is a deliberate omission rather than an oversight,
-which is why it is stated here.
+Inbound Chat Completions streaming is a delivery concern of `POST /v1/chat/completions`.
+This outbound adapter still buffers one round: partial tokens are not RunEvents,
+and the Worker checkpoint needs the complete assistant turn. The HTTP adapter
+streams that turn to the compatibility client after the round is recorded.
 
 Every parsing failure produces a *failed round*, never an exception out of the
 Worker, and every one of them is replay-safe: nothing was written anywhere, so

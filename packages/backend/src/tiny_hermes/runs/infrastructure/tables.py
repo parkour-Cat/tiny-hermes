@@ -20,6 +20,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from tiny_hermes.runs.domain.models import (
     CallerType,
     CheckpointEffectStatus,
+    DeliveryMode,
     PauseReason,
     RunEventType,
     RunState,
@@ -124,6 +125,10 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
         CheckConstraint("recovery_attempts >= 0", name="ck_runs_recovery_attempts"),
         CheckConstraint("next_event_sequence > 0", name="ck_runs_next_event_sequence"),
         CheckConstraint("session_sequence > 0", name="ck_runs_session_sequence_positive"),
+        CheckConstraint(
+            f"delivery_mode IS NULL OR {_in_enum('delivery_mode', DeliveryMode)}",
+            name="ck_runs_delivery_mode",
+        ),
         ForeignKeyConstraint(
             ["session_id", "workspace_id"],
             ["sessions.id", "sessions.workspace_id"],
@@ -189,6 +194,9 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
         String(20), nullable=True
     )
     workspace_cleanup_sandbox_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    #: Set only when Chat Completions created the Run. The Worker holds the
+    #: lease across ordinary slice boundaries until ``sync_timeout_seconds``.
+    delivery_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class RunBudgetScopeRow(Base):

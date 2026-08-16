@@ -36,6 +36,7 @@ from tiny_hermes.runs.domain.models import (
     CallerType,
     CanonicalMessage,
     CheckpointEffectStatus,
+    DeliveryMode,
     PauseReason,
     QueueStatus,
     RunCapabilities,
@@ -162,6 +163,7 @@ class SqlRunStore:
             "session",
             row.id,
             command.request_id,
+            actor_type=command.caller.caller_type.value,
         )
         return _session_snapshot(row)
 
@@ -218,6 +220,7 @@ class SqlRunStore:
             checkpoint_replay_safe=True,
             checkpoint_effect_status=CheckpointEffectStatus.NONE.value,
             checkpoint_workspace_revision_id=session.workspace_revision_id,
+            delivery_mode=command.delivery_mode,
             created_at=now,
             updated_at=now,
         )
@@ -265,6 +268,7 @@ class SqlRunStore:
             "run",
             run_id,
             command.request_id,
+            actor_type=command.caller.caller_type.value,
         )
 
         snapshot = await self._snapshot(run, command.capabilities)
@@ -410,6 +414,7 @@ class SqlRunStore:
                 command.request_id,
                 result="denied",
                 context={"signal": command.signal.value},
+                actor_type=command.caller.caller_type.value,
             )
             raise DeniedRunControl(_denial_code(error)) from error
 
@@ -560,14 +565,19 @@ class SqlRunStore:
         if owning is None or owning.session_mode == SessionMode.EPHEMERAL.value:
             scoped = scoped.where(SessionMessageRow.source_run_id == run.id)
         found = await self._session.scalars(scoped.order_by(SessionMessageRow.sequence))
+        spec = AgentSpec.model_validate(version.spec)
+        deadline = None
+        if run.delivery_mode == DeliveryMode.CHAT_COMPLETIONS.value:
+            deadline = run.created_at + timedelta(seconds=spec.delivery.sync_timeout_seconds)
         return ExecutionContext(
             run_id=run.id,
             state_version=run.state_version,
-            spec=AgentSpec.model_validate(version.spec),
+            spec=spec,
             messages=tuple(_to_message(row) for row in found),
             cancel_requested=run.cancel_requested_at is not None,
             pause_requested=run.pause_requested_at is not None,
             budget=_budget_summary(budget),
+            compat_deadline_at=deadline,
         )
 
     async def renew_lease(self, command: RenewLeaseCommand) -> RenewedLease | None:
@@ -1048,6 +1058,40 @@ class SqlRunStore:
         )
         return list(rows.all())
 
+    async def aged_compat_timeout_runs(self, now: datetime, limit: int) -> Sequence[UUID]:
+        cutoff = now - timedelta(hours=24)
+        rows = await self._session.scalars(
+            select(RunRow.id)
+            .where(
+                RunRow.status == RunState.PAUSED.value,
+                RunRow.pause_reason == PauseReason.COMPAT_TIMEOUT.value,
+                RunRow.updated_at <= cutoff,
+            )
+            .order_by(RunRow.updated_at)
+            .limit(limit)
+        )
+        return list(rows.all())
+
+    async def cancel_aged_compat_timeout(self, run_id: UUID, request_id: str) -> None:
+        run = await self._lock_run_any_workspace(run_id)
+        if run is None or RunState(run.status) is not RunState.PAUSED:
+            return
+        if run.pause_reason != PauseReason.COMPAT_TIMEOUT.value:
+            return
+        session = await self._lock_session(run.workspace_id, run.session_id)
+        if session is None:
+            return
+        await self._decide_and_write(
+            run,
+            session,
+            RunSignal.CANCEL_REQUESTED,
+            pause_reason=None,
+            wait_kind=None,
+            wait_deadline_at=None,
+            request_id=request_id,
+            payload={"reason": "compat_timeout_aged_out"},
+        )
+
     async def time_out_external_wait(self, run_id: UUID, request_id: str) -> None:
         run = await self._lock_run_any_workspace(run_id)
         if run is None or RunState(run.status) is not RunState.WAITING_EXTERNAL:
@@ -1257,6 +1301,7 @@ class SqlRunStore:
             checkpoint_replay_safe=True,
             checkpoint_effect_status=CheckpointEffectStatus.NONE.value,
             checkpoint_workspace_revision_id=session.workspace_revision_id,
+            delivery_mode=source.delivery_mode,
             created_at=now,
             updated_at=now,
         )
@@ -1298,6 +1343,7 @@ class SqlRunStore:
             "run",
             run_id,
             command.request_id,
+            actor_type=command.caller.caller_type.value,
         )
 
         document = (await self._snapshot(run, command.capabilities)).document()
@@ -1311,6 +1357,55 @@ class SqlRunStore:
             document,
         )
         return AcceptedRun(run_id=run_id, document=document, replayed=False)
+
+    async def list_session_messages(
+        self, workspace_id: UUID, session_id: UUID
+    ) -> Sequence[CanonicalMessage]:
+        rows = (
+            await self._session.scalars(
+                select(SessionMessageRow)
+                .where(
+                    SessionMessageRow.workspace_id == workspace_id,
+                    SessionMessageRow.session_id == session_id,
+                    SessionMessageRow.redacted.is_(False),
+                )
+                .order_by(SessionMessageRow.sequence)
+            )
+        ).all()
+        return [_to_message(row) for row in rows]
+
+    async def claim_idempotency(
+        self,
+        workspace_id: UUID,
+        caller_type: CallerType,
+        caller_id: UUID,
+        endpoint: str,
+        idempotency_key: str,
+        fingerprint: str,
+    ) -> AcceptedRun | None:
+        return await self._claim_idempotency(
+            workspace_id, caller_type, caller_id, endpoint, idempotency_key, fingerprint
+        )
+
+    async def store_idempotency_response(
+        self,
+        workspace_id: UUID,
+        caller_type: CallerType,
+        caller_id: UUID,
+        endpoint: str,
+        idempotency_key: str,
+        run_id: UUID,
+        document: dict[str, Any],
+    ) -> None:
+        await self._store_response(
+            workspace_id,
+            caller_type,
+            caller_id,
+            endpoint,
+            idempotency_key,
+            run_id,
+            document,
+        )
 
     async def _copy_checkpoint_messages(
         self, session: SessionRow, source: RunRow, run_id: UUID, now: datetime
@@ -1494,6 +1589,9 @@ class SqlRunStore:
         )
         blocker = await self._retry_blocker(run, session, summary)
         retry_allowed = capabilities.can_retry and blocker is None
+        head_status, head_pause, head_wait, head_deadline, head_actions = (
+            await self._blocked_head_fields(queue_status, run, capabilities)
+        )
         return RunSnapshot(
             id=run.id,
             workspace_id=run.workspace_id,
@@ -1521,6 +1619,54 @@ class SqlRunStore:
             created_at=run.created_at,
             started_at=run.started_at,
             finished_at=run.finished_at,
+            head_status=head_status,
+            head_pause_reason=head_pause,
+            head_wait_kind=head_wait,
+            head_wait_deadline_at=head_deadline,
+            queue_available_actions=head_actions,
+        )
+
+    async def _blocked_head_fields(
+        self,
+        queue_status: QueueStatus,
+        run: RunRow,
+        capabilities: RunCapabilities,
+    ) -> tuple[RunState | None, PauseReason | None, str | None, datetime | None, tuple[str, ...]]:
+        """Name the blocking head only when this snapshot is the blocked pending Run.
+
+        `queue.available_actions` is the head's list for this caller, not this
+        pending Run's. The two answers different questions: what can I do to
+        the thing in the way, versus what can I do to the thing I just queued.
+        """
+        empty: tuple[str, ...] = ()
+        if queue_status is not QueueStatus.SESSION_BLOCKED or run.blocked_by_run_id is None:
+            return None, None, None, None, empty
+        head = await self._session.get(RunRow, run.blocked_by_run_id)
+        if head is None:
+            return None, None, None, None, empty
+        budget_row = await self._session.get(RunBudgetScopeRow, head.budget_root_run_id)
+        if budget_row is None:
+            return None, None, None, None, empty
+        head_summary = _budget_summary(budget_row)
+        head_state = RunState(head.status)
+        head_reason = None if head.pause_reason is None else PauseReason(head.pause_reason)
+        head_view = RunStateView(
+            state=head_state,
+            pause_reason=head_reason,
+            wait_kind=head.wait_kind,
+            wait_deadline_at=head.wait_deadline_at,
+            pause_requested=head.pause_requested_at is not None,
+            cancel_requested=head.cancel_requested_at is not None,
+            budget_allows_execution=head_summary.allows_execution(datetime.now(UTC)),
+        )
+        return (
+            head_state,
+            head_reason,
+            head.wait_kind,
+            head.wait_deadline_at,
+            self._machine.available_actions(
+                head_view, can_control=capabilities.can_control, can_retry=False
+            ),
         )
 
     async def _retry_blocker(
@@ -1568,11 +1714,14 @@ class SqlRunStore:
         request_id: str,
         result: str = "succeeded",
         context: dict[str, Any] | None = None,
+        actor_type: str | None = None,
     ) -> None:
+        if actor_type is None:
+            actor_type = "user" if actor_id is not None else "system"
         self._session.add(
             AuditEventRow(
                 workspace_id=workspace_id,
-                actor_type="user" if actor_id is not None else "system",
+                actor_type=actor_type,
                 actor_id=actor_id,
                 action=action,
                 resource_type=resource_type,

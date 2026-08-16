@@ -195,6 +195,18 @@ def test_idle_and_operation_deadlines_are_decisions_not_sleeps() -> None:
     assert receiver.next_deadline() == 125.0 + IDLE_SECONDS
 
 
+def test_progress_frames_do_not_count_toward_end_totals() -> None:
+    """A silent exec's keep-alives must not look like output to the digest."""
+    receiver = StreamReceiver(declared_limit=100)
+    assert receiver.accept(_start(50)).ok
+    assert receiver.accept(Frame(FrameType.PROGRESS, 1, b"")).ok
+    assert receiver.accept(Frame(FrameType.DATA, 2, b"ab")).ok
+    assert receiver.accept(Frame(FrameType.PROGRESS, 3, b"")).ok
+    done = receiver.accept(_end(b"ab", sequence=4, frame_count=1))
+    assert done.ok and done.finished
+    assert receiver.received_bytes == 2
+
+
 def test_the_running_digest_hashes_what_actually_arrived() -> None:
     parts = [b"alpha", b"beta", b"gamma"]
     body = b"".join(parts)

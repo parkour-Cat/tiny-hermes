@@ -1,5 +1,7 @@
 import asyncio
+import inspect
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from time import monotonic
@@ -8,6 +10,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from tiny_hermes.artifacts.application.service import ArtifactLimits, ArtifactRecorder
 from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
 from tiny_hermes.runs.domain.models import (
     Block,
@@ -68,9 +71,13 @@ from tiny_hermes.session_workspace.infrastructure.sandbox_port import (
     WorkspaceGateway,
 )
 from tiny_hermes.session_workspace.ports.objects import ObjectStore
-from tiny_hermes.tools.application.execute import run_tool_call
+from tiny_hermes.tools.application.execute import (
+    ArtifactUpload,
+    StreamedCommandRunner,
+    run_tool_call,
+)
 from tiny_hermes.tools.domain.files import DATA_ROOT, FILE_HELPER, changes_workspace
-from tiny_hermes.tools.domain.registry import schemas_for
+from tiny_hermes.tools.domain.registry import DEFAULT_OUTPUT_BYTES, schemas_for
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +96,13 @@ class WorkspaceRuntime:
     quota: WorkspaceQuota
     staging_ttl_seconds: int
     export_limit: int
+    artifact_max_bytes: int = 104_857_600
+    run_artifact_max_bytes: int = 524_288_000
+    #: Seven days: Artifacts are Run output, not workspace state, and the
+    #: Scheduler already expires rows by ``expires_at``. A workspace policy
+    #: field can replace this default when 4B surfaces retention in the UI.
+    artifact_retention_seconds: int = 604_800
+    preview_bytes: int = DEFAULT_OUTPUT_BYTES
 
 
 @dataclass(frozen=True)
@@ -259,6 +273,11 @@ class WorkerRuntime:
                 after = await self._read_context(workspace_id, claimed.run.id)
                 if after is None or handle.lost:
                     return
+                now = datetime.now(UTC)
+                compat_expired = (
+                    after.compat_deadline_at is not None
+                    and now >= after.compat_deadline_at
+                )
                 decision = decide_after_round(
                     RoundOutcome(
                         stop_reason=response.stop_reason,
@@ -267,6 +286,10 @@ class WorkerRuntime:
                         budget_allows=_budget_after(after, response, executed_ms),
                         slice_expired=(monotonic() - started)
                         >= self._settings.max_slice_seconds,
+                        hold_slice=(
+                            after.compat_deadline_at is not None and not compat_expired
+                        ),
+                        compat_window_expired=compat_expired,
                     )
                 )
 
@@ -504,6 +527,31 @@ class WorkerRuntime:
             staging_ttl_seconds=runtime.staging_ttl_seconds,
         )
 
+    def _open_artifact(self, claimed: ClaimedRun) -> Callable[[], ArtifactUpload] | None:
+        """A factory so the recorder is constructed only after the preview overflows."""
+        runtime = self._workspace
+        if runtime is None:
+            return None
+
+        def open_recorder() -> ArtifactRecorder:
+            return ArtifactRecorder(
+                sessions=self._sessions,
+                objects=runtime.objects,
+                workspace_id=claimed.run.workspace_id,
+                session_id=claimed.run.session_id,
+                run_id=claimed.run.id,
+                filename="command-output.log",
+                media_type="text/plain",
+                limits=ArtifactLimits(
+                    artifact_max_bytes=runtime.artifact_max_bytes,
+                    run_artifact_max_bytes=runtime.run_artifact_max_bytes,
+                    retention_seconds=runtime.artifact_retention_seconds,
+                    staging_ttl_seconds=runtime.staging_ttl_seconds,
+                ),
+            )
+
+        return open_recorder
+
     async def _answer_tools(
         self,
         claimed: ClaimedRun,
@@ -555,7 +603,23 @@ class WorkerRuntime:
                 sandbox_id=box.sandbox_id,
                 bound=context.spec.tools,
                 call=call,
+                streamer=_streamer_of(self._sandbox),
+                open_artifact=self._open_artifact(claimed),
+                preview_limit=(
+                    self._workspace.preview_bytes
+                    if self._workspace is not None
+                    else DEFAULT_OUTPUT_BYTES
+                ),
+                artifact_limit=(
+                    None
+                    if self._workspace is None
+                    else self._workspace.artifact_max_bytes
+                ),
             )
+            if "artifact_store_failed" in answer.output:
+                await self._append_event(
+                    claimed, RunEventType.WORKSPACE_STORAGE_UNAVAILABLE
+                )
             if not answer.failed and changes_workspace(call.name):
                 wrote = True
             results.append(answer)
@@ -1091,6 +1155,24 @@ class WorkerRuntime:
                     handle.lost = True
                     return
                 handle.version = renewed.version
+
+
+def _streamer_of(sandbox: SandboxSession) -> StreamedCommandRunner | None:
+    """The socket client's stream seam, not the Controller's authorize-only ticket.
+
+    `SandboxController.execute_stream` shares the name and returns a ticket;
+    calling it as if it took a sink would fail. The Worker's fakes that still
+    buffer through `execute` simply omit `sink` and stay on that path.
+    """
+    method = getattr(sandbox, "execute_stream", None)
+    if method is None:
+        return None
+    try:
+        if "sink" not in inspect.signature(method).parameters:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return cast(StreamedCommandRunner, sandbox)
 
 
 def _with_rollback_results(

@@ -139,6 +139,24 @@ class AgentCatalog:
             )
         return await self._store.list_versions(workspace_id, agent_id)
 
+    async def published_alias(
+        self, workspace_id: UUID, actor: Actor, alias: str, request_id: str
+    ) -> tuple[Agent, AgentVersion]:
+        """The published version a Chat Completions `model` field names."""
+        await self._require_role(workspace_id, actor, READERS)
+        del request_id
+        for agent in await self._store.list_agents(workspace_id):
+            if agent.alias != alias:
+                continue
+            if agent.current_version_id is None:
+                raise UnknownAgent
+            versions = await self._store.list_versions(workspace_id, agent.id)
+            for version in versions:
+                if version.id == agent.current_version_id:
+                    return agent, version
+            raise UnknownAgent
+        raise UnknownAgent
+
     async def replace_draft(
         self,
         workspace_id: UUID,
@@ -222,6 +240,10 @@ class AgentCatalog:
         self, workspace_id: UUID, actor: Actor, allowed: set[Role]
     ) -> bool:
         """Return True when the actor acts with platform authority only."""
+        if actor.is_service_account:
+            if actor.role is None or actor.role not in allowed:
+                raise ForbiddenAgentAction
+            return False
         role = await self._store.role_for(workspace_id, actor.id)
         if role is not None:
             if role not in allowed:

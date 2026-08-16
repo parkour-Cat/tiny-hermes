@@ -51,6 +51,15 @@ class EndpointModelPolicy(BaseModel):
     max_output_tokens: int | None = Field(default=None, ge=1)
 
 
+class ChatCompletionsDelivery(BaseModel):
+    """Inbound OpenAI-compatible delivery. Off unless an Agent opts in."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    sync_timeout_seconds: int = Field(default=60, ge=1, le=60)
+
+
 #: Discriminated, so a `provider` the platform does not understand is refused
 #: rather than falling through to the stand-in. An Agent that answers from a
 #: `match` statement while its author believes it is talking to a model is the
@@ -86,6 +95,9 @@ class AgentSpec(BaseModel):
     #: assumed.
     tools: tuple[str, ...] = ()
     limits: AgentLimits = AgentLimits()
+    #: Omitted from the normalized document when it equals the default, so a
+    #: spec that never heard of Chat Completions still hashes as it did.
+    delivery: ChatCompletionsDelivery = ChatCompletionsDelivery()
 
     @field_validator("tools")
     @classmethod
@@ -118,6 +130,9 @@ class AgentSpec(BaseModel):
 
 def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
     normalized = spec.model_dump(mode="json")
+    default_delivery = ChatCompletionsDelivery().model_dump(mode="json")
+    if normalized.get("delivery") == default_delivery:
+        del normalized["delivery"]
     encoded = json.dumps(
         normalized,
         ensure_ascii=False,
