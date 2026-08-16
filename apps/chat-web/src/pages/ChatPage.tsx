@@ -2,17 +2,9 @@ import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/rea
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
-import { downloadArtifact } from "../api/artifacts";
-import { api } from "../api/client";
 import { problemMessage } from "../api/messages";
-import type {
-  AgentResponse,
-  ArtifactResponse,
-  CanonicalMessage,
-  RunResponse,
-  SessionResponse,
-} from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
+import { useBackend } from "../backend/useBackend";
 import { AgentPicker } from "../chat/AgentPicker";
 import { Composer } from "../chat/Composer";
 import { downloadMarkdown, exportFilename, transcriptMarkdown } from "../chat/exportTranscript";
@@ -48,7 +40,7 @@ export function ChatPage() {
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [prefs, setPrefs] = useState(loadSessionPrefs);
-  const scope = { workspace: workspaceId ?? "" };
+  const backend = useBackend(workspaceId);
   const enabled = workspaceId !== null && agentId !== null && auth.user !== null;
 
   function go(sessionId?: string | null): void {
@@ -69,13 +61,13 @@ export function ChatPage() {
   }
 
   const agent = useQuery({
-    queryKey: ["agent", workspaceId, agentId] as const,
-    queryFn: () => api<AgentResponse>(`/api/v1/agents/${agentId ?? ""}`, scope),
+    queryKey: ["agent", backend.scopeKey, agentId] as const,
+    queryFn: () => backend.agent(agentId ?? ""),
     enabled,
   });
   const sessions = useQuery({
-    queryKey: ["sessions", workspaceId, agentId, auth.user?.id] as const,
-    queryFn: () => api<SessionResponse[]>("/api/v1/sessions", scope),
+    queryKey: ["sessions", backend.scopeKey, agentId, auth.user?.id] as const,
+    queryFn: () => backend.listSessions(),
     enabled,
   });
   const mine = matchingSessions(sessions.data ?? [], agentId ?? "", auth.user?.id ?? "").filter(
@@ -96,44 +88,44 @@ export function ChatPage() {
 
   const titleQueries = useQueries({
     queries: mine.map((session) => ({
-      queryKey: ["session-messages", workspaceId, session.id] as const,
+      queryKey: ["session-messages", backend.scopeKey, session.id] as const,
       queryFn: () =>
-        api<CanonicalMessage[]>(`/api/v1/sessions/${session.id}/messages`, scope),
+        backend.messages(session.id),
     })),
   });
   const messages = useQuery({
-    queryKey: ["session-messages", workspaceId, activeSessionId] as const,
+    queryKey: ["session-messages", backend.scopeKey, activeSessionId] as const,
     queryFn: () =>
-      api<CanonicalMessage[]>(`/api/v1/sessions/${activeSessionId ?? ""}/messages`, scope),
+      backend.messages(activeSessionId ?? ""),
     enabled: enabled && activeSessionId !== null,
   });
 
   const activeRunId = runId ?? active?.head_run_id ?? null;
   const snapshot = useQuery({
-    ...runQueryOptions(workspaceId ?? "", activeRunId ?? ""),
+    ...runQueryOptions(backend, activeRunId ?? ""),
     enabled: enabled && activeRunId !== null,
   });
   const events = useRunEvents({
     runId: enabled && activeRunId !== null ? activeRunId : null,
-    workspaceId,
+    backend,
   });
   const artifacts = useQuery({
-    queryKey: ["run-artifacts", workspaceId, activeRunId] as const,
+    queryKey: ["run-artifacts", backend.scopeKey, activeRunId] as const,
     queryFn: () =>
-      api<ArtifactResponse[]>(`/api/v1/runs/${activeRunId ?? ""}/artifacts`, scope),
+      backend.artifacts(activeRunId ?? ""),
     enabled: enabled && activeRunId !== null,
   });
 
   useEffect(() => {
     if (snapshot.data?.finished_at !== null && snapshot.data?.finished_at !== undefined) {
       void queryClient.invalidateQueries({
-        queryKey: ["session-messages", workspaceId, activeSessionId],
+        queryKey: ["session-messages", backend.scopeKey, activeSessionId],
       });
       void queryClient.invalidateQueries({
-        queryKey: ["run-artifacts", workspaceId, activeRunId],
+        queryKey: ["run-artifacts", backend.scopeKey, activeRunId],
       });
     }
-  }, [snapshot.data?.finished_at, queryClient, workspaceId, activeSessionId, activeRunId]);
+  }, [snapshot.data?.finished_at, queryClient, backend, activeSessionId, activeRunId]);
 
   useEffect(() => {
     if (optimistic === null || messages.data === undefined) {
@@ -161,14 +153,9 @@ export function ChatPage() {
   }, [workspaceId, agentId, listed.rows, activeSessionId, location.pathname, navigate]);
 
   const openSession = useMutation({
-    mutationFn: () =>
-      api<SessionResponse>("/api/v1/sessions", {
-        ...scope,
-        method: "POST",
-        body: JSON.stringify({ agent_id: agentId, session_mode: "persistent" }),
-      }),
+    mutationFn: () => backend.createSession(agentId ?? ""),
     onSuccess: (created) => {
-      void queryClient.invalidateQueries({ queryKey: ["sessions", workspaceId, agentId] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions", backend.scopeKey, agentId] });
       setOpenedId(created.id);
       setRunId(null);
       setOptimistic(null);
@@ -182,27 +169,18 @@ export function ChatPage() {
     mutationFn: async (text: string) => {
       let sessionId = activeSessionId;
       if (sessionId === null) {
-        const created = await api<SessionResponse>("/api/v1/sessions", {
-          ...scope,
-          method: "POST",
-          body: JSON.stringify({ agent_id: agentId, session_mode: "persistent" }),
-        });
+        const created = await backend.createSession(agentId ?? "");
         sessionId = created.id;
         setOpenedId(created.id);
-        await queryClient.invalidateQueries({ queryKey: ["sessions", workspaceId, agentId] });
+        await queryClient.invalidateQueries({ queryKey: ["sessions", backend.scopeKey, agentId] });
         go(created.id);
       }
-      return api<RunResponse>("/api/v1/runs", {
-        ...scope,
-        method: "POST",
-        headers: { "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify({ session_id: sessionId, input: text }),
-      });
+      return backend.startRun(sessionId, text);
     },
     onMutate: (text) => setOptimistic(text),
     onSuccess: (created) => {
       setRunId(created.id);
-      queryClient.setQueryData(runQueryOptions(workspaceId ?? "", created.id).queryKey, created);
+      queryClient.setQueryData(runQueryOptions(backend, created.id).queryKey, created);
       setError(null);
     },
     onError: (caught) => {
@@ -213,15 +191,11 @@ export function ChatPage() {
 
   const control = useMutation({
     mutationFn: async ({ target, action }: { target: string; action: string }) => {
-      const current = await api<RunResponse>(`/api/v1/runs/${target}`, scope);
-      return api<RunResponse>(`/api/v1/runs/${target}/${action}`, {
-        ...scope,
-        method: "POST",
-        body: JSON.stringify({ expected_state_version: current.state_version }),
-      });
+      const current = await backend.run(target);
+      return backend.act(target, action, current.state_version);
     },
     onSuccess: (updated, { action, target }) => {
-      queryClient.setQueryData(runQueryOptions(workspaceId ?? "", target).queryKey, updated);
+      queryClient.setQueryData(runQueryOptions(backend, target).queryKey, updated);
       if (target === activeRunId) {
         setRunId(updated.id);
       }
@@ -379,7 +353,7 @@ export function ChatPage() {
             artifacts={artifacts.data ?? []}
             canRetry={!live && (run?.available_actions ?? []).includes("retry")}
             onDownload={(id, filename) => {
-              void downloadArtifact(id, filename, workspaceId).catch((caught) =>
+              void backend.downloadArtifact(id, filename).catch((caught) =>
                 setError(problemMessage(caught)),
               );
             }}

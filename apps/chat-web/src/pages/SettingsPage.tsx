@@ -52,7 +52,7 @@ export function SettingsPage() {
         <dl className="settings-dl">
           <div>
             <dt>{t("displayName")}</dt>
-            <dd>{auth.user?.display_name ?? "—"}</dd>
+            <dd>{auth.user?.displayName ?? "—"}</dd>
           </div>
           <div>
             <dt>{t("email")}</dt>

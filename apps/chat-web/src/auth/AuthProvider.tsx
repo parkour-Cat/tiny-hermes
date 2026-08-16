@@ -1,22 +1,23 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 
-import { api, ApiError } from "../api/client";
+import { ApiError } from "../api/client";
+import { consoleBackend } from "../backend/console";
+import type { SignInInput, Viewer } from "../backend/types";
 
-export type User = {
-  id: string;
-  subject: string;
-  display_name: string;
-  status: string;
-  is_platform_admin: boolean;
-};
+/**
+ * Identity, without the console's own user document.
+ *
+ * The chat surface used to hold `User`, `is_platform_admin` and all — a
+ * control-console fact that means nothing to somebody talking to an Agent,
+ * and that a page serving product design §4.5's end user could not produce.
+ * `Viewer` is the three fields this surface actually shows.
+ */
+export type User = Viewer;
 
-type LoginInput = {
-  subject: string;
-  password: string;
-};
+type LoginInput = SignInInput;
 
 type AuthValue = {
-  user: User | null;
+  user: Viewer | null;
   loading: boolean;
   error: string | null;
   login: (input: LoginInput) => Promise<void>;
@@ -28,7 +29,9 @@ type AuthValue = {
 const AuthContext = createContext<AuthValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
+  // Identity is not scoped to a workspace, so this backend has none.
+  const backend = useMemo(() => consoleBackend(null), []);
+  const [user, setUser] = useState<Viewer | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -36,7 +39,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setLoading(true);
     setError(null);
     try {
-      setUser(await api<User>("/api/v1/auth/me"));
+      setUser(await backend.viewer());
     } catch (caught) {
       if (caught instanceof ApiError && caught.status === 401) {
         setUser(null);
@@ -53,16 +56,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   async function login(input: LoginInput): Promise<void> {
-    const authenticated = await api<User>("/api/v1/auth/sessions", {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
-    setUser(authenticated);
+    setUser(await backend.signIn(input));
     setError(null);
   }
 
   async function logout(): Promise<void> {
-    await api<void>("/api/v1/auth/sessions/current", { method: "DELETE" });
+    await backend.signOut();
     setUser(null);
   }
 

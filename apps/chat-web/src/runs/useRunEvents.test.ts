@@ -4,6 +4,7 @@ import { http, HttpResponse } from "msw";
 import { createElement, type ReactNode } from "react";
 import { expect, test } from "vitest";
 
+import { consoleBackend } from "../backend/console";
 import { useRunEvents } from "./useRunEvents";
 import { t } from "../i18n/zh-CN";
 import { server } from "../test/server";
@@ -107,7 +108,7 @@ test("events arrive in order, and a finished Run ends the subscription", async (
     http.get(SNAPSHOT_PATH, () => HttpResponse.json(runSnapshot(true))),
   );
 
-  const { result } = renderHook(() => useRunEvents({ runId: RUN, workspaceId: WORKSPACE }), {
+  const { result } = renderHook(() => useRunEvents({ runId: RUN, backend: consoleBackend(WORKSPACE) }), {
     wrapper,
   });
 
@@ -132,7 +133,7 @@ test("a stream that ends early resumes from the last sequence seen, delivering n
     http.get(SNAPSHOT_PATH, () => HttpResponse.json(runSnapshot(cursors.length > 1))),
   );
 
-  const { result } = renderHook(() => useRunEvents({ runId: RUN, workspaceId: WORKSPACE }), {
+  const { result } = renderHook(() => useRunEvents({ runId: RUN, backend: consoleBackend(WORKSPACE) }), {
     wrapper,
   });
 
@@ -161,7 +162,7 @@ test("an expired cursor marks the gap it leaves and resubscribes from what survi
     http.get(SNAPSHOT_PATH, () => HttpResponse.json(runSnapshot(true))),
   );
 
-  const { result } = renderHook(() => useRunEvents({ runId: RUN, workspaceId: WORKSPACE }), {
+  const { result } = renderHook(() => useRunEvents({ runId: RUN, backend: consoleBackend(WORKSPACE) }), {
     wrapper,
   });
 
@@ -183,7 +184,7 @@ test("a refused stream stops the reader and is not tried again", async () => {
     }),
   );
 
-  const { result } = renderHook(() => useRunEvents({ runId: RUN, workspaceId: WORKSPACE }), {
+  const { result } = renderHook(() => useRunEvents({ runId: RUN, backend: consoleBackend(WORKSPACE) }), {
     wrapper,
   });
 
@@ -201,7 +202,7 @@ test("a Run the platform does not know stops the reader and is not tried again",
     }),
   );
 
-  const { result } = renderHook(() => useRunEvents({ runId: RUN, workspaceId: WORKSPACE }), {
+  const { result } = renderHook(() => useRunEvents({ runId: RUN, backend: consoleBackend(WORKSPACE) }), {
     wrapper,
   });
 
@@ -220,7 +221,7 @@ test("leaving the page aborts the connection instead of holding it open", async 
   );
 
   const { result, unmount } = renderHook(
-    () => useRunEvents({ runId: RUN, workspaceId: WORKSPACE }),
+    () => useRunEvents({ runId: RUN, backend: consoleBackend(WORKSPACE) }),
     { wrapper },
   );
 

@@ -1,10 +1,11 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { readFrames } from "./eventFrames";
-import { ApiError, api, asApiError } from "../api/client";
+import { ApiError, asApiError } from "../api/client";
 import { problemMessage } from "../api/messages";
 import type { RunEventFrame, RunResponse } from "../api/types";
+import type { ChatBackend } from "../backend/types";
 
 /**
  * The console's subscription to a Run's event stream.
@@ -17,11 +18,10 @@ import type { RunEventFrame, RunResponse } from "../api/types";
  * truncated history that looks complete. Reconnection is the price: it is
  * written here instead of being inherited.
  *
- * Two details follow the stream route rather than the rest of the API. The
- * workspace goes in the query string, because that route reads it there and
- * would answer `workspace_required` to the `X-Workspace-Id` header every other
- * request uses; the cursor goes in `Last-Event-ID`, which is the header that
- * route reads.
+ * How the connection is scoped and authenticated is the backend's business,
+ * not this hook's: it asks for a stream and gets a `Response`. The cursor is
+ * the one protocol detail that stays here, because reconnection is what this
+ * file is for.
  */
 
 /** How long to wait before reconnecting, after 1, 2, 3… quiet failures. */
@@ -53,26 +53,39 @@ export type RunEvents = {
  * share a definition so that "refetch the snapshot after an event" and "the
  * snapshot the page is showing" cannot become two different requests.
  */
-export function runQueryOptions(workspaceId: string, runId: string) {
+export function runQueryOptions(backend: ChatBackend, runId: string) {
   return {
-    queryKey: ["run", workspaceId, runId] as const,
-    queryFn: () => api<RunResponse>(`/api/v1/runs/${runId}`, { workspace: workspaceId }),
+    queryKey: ["run", backend.scopeKey, runId] as const,
+    queryFn: (): Promise<RunResponse> => backend.run(runId),
   };
 }
 
 export function useRunEvents({
   runId,
-  workspaceId,
+  backend,
 }: {
   runId: string | null;
-  workspaceId: string | null;
+  backend: ChatBackend;
 }): RunEvents {
   const queryClient = useQueryClient();
   const [entries, setEntries] = useState<TimelineEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * The backend behind a ref, and `scopeKey` in the dependencies instead of
+   * the object.
+   *
+   * A subscription depends on *which* Run in *which* scope, not on the
+   * identity of the object that opens it. Depending on the object made a
+   * caller who built one inline — which the tests did — resubscribe on every
+   * render, set state, render again, and hang the process. A footgun that
+   * only goes off for careless callers is still a footgun.
+   */
+  const backendRef = useRef(backend);
+  backendRef.current = backend;
+  const { scopeKey } = backend;
 
   useEffect(() => {
-    if (runId === null || workspaceId === null) {
+    if (runId === null) {
       return;
     }
     const controller = new AbortController();
@@ -83,7 +96,7 @@ export function useRunEvents({
     /** Whether the state machine says this Run is over, which only it can say. */
     const hasFinished = async (): Promise<boolean> => {
       try {
-        const run = await queryClient.fetchQuery(runQueryOptions(workspaceId, runId));
+        const run = await queryClient.fetchQuery(runQueryOptions(backendRef.current, runId));
         return run.finished_at !== null;
       } catch {
         // A snapshot that cannot be read is not evidence the Run ended.
@@ -101,7 +114,7 @@ export function useRunEvents({
      * time once the first read has landed.
      */
     const refresh = async (): Promise<void> => {
-      const { queryKey } = runQueryOptions(workspaceId, runId);
+      const { queryKey } = runQueryOptions(backendRef.current, runId);
       const before = queryClient.getQueryState(queryKey);
       const joined = before?.fetchStatus === "fetching" && before.dataUpdatedAt === 0;
       await queryClient.invalidateQueries({ queryKey, exact: true }, { cancelRefetch: true });
@@ -153,17 +166,9 @@ export function useRunEvents({
       while (!signal.aborted) {
         let moved = false;
         try {
-          // No cursor on a first subscription: the stream reads a missing
-          // `Last-Event-ID` as "from the beginning", which is what is wanted,
-          // and sending `0` would say the same thing less clearly.
-          const headers = new Headers();
-          if (cursor > 0) {
-            headers.set("Last-Event-ID", String(cursor));
-          }
-          const response = await fetch(
-            `/api/v1/runs/${runId}/events?workspace_id=${encodeURIComponent(workspaceId)}`,
-            { credentials: "include", headers, signal },
-          );
+          // Cursor 0 means "from the beginning"; the backend turns that into
+          // a missing `Last-Event-ID`, which is how the stream reads it.
+          const response = await backendRef.current.openEventStream(runId, cursor, signal);
           if (!response.ok) {
             const problem = await asApiError(response);
             if (problem.status === 410) {
@@ -199,7 +204,7 @@ export function useRunEvents({
 
     void subscribe();
     return () => controller.abort();
-  }, [runId, workspaceId, queryClient]);
+  }, [runId, scopeKey, queryClient]);
 
   return { entries, error };
 }

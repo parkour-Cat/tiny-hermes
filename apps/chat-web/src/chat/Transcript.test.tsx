@@ -43,7 +43,11 @@ test("each finished line can be copied", async () => {
 
 test("retry stays on the last assistant turn, not in chrome", async () => {
   const retries: string[] = [];
-  renderTranscript(true, () => retries.push("retry"));
+  renderTranscript(true, () => {
+    // A callback typed `() => void`: `Array.push` returns the new length, and
+    // handing that back made the whole app fail `tsc --noEmit`.
+    retries.push("retry");
+  });
   expect(screen.queryByRole("button", { name: "重试" })).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "重试" }));
   expect(screen.getByText(/再跑一次/)).toBeInTheDocument();

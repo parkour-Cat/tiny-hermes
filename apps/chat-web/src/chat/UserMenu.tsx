@@ -16,7 +16,7 @@ export function UserMenu() {
   const close = useCallback(() => setOpen(false), []);
   useDismiss(open, close, root);
 
-  const name = auth.user?.display_name ?? "";
+  const name = auth.user?.displayName ?? "";
   const subject = auth.user?.subject ?? "";
   const initial = name.slice(0, 1).toUpperCase() || "?";
 
