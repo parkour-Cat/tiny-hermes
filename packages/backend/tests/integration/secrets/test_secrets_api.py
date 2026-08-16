@@ -196,10 +196,15 @@ def test_rewrap_skips_already_rotated_rows(
             "processed": 2,
             "remaining": 0,
             "current_key_id": "v2",
+            # Zero, and said out loud: a rotation that reports nothing
+            # unrecoverable is the difference between "finished" and
+            # "finished, and some ciphertext is gone".
+            "unrecoverable": 0,
         }
         second = other.post("/api/v1/secrets/rewrap", headers=headers)
         assert second.json() == {
             "processed": 0,
             "remaining": 0,
             "current_key_id": "v2",
+            "unrecoverable": 0,
         }
