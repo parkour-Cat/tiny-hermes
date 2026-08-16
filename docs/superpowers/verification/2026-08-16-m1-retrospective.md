@@ -111,11 +111,16 @@ What is good, and should not be traded away:
 
 What cost time:
 
-- **A foreign `X-Workspace-Id` returns `[]`, not a refusal.** Scoping a list
-  to nothing is defensible and leaks nothing, but a developer who mistypes a
-  workspace id sees an empty catalogue and concludes their data is gone. A
-  `403` on a workspace the caller is not a member of would cost nothing and
-  save an afternoon.
+- ~~A foreign `X-Workspace-Id` returns `[]`, not a refusal.~~ **Withdrawn —
+  this was wrong.** The probe ran as the bootstrap *platform administrator*,
+  who may read any workspace; the id in it belonged to no workspace at all,
+  so an empty list was the correct answer rather than a missing check.
+  Re-tested with a workspace-bound ServiceAccount key: its own workspace
+  answers `200`, a workspace it does not belong to answers **403
+  `forbidden`**, "The current user cannot perform this workspace action."
+  `_require_role` refuses a non-member who is not a platform administrator.
+  The isolation is sound; the finding was an artifact of who was holding the
+  credential.
 - **A tool round leaves no `run_events` row.** Reading `run_events` for a
   successful tool call shows `run_created`, `run_lease_acquired`,
   `sandbox_cache_reset`, `run_completed` and no trace of the command. This
@@ -145,12 +150,15 @@ Ranked by evidence, not by appetite:
 
 1. **A failed Run must say why, in the API.** §3. Small, and the information
    already exists.
-2. **Refuse a foreign workspace instead of answering emptily.** §5.
-3. **Audit for silently swallowed errors.** The lease bug and the
+2. **Audit for silently swallowed errors.** The lease bug and the
    `DockerUnavailable` crash were both "an exception path that returns or
    raises the wrong thing, without a log". Two in one week, both found by
    accident.
-4. **Put a real user in front of it before designing M2 features.** §6.
+3. **Put a real user in front of it before designing M2 features.** §6.
+
+The workspace-isolation item that stood second here has been withdrawn; see
+§5. It is left visible rather than deleted, because a review that quietly
+removes its own mistakes is not a review.
 
 ## 8. What this review cannot decide
 
