@@ -82,12 +82,10 @@ corepack enable --install-directory "$HOME/.local/node/bin"
 corepack prepare pnpm@10.15.0 --activate
 ```
 
-Then the repository and its locked dependencies. Until the repository is
-public, this clone needs a credential of its own — `gh auth login`, a deploy
-key, or a token in the URL; delete this paragraph when it stops being true.
-A host that should hold no credential at all, now or later, can be handed the
-tree over `git bundle` instead, which is how the fresh-host verification was
-done:
+Then the repository and its locked dependencies. The clone needs no
+credential — the repository is public. A host that should hold none of its
+own anyway can be handed the tree over `git bundle` instead, which is how the
+fresh-host verification was done:
 
 ```bash
 git clone https://github.com/parkour-Cat/tiny-hermes.git
