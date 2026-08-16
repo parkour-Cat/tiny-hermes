@@ -281,14 +281,14 @@ async def test_a_secret_the_previous_kek_cannot_open_is_counted_not_skipped(
     good = await creator.create(
         PLATFORM, workspace_id, "good", SecretScope.PLATFORM, "alpha", "req-1"
     )
-    doomed = await creator.create(
-        PLATFORM, workspace_id, "doomed", SecretScope.PLATFORM, "beta", "req-2"
-    )
-    # Sealed under a KEK the rotation will not be given: the previous key
-    # cannot unwrap it, which is the shape of a KEK that was lost or rotated
-    # out of order.
+    # Sealed under a KEK the rotation will never be given, but labelled `v1`
+    # like the rest: the shape of a key that was lost, or rotated out of
+    # order. The loop will reach this record and the previous KEK will not
+    # open it.
     stranger = SecretService(store, KekSettings(current=THIRD_KEK, current_id="v1"))
-    await stranger.rotate(PLATFORM, workspace_id, doomed.id, "gamma", "req-3")
+    doomed = await stranger.create(
+        PLATFORM, workspace_id, "doomed", SecretScope.PLATFORM, "gamma", "req-2"
+    )
 
     rotator = SecretService(
         store,
