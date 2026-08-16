@@ -58,7 +58,14 @@ class SandboxClient:
             try:
                 reason = RefusalReason(refused.reason)
             except ValueError:
-                raise
+                # Not every "error" on the wire is a decided refusal. The
+                # server answers any exception with its class name, so an
+                # infrastructure failure arrives as, say, `DockerUnavailable`.
+                # Raising the enum's own ValueError turned "the Controller
+                # could not do it" into a crash inside the caller; the
+                # Scheduler's cleanup logged that in a loop. Keep the
+                # transport's error, which is what `_refusal` already does.
+                raise refused from None
             raise SandboxRefused(reason) from refused
 
     async def acquire(
