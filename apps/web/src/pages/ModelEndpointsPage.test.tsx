@@ -72,7 +72,7 @@ test("a platform administrator sees the base url and whether a credential exists
 
   expect(await screen.findByText("https://models.example.com/v1")).toBeInTheDocument();
   expect(screen.getByText("凭证已配置")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "注册端点" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "接入模型服务" })).toBeInTheDocument();
   await waitFor(() => expect(details).toBe(1));
 });
 
@@ -96,6 +96,6 @@ test("everyone else lists the summary and never the base url", async () => {
 
   expect(await screen.findByText("acme-gpt")).toBeInTheDocument();
   expect(screen.queryByText("https://models.example.com/v1")).not.toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "注册端点" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "接入模型服务" })).not.toBeInTheDocument();
   expect(details).toBe(0);
 });

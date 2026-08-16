@@ -71,7 +71,7 @@ test("both sections stay inside the workspace the address names", async () => {
     "href",
     `/workspaces/${WORKSPACE}/agents`,
   );
-  expect(screen.getByRole("link", { name: "运行" })).toHaveAttribute(
+  expect(screen.getByRole("link", { name: "任务" })).toHaveAttribute(
     "href",
     `/workspaces/${WORKSPACE}/runs`,
   );
@@ -79,15 +79,15 @@ test("both sections stay inside the workspace the address names", async () => {
     "href",
     `/workspaces/${WORKSPACE}/members`,
   );
-  expect(screen.getByRole("link", { name: "模型端点" })).toHaveAttribute(
+  expect(screen.getByRole("link", { name: "模型接入" })).toHaveAttribute(
     "href",
     `/workspaces/${WORKSPACE}/model-endpoints`,
   );
-  expect(screen.getByRole("link", { name: "API Keys" })).toHaveAttribute(
+  expect(screen.getByRole("link", { name: "接入凭证" })).toHaveAttribute(
     "href",
     `/workspaces/${WORKSPACE}/api-keys`,
   );
-  expect(screen.getByRole("link", { name: "Secrets" })).toHaveAttribute(
+  expect(screen.getByRole("link", { name: "凭据保管箱" })).toHaveAttribute(
     "href",
     `/workspaces/${WORKSPACE}/secrets`,
   );
@@ -161,7 +161,7 @@ test("a stored dark theme wins over a light system preference", () => {
 test("the locale switcher changes chrome into English", async () => {
   renderShell(`/workspaces/${WORKSPACE}/agents`);
 
-  expect(await screen.findByRole("link", { name: "运行" })).toBeInTheDocument();
+  expect(await screen.findByRole("link", { name: "任务" })).toBeInTheDocument();
   await userEvent.click(screen.getByLabelText("语言"));
   await userEvent.click(await screen.findByTitle("English"));
 
