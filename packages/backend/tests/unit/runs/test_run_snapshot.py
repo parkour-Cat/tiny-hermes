@@ -52,6 +52,7 @@ def _snapshot(**overrides: object) -> RunSnapshot:
         "checkpoint_replay_safe": True,
         "checkpoint_effect_status": CheckpointEffectStatus.NONE,
         "checkpoint_usage_quality": None,
+        "failure_reason": None,
         "created_at": now,
         "started_at": None,
         "finished_at": None,
@@ -110,3 +111,24 @@ def test_a_blocked_snapshot_names_the_head_and_what_the_caller_can_do_to_it() ->
         "available_actions": ["resume", "cancel"],
     }
     assert document["available_actions"] == ["pause", "cancel"]
+
+
+def test_a_failed_run_says_why_in_its_own_document() -> None:
+    """A caller must not have to read the transcript to learn the reason.
+
+    Before this field the snapshot carried 22 keys and none of them was the
+    verdict, while the checkpoint had held `failure` the whole time.
+    """
+    document = _snapshot(
+        state=RunState.FAILED,
+        queue_position=0,
+        queue_status=QueueStatus.TERMINAL,
+        failure_reason="deterministic_command_failed",
+    ).document()
+
+    assert document["status"] == "failed"
+    assert document["failure_reason"] == "deterministic_command_failed"
+
+
+def test_a_run_that_has_not_failed_reports_no_reason() -> None:
+    assert _snapshot().document()["failure_reason"] is None

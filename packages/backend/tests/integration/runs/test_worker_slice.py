@@ -57,6 +57,7 @@ def _slice(
     tokens: int = 32,
     limit_reached: bool = False,
     said: str | None = "the answer",
+    checkpoint: dict[str, Any] | None = None,
 ) -> RecordSliceCommand:
     return RecordSliceCommand(
         workspace_id=UUID(workspace_id),
@@ -66,7 +67,7 @@ def _slice(
         signal=signal,
         pause_reason=None,
         limit_reached=limit_reached,
-        checkpoint=CHECKPOINT,
+        checkpoint=CHECKPOINT if checkpoint is None else checkpoint,
         checkpoint_replay_safe=True,
         checkpoint_effect_status=CheckpointEffectStatus.NONE,
         executed_ms=executed_ms,
@@ -460,3 +461,65 @@ async def test_apply_signal_slice_ended_releases_the_lease_like_record_slice(
     assert lease[0] is True
     again = await _claim(engine, scope["X-Workspace-Id"], worker_id="worker-b")
     assert again.run.id == claimed.run.id
+
+
+async def test_a_failed_run_reports_why_in_its_snapshot_and_its_event(
+    submitted_run: dict[str, Any], scope: dict[str, str], engine: AsyncEngine
+) -> None:
+    """The reason is in the checkpoint; a caller should not have to dig it out.
+
+    Before this, `GET /runs/{id}` answered `failed` and twenty-two fields that
+    said nothing about why, and `run_failed` carried `executed_ms` alone — so
+    an SSE subscriber learned no more than a poller. The Worker had written
+    `failure` into the checkpoint the whole time.
+    """
+    del submitted_run
+    claimed = await _claim(engine, scope["X-Workspace-Id"])
+    checkpoint = {
+        "kind": "model_call",
+        "stop_reason": "failed",
+        "failure": "deterministic_command_failed",
+    }
+
+    async with _factory(engine).begin() as session:
+        snapshot = await SqlRunStore(session).record_slice(
+            _slice(
+                claimed,
+                scope["X-Workspace-Id"],
+                RunSignal.FAILED,
+                checkpoint=checkpoint,
+            )
+        )
+
+    assert snapshot.state.value == "failed"
+    assert snapshot.failure_reason == "deterministic_command_failed"
+    assert snapshot.document()["failure_reason"] == "deterministic_command_failed"
+
+    event = await _row(
+        engine,
+        "SELECT payload FROM run_events WHERE run_id = :id AND event_type = 'run_failed'",
+        id=claimed.run.id,
+    )
+    assert event[0]["failure_reason"] == "deterministic_command_failed"
+    assert "executed_ms" in event[0]
+
+
+async def test_a_completed_run_carries_no_reason(
+    submitted_run: dict[str, Any], scope: dict[str, str], engine: AsyncEngine
+) -> None:
+    del submitted_run
+    claimed = await _claim(engine, scope["X-Workspace-Id"])
+
+    async with _factory(engine).begin() as session:
+        snapshot = await SqlRunStore(session).record_slice(
+            _slice(claimed, scope["X-Workspace-Id"], RunSignal.COMPLETED)
+        )
+
+    assert snapshot.state.value == "completed"
+    assert snapshot.failure_reason is None
+    event = await _row(
+        engine,
+        "SELECT payload FROM run_events WHERE run_id = :id AND event_type = 'run_completed'",
+        id=claimed.run.id,
+    )
+    assert "failure_reason" not in event[0]

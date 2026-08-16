@@ -6,6 +6,15 @@ from tiny_hermes.shared.config import Settings
 
 
 def _settings(**overrides: Any) -> Settings:
+    """Settings built from these values alone.
+
+    `_env_file=None` is the point: `Settings` reads `.env`, and *First start*
+    in docs/development.md creates one with a real KEK in it. Without this,
+    a developer who followed the documentation in order — first start, then
+    local tests — met a red suite, while CI, which has no `.env`, stayed
+    green. A unit test must not depend on whether the machine it runs on has
+    been set up.
+    """
     values: dict[str, Any] = {
         "database_url": "postgresql+asyncpg://app:app@db/app",
         "redis_url": "redis://redis:6379/0",
@@ -17,7 +26,9 @@ def _settings(**overrides: Any) -> Settings:
         "bootstrap_token": "bootstrap-token-with-at-least-32-characters",
     }
     values.update(overrides)
-    return Settings(**values)
+    # `_env_file` is pydantic-settings' own keyword; its signature does not
+    # declare it, so the type checker has to be told this is deliberate.
+    return Settings(_env_file=None, **values)  # pyright: ignore[reportCallIssue]
 
 
 EXECUTION_BOUNDS = [
