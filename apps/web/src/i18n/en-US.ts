@@ -205,12 +205,16 @@ export const enUS: Record<MessageKey, string> = {
   newServiceAccount: "New service account",
   accountName: "Name",
   accountRole: "Role",
+  disableAccountWarning:
+    "Disabling an account invalidates every key it holds, not only one of them.",
   disableAccount: "Disable",
   emptyServiceAccounts: "No service accounts yet",
   newApiKey: "New API key",
   keyScopes: "Scopes",
   keyPlaintextOnce: "Copy it now. The plaintext cannot be shown again.",
   dismissPlaintext: "I have saved it",
+  revokeKeyWarning:
+    "Revoking takes effect at once. A system calling with this key is refused on its next request, and it cannot be restored — issue a new key and swap it in.",
   revokeKey: "Revoke",
   emptyApiKeys: "No API keys yet",
   endpointsTitle: "Model endpoints",
@@ -226,6 +230,8 @@ export const enUS: Record<MessageKey, string> = {
   endpointCredentialRef: "Credential environment variable",
   checkEndpoint: "Check",
   enableEndpoint: "Enable",
+  disableEndpointWarning:
+    "Runs using this model fail on their next round rather than waiting, and a published Agent does not fall back to another model.",
   disableEndpoint: "Disable",
   endpointReachable: "Reachable",
   endpointUnreachable: "Unreachable",
@@ -242,7 +248,11 @@ export const enUS: Record<MessageKey, string> = {
   secretScopePlatform: "Platform",
   secretPlaintext: "Plaintext",
   emptySecrets: "No secrets yet",
+  disableSecretWarning:
+    "A model endpoint naming this secret can no longer resolve a credential, and Runs through it fail. Check that no endpoint is still using it.",
   disableSecret: "Disable",
+  rewrapWarning:
+    "Re-encrypts every secret under the new KEK. It can be interrupted and re-run; an \"unrecoverable\" count above zero means that ciphertext cannot be opened again and those secrets must be entered afresh.",
   rewrapSecrets: "Rewrap",
   rewrapProcessed: "Processed ",
   rewrapRemaining: ", remaining ",

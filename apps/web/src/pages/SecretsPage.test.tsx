@@ -65,7 +65,7 @@ test("plaintext typed into create is not echoed back from the list", async () =>
 
   renderSecrets();
   await userEvent.type(await screen.findByLabelText("名称"), "openai");
-  await userEvent.type(screen.getByLabelText("明文"), PLAINTEXT);
+  await userEvent.type(screen.getByLabelText("凭据内容"), PLAINTEXT);
   await userEvent.click(screen.getByRole("button", { name: "创建" }));
 
   expect(await screen.findByText("sk••••ue")).toBeInTheDocument();
@@ -85,6 +85,10 @@ test("a platform administrator can start a rewrap", async () => {
   );
 
   renderSecrets();
-  await userEvent.click(await screen.findByRole("button", { name: "重包" }));
+  await userEvent.click(await screen.findByRole("button", { name: "轮换主密钥" }));
+  // Rotating the KEK asks before it acts: the warning names what an
+  // "unrecoverable" count would mean, and nothing is sent until it is read.
+  expect(await screen.findByText(/无法恢复/)).toBeInTheDocument();
+  await userEvent.click(await screen.findByRole("button", { name: "确定" }));
   expect(await screen.findByText(/2/)).toBeInTheDocument();
 });

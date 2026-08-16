@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Form, Input, InputNumber, Select, Space, Typography } from "antd";
+import { Alert, Button, Card, Form, Input, Modal, InputNumber, Select, Space, Typography } from "antd";
 import { useState } from "react";
 
 import { api } from "../api/client";
@@ -28,6 +28,7 @@ type RegisterValues = {
 
 export function ModelEndpointsPage() {
   const t = useT();
+  const [modal, contextHolder] = Modal.useModal();
   const auth = useAuth();
   const queryClient = useQueryClient();
   const [form] = Form.useForm<RegisterValues>();
@@ -105,6 +106,7 @@ export function ModelEndpointsPage() {
 
   return (
     <>
+      {contextHolder}
       <PageHeading
         kicker={t("appKicker")}
         title={t("endpointsTitle")}
@@ -224,7 +226,18 @@ export function ModelEndpointsPage() {
                       </Button>
                       {entry.status === "active" ? (
                         <Button
-                          onClick={() => setStatus.mutate({ id: entry.id, status: "disabled" })}
+                          onClick={() =>
+                            void modal.confirm({
+                              title: t("disableEndpoint"),
+                              content: t("disableEndpointWarning"),
+                              okText: t("confirm"),
+                              cancelText: t("cancel"),
+                              onOk: () =>
+                                setStatus
+                                  .mutateAsync({ id: entry.id, status: "disabled" })
+                                  .catch(() => undefined),
+                            })
+                          }
                         >
                           {t("disableEndpoint")}
                         </Button>

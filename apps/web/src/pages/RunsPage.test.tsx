@@ -157,7 +157,7 @@ test("the page neither pages the list nor pretends the platform can", async () =
   await rowOf(HEAD_RUN);
 
   expect(
-    screen.queryByText("接口一次返回全部运行记录，没有分页，也没有筛选。记录很多时列表会变慢。"),
+    screen.queryByText("接口一次返回全部任务记录，没有分页，也没有筛选。记录很多时列表会变慢。"),
   ).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Analyst · 第 1 次" })).toHaveAttribute(
     "href",
@@ -172,7 +172,7 @@ test("the page neither pages the list nor pretends the platform can", async () =
 
 /** Fills in the submission dialog and presses 提交. */
 async function submitRun(message: string): Promise<void> {
-  await userEvent.click(await screen.findByRole("button", { name: "提交运行" }));
+  await userEvent.click(await screen.findByRole("button", { name: "提交任务" }));
   await userEvent.click(await screen.findByLabelText("智能体"));
   await userEvent.click(await screen.findByTitle("Analyst"));
   await userEvent.type(await screen.findByLabelText("输入"), message);
@@ -233,7 +233,7 @@ test("an unpublished agent is answered with what has to happen first", async () 
   renderRuns();
   await submitRun("Summarize the incident.");
 
-  expect(await screen.findByText("该智能体尚未发布，请先发布后再提交运行")).toBeInTheDocument();
+  expect(await screen.findByText("该智能体尚未发布，请先发布后再提交任务")).toBeInTheDocument();
   expect(screen.queryByText("run detail")).not.toBeInTheDocument();
 });
 

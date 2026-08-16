@@ -363,7 +363,7 @@ test("the draft revision and the published version are two separate facts", asyn
   expect(await screen.findByText("草稿修订 3")).toBeInTheDocument();
   expect(screen.getByText("尚未发布")).toBeInTheDocument();
   expect(screen.getByText("尚未发布，没有可对比的版本。")).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "打开试验场" })).toHaveAttribute(
+  expect(screen.getByRole("link", { name: "打开调试台" })).toHaveAttribute(
     "href",
     `/workspaces/${WORKSPACE}/agents/${AGENT}/playground`,
   );
@@ -380,8 +380,8 @@ test("enabling delivery puts the timeout on the draft", async () => {
   );
 
   renderDetail();
-  await builderTab("投递");
-  await userEvent.click(await screen.findByRole("switch", { name: "启用 Chat Completions" }));
+  await builderTab("对外接口");
+  await userEvent.click(await screen.findByRole("switch", { name: "允许用 OpenAI 兼容接口调用" }));
   await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
 
   await waitFor(() => expect(sent).toHaveLength(1));
@@ -411,7 +411,7 @@ test("saving a name sends a patch, not a new draft revision", async () => {
   const name = await screen.findByLabelText("名称");
   await userEvent.clear(name);
   await userEvent.type(name, "Renamed");
-  await userEvent.click(screen.getByRole("button", { name: "保存名称" }));
+  await userEvent.click(screen.getByRole("button", { name: "保存" }));
 
   await waitFor(() => expect(sent).toEqual([{ name: "Renamed", alias: "analyst" }]));
   expect(await screen.findByRole("heading", { name: "Renamed" })).toBeInTheDocument();

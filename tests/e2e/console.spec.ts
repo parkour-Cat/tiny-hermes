@@ -82,8 +82,8 @@ async function publishAgent(page: Page, scenario: string): Promise<string> {
 
 /** Submits a Run for the named Agent and lands on its detail page. */
 async function submitRun(page: Page, agentName: string): Promise<string> {
-  await page.getByRole("link", { name: "运行", exact: true }).click();
-  await page.getByRole("button", { name: "提交运行" }).click();
+  await page.getByRole("link", { name: "任务", exact: true }).click();
+  await page.getByRole("button", { name: "提交任务" }).click();
   await choose(page, "智能体", agentName);
   await page.getByLabel("输入").fill("Say hello to the acceptance walk.");
   await page.getByRole("button", { name: "提交", exact: true }).click();
@@ -144,7 +144,7 @@ test("draft, publish, submit, watch, retry, and be refused a foreign workspace",
   const failedRun = await submitRun(page, failing);
   await expect(summary(page).getByText("失败", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "重试运行" }).click();
+  await page.getByRole("button", { name: "重试任务" }).click();
   await page.getByRole("button", { name: "确定" }).click();
   // A retry is a new Run under the same budget, so the page moves rather than
   // reporting something about the one that failed.
@@ -195,7 +195,7 @@ test("the builder binds a tool, playground sends, and rollback restores v1", asy
   await page.getByRole("button", { name: "确定" }).click();
   await expect(page.getByText("当前版本 v1")).toBeVisible();
 
-  await page.getByRole("button", { name: "打开试验场" }).click();
+  await page.getByRole("button", { name: "打开调试台" }).click();
   await expect(page).toHaveURL(/\/playground$/);
   await page.getByLabel("输入要发给智能体的消息").fill("Say hello to the playground walk.");
   await page.getByRole("button", { name: "发送" }).click();
@@ -227,7 +227,7 @@ test("the builder binds a tool, playground sends, and rollback restores v1", asy
 
 test("the locale switcher changes chrome and can switch back", async ({ page }) => {
   await openWorkspace(page);
-  await expect(page.getByRole("link", { name: "运行" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "任务" })).toBeVisible();
   await page.getByLabel("语言").click();
   await page
     .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
@@ -239,5 +239,5 @@ test("the locale switcher changes chrome and can switch back", async ({ page }) 
     .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
     .locator('.ant-select-item-option[title="中文"]')
     .click();
-  await expect(page.getByRole("link", { name: "运行" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "任务" })).toBeVisible();
 });
