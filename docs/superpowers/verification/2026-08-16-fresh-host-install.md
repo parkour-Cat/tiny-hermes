@@ -130,15 +130,56 @@ meant to detect.
 
 ## 5. Verdict
 
-**Gate 2 passes on the product and fails on the documentation.** A fresh
-Linux host reached a working single-agent file-and-command task, Chat
-Completions included, with no product change and no workaround — but only
-because the operator could supply the five missing install steps. A reader
-with the document alone stalls at §4.1.
+**Gate 2 passed on the product and failed on the documentation**, and the
+documentation was then fixed and re-walked from bare metal — see §6. A reader
+with the document alone now reaches a working single-agent file-and-command
+task; before §6 they stalled at §4.1.
 
 **Gate 3 passes.**
 
-## 6. Not claimed
+## 6. The document was fixed, and the fix was walked
+
+§4 was answered the same day. `docs/development.md` gained an *Installing on
+Linux* section carrying the five missing steps, the `needrestart` hazard, the
+nodejs.org tarball, the credential note on the clone, and a `git bundle`
+alternative for a host that should hold none. *First start* gained the sandbox
+image build — a tool-bound Agent cannot run without it, so it belongs there
+and not 500 lines below. The bootstrap call gained a bash form, the
+walkthrough gained an `ssh -L` line for headless hosts, and *Requirements*
+now says plainly that `python3` on Linux may be any version because `uv sync`
+fetches the pinned one.
+
+Then the same host was **wiped back to bare** — Docker purged, `uv`, Node,
+pnpm and the checkout deleted — and the document was executed verbatim: every
+command copied out of its blocks, in its order, nothing added but `set -e`.
+
+| Block | Result |
+|---|---|
+| needrestart / `DEBIAN_FRONTEND` | ok |
+| `apt-get install docker.io docker-compose-v2` | Docker 29.1.3, Compose 2.40.3 |
+| uv installer, pinned | uv 0.11.26 |
+| nodejs.org tarball + Corepack | v24.6.0, pnpm 10.15.0 |
+| the document's own version checks | all six print; `python3` is 3.14.4, as the new text says it may be |
+| `uv sync --frozen`, `pnpm install --frozen-lockfile` | ok |
+| `generate_local_secrets.py` | 42 keys |
+| sandbox image + digest | `sha256:120a72ac…` |
+| `docker compose … up -d --build --wait` | **exit 0**, nine services |
+| bootstrap | `is_platform_admin: true` |
+
+**The whole sequence exited 0.** The walkthrough then ran on that host:
+workspaces, Agent, publish, ServiceAccount, API Key, `POST /v1/chat/completions`
+**200**, and the file-and-command task again round-tripped — `report.txt`
+written in one container, `written on a fresh host` read back in the next.
+Zero leftover containers.
+
+One caveat, stated rather than buried: the document's *"log out and back in,
+or the socket is refused"* note after `usermod -aG docker` was **not**
+exercised. Purging `docker.io` does not remove the `docker` group, so this
+host's user still carried the membership from the first install. The note is
+correct for a genuinely new machine; this walk cannot claim to have proved
+it.
+
+## 7. Not claimed
 
 - `0.1 Technical Preview`.
 - That the documentation is fixed. §4 is a list of defects, not a changelog.

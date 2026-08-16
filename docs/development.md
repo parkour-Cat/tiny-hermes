@@ -8,7 +8,15 @@
 - pnpm 10.15.0, invoked through Corepack
 - Docker with Docker Compose
 
-Check the installed versions from the repository root:
+The command blocks in this file are PowerShell, because that is the shape of
+the machine most of this was written on. *Installing on Linux* below is the
+same sequence in bash; the API calls further down translate to `curl` without
+changing a single header or body.
+
+Check the installed versions from the repository root. On Linux the binary is
+`python3`, and a distribution that ships something other than 3.12 is not a
+problem: `uv sync` fetches the version this project pins, whatever the system
+Python is.
 
 ```powershell
 python --version
@@ -27,6 +35,70 @@ uv sync --frozen
 corepack pnpm install --frozen-lockfile
 ```
 
+## Installing on Linux
+
+A fresh Ubuntu host has none of the five requirements. This is the whole
+sequence, verified on Ubuntu 26.04 with 8 vCPU and 16 GB
+(`docs/superpowers/verification/2026-08-16-fresh-host-install.md`).
+
+Ubuntu's `needrestart` opens a dialog after a libc upgrade. Over SSH, with no
+terminal for it to draw on, `apt-get` is stopped by `SIGTTOU` and waits
+forever rather than failing — so silence both frontends before installing
+anything:
+
+```bash
+sudo mkdir -p /etc/needrestart/conf.d
+printf '%s\n' '$nrconf{restart} = "a";' '$nrconf{kernelhints} = -1;' \
+  | sudo tee /etc/needrestart/conf.d/99-noninteractive.conf
+export DEBIAN_FRONTEND=noninteractive
+```
+
+Docker and Compose come from the distribution. Ubuntu 26.04 carries Docker
+29.1.3 and Compose 2.40.3, which is what CI uses:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y docker.io docker-compose-v2
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"   # log out and back in, or the socket is refused
+```
+
+uv is pinned to the version in *Requirements*:
+
+```bash
+curl -LsSf https://astral.sh/uv/0.11.26/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Node 24 is **not** in Ubuntu's archive — 26.04 offers 22.x — so take the
+official tarball and let Corepack place pnpm:
+
+```bash
+mkdir -p ~/.local/node
+curl -fsSL https://nodejs.org/dist/v24.6.0/node-v24.6.0-linux-x64.tar.xz \
+  | tar -xJ --strip-components=1 -C ~/.local/node
+export PATH="$HOME/.local/node/bin:$PATH"
+corepack enable --install-directory "$HOME/.local/node/bin"
+corepack prepare pnpm@10.15.0 --activate
+```
+
+Then the repository and its locked dependencies. The repository is private, so
+the clone needs a credential of its own — a `gh auth login`, a deploy key, or
+a token in the URL. A host that should hold no credential at all can be given
+the tree over `git bundle` instead, which is how the fresh-host verification
+was done:
+
+```bash
+git clone https://github.com/parkour-Cat/tiny-hermes.git
+cd tiny-hermes
+export UV_CACHE_DIR=".uv-cache"
+uv sync --frozen
+corepack pnpm install --frozen-lockfile
+```
+
+Both `PATH` lines are for this shell only. Put them in `~/.profile` if this
+host is going to be used more than once.
+
 ## First start
 
 Create the local environment file and mint `SESSION_COOKIE_SECRET`,
@@ -40,12 +112,33 @@ uv run --no-sync python scripts/generate_local_secrets.py --env-file .env
 If `.env` already exists, pass `--force` to replace only those secret keys.
 `SESSION_COOKIE_SECRET` protects browser sessions. `BOOTSTRAP_TOKEN` is accepted only until the first platform administrator is created. Do not reuse either value outside this local installation.
 
+Build the sandbox runtime image and approve it **by digest**. An empty
+`SANDBOX_IMAGE_DIGEST` approves nothing, so every tool-bound Run fails closed
+rather than falling back to a tag or to the host — which means an Agent that
+binds `shell.exec` or the `file.*` tools cannot run at all until this is set.
+*Sandbox and `shell.exec`* explains what the image is; this is where it has to
+happen:
+
+```powershell
+docker build -t tiny-hermes-sandbox:local -f deploy/sandbox/Dockerfile deploy/sandbox
+$env:SANDBOX_IMAGE_DIGEST = (docker image inspect tiny-hermes-sandbox:local --format '{{.Id}}').Trim()
+```
+
+```bash
+docker build -t tiny-hermes-sandbox:local -f deploy/sandbox/Dockerfile deploy/sandbox
+export SANDBOX_IMAGE_DIGEST="$(docker image inspect tiny-hermes-sandbox:local --format '{{.Id}}')"
+```
+
 Build the images, apply database migrations, and wait until the API and Web containers are healthy:
 
 ```powershell
 docker compose --env-file .env -f deploy/compose/compose.yaml up -d --build --wait
 docker compose --env-file .env -f deploy/compose/compose.yaml ps -a
 ```
+
+The same two lines are shell-agnostic; on Linux they run unchanged. Nine
+services report healthy — `postgres`, `redis`, `minio`, `api`, `web`,
+`worker`, `scheduler`, `controller`, and `migrate` having exited 0.
 
 Open `http://127.0.0.1:3000/bootstrap` to create the first administrator. The page sends the bootstrap token in a request header; it is never included in the URL. The equivalent API call is:
 
@@ -68,6 +161,19 @@ try {
 }
 ```
 
+In bash, with the token read straight out of `.env` so it never reaches the
+shell history:
+
+```bash
+TOKEN=$(grep '^BOOTSTRAP_TOKEN=' .env | cut -d= -f2-)
+curl -s -X POST http://127.0.0.1:8000/api/v1/bootstrap \
+  -H "X-Bootstrap-Token: $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"subject":"admin@example.com","display_name":"Administrator",
+       "password":"replace-with-a-local-password"}'
+unset TOKEN
+```
+
 After a successful bootstrap, the same endpoint permanently returns `bootstrap_closed`. Sign in at `http://127.0.0.1:3000/login`.
 
 ## Operator walkthrough
@@ -76,12 +182,26 @@ On a fresh Linux Docker host, after *First start* and sign-in, a reviewer can
 prove the M1 console and machine-identity path without inventing a second
 protocol. The PowerShell blocks later in this file are the same calls.
 
+The pages below are served on the host's own loopback. If that host is a
+remote machine reached over SSH, forward the two ports and open the URLs on
+the workstation — nothing in the platform listens on a public interface, and
+it should stay that way:
+
+```bash
+ssh -N -L 3000:127.0.0.1:3000 -L 8000:127.0.0.1:8000 user@host
+```
+
+Every step below can also be driven entirely over the API with `curl`; the
+walk in `docs/superpowers/verification/2026-08-16-fresh-host-install.md` is
+exactly that, in order, and is what a headless reviewer should copy.
+
 1. Open `http://127.0.0.1:3000/workspaces` and create **two** workspaces.
 2. Inside the first workspace, create an Agent (name `Analyst`, alias `analyst`).
-   On the Agent page bind `file.list` if a sandbox image digest is configured,
-   enable Chat Completions delivery (`enabled`, `sync_timeout_seconds` 60), and
-   publish. The field-level diff is against the published spec; rollback is on
-   the same page.
+   On the Agent page bind the tools the walk needs — `shell.exec` and
+   `file.list` are enough, and *First start* has already approved the image
+   they run in — enable Chat Completions delivery (`enabled`,
+   `sync_timeout_seconds` 60), and publish. The field-level diff is against the
+   published spec; rollback is on the same page.
 3. Open Playground from that Agent. Send a message. Playground posts
    `POST /api/v1/runs` with a cookie, CSRF, and a fresh `Idempotency-Key`; it is
    not Chat Completions. The Run Detail page lists transcript, tools, and files.
