@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -53,11 +54,19 @@ class PreviousKekMissing(Exception):
     pass
 
 
+logger = logging.getLogger(__name__)
+
+
 @dataclass(frozen=True)
 class RewrapResult:
     processed: int
     remaining: int
     current_key_id: str
+    #: Records the previous KEK could not unwrap. They are inside `remaining`
+    #: too, and that is the point: without this number an operator reruns a
+    #: rotation that reports the same `remaining` forever, unable to tell
+    #: "not reached yet" from "this ciphertext is not coming back".
+    unrecoverable: int = 0
 
 
 @dataclass(frozen=True)
@@ -154,12 +163,22 @@ class SecretService:
         current = self._current_kek()
         previous = self._previous_kek()
         processed = 0
+        unrecoverable = 0
         for record in await self._store.list_by_key_id(self._kek.previous_id):
             try:
                 rotated = rewrap_envelope(
                     record.envelope(), previous, current, self._kek.current_id
                 )
             except UnwrapFailed:
+                # Not a skip to be quiet about: with the previous KEK unable
+                # to open it, this record's plaintext is unreachable, and
+                # rerunning the rotation will never change that. The id says
+                # which secret; the plaintext is exactly what nobody has.
+                unrecoverable += 1
+                logger.error(
+                    "secret cannot be unwrapped by the previous KEK",
+                    extra={"secret_id": str(record.id), "key_id": self._kek.previous_id},
+                )
                 continue
             await self._store.replace_wrap(
                 record.id, rotated.wrapped_dek, rotated.wrap_nonce, rotated.key_id
@@ -175,6 +194,7 @@ class SecretService:
             context={
                 "processed": str(processed),
                 "remaining": str(remaining),
+                "unrecoverable": str(unrecoverable),
                 "current_key_id": self._kek.current_id,
             },
         )
@@ -182,6 +202,7 @@ class SecretService:
             processed=processed,
             remaining=remaining,
             current_key_id=self._kek.current_id,
+            unrecoverable=unrecoverable,
         )
 
     async def _visible(self, workspace_id: UUID, secret_id: UUID) -> SecretRecord:

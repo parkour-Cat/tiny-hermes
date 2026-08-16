@@ -67,6 +67,7 @@ class RewrapResponse(BaseModel):
     processed: int
     remaining: int
     current_key_id: str
+    unrecoverable: int
 
 
 def secret_router(resources: ApplicationResources) -> APIRouter:
@@ -170,6 +171,7 @@ def secret_router(resources: ApplicationResources) -> APIRouter:
             processed=result.processed,
             remaining=result.remaining,
             current_key_id=result.current_key_id,
+            unrecoverable=result.unrecoverable,
         )
 
     @router.post("/{secret_id}/disable", response_model=SecretResponse)
