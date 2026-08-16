@@ -156,6 +156,7 @@ export const enUS: Record<MessageKey, string> = {
   modelEndpoints: "Model endpoints",
   apiKeys: "API keys",
   secrets: "Secrets",
+  configureAgent: "Configure",
   playground: "Playground",
   language: "Language",
   themeLight: "Light",

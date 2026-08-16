@@ -151,6 +151,7 @@ export const zhCN = {
   apiKeys: "接入凭证",
   secrets: "凭据保管箱",
   playground: "调试台",
+  configureAgent: "去配置",
   language: "语言",
   themeLight: "浅色",
   themeDark: "深色",

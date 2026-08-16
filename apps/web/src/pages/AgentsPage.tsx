@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Avatar, Button, Card, Form, Input, Modal, Tag, Typography } from "antd";
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../api/client";
 import { problemField, problemMessage } from "../api/messages";
@@ -20,6 +20,7 @@ export function AgentsPage() {
   const t = useT();
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [form] = Form.useForm<AgentValues>();
   const [open, setOpen] = useState(false);
   const agentsQuery = ["agents", workspaceId] as const;
@@ -42,6 +43,10 @@ export function AgentsPage() {
       ]);
       setOpen(false);
       form.resetFields();
+      // Straight into the builder. A new Agent has no persona, no model and no
+      // tools yet, so dropping the person back on a list — where the only way
+      // in is the name, in small type — leaves the next step to be guessed.
+      navigate(`/workspaces/${workspaceId ?? ""}/agents/${created.id}`);
     },
     onError: (caught) => {
       // The dialog stays open with the typed values in it. A refused name or
@@ -93,9 +98,17 @@ export function AgentsPage() {
                   </Typography.Title>
                   <Typography.Text type="secondary">{entry.alias}</Typography.Text>
                   <div>
-                    <Link to={`/workspaces/${workspaceId}/agents/${entry.id}/playground`}>
-                      {t("playground")}
-                    </Link>
+                    {/* An unpublished Agent cannot answer anything, so the
+                        playground is a dead end until it is configured. */}
+                    {entry.current_version_id === null ? (
+                      <Link to={`/workspaces/${workspaceId}/agents/${entry.id}`}>
+                        {t("configureAgent")}
+                      </Link>
+                    ) : (
+                      <Link to={`/workspaces/${workspaceId}/agents/${entry.id}/playground`}>
+                        {t("playground")}
+                      </Link>
+                    )}
                   </div>
                 </div>
                 <Tag

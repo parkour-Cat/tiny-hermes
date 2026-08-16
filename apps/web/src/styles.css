@@ -253,12 +253,35 @@ h4,
 }
 
 .workspace-row {
+  position: relative;
   display: grid;
   grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: 16px;
   padding: 18px 0;
   border-bottom: 1px solid var(--th-line);
+}
+
+.workspace-row:hover {
+  background: rgb(26 22 18 / 3%);
+}
+
+/* The title's own link, stretched over the row.
+   Wrapping the row in an anchor would nest it around the links already
+   inside, which is invalid and reads as one target to a screen reader. This
+   keeps one link per destination and only widens where the first one can be
+   hit. */
+.workspace-row .workspace-summary h4 a::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+
+/* Anything else in the row has to sit above that overlay to stay clickable. */
+.workspace-row .workspace-summary > div a,
+.workspace-row > :last-child {
+  position: relative;
+  z-index: 1;
 }
 
 .workspace-row:last-child {
