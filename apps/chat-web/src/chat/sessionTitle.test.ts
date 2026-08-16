@@ -28,9 +28,18 @@ test("a session is blank until the user has spoken", () => {
   ).toBe(false);
 });
 
-test("long first lines are clipped for the rail", () => {
+test("a title keeps enough of the line to be worth hovering", () => {
+  // The rail clips to one line in CSS and puts the whole string in `title`,
+  // so cutting at 35 here threw away the part a person hovers to read.
   const line = "Please write a very long brief that should not stretch the session rail forever";
   expect(sessionTitle([{ role: "user", parts: [{ type: "text", text: line }] }], "新对话")).toBe(
-    `${line.slice(0, 35)}…`,
+    line,
   );
+});
+
+test("a line past the tooltip's usefulness is still capped", () => {
+  const line = "x".repeat(200);
+  const title = sessionTitle([{ role: "user", parts: [{ type: "text", text: line }] }], "新对话");
+  expect(title).toHaveLength(80);
+  expect(title.endsWith("…")).toBe(true);
 });

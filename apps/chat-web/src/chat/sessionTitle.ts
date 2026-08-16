@@ -26,7 +26,9 @@ export function sessionTitle(messages: CanonicalMessage[], emptyLabel: string): 
     if (line === "") {
       continue;
     }
-    return line.length > 36 ? `${line.slice(0, 35)}…` : line;
+    // Long enough to be a useful tooltip; the rail truncates what it shows
+    // with an ellipsis rather than cutting the string here.
+    return line.length > 80 ? `${line.slice(0, 79)}…` : line;
   }
   return emptyLabel;
 }

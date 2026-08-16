@@ -55,6 +55,9 @@ export function SessionItem({
         type="button"
         className="rail-session-open"
         aria-current={active ? "true" : undefined}
+        // The row clips to one line, so the whole title has to be reachable
+        // somewhere: hovering is where a person looks for it.
+        title={session.title}
         onClick={onOpen}
       >
         {pinned ? <span className="rail-pin" aria-hidden /> : null}

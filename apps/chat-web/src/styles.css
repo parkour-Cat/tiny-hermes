@@ -490,23 +490,29 @@ button:disabled {
 }
 
 .rail-session.is-active .rail-session-open {
-  font-weight: 650;
+  /* The background already says which row is open; ink is enough on top of
+     it, and 650 made the active row shout. */
+  color: var(--th-ink);
+  font-weight: 550;
 }
 
 .rail-session-open {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
   border: 0;
   border-radius: 8px;
-  padding: 8px 6px 8px 10px;
+  padding: 7px 6px 7px 10px;
   background: transparent;
-  color: var(--th-ink);
+  /* A list, not prose: one line, 13px like every other list in the app, and
+     the ellipsis rather than a second line. A wrapped title made one row
+     three lines tall and heavier than the brand above it. */
+  color: var(--th-ink-soft);
   text-align: left;
-  line-height: 1.35;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .rail-pin {

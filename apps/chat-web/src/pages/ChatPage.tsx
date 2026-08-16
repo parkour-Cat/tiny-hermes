@@ -250,10 +250,15 @@ export function ChatPage() {
   const headId = run?.queue.blocked_by_run_id ?? null;
   const headActions = blocked ? (run.queue.available_actions ?? []) : [];
   const live = isLiveStatus(run?.status) && run?.finished_at === null;
-  const railSessions = mine.map((session, index) => ({
-    id: session.id,
-    title: sessionTitle(titleQueries[index]?.data ?? [], t("untitledChat")),
-  }));
+  // Newest first. The API answers in `created_at` order, and passing that
+  // through put the conversation you just had at the bottom of the rail.
+  const railSessions = mine
+    .map((session, index) => ({
+      id: session.id,
+      title: sessionTitle(titleQueries[index]?.data ?? [], t("untitledChat")),
+      createdAt: session.created_at,
+    }))
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 
   return (
     <div className="chat-app">
