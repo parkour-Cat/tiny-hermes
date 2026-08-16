@@ -176,6 +176,9 @@ async def test_a_service_account_cannot_manage_secrets() -> None:
 
 
 OTHER_KEK = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+#: A third key nobody hands the rotation, so a record sealed under it is
+#: unopenable by the previous KEK — a lost key, or one rotated out of order.
+THIRD_KEK = "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
 
 
 class InterruptAfterOne(MemorySecretStore):
@@ -228,6 +231,7 @@ async def test_rewrap_can_be_interrupted_and_resumed() -> None:
     result = await rotator.rewrap(PLATFORM, workspace_id, "req-rewrap-2")
     assert result.processed == 1
     assert result.remaining == 0
+    assert result.unrecoverable == 0
     assert result.current_key_id == "v2"
     assert store.records[first.id].key_id == "v2"
     assert store.records[second.id].key_id == "v2"
@@ -257,3 +261,49 @@ async def test_rewrap_without_the_previous_kek_is_refused() -> None:
     rotator = SecretService(store, KekSettings(current=TEST_KEK, current_id="v1"))
     with pytest.raises(PreviousKekMissing):
         await rotator.rewrap(PLATFORM, workspace_id, "req-rewrap")
+
+
+@pytest.mark.asyncio
+async def test_a_secret_the_previous_kek_cannot_open_is_counted_not_skipped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`remaining` alone cannot say whether a rerun would help.
+
+    A rotation that reports the same `remaining` every time reads as "keep
+    going" when it may mean "this ciphertext is not coming back". The count
+    separates the two, and the log names the record — never the plaintext,
+    which is precisely what nobody can produce.
+    """
+    store = MemorySecretStore()
+    workspace_id = uuid4()
+    store.memberships[(workspace_id, PLATFORM.id)] = Role.WORKSPACE_ADMIN
+    creator = SecretService(store, KekSettings(current=TEST_KEK, current_id="v1"))
+    good = await creator.create(
+        PLATFORM, workspace_id, "good", SecretScope.PLATFORM, "alpha", "req-1"
+    )
+    doomed = await creator.create(
+        PLATFORM, workspace_id, "doomed", SecretScope.PLATFORM, "beta", "req-2"
+    )
+    # Sealed under a KEK the rotation will not be given: the previous key
+    # cannot unwrap it, which is the shape of a KEK that was lost or rotated
+    # out of order.
+    stranger = SecretService(store, KekSettings(current=THIRD_KEK, current_id="v1"))
+    await stranger.rotate(PLATFORM, workspace_id, doomed.id, "gamma", "req-3")
+
+    rotator = SecretService(
+        store,
+        KekSettings(
+            current=OTHER_KEK, current_id="v2", previous=TEST_KEK, previous_id="v1"
+        ),
+    )
+    with caplog.at_level("ERROR"):
+        result = await rotator.rewrap(PLATFORM, workspace_id, "req-rewrap")
+
+    assert result.processed == 1
+    assert result.unrecoverable == 1
+    assert result.remaining == 1
+    assert store.records[good.id].key_id == "v2"
+    assert store.records[doomed.id].key_id == "v1"
+    assert "cannot be unwrapped" in caplog.text
+    assert str(doomed.id) in str(caplog.records[-1].__dict__.get("secret_id", ""))
+    assert "gamma" not in caplog.text
