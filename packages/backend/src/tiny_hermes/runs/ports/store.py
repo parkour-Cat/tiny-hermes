@@ -137,7 +137,6 @@ class RecordSliceCommand:
     workspace_id: UUID
     run_id: UUID
     lease_id: UUID
-    expected_lease_version: int
     expected_state_version: int
     signal: RunSignal | None
     pause_reason: PauseReason | None

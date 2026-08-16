@@ -1,11 +1,12 @@
 [project]
 name = "tiny-hermes"
 version = "0.0.0"
-description = "A multi-tenant runtime for lightweight Hermes-style agents"
+description = "单 Agent 安全运行骨架"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "alembic>=1.19.1",
     "asyncpg>=0.31.0",
+    "cryptography>=50.0.0",
     "docker>=7.2.0",
     "email-validator>=2.3.0",
     "fastapi>=0.141.1",

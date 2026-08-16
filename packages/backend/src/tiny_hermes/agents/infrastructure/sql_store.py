@@ -185,6 +185,28 @@ class SqlAgentStore:
         )
         return None if row is None else _agent(row)
 
+    async def update_agent(
+        self,
+        workspace_id: UUID,
+        agent_id: UUID,
+        name: str | None,
+        alias: str | None,
+    ) -> Agent | None:
+        row = await self._lock_agent(workspace_id, agent_id)
+        if row is None:
+            return None
+        if name is not None:
+            row.name = name
+        if alias is not None:
+            row.alias = alias
+        try:
+            await self._session.flush()
+        except IntegrityError as error:
+            if ALIAS_CONSTRAINT not in str(error.orig):
+                raise
+            raise AgentAliasAlreadyUsed from error
+        return _agent(row)
+
     async def get_draft(self, workspace_id: UUID, agent_id: UUID) -> AgentDraft | None:
         if await self.get_agent(workspace_id, agent_id) is None:
             return None

@@ -4,6 +4,8 @@ from fastapi import APIRouter, Response, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from tiny_hermes.secrets.domain.envelope import InvalidKek, decode_kek
+
 ReadinessChecks = dict[str, str]
 ReadinessCheck = Callable[[], Awaitable[ReadinessChecks]]
 
@@ -34,6 +36,34 @@ class DatabaseReadinessProbe:
         return {"database": "ok", "migration": migration}
 
 
+def kek_status(value: str) -> str:
+    if not value:
+        return "missing"
+    try:
+        decode_kek(value)
+        return "current"
+    except InvalidKek:
+        return "missing"
+
+
+class ApiReadinessProbe:
+    """Database, migration, and the KEK the API needs to write Secrets."""
+
+    def __init__(
+        self,
+        database: DatabaseReadinessProbe,
+        kek: str | Callable[[], str],
+    ) -> None:
+        self._database = database
+        self._kek = kek
+
+    async def __call__(self) -> ReadinessChecks:
+        checks = await self._database()
+        value = self._kek() if callable(self._kek) else self._kek
+        checks["kek"] = kek_status(value)
+        return checks
+
+
 def health_router(readiness: ReadinessCheck) -> APIRouter:
     router = APIRouter(tags=["health"])
 
@@ -47,7 +77,9 @@ def health_router(readiness: ReadinessCheck) -> APIRouter:
     ) -> dict[str, str | ReadinessChecks]:
         checks = await readiness()
         is_ready = (
-            checks.get("database") == "ok" and checks.get("migration") == "current"
+            checks.get("database") == "ok"
+            and checks.get("migration") == "current"
+            and checks.get("kek", "current") == "current"
         )
         if not is_ready:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE

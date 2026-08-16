@@ -1056,7 +1056,6 @@ class WorkerRuntime:
             workspace_id=claimed.run.workspace_id,
             run_id=claimed.run.id,
             lease_id=handle.lease_id,
-            expected_lease_version=handle.version,
             expected_state_version=state_version,
             signal=decision.signal,
             pause_reason=decision.pause_reason,

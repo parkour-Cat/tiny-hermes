@@ -86,9 +86,12 @@ def test_estimated_usage_quality_is_refused() -> None:
         ("HAS SPACE", False),
         ("", False),
         ("sk-a-real-looking-key", False),
+        ("11111111-2222-4333-8444-555555555555", True),
     ],
 )
-def test_a_credential_ref_names_an_environment_variable(ref: str, wellformed: bool) -> None:
+def test_a_credential_ref_names_an_environment_variable_or_a_secret_id(
+    ref: str, wellformed: bool
+) -> None:
     """It is a name, never a value.
 
     The shape is checked so that pasting the key itself into the field is caught

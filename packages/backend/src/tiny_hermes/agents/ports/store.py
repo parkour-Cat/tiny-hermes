@@ -50,6 +50,14 @@ class AgentStore(Protocol):
 
     async def get_agent(self, workspace_id: UUID, agent_id: UUID) -> Agent | None: ...
 
+    async def update_agent(
+        self,
+        workspace_id: UUID,
+        agent_id: UUID,
+        name: str | None,
+        alias: str | None,
+    ) -> Agent | None: ...
+
     async def get_draft(self, workspace_id: UUID, agent_id: UUID) -> AgentDraft | None: ...
 
     async def list_agents(self, workspace_id: UUID) -> Sequence[Agent]: ...

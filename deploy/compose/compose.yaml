@@ -16,6 +16,11 @@ x-base-env: &base-env
   # Run short enough to watch; the restart drill raises it, because a Run
   # that finishes in a blink cannot have a restart land inside it.
   DETERMINISTIC_MODEL_DELAY_MS: ${DETERMINISTIC_MODEL_DELAY_MS:-50}
+  # How long a Worker's claim on a Run survives without renewal. Not a §24.1
+  # number, but §24.1's 30s recovery cell and the workspace drill's 100 MiB
+  # checkpoint disagree about it, so a drill has to be able to vary it
+  # without editing the source. See 2026-08-15-m1-drills-16gb.md.
+  WORKER_LEASE_SECONDS: ${WORKER_LEASE_SECONDS:-20}
   # Outbound safety. The default approves nothing, so only public addresses
   # are reachable; an enterprise private endpoint needs its range named here.
   OUTBOUND_ALLOWED_CIDRS: ${OUTBOUND_ALLOWED_CIDRS:-}
@@ -39,14 +44,22 @@ x-app-env: &app-env
   <<: *base-env
   S3_ACCESS_KEY: ${S3_ACCESS_KEY:-tiny-hermes-local}
   S3_SECRET_KEY: ${S3_SECRET_KEY:-tiny-hermes-local-password}
-  # Model endpoint credentials are passed through by name. Each registered
-  # endpoint's `credential_ref` must match a variable the deployment sets;
-  # nothing is stored in the database.
+  # Envelope KEK. 32 zero bytes, standard base64 — local compose only.
+  # Generate a real one: python -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"
+  TINY_HERMES_KEK: ${TINY_HERMES_KEK:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+  TINY_HERMES_KEK_ID: ${TINY_HERMES_KEK_ID:-v1}
+  TINY_HERMES_PREVIOUS_KEK: ${TINY_HERMES_PREVIOUS_KEK:-}
+  TINY_HERMES_PREVIOUS_KEK_ID: ${TINY_HERMES_PREVIOUS_KEK_ID:-}
+  # Model endpoint credentials. `credential_ref` may name this variable *or*
+  # a Secret id created from the console. Compose keeps the env form so an
+  # endpoint registered before 4C still resolves. Create a platform Secret
+  # and point an endpoint at its id to exercise rewrap.
   TINY_HERMES_MODEL_KEY_EXAMPLE: ${TINY_HERMES_MODEL_KEY_EXAMPLE:-}
 
 services:
   postgres:
     image: postgres:17.6-alpine
+    command: ["postgres", "-c", "max_connections=200"]
     environment:
       POSTGRES_DB: tiny_hermes
       POSTGRES_USER: tiny_hermes

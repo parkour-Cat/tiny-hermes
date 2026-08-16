@@ -55,6 +55,11 @@ class RollbackRequest(BaseModel):
     version_id: UUID
 
 
+class UpdateAgentRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    alias: str | None = Field(default=None, min_length=1, max_length=80)
+
+
 class AgentResponse(BaseModel):
     id: UUID
     name: str
@@ -110,6 +115,24 @@ class AgentVersionResponse(BaseModel):
             schema_version=version.schema_version,
             content_hash=version.content_hash,
             created_at=version.created_at,
+        )
+
+
+class AgentVersionDetailResponse(AgentVersionResponse):
+    """One version, including the spec the Builder diffs against."""
+
+    spec: dict[str, Any]
+
+    @classmethod
+    def from_domain(cls, version: AgentVersion) -> "AgentVersionDetailResponse":
+        return cls(
+            id=version.id,
+            agent_id=version.agent_id,
+            version_number=version.version_number,
+            schema_version=version.schema_version,
+            content_hash=version.content_hash,
+            created_at=version.created_at,
+            spec=version.spec,
         )
 
 
@@ -179,6 +202,39 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
             raise _as_app_error(error) from error
         return AgentResponse.from_domain(agent)
 
+    @router.patch("/{agent_id}", response_model=AgentResponse)
+    async def update_agent(  # pyright: ignore[reportUnusedFunction]
+        agent_id: UUID,
+        payload: UpdateAgentRequest,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[AgentCatalog, Depends(catalog_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> AgentResponse:
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        if payload.name is None and payload.alias is None:
+            raise AppError(
+                code="invalid_agent_update",
+                title="Invalid agent update",
+                status=422,
+                detail="A rename must include a name, an alias, or both.",
+            )
+        try:
+            agent = await catalog.update_agent(
+                workspace_id,
+                _actor(user),
+                agent_id,
+                payload.name,
+                payload.alias,
+                request.state.request_id,
+            )
+        except AgentCatalogError as error:
+            raise _as_app_error(error) from error
+        return AgentResponse.from_domain(agent)
+
     @router.get("/{agent_id}/draft", response_model=AgentDraftResponse)
     async def get_draft(  # pyright: ignore[reportUnusedFunction]
         agent_id: UUID,
@@ -242,6 +298,30 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
         except AgentCatalogError as error:
             raise _as_app_error(error) from error
         return [AgentVersionResponse.from_domain(version) for version in versions]
+
+    @router.get("/{agent_id}/versions/{version_id}", response_model=AgentVersionDetailResponse)
+    async def get_version(  # pyright: ignore[reportUnusedFunction]
+        agent_id: UUID,
+        version_id: UUID,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[AgentCatalog, Depends(catalog_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+    ) -> AgentVersionDetailResponse:
+        user = await authenticate_browser_user(auth, session_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            version = await catalog.get_version(
+                workspace_id,
+                _actor(user),
+                agent_id,
+                version_id,
+                request.state.request_id,
+            )
+        except AgentCatalogError as error:
+            raise _as_app_error(error) from error
+        return AgentVersionDetailResponse.from_domain(version)
 
     @router.post("/{agent_id}/publish", response_model=AgentVersionResponse)
     async def publish(  # pyright: ignore[reportUnusedFunction]

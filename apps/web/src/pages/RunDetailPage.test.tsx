@@ -3,7 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { expect, test } from "vitest";
+import { expect, test, beforeEach } from "vitest";
 
 import { RunDetailPage } from "./RunDetailPage";
 import { moment } from "../i18n/moment";
@@ -105,6 +105,13 @@ function renderRun(): void {
     </TestTheme>,
   );
 }
+
+beforeEach(() => {
+  server.use(
+    http.get(`/api/v1/sessions/${SESSION}/messages`, () => HttpResponse.json([])),
+    http.get(`/api/v1/runs/${RUN}/artifacts`, () => HttpResponse.json([])),
+  );
+});
 
 /** The 概要 card, so a value is read where the page actually states it. */
 async function summary(): Promise<HTMLElement> {
@@ -293,9 +300,82 @@ test("what the platform cannot produce is absent, not empty", async () => {
   renderRun();
   await screen.findByText(t("summarySection"));
 
-  // A pane that says "no data" reads as "nothing happened". These are phase
-  // three and four; the console does not stand in for them.
-  for (const absent of ["父子任务树", "上下文和压缩事件", "产物", "Token 和费用"]) {
+  // A pane that says "no data" reads as "nothing happened". These are M2/M3;
+  // the console does not stand in for them. 产物 is the Files card now.
+  for (const absent of ["父子任务树", "上下文和压缩事件", "Token 和费用"]) {
     expect(screen.queryByText(absent)).not.toBeInTheDocument();
   }
+});
+
+test("the session transcript and the run's files are listed", async () => {
+  const artifact = {
+    id: "77777777-8888-4999-8aaa-bbbbbbbbbbbb",
+    run_id: RUN,
+    session_id: SESSION,
+    filename: "stdout.log",
+    media_type: "text/plain",
+    size_bytes: 12,
+    sha256: "abc",
+    truncated: false,
+    expires_at: "2026-08-11T00:00:00Z",
+  };
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run())),
+    http.get(`/api/v1/sessions/${SESSION}/messages`, () =>
+      HttpResponse.json([
+        { role: "user", parts: [{ type: "text", text: "List the files." }] },
+        {
+          role: "assistant",
+          parts: [
+            {
+              type: "tool_call",
+              call_id: "c1",
+              name: "file.list",
+              arguments: { path: "." },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          parts: [
+            {
+              type: "tool_result",
+              call_id: "c1",
+              output: `ok\nartifact_id=${artifact.id}`,
+              exit_code: 0,
+              failed: false,
+            },
+          ],
+        },
+      ]),
+    ),
+    http.get(`/api/v1/runs/${RUN}/artifacts`, () => HttpResponse.json([artifact])),
+  );
+  stream();
+
+  renderRun();
+
+  expect(await screen.findByText("List the files.")).toBeInTheDocument();
+  expect(screen.getByText("file.list")).toBeInTheDocument();
+  expect(screen.getByText("stdout.log")).toBeInTheDocument();
+  expect(screen.getAllByRole("button", { name: t("downloadArtifact") }).length).toBeGreaterThan(0);
+});
+
+test("a timeline event keeps its payload folded", async () => {
+  server.use(http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run())));
+  stream([
+    `id: 3\nevent: run_completed\ndata: ${JSON.stringify({
+      sequence: 3,
+      event_type: "run_completed",
+      occurred_at: "2026-08-10T02:00:07Z",
+      payload: { reason: "goal" },
+    })}\n\n`,
+  ]);
+
+  renderRun();
+
+  expect(await screen.findByText("run_completed")).toBeInTheDocument();
+  const payload = screen.getByText(t("eventPayload")).closest("details");
+  expect(payload).not.toBeNull();
+  expect(payload).not.toHaveAttribute("open");
 });

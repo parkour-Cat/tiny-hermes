@@ -50,6 +50,7 @@ function loadedAgent(revision = 3): void {
     http.get(`/api/v1/agents/${AGENT}`, () => HttpResponse.json(AGENT_ROW)),
     http.get(`/api/v1/agents/${AGENT}/draft`, () => HttpResponse.json(draftBody(revision))),
     http.get(`/api/v1/agents/${AGENT}/versions`, () => HttpResponse.json([])),
+    http.get("/api/v1/model-endpoints", () => HttpResponse.json([])),
   );
 }
 
@@ -78,6 +79,9 @@ test("the loaded draft fills every field the console can edit", async () => {
 
   expect(await screen.findByLabelText("人格")).toHaveValue("You answer support questions.");
   expect(screen.getByText("continue_once")).toBeInTheDocument();
+  for (const tool of ["file.list", "file.read", "file.write", "shell.exec"]) {
+    expect(screen.getByRole("checkbox", { name: tool })).not.toBeChecked();
+  }
   expect(screen.getByLabelText("单次执行秒数上限")).toHaveValue("600");
   expect(screen.getByLabelText("总时长秒数上限")).toHaveValue("3600");
   expect(screen.getByLabelText("模型调用次数上限")).toHaveValue("12");
@@ -206,15 +210,27 @@ test("a rejected spec is reported without throwing the edits away", async () => 
   expect(personality).toHaveValue("Still mine.");
 });
 
-test("the tools gap is stated, not mocked up", async () => {
-  loadedAgent();
+test("the tools checklist puts the bound names on the draft", async () => {
+  loadedAgent(3);
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
 
   renderDetail();
+  await userEvent.click(await screen.findByRole("checkbox", { name: "file.list" }));
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
 
-  expect(await screen.findByText("工具在阶段三接入，当前草稿固定为空。")).toBeInTheDocument();
-  // Nothing to press, nothing to fill: an inert control here would promise a
-  // capability the platform does not have.
-  expect(screen.queryByRole("button", { name: "添加工具" })).not.toBeInTheDocument();
+  await waitFor(() => expect(sent).toHaveLength(1));
+  expect(sent).toEqual([
+    {
+      expected_revision: 3,
+      spec: { ...SPEC, tools: ["file.list"] },
+    },
+  ]);
 });
 
 const HASH = "9f2c4b7a1d3e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff";
@@ -251,11 +267,15 @@ test("publishing asks first, and sends nothing while the question is open", asyn
 test("confirming publishes the loaded revision and shows the version it made", async () => {
   loadedAgent(3);
   const sent: unknown[] = [];
+  const published = version(1);
   server.use(
     http.post(`/api/v1/agents/${AGENT}/publish`, async ({ request }) => {
       sent.push(await request.json());
-      return HttpResponse.json(version(1), { status: 201 });
+      return HttpResponse.json(published, { status: 201 });
     }),
+    http.get(`/api/v1/agents/${AGENT}/versions/${published.id}`, () =>
+      HttpResponse.json({ ...published, spec: SPEC }),
+    ),
   );
 
   renderDetail();
@@ -263,17 +283,21 @@ test("confirming publishes the loaded revision and shows the version it made", a
   await userEvent.click(await screen.findByRole("button", { name: "确定" }));
 
   expect(await screen.findByText(`当前版本 v1`)).toBeInTheDocument();
-  expect(screen.getByText(HASH)).toBeInTheDocument();
+  expect(screen.getAllByText(HASH).length).toBeGreaterThan(0);
   expect(sent).toEqual([{ expected_revision: 3 }]);
 });
 
 test("re-publishing unchanged content is reported as no new version", async () => {
   loadedAgent(3);
+  const published = version(1);
   server.use(
     // 200 rather than 201: the content was already published, which the server
     // treats as success and so must the console.
     http.post(`/api/v1/agents/${AGENT}/publish`, () =>
-      HttpResponse.json(version(1), { status: 200 }),
+      HttpResponse.json(published, { status: 200 }),
+    ),
+    http.get(`/api/v1/agents/${AGENT}/versions/${published.id}`, () =>
+      HttpResponse.json({ ...published, spec: SPEC }),
     ),
   );
 
@@ -330,7 +354,117 @@ test("the draft revision and the published version are two separate facts", asyn
 
   expect(await screen.findByText("草稿修订 3")).toBeInTheDocument();
   expect(screen.getByText("尚未发布")).toBeInTheDocument();
-  expect(
-    screen.getByText("接口不提供草稿内容摘要，控制台无法判断草稿与已发布版本是否一致。"),
-  ).toBeInTheDocument();
+  expect(screen.getByText("尚未发布，没有可对比的版本。")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "打开 Playground" })).toHaveAttribute(
+    "href",
+    `/workspaces/${WORKSPACE}/agents/${AGENT}/playground`,
+  );
+});
+
+test("enabling delivery puts the timeout on the draft", async () => {
+  loadedAgent(3);
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByRole("switch", { name: "启用 Chat Completions" }));
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  expect(sent).toEqual([
+    {
+      expected_revision: 3,
+      spec: {
+        ...SPEC,
+        delivery: { enabled: true, sync_timeout_seconds: 60 },
+      },
+    },
+  ]);
+});
+
+test("saving a name sends a patch, not a new draft revision", async () => {
+  loadedAgent();
+  const sent: unknown[] = [];
+  server.use(
+    http.patch(`/api/v1/agents/${AGENT}`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json({ ...AGENT_ROW, name: "Renamed" });
+    }),
+  );
+
+  renderDetail();
+  const name = await screen.findByLabelText("名称");
+  await userEvent.clear(name);
+  await userEvent.type(name, "Renamed");
+  await userEvent.click(screen.getByRole("button", { name: "保存名称" }));
+
+  await waitFor(() => expect(sent).toEqual([{ name: "Renamed", alias: "analyst" }]));
+  expect(await screen.findByRole("heading", { name: "Renamed" })).toBeInTheDocument();
+});
+
+test("a published version is compared field by field against the form", async () => {
+  const published = version(1);
+  server.use(
+    http.get(`/api/v1/agents/${AGENT}`, () =>
+      HttpResponse.json({
+        ...AGENT_ROW,
+        status: "published",
+        current_version_id: published.id,
+      }),
+    ),
+    http.get(`/api/v1/agents/${AGENT}/draft`, () => HttpResponse.json(draftBody(4))),
+    http.get(`/api/v1/agents/${AGENT}/versions`, () => HttpResponse.json([published])),
+    http.get(`/api/v1/agents/${AGENT}/versions/${published.id}`, () =>
+      HttpResponse.json({ ...published, spec: SPEC }),
+    ),
+    http.get("/api/v1/model-endpoints", () => HttpResponse.json([])),
+  );
+
+  renderDetail();
+  const personality = await screen.findByLabelText("人格");
+  await userEvent.clear(personality);
+  await userEvent.type(personality, "A different voice.");
+
+  expect(await screen.findByText("personality")).toBeInTheDocument();
+  expect(screen.getByText("You answer support questions.")).toBeInTheDocument();
+  expect(screen.getAllByText("A different voice.").length).toBeGreaterThan(0);
+});
+
+test("rollback asks first, then names the version it restored", async () => {
+  const first = version(1);
+  const second = version(2);
+  let body: unknown;
+  server.use(
+    http.get(`/api/v1/agents/${AGENT}`, () =>
+      HttpResponse.json({
+        ...AGENT_ROW,
+        status: "published",
+        current_version_id: second.id,
+      }),
+    ),
+    http.get(`/api/v1/agents/${AGENT}/draft`, () => HttpResponse.json(draftBody(5))),
+    http.get(`/api/v1/agents/${AGENT}/versions`, () => HttpResponse.json([first, second])),
+    http.get(`/api/v1/agents/${AGENT}/versions/${second.id}`, () =>
+      HttpResponse.json({ ...second, spec: SPEC }),
+    ),
+    http.get("/api/v1/model-endpoints", () => HttpResponse.json([])),
+    http.post(`/api/v1/agents/${AGENT}/rollback`, async ({ request }) => {
+      body = await request.json();
+      return HttpResponse.json(first);
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByRole("button", { name: "回滚到此版本" }));
+  expect(await screen.findByText("回滚会把该版本重新设为当前版本，草稿不会自动改写。")).toBeInTheDocument();
+  expect(body).toBeUndefined();
+
+  await userEvent.click(screen.getByRole("button", { name: "确定" }));
+  await waitFor(() => expect(body).toEqual({ version_id: first.id }));
+  expect(await screen.findByText("当前版本 v1")).toBeInTheDocument();
 });

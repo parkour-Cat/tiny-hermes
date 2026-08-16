@@ -17,6 +17,10 @@ from contextlib import AbstractAsyncContextManager
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tiny_hermes.agents.domain.models import DeterministicModelPolicy
+from tiny_hermes.model_catalog.infrastructure.credentials import (
+    CredentialMissing,
+    CredentialResolver,
+)
 from tiny_hermes.model_catalog.infrastructure.sql_store import SqlModelEndpointStore
 from tiny_hermes.outbound.client import SafeOutboundClient
 from tiny_hermes.runs.infrastructure.openai_model import (
@@ -30,6 +34,7 @@ from tiny_hermes.runs.ports.model import (
     StopReason,
     UsageQuality,
 )
+from tiny_hermes.secrets.infrastructure.sql_store import SqlSecretStore
 
 ClientFactory = Callable[[], AbstractAsyncContextManager[SafeOutboundClient]]
 
@@ -54,11 +59,13 @@ class ModelRouter:
         session_factory: async_sessionmaker[AsyncSession],
         client_factory: ClientFactory,
         retry: RetryPolicy | None = None,
+        kek: bytes | None = None,
     ) -> None:
         self._deterministic = deterministic
         self._sessions = session_factory
         self._client_factory = client_factory
         self._retry = retry or RetryPolicy()
+        self._kek = kek
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         policy = request.policy
@@ -67,9 +74,17 @@ class ModelRouter:
 
         async with self._sessions() as session:
             endpoint = await SqlModelEndpointStore(session).read(policy.endpoint_id)
-        if endpoint is None or not endpoint.is_selectable:
-            return _unavailable("model_endpoint_unavailable")
+            if endpoint is None or not endpoint.is_selectable:
+                return _unavailable("model_endpoint_unavailable")
+            try:
+                token = await CredentialResolver(SqlSecretStore(session), self._kek).resolve(
+                    endpoint.spec.credential_ref
+                )
+            except CredentialMissing:
+                return _unavailable("credential_missing")
 
         async with self._client_factory() as client:
-            provider = OpenAICompatibleProvider(endpoint.spec, client, self._retry)
+            provider = OpenAICompatibleProvider(
+                endpoint.spec, client, self._retry, token=token
+            )
             return await provider.complete(request)

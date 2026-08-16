@@ -114,6 +114,27 @@ class AgentCatalog:
             await self._audit(workspace_id, actor, "agent.read", agent.id, request_id, platform)
         return agent
 
+    async def update_agent(
+        self,
+        workspace_id: UUID,
+        actor: Actor,
+        agent_id: UUID,
+        name: str | None,
+        alias: str | None,
+        request_id: str,
+    ) -> Agent:
+        platform = await self._require_role(workspace_id, actor, WRITERS)
+        agent = await self._store.update_agent(
+            workspace_id,
+            agent_id,
+            None if name is None else _valid_name(name),
+            None if alias is None else _valid_alias(alias),
+        )
+        if agent is None:
+            raise UnknownAgent
+        await self._audit(workspace_id, actor, "agent.updated", agent.id, request_id, platform)
+        return agent
+
     async def get_draft(
         self, workspace_id: UUID, actor: Actor, agent_id: UUID, request_id: str
     ) -> AgentDraft:
@@ -138,6 +159,31 @@ class AgentCatalog:
                 workspace_id, actor, "agent.versions_read", agent_id, request_id, platform
             )
         return await self._store.list_versions(workspace_id, agent_id)
+
+    async def get_version(
+        self,
+        workspace_id: UUID,
+        actor: Actor,
+        agent_id: UUID,
+        version_id: UUID,
+        request_id: str,
+    ) -> AgentVersion:
+        platform = await self._require_role(workspace_id, actor, READERS)
+        if await self._store.get_agent(workspace_id, agent_id) is None:
+            raise UnknownAgent
+        for version in await self._store.list_versions(workspace_id, agent_id):
+            if version.id == version_id:
+                if platform:
+                    await self._audit(
+                        workspace_id,
+                        actor,
+                        "agent.version_read",
+                        version.id,
+                        request_id,
+                        platform,
+                    )
+                return version
+        raise UnknownAgent
 
     async def published_alias(
         self, workspace_id: UUID, actor: Actor, alias: str, request_id: str

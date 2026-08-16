@@ -474,6 +474,13 @@ class SqlRunStore:
             # Cleared only in the same transition that reaches the target.
             run.workspace_cleanup_target = None
             run.workspace_cleanup_sandbox_id = None
+        # record_slice releases the lease when it writes a signal. The
+        # committed-checkpoint path applies the real signal here after a
+        # signal=None commit, and must do the same: a queued Run whose
+        # WorkerLease is still held cannot be claimed until expiry, so the
+        # warm thaw waits out the remaining lease instead of 300ms.
+        if RunState(run.status) is not RunState.RUNNING:
+            await self._release_lease(run.id)
         return await self._snapshot(run, command.capabilities)
 
     async def _decide_and_write(
@@ -619,11 +626,14 @@ class SqlRunStore:
         if run is None:
             raise UnknownRun
         lease = await self._lock_lease(command.lease_id, command.run_id)
-        if (
-            lease is None
-            or lease.released_at is not None
-            or lease.version != command.expected_lease_version
-        ):
+        # Ownership is the lease id, not the renewal counter. A re-claim mints
+        # a fresh id (`claim` upserts `id=uuid4()`) and a Scheduler reclaim sets
+        # `released_at`, so those two already fence a Worker that lost the Run.
+        # The version is bumped by the holder's *own* renewals, so comparing it
+        # here rejected every write whose round outlived one renewal interval —
+        # a 100 MiB checkpoint under a 20s lease, every time. See
+        # docs/superpowers/verification/2026-08-15-m1-drills-16gb.md.
+        if lease is None or lease.released_at is not None:
             raise LeaseLost
         if run.state_version != command.expected_state_version:
             raise StateVersionConflict

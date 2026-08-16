@@ -27,6 +27,7 @@ from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
 from tiny_hermes.sandbox.transport.adapter import SandboxClient
 from tiny_hermes.sandbox.transport.client import ControllerClient
+from tiny_hermes.secrets.domain.envelope import optional_kek
 from tiny_hermes.session_workspace.domain.models import WorkspaceQuota
 from tiny_hermes.session_workspace.infrastructure.minio_store import MinioObjectStore
 from tiny_hermes.shared.config import Settings, get_settings
@@ -79,6 +80,7 @@ async def _worker() -> None:
                 max_attempts=settings.model_max_attempts,
                 base_ms=settings.model_retry_base_ms,
             ),
+            kek=optional_kek(settings.tiny_hermes_kek),
         ),
         notifier=notifier,
         # Absent when no image is approved: a deployment that has not chosen

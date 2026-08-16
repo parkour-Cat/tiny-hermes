@@ -46,7 +46,7 @@ def _artifact(*, expired: bool = False) -> Artifact:
 
 class FakeStore:
     def __init__(self, artifact: Artifact | None) -> None:
-        self._artifact = artifact
+        self.artifacts = [] if artifact is None else [artifact]
         self.roles: dict[tuple[UUID, UUID], Role] = {}
 
     async def insert(self, artifact: Artifact) -> None:  # pragma: no cover
@@ -55,9 +55,9 @@ class FakeStore:
     async def read_scoped(
         self, artifact_id: UUID, workspace_id: UUID
     ) -> Artifact | None:
-        found = self._artifact
-        if found and found.id == artifact_id and found.workspace_id == workspace_id:
-            return found
+        for found in self.artifacts:
+            if found.id == artifact_id and found.workspace_id == workspace_id:
+                return found
         return None
 
     async def role_for(self, workspace_id: UUID, user_id: UUID) -> Role | None:
@@ -66,6 +66,13 @@ class FakeStore:
     async def run_total_bytes(self, run_id: UUID) -> int:  # pragma: no cover
         del run_id
         return 0
+
+    async def list_for_run(self, workspace_id: UUID, run_id: UUID) -> list[Artifact]:
+        return [
+            item
+            for item in self.artifacts
+            if item.workspace_id == workspace_id and item.run_id == run_id
+        ]
 
 
 class FakeObjects:
@@ -142,3 +149,36 @@ async def test_a_platform_admin_reads_without_a_membership_row() -> None:
 
     found = await service.metadata(WORKSPACE, PLATFORM_ADMIN, artifact.id)
     assert found.id == artifact.id
+
+
+async def test_listing_a_run_omits_expired_artifacts_and_never_names_a_key() -> None:
+    live = _artifact()
+    expired = _artifact(expired=True)
+    expired = Artifact(
+        id=expired.id,
+        workspace_id=WORKSPACE,
+        session_id=live.session_id,
+        run_id=live.run_id,
+        object_key=expired.object_key,
+        filename="old.log",
+        media_type="text/plain",
+        size_bytes=1,
+        sha256="b" * 64,
+        truncated=False,
+        expires_at=expired.expires_at,
+    )
+    service, store, _ = _service(live)
+    store.artifacts.append(expired)
+    store.roles[(WORKSPACE, MEMBER.id)] = Role.VIEWER
+
+    listed = await service.list_for_run(WORKSPACE, MEMBER, live.run_id)
+
+    assert [item.id for item in listed] == [live.id]
+
+
+async def test_a_non_member_cannot_list_a_run_s_artifacts() -> None:
+    artifact = _artifact()
+    service, _, _ = _service(artifact)
+
+    with pytest.raises(ArtifactForbidden):
+        await service.list_for_run(WORKSPACE, OUTSIDER, artifact.run_id)

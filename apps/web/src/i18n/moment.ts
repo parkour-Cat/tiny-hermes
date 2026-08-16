@@ -6,8 +6,8 @@
  * reading a queue; showing a local time without seconds would hide the gaps
  * that matter when Runs are seconds apart. So: local zone, seconds kept.
  */
-export function moment(value: string): string {
-  return new Date(value).toLocaleString("zh-CN", {
+export function moment(value: string, locale = "zh-CN"): string {
+  return new Date(value).toLocaleString(locale, {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",

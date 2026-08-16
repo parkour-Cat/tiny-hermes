@@ -18,11 +18,15 @@ from tiny_hermes.identity.infrastructure.sql_store import SqlAuthStore
 from tiny_hermes.model_catalog.application.service import ModelEndpointService
 from tiny_hermes.model_catalog.infrastructure.sql_store import SqlModelEndpointStore
 from tiny_hermes.outbound.client import SafeOutboundClient
+from tiny_hermes.runs.application.event_stream import EventStreamHub, Poll
 from tiny_hermes.runs.application.service import RunCoordination
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
+from tiny_hermes.secrets.application.service import KekSettings, SecretService
+from tiny_hermes.secrets.domain.envelope import optional_kek
+from tiny_hermes.secrets.infrastructure.sql_store import SqlSecretStore
 from tiny_hermes.session_workspace.infrastructure.minio_store import MinioObjectStore
 from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.errors import AppError, AuditedDenial
@@ -37,12 +41,18 @@ class ApplicationResources:
         self._session_factory: async_sessionmaker[AsyncSession] | None = None
         self._notifier: WakeUpNotifier | None = None
         self._object_store: MinioObjectStore | None = None
+        self._event_hub: EventStreamHub | None = None
 
     @property
     def settings(self) -> Settings:
         if self._settings is None:
             self._settings = get_settings()
         return self._settings
+
+    def event_stream_hub(self, poll: Poll) -> EventStreamHub:
+        if self._event_hub is None:
+            self._event_hub = EventStreamHub(poll)
+        return self._event_hub
 
     def session_factory(self) -> async_sessionmaker[AsyncSession]:
         if self._session_factory is None:
@@ -54,7 +64,10 @@ class ApplicationResources:
     def database_engine(self) -> AsyncEngine:
         if self._engine is None:
             self._engine = create_async_engine(
-                self.settings.database_url, pool_pre_ping=True
+                self.settings.database_url,
+                pool_pre_ping=True,
+                pool_size=self.settings.database_pool_size,
+                max_overflow=self.settings.database_max_overflow,
             )
         return self._engine
 
@@ -133,7 +146,11 @@ class ApplicationResources:
     async def model_endpoints(self) -> AsyncGenerator[ModelEndpointService]:
         async with self.session_factory()() as session:
             try:
-                yield ModelEndpointService(SqlModelEndpointStore(session))
+                yield ModelEndpointService(
+                    SqlModelEndpointStore(session),
+                    SqlSecretStore(session),
+                    optional_kek(self.settings.tiny_hermes_kek),
+                )
             except BaseException:
                 await session.rollback()
                 raise
@@ -186,3 +203,27 @@ class ApplicationResources:
         """Reads only: nothing here writes, so nothing here commits."""
         async with self.session_factory()() as session:
             yield ArtifactService(SqlArtifactStore(session), self.object_store())
+
+    async def secret_service(self) -> AsyncGenerator[SecretService]:
+        async with self.session_factory()() as session:
+            try:
+                yield SecretService(
+                    SqlSecretStore(session),
+                    KekSettings(
+                        current=self.settings.tiny_hermes_kek,
+                        current_id=self.settings.tiny_hermes_kek_id,
+                        previous=self.settings.tiny_hermes_previous_kek,
+                        previous_id=self.settings.tiny_hermes_previous_kek_id,
+                    ),
+                )
+            except AppError as error:
+                if error.audited:
+                    await session.commit()
+                else:
+                    await session.rollback()
+                raise
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()

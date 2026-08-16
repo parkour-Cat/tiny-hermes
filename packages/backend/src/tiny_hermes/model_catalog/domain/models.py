@@ -6,13 +6,8 @@ administrator only the choice among approved ones, so there is no
 ``workspace_id`` here and no column reserved for one.
 
 Nothing in this module holds a credential. ``credential_ref`` names an
-environment variable the deployment provides; the value is read at call time and
-written nowhere. That is a real limitation with a real cost — rotating a model
-key is a restart, and model credentials are deployment configuration rather than
-workspace data — and it is preferred to the alternative available in this slice.
-Envelope encryption with a rewrappable KEK is roadmap phase four; a table
-holding plaintext, or ciphertext under a key with no rotation path, would read
-in a review as a control that exists while not being one.
+environment variable the deployment provides, or the id of an active Secret.
+The value is read at call time and written nowhere.
 """
 
 import re
@@ -25,7 +20,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-#: An environment variable name, which is all this field is ever allowed to be.
+#: An environment variable name. A Secret id is a UUID and is accepted separately.
 CREDENTIAL_REF = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
@@ -47,7 +42,13 @@ class EndpointStatus(StrEnum):
 
 
 def credential_ref_is_wellformed(value: str) -> bool:
-    return CREDENTIAL_REF.fullmatch(value) is not None
+    if CREDENTIAL_REF.fullmatch(value) is not None:
+        return True
+    try:
+        UUID(value)
+    except ValueError:
+        return False
+    return True
 
 
 class ModelEndpointSpec(BaseModel):
@@ -84,7 +85,7 @@ class ModelEndpointSpec(BaseModel):
         if not credential_ref_is_wellformed(value):
             raise ValueError(
                 "credential_ref names an environment variable "
-                "(upper case, digits and underscores), never a credential"
+                "(upper case, digits and underscores) or a Secret id, never a credential"
             )
         return value
 

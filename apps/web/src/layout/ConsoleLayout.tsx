@@ -1,12 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
-import { Alert, Avatar, Button, Layout, Space, Typography } from "antd";
+import { Alert, Avatar, Button, Layout, Select, Space, Typography } from "antd";
 import { useState } from "react";
 import { Link, NavLink, Outlet } from "react-router-dom";
 
 import { api } from "../api/client";
 import { useAuth } from "../auth/AuthProvider";
-import { t } from "../i18n/zh-CN";
+import { useLocale } from "../i18n/locale";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
+import { useConsoleTheme } from "./ConsoleTheme";
 
 type WorkspaceSummary = {
   id: string;
@@ -19,6 +20,8 @@ const WORKSPACES_QUERY = ["workspaces"] as const;
 export function ConsoleLayout() {
   const workspaceId = useWorkspaceId();
   const auth = useAuth();
+  const { t, locale, setLocale } = useLocale();
+  const theme = useConsoleTheme();
   const [actionError, setActionError] = useState<string | null>(null);
   // Only to put a name on the header. Membership is the server's answer, never
   // this list's: a Workspace missing from it still gets its requests sent and
@@ -72,9 +75,26 @@ export function ConsoleLayout() {
           <nav className="console-nav">
             <NavLink to={`/workspaces/${workspaceId}/agents`}>{t("agents")}</NavLink>
             <NavLink to={`/workspaces/${workspaceId}/runs`}>{t("runs")}</NavLink>
+            <NavLink to={`/workspaces/${workspaceId}/members`}>{t("members")}</NavLink>
+            <NavLink to={`/workspaces/${workspaceId}/model-endpoints`}>{t("modelEndpoints")}</NavLink>
+            <NavLink to={`/workspaces/${workspaceId}/api-keys`}>{t("apiKeys")}</NavLink>
+            <NavLink to={`/workspaces/${workspaceId}/secrets`}>{t("secrets")}</NavLink>
           </nav>
         </div>
-        <Space>
+        <Space wrap>
+          <Select
+            aria-label={t("language")}
+            value={locale}
+            onChange={(next) => setLocale(next)}
+            options={[
+              { value: "zh-CN", label: t("localeZh") },
+              { value: "en-US", label: t("localeEn") },
+            ]}
+            popupMatchSelectWidth={false}
+          />
+          <Button onClick={() => theme.toggle()}>
+            {theme.dark ? t("themeLight") : t("themeDark")}
+          </Button>
           <Avatar>{auth.user?.display_name.slice(0, 1).toUpperCase()}</Avatar>
           <div className="user-summary">
             <Typography.Text>{auth.user?.display_name}</Typography.Text>

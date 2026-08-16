@@ -21,14 +21,16 @@ def _settings(**overrides: Any) -> Settings:
 
 
 EXECUTION_BOUNDS = [
-    ("worker_lease_seconds", 30, 10, 300),
+    ("worker_lease_seconds", 20, 10, 300),
     ("worker_max_slice_seconds", 30, 10, 300),
     ("worker_idle_poll_seconds", 2, 1, 30),
     ("worker_shutdown_grace_seconds", 20, 5, 120),
-    ("scheduler_interval_seconds", 5, 1, 60),
+    ("scheduler_interval_seconds", 1, 1, 60),
     ("max_recovery_attempts", 3, 0, 10),
     ("event_retention_hours", 168, 1, 8760),
     ("sse_heartbeat_seconds", 15, 5, 60),
+    ("database_pool_size", 80, 5, 200),
+    ("database_max_overflow", 40, 0, 200),
     ("deterministic_model_delay_ms", 50, 0, 5000),
 ]
 
@@ -103,6 +105,11 @@ def test_workspace_settings_reject_values_outside_their_range(
         _settings(**{name: low - 1})
     with pytest.raises(ValidationError):
         _settings(**{name: high + 1})
+
+
+def test_settings_default_kek_is_empty_so_a_worker_can_boot() -> None:
+    assert _settings().tiny_hermes_kek == ""
+    assert _settings().tiny_hermes_kek_id == "v1"
 
 
 def test_a_transfer_timeout_above_thirty_minutes_is_refused() -> None:

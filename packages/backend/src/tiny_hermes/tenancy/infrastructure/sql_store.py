@@ -1,12 +1,16 @@
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
-from tiny_hermes.identity.infrastructure.tables import UserRow
+from tiny_hermes.identity.infrastructure.tables import AuthIdentityRow, UserRow
+from tiny_hermes.tenancy.application.workspace_service import MemberAlreadyPresent
 from tiny_hermes.tenancy.domain.models import Role, Workspace, WorkspaceMember
 from tiny_hermes.tenancy.infrastructure.tables import MembershipRow, WorkspaceRow
+
+MEMBERSHIP_CONSTRAINT = "memberships_workspace_id_user_id_key"
 
 
 class SqlWorkspaceStore:
@@ -23,6 +27,12 @@ class SqlWorkspaceStore:
         self._session.add(
             MembershipRow(workspace_id=workspace_id, user_id=user_id, role=role.value)
         )
+        try:
+            await self._session.flush()
+        except IntegrityError as error:
+            if MEMBERSHIP_CONSTRAINT not in str(error.orig):
+                raise
+            raise MemberAlreadyPresent from error
 
     async def list_visible_workspaces(
         self, user_id: UUID, *, include_all: bool
@@ -47,16 +57,71 @@ class SqlWorkspaceStore:
     async def list_members(self, workspace_id: UUID) -> list[WorkspaceMember]:
         rows = (
             await self._session.execute(
-                select(MembershipRow, UserRow)
+                select(MembershipRow, UserRow, AuthIdentityRow.subject)
                 .join(UserRow, UserRow.id == MembershipRow.user_id)
-                .where(MembershipRow.workspace_id == workspace_id)
+                .join(AuthIdentityRow, AuthIdentityRow.user_id == UserRow.id)
+                .where(
+                    MembershipRow.workspace_id == workspace_id,
+                    AuthIdentityRow.provider == "local",
+                )
                 .order_by(MembershipRow.created_at, MembershipRow.id)
             )
         ).all()
         return [
-            WorkspaceMember(membership.user_id, user.display_name, Role(membership.role))
-            for membership, user in rows
+            WorkspaceMember(
+                membership.user_id, user.display_name, subject, Role(membership.role)
+            )
+            for membership, user, subject in rows
         ]
+
+    async def find_user_by_subject(self, subject: str) -> tuple[UUID, str] | None:
+        row = (
+            await self._session.execute(
+                select(UserRow.id, UserRow.display_name)
+                .join(AuthIdentityRow, AuthIdentityRow.user_id == UserRow.id)
+                .where(
+                    AuthIdentityRow.provider == "local",
+                    AuthIdentityRow.subject == subject,
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        return row[0], row[1]
+
+    async def update_membership(
+        self, workspace_id: UUID, user_id: UUID, role: Role
+    ) -> WorkspaceMember | None:
+        membership = await self._session.scalar(
+            select(MembershipRow)
+            .where(
+                MembershipRow.workspace_id == workspace_id,
+                MembershipRow.user_id == user_id,
+            )
+            .with_for_update()
+        )
+        if membership is None:
+            return None
+        membership.role = role.value
+        await self._session.flush()
+        members = await self.list_members(workspace_id)
+        for member in members:
+            if member.user_id == user_id:
+                return member
+        return None
+
+    async def remove_membership(self, workspace_id: UUID, user_id: UUID) -> bool:
+        membership = await self._session.scalar(
+            select(MembershipRow).where(
+                MembershipRow.workspace_id == workspace_id,
+                MembershipRow.user_id == user_id,
+            )
+        )
+        if membership is None:
+            return False
+        await self._session.delete(membership)
+        await self._session.flush()
+        return True
 
     async def append_audit(
         self,

@@ -39,6 +39,20 @@ async function choose(page: Page, label: string, value: string): Promise<void> {
     .click();
 }
 
+/**
+ * Binds a tool the way a person does: the visible Ant Design wrapper.
+ *
+ * `locator.check()` targets the opacity-0 native input. Clicking that input
+ * does not change Ant Design 6's checked state, so the walk never saves a
+ * bound tool.
+ */
+async function bindTool(page: Page, name: string): Promise<void> {
+  const box = page.getByRole("checkbox", { name });
+  await expect(box).not.toBeChecked();
+  await page.locator(".ant-checkbox-wrapper").filter({ hasText: name }).click();
+  await expect(box).toBeChecked();
+}
+
 /** Creates an Agent, writes the scenario into its draft, and publishes v1. */
 async function publishAgent(page: Page, scenario: string): Promise<string> {
   const name = unique(scenario);
@@ -155,7 +169,74 @@ test("the panes phase two cannot fill are absent, not empty", async ({ page }) =
 
   // Phase three and four. A pane reading "暂无数据" would tell the user that
   // nothing happened, which is a different claim from "not built yet".
-  for (const absent of ["父子任务树", "上下文和压缩事件", "产物", "Token 和费用"]) {
+  for (const absent of ["父子任务树", "上下文和压缩事件", "Token 和费用"]) {
     await expect(page.getByText(absent)).toHaveCount(0);
   }
+});
+
+test("the builder binds a tool, playground sends, and rollback restores v1", async ({ page }) => {
+  await openWorkspace(page);
+  const name = unique("playground");
+  await page.getByRole("link", { name: "Agent", exact: true }).click();
+  await page.getByRole("button", { name: "新建 Agent" }).click();
+  await page.getByLabel("名称").fill(name);
+  await page.getByLabel("别名").fill(name.toLowerCase().replace(/_/g, "-"));
+  await page.getByRole("button", { name: "创建" }).click();
+  await expect(page.getByRole("dialog", { name: "新建 Agent" })).toBeHidden();
+  await page.getByRole("link", { name, exact: true }).click();
+
+  await page.getByLabel("人格").fill("A playground agent for the console acceptance walk.");
+  await choose(page, "模型场景", "continue_once");
+  await bindTool(page, "file.list");
+  await page.getByRole("button", { name: "保存草稿" }).click();
+  await expect(page.getByText("草稿修订 2")).toBeVisible();
+  await page.getByRole("button", { name: "发布" }).click();
+  await page.getByRole("button", { name: "确定" }).click();
+  await expect(page.getByText("当前版本 v1")).toBeVisible();
+
+  await page.getByRole("button", { name: "打开 Playground" }).click();
+  await expect(page).toHaveURL(/\/playground$/);
+  await page.getByLabel("输入要发给 Agent 的消息").fill("Say hello to the playground walk.");
+  await page.getByRole("button", { name: "发送" }).click();
+  // A bound tool yields a tool-call turn and a final turn, so there are two
+  // role tags. One assistant message is the claim; uniqueness is not.
+  await expect(page.getByText("assistant", { exact: true }).first()).toBeVisible({
+    timeout: 60_000,
+  });
+
+  const pause = page.getByRole("button", { name: "暂停" });
+  if (await pause.isVisible().catch(() => false)) {
+    await pause.click();
+    await page.getByLabel("输入要发给 Agent 的消息").fill("A second turn while the head is paused.");
+    await page.getByRole("button", { name: "发送" }).click();
+    await expect(page.getByText("当前 Session 被队列挡住")).toBeVisible();
+  }
+
+  await page.getByRole("link", { name }).click();
+  await page.getByLabel("人格").fill("A second published voice.");
+  await page.getByRole("button", { name: "保存草稿" }).click();
+  await expect(page.getByText("草稿修订 3")).toBeVisible();
+  await page.getByRole("button", { name: "发布" }).click();
+  await page.getByRole("button", { name: "确定" }).click();
+  await expect(page.getByText("当前版本 v2")).toBeVisible();
+  await page.getByRole("button", { name: "回滚到此版本" }).click();
+  await page.getByRole("button", { name: "确定" }).click();
+  await expect(page.getByText("当前版本 v1")).toBeVisible();
+});
+
+test("the locale switcher changes chrome and can switch back", async ({ page }) => {
+  await openWorkspace(page);
+  await expect(page.getByRole("link", { name: "运行" })).toBeVisible();
+  await page.getByLabel("语言").click();
+  await page
+    .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
+    .locator('.ant-select-item-option[title="English"]')
+    .click();
+  await expect(page.getByRole("link", { name: "Runs" })).toBeVisible();
+  await page.getByLabel("Language").click();
+  await page
+    .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
+    .locator('.ant-select-item-option[title="中文"]')
+    .click();
+  await expect(page.getByRole("link", { name: "运行" })).toBeVisible();
 });

@@ -286,15 +286,20 @@ class OpenAICompatibleProvider:
         client: SafeOutboundClient,
         policy: RetryPolicy | None = None,
         sleep: Sleeper | None = None,
+        token: str | None = None,
     ) -> None:
         self._spec = spec
         self._client = client
         self._policy = policy or RetryPolicy()
         self._sleep = sleep or asyncio.sleep
+        self._token = token
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         try:
-            token = credentials.resolve(self._spec.credential_ref)
+            if self._token is not None:
+                token = self._token
+            else:
+                token = credentials.resolve(self._spec.credential_ref)
         except credentials.CredentialMissing:
             return _failed("credential_missing")
 

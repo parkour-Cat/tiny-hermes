@@ -1,6 +1,6 @@
 import asyncio
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
@@ -15,6 +15,7 @@ from tiny_hermes.runs.domain.models import (
 )
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.store import (
+    ApplySignalCommand,
     ClaimedRun,
     ClaimRunCommand,
     RecordSliceCommand,
@@ -51,7 +52,6 @@ def _slice(
     workspace_id: str,
     signal: RunSignal | None,
     *,
-    lease_version: int = 1,
     executed_ms: int = 1_200,
     model_calls: int = 1,
     tokens: int = 32,
@@ -62,7 +62,6 @@ def _slice(
         workspace_id=UUID(workspace_id),
         run_id=claimed.run.id,
         lease_id=claimed.lease_id,
-        expected_lease_version=lease_version,
         expected_state_version=claimed.run.state_version,
         signal=signal,
         pause_reason=None,
@@ -115,6 +114,50 @@ async def test_renewing_a_lease_extends_it_and_records_a_heartbeat(
         id=claimed.run.id,
     )
     assert row[0] is True
+
+
+async def test_a_round_that_outlived_its_own_renewal_still_records(
+    submitted_run: dict[str, Any], scope: dict[str, str], engine: AsyncEngine
+) -> None:
+    """The holder's own renewal must not read as somebody else's claim.
+
+    A round builds its slice command before the work and records it after.
+    A checkpoint long enough to span one renewal interval — 100 MiB under a
+    20s lease — therefore presents a lease version the renewal has already
+    moved on. Rejecting that write left the Run running on a lease nobody
+    would extend until the Scheduler interrupted it, four times, silently.
+    """
+    del submitted_run
+    claimed = await _claim(engine, scope["X-Workspace-Id"])
+
+    async with _factory(engine).begin() as session:
+        renewed = await SqlRunStore(session).renew_lease(
+            RenewLeaseCommand(
+                workspace_id=UUID(scope["X-Workspace-Id"]),
+                run_id=claimed.run.id,
+                lease_id=claimed.lease_id,
+                expected_version=1,
+                lease_seconds=60,
+            )
+        )
+    assert renewed is not None
+    assert renewed.version == 2
+
+    async with _factory(engine).begin() as session:
+        snapshot = await SqlRunStore(session).record_slice(
+            _slice(claimed, scope["X-Workspace-Id"], None)
+        )
+
+    assert snapshot.state.value == "running"
+    row = await _row(
+        engine,
+        "SELECT b.consumed_execution_ms, l.version FROM runs r "
+        "JOIN run_budget_scopes b ON b.root_run_id = r.budget_root_run_id "
+        "JOIN worker_leases l ON l.run_id = r.id WHERE r.id = :id",
+        id=claimed.run.id,
+    )
+    assert row[0] == 1_200
+    assert row[1] == 2
 
 
 async def test_renewing_a_reclaimed_lease_returns_nothing_and_writes_nothing(
@@ -275,21 +318,27 @@ async def test_a_limit_pause_writes_the_safety_valve_event_contiguously(
     assert [item[0] for item in events] == [1, 2, 3, 4]
 
 
-async def test_a_stale_lease_version_is_refused_and_changes_nothing(
+async def test_a_lease_that_no_longer_owns_the_run_is_refused(
     submitted_run: dict[str, Any], scope: dict[str, str], engine: AsyncEngine
 ) -> None:
+    """Ownership is the lease id, and a re-claim mints a new one.
+
+    This is the fence the renewal counter used to be asked to provide: a
+    Worker that lost the Run writes nothing, because the id it holds is not
+    the id the row carries.
+    """
     del submitted_run
     claimed = await _claim(engine, scope["X-Workspace-Id"])
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE worker_leases SET id = :fresh WHERE id = :stale"),
+            {"fresh": uuid4(), "stale": claimed.lease_id},
+        )
 
     with pytest.raises(LeaseLost):
         async with _factory(engine).begin() as session:
             await SqlRunStore(session).record_slice(
-                _slice(
-                    claimed,
-                    scope["X-Workspace-Id"],
-                    RunSignal.COMPLETED,
-                    lease_version=99,
-                )
+                _slice(claimed, scope["X-Workspace-Id"], RunSignal.COMPLETED)
             )
 
     row = await _row(
@@ -374,3 +423,40 @@ async def test_a_slice_that_keeps_the_lease_records_progress_without_a_signal(
     )
     assert lease[0] is True
     assert budget[0] == 1_200
+
+
+async def test_apply_signal_slice_ended_releases_the_lease_like_record_slice(
+    submitted_run: dict[str, Any], scope: dict[str, str], engine: AsyncEngine
+) -> None:
+    """The committed-checkpoint path applies SLICE_ENDED after record_slice(None).
+
+    Product design: the Run returns to queued and the WorkerLease is released
+    so the next slice can thaw the kept instance. Leaving the lease held until
+    expiry makes warm reacquire wait ~26s instead of 300ms.
+    """
+    del submitted_run
+    claimed = await _claim(engine, scope["X-Workspace-Id"])
+
+    async with _factory(engine).begin() as session:
+        await SqlRunStore(session).record_slice(
+            _slice(claimed, scope["X-Workspace-Id"], None)
+        )
+        snapshot = await SqlRunStore(session).apply_signal(
+            ApplySignalCommand(
+                workspace_id=UUID(scope["X-Workspace-Id"]),
+                run_id=claimed.run.id,
+                signal=RunSignal.SLICE_ENDED,
+                request_id="slice-apply",
+                capabilities=FULL,
+            )
+        )
+
+    assert snapshot.state.value == "queued"
+    lease = await _row(
+        engine,
+        "SELECT released_at IS NOT NULL FROM worker_leases WHERE id = :id",
+        id=claimed.lease_id,
+    )
+    assert lease[0] is True
+    again = await _claim(engine, scope["X-Workspace-Id"], worker_id="worker-b")
+    assert again.run.id == claimed.run.id

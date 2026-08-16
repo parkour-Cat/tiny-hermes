@@ -103,7 +103,6 @@ async def _interrupt_with_intent(
                 workspace_id=claimed.run.workspace_id,
                 run_id=claimed.run.id,
                 lease_id=claimed.lease_id,
-                expected_lease_version=claimed.lease_version,
                 expected_state_version=claimed.run.state_version,
                 signal=RunSignal.INTERRUPTED,
                 pause_reason=None,

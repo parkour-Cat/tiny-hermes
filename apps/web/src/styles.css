@@ -175,30 +175,28 @@ body {
   padding: 24px;
 }
 
-/* These few surfaces are painted here rather than by Ant Design, so they have
-   to follow the same system preference the theme algorithm follows. */
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #e6edf3;
-    background: #14181c;
-  }
+/* Surfaces painted here rather than by Ant Design follow the same theme
+   the algorithm selected, including a persisted toggle. */
+html[data-theme="dark"] {
+  color: #e6edf3;
+  background: #14181c;
+}
 
-  .public-shell {
-    background: linear-gradient(145deg, #12171b 0%, #171d22 58%, #10151a 100%);
-  }
+html[data-theme="dark"] .public-shell {
+  background: linear-gradient(145deg, #12171b 0%, #171d22 58%, #10151a 100%);
+}
 
-  .app-layout {
-    background: #14181c;
-  }
+html[data-theme="dark"] .app-layout {
+  background: #14181c;
+}
 
-  .app-header {
-    background: rgb(24 30 35 / 92%);
-    border-bottom-color: #2b343b;
-  }
+html[data-theme="dark"] .app-header {
+  background: rgb(24 30 35 / 92%);
+  border-bottom-color: #2b343b;
+}
 
-  .workspace-row {
-    border-bottom-color: #262f36;
-  }
+html[data-theme="dark"] .workspace-row {
+  border-bottom-color: #262f36;
 }
 
 @media (max-width: 760px) {

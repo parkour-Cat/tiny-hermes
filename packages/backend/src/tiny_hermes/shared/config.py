@@ -30,14 +30,23 @@ class Settings(BaseSettings):
     # Execution tuning. Every bound is explicit so an operator cannot configure
     # a lease shorter than a slice, or a retention window that silently
     # discards events a live subscriber still needs.
-    worker_lease_seconds: int = Field(default=30, ge=10, le=300)
+    # §24.1: after the Worker is killed, a retry-safe Run is queued in 30s.
+    # A 30s lease plus a 5s scan cannot meet that cell: expiry is already
+    # the whole window. 20s + 1s scan fits; the lease is not a §24.1 number.
+    worker_lease_seconds: int = Field(default=20, ge=10, le=300)
     worker_max_slice_seconds: int = Field(default=30, ge=10, le=300)
     worker_idle_poll_seconds: int = Field(default=2, ge=1, le=30)
     worker_shutdown_grace_seconds: int = Field(default=20, ge=5, le=120)
-    scheduler_interval_seconds: int = Field(default=5, ge=1, le=60)
+    scheduler_interval_seconds: int = Field(default=1, ge=1, le=60)
     max_recovery_attempts: int = Field(default=3, ge=0, le=10)
     event_retention_hours: int = Field(default=168, ge=1, le=8_760)
     sse_heartbeat_seconds: int = Field(default=15, ge=5, le=60)
+    #: The API process holds one pool. §24.1 keeps 500 SSE subscribers, each
+    #: polling committed rows; the default SQLAlchemy pool of 15 serialises
+    #: those polls into multi-second gaps. Worker and Scheduler do not read
+    #: this — they keep the small engine default.
+    database_pool_size: int = Field(default=80, ge=5, le=200)
+    database_max_overflow: int = Field(default=40, ge=0, le=200)
     deterministic_model_delay_ms: int = Field(default=50, ge=0, le=5_000)
 
     # Outbound calls. The read timeout is what actually bounds one model round:
@@ -100,6 +109,13 @@ class Settings(BaseSettings):
     controller_stream_idle_seconds: int = Field(default=30, ge=5, le=300)
     artifact_max_bytes: int = Field(default=104_857_600, ge=1_048_576, le=1_073_741_824)
     run_artifact_max_bytes: int = Field(default=524_288_000, ge=1_048_576, le=10_737_418_240)
+
+    #: Envelope KEK. Empty is legal at process boot (Workers unwrap at call
+    #: time). The API ready check refuses an empty or invalid value.
+    tiny_hermes_kek: str = ""
+    tiny_hermes_kek_id: str = "v1"
+    tiny_hermes_previous_kek: str = ""
+    tiny_hermes_previous_kek_id: str = ""
 
     @property
     def approved_image_digests(self) -> tuple[str, ...]:

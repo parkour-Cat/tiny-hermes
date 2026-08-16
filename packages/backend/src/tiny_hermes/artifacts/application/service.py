@@ -76,6 +76,17 @@ class ArtifactService:
             raise ArtifactNotFound
         return found
 
+    async def list_for_run(
+        self, workspace_id: UUID, actor: Actor, run_id: UUID
+    ) -> list[Artifact]:
+        await self._require_reader(workspace_id, actor)
+        now = datetime.now(UTC)
+        return [
+            item
+            for item in await self._store.list_for_run(workspace_id, run_id)
+            if item.expires_at > now
+        ]
+
     def content(self, artifact: Artifact) -> AsyncIterator[bytes]:
         """The bytes, streamed. Call ``metadata`` first — that is the check."""
         return self._objects.get_stream(ObjectRef(key=artifact.object_key))

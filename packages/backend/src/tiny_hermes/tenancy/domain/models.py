@@ -37,4 +37,5 @@ class Workspace:
 class WorkspaceMember:
     user_id: UUID
     display_name: str
+    subject: str
     role: Role

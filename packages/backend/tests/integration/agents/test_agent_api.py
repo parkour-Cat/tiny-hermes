@@ -67,6 +67,14 @@ async def test_agent_publication_workflow_keeps_versions_immutable(
     assert reloaded.json()["current_version_id"] == first.json()["id"]
     assert reloaded.json()["status"] == "published"
 
+    detail = client.get(
+        f"/api/v1/agents/{agent_id}/versions/{first.json()['id']}", headers=scope
+    )
+    assert detail.status_code == 200
+    assert detail.json()["id"] == first.json()["id"]
+    assert detail.json()["spec"]["personality"] == "You are concise."
+    assert "personality" not in str(first.json())
+
 
 async def test_stale_draft_revision_conflicts_without_overwriting(
     client: TestClient, scope: dict[str, str]
@@ -142,6 +150,17 @@ async def test_cross_workspace_agent_identifier_is_a_generic_not_found(
     agent_id = client.post(
         "/api/v1/agents", headers=scope, json={"name": "Analyst", "alias": "analyst"}
     ).json()["id"]
+    client.put(
+        f"/api/v1/agents/{agent_id}/draft",
+        headers=scope,
+        json={"expected_revision": 1, "spec": VALID_SPEC},
+    )
+    published = client.post(
+        f"/api/v1/agents/{agent_id}/publish",
+        headers=scope,
+        json={"expected_revision": 2},
+    )
+    assert published.status_code == 201
     second_workspace = client.post(
         "/api/v1/workspaces",
         headers={"X-CSRF-Token": admin_csrf},
@@ -158,6 +177,14 @@ async def test_cross_workspace_agent_identifier_is_a_generic_not_found(
     assert "Analyst" not in body
     assert "analyst" not in body
     assert "concise" not in body
+
+    leaked = client.get(
+        f"/api/v1/agents/{agent_id}/versions/{published.json()['id']}",
+        headers={"X-Workspace-Id": second_workspace["id"]},
+    )
+    assert leaked.status_code == 404
+    assert leaked.json()["code"] == "agent_not_found"
+    assert "concise" not in str(leaked.json())
 
 
 async def test_missing_membership_is_forbidden_before_resource_lookup(
@@ -200,3 +227,43 @@ async def test_missing_membership_is_forbidden_before_resource_lookup(
     )
     assert denied.status_code == 403
     assert denied.json()["code"] == "forbidden"
+
+
+async def test_a_developer_can_rename_an_agent(
+    client: TestClient, scope: dict[str, str]
+) -> None:
+    agent_id = client.post(
+        "/api/v1/agents", headers=scope, json={"name": "Analyst", "alias": "analyst"}
+    ).json()["id"]
+
+    renamed = client.patch(
+        f"/api/v1/agents/{agent_id}",
+        headers=scope,
+        json={"name": "Researcher", "alias": "researcher"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "Researcher"
+    assert renamed.json()["alias"] == "researcher"
+
+    reloaded = client.get(f"/api/v1/agents/{agent_id}", headers=scope)
+    assert reloaded.json()["name"] == "Researcher"
+    assert reloaded.json()["alias"] == "researcher"
+
+
+async def test_renaming_to_a_taken_alias_is_a_conflict(
+    client: TestClient, scope: dict[str, str]
+) -> None:
+    client.post(
+        "/api/v1/agents", headers=scope, json={"name": "Analyst", "alias": "analyst"}
+    )
+    other = client.post(
+        "/api/v1/agents", headers=scope, json={"name": "Other", "alias": "other"}
+    ).json()["id"]
+
+    conflict = client.patch(
+        f"/api/v1/agents/{other}",
+        headers=scope,
+        json={"alias": "analyst"},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "agent_alias_taken"

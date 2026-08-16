@@ -109,6 +109,23 @@ def test_an_absent_credential_is_found_at_registration(
     assert refused.json()["code"] == "credential_missing"
 
 
+def test_an_endpoint_may_name_an_active_secret(
+    client: TestClient, admin_csrf: str, scope: dict[str, str]
+) -> None:
+    created = client.post(
+        "/api/v1/secrets",
+        headers=scope,
+        json={"name": "model-key", "scope": "platform", "plaintext": "sk-from-secret"},
+    )
+    assert created.status_code == 201, created.text
+    secret_id = created.json()["id"]
+    registered = register(client, admin_csrf, credential_ref=secret_id)
+    assert registered.status_code == 201, registered.text
+    detail = client.get(f"/api/v1/model-endpoints/{registered.json()['id']}")
+    assert detail.json()["credential_available"] is True
+    assert "credential_ref" not in detail.json()
+
+
 def test_a_credential_pasted_into_the_reference_is_refused(
     client: TestClient, admin_csrf: str
 ) -> None:

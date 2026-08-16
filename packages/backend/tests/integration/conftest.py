@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from tiny_hermes.api.app import create_app
 from tiny_hermes.artifacts.infrastructure import tables as artifact_tables
 from tiny_hermes.sandbox.infrastructure import tables as sandbox_tables
+from tiny_hermes.secrets.infrastructure import tables as secret_tables
 from tiny_hermes.session_workspace.infrastructure import tables as workspace_tables
 from tiny_hermes.shared.config import Settings
 from tiny_hermes.shared.database import Base
@@ -26,6 +27,7 @@ from integration.support import EventsUrl, ReadStream
 assert sandbox_tables.SandboxReservationRow.__tablename__
 assert workspace_tables.ObjectUploadRow.__tablename__
 assert artifact_tables.ArtifactRow.__tablename__
+assert secret_tables.SecretRow.__tablename__
 
 STREAM_TIMEOUT = 20
 
@@ -100,6 +102,7 @@ def settings(database_url: str, redis_url: str) -> Settings:
         s3_secret_key=os.environ.get("S3_SECRET_KEY", "tiny-hermes-local-password"),
         session_cookie_secret="test-cookie-secret-with-32-characters",
         bootstrap_token=BOOTSTRAP_TOKEN,
+        tiny_hermes_kek="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
     )
 
 

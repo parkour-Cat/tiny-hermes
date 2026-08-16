@@ -1,58 +1,34 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Button, Card, Descriptions, Empty, Modal, Space, Tag, Timeline, Typography } from "antd";
 import type { DescriptionsProps } from "antd";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
+import { downloadArtifact } from "../api/artifacts";
 import { ApiError, api } from "../api/client";
 import { problemMessage } from "../api/messages";
-import type { BudgetDocument, RunResponse } from "../api/types";
+import type { ArtifactResponse, BudgetDocument, CanonicalMessage, RunResponse } from "../api/types";
 import { moment } from "../i18n/moment";
-import { t } from "../i18n/zh-CN";
+import { useT } from "../i18n/locale";
 import type { MessageKey } from "../i18n/zh-CN";
+import { RUN_ACTIONS } from "../runs/actions";
+import { artifactIdsIn, mergeArtifacts, textOf, toolsOf } from "../runs/transcript";
 import { runQueryOptions, useRunEvents } from "../runs/useRunEvents";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
-/**
- * What the console offers for each action the platform reports.
- *
- * Keyed by the action names the state machine produces. An action this table
- * does not know is not rendered: its request shape would be a guess, and a
- * button that posts a guess is worse than one the user never sees.
- */
-type Offer = {
-  label: MessageKey;
-  /** What to ask before sending, when the action is worth asking about. */
-  question: MessageKey | null;
-  /** What to say afterwards — a request submitted, never a state reached. */
-  done: MessageKey | null;
-};
-
-const ACTIONS: Partial<Record<string, Offer>> = {
-  pause: { label: "pauseRun", question: null, done: "pauseRequested" },
-  resume: { label: "resumeRun", question: null, done: "resumeRequested" },
-  cancel: { label: "cancelRun", question: "cancelRunWarning", done: "cancelRequested" },
-  // A retry answers with a different Run, so the page moves rather than
-  // reporting anything about this one.
-  retry: { label: "retryRun", question: "retryRunWarning", done: null },
-};
-
 /** Consumed against its limit, in the unit the limit is written in. */
-function against(consumed: number, limit: number | null): string {
-  return `${consumed} / ${limit === null ? t("budgetUnlimited") : limit}`;
+function against(consumed: number, limit: number | null, unlimited: string): string {
+  return `${consumed} / ${limit === null ? unlimited : limit}`;
 }
 
 type Rows = NonNullable<DescriptionsProps["items"]>;
 
-function budgetRows(budget: BudgetDocument): Rows {
+function budgetRows(budget: BudgetDocument, t: (key: MessageKey) => string): Rows {
   return [
     {
       key: "execution",
       label: t("budgetExecution"),
-      // The platform counts execution in milliseconds and bounds it in
-      // seconds. Printed side by side unconverted, the pair would read as a
-      // run using two hundred times its allowance.
-      children: against(budget.consumed_execution_ms / 1000, budget.max_execution_seconds),
+      children: against(budget.consumed_execution_ms / 1000, budget.max_execution_seconds, t("budgetUnlimited")),
     },
     {
       key: "elapsed",
@@ -62,27 +38,28 @@ function budgetRows(budget: BudgetDocument): Rows {
     {
       key: "model-calls",
       label: t("budgetModelCalls"),
-      children: against(budget.consumed_model_calls, budget.max_model_calls),
+      children: against(budget.consumed_model_calls, budget.max_model_calls, t("budgetUnlimited")),
     },
     {
       key: "tool-calls",
       label: t("budgetToolCalls"),
-      children: against(budget.consumed_tool_calls, budget.max_tool_calls),
+      children: against(budget.consumed_tool_calls, budget.max_tool_calls, t("budgetUnlimited")),
     },
     {
       key: "tokens",
       label: t("budgetTokens"),
-      children: against(budget.consumed_tokens, budget.max_tokens),
+      children: against(budget.consumed_tokens, budget.max_tokens, t("budgetUnlimited")),
     },
     {
       key: "derived-retries",
       label: t("budgetDerivedRetries"),
-      children: against(budget.derived_retry_count, budget.max_derived_retries),
+      children: against(budget.derived_retry_count, budget.max_derived_retries, t("budgetUnlimited")),
     },
   ];
 }
 
 export function RunDetailPage() {
+  const t = useT();
   const workspaceId = useWorkspaceId();
   const { runId = "" } = useParams();
   const queryClient = useQueryClient();
@@ -93,9 +70,29 @@ export function RunDetailPage() {
   const retryKey = useRef<string | null>(null);
   const enabled = workspaceId !== null && runId !== "";
   const options = runQueryOptions(workspaceId ?? "", runId);
+  const scope = { workspace: workspaceId ?? "" };
 
   const snapshot = useQuery({ ...options, enabled });
   const events = useRunEvents({ runId: enabled ? runId : null, workspaceId });
+  const sessionId = snapshot.data?.session_id;
+  const messages = useQuery({
+    queryKey: ["session-messages", workspaceId, sessionId] as const,
+    queryFn: () =>
+      api<CanonicalMessage[]>(`/api/v1/sessions/${sessionId ?? ""}/messages`, scope),
+    enabled: enabled && sessionId !== undefined,
+  });
+  const artifacts = useQuery({
+    queryKey: ["run-artifacts", workspaceId, runId] as const,
+    queryFn: () => api<ArtifactResponse[]>(`/api/v1/runs/${runId}/artifacts`, scope),
+    enabled,
+  });
+
+  useEffect(() => {
+    if (snapshot.data?.finished_at !== null && snapshot.data?.finished_at !== undefined) {
+      void queryClient.invalidateQueries({ queryKey: ["session-messages", workspaceId, sessionId] });
+      void queryClient.invalidateQueries({ queryKey: ["run-artifacts", workspaceId, runId] });
+    }
+  }, [snapshot.data?.finished_at, queryClient, workspaceId, sessionId, runId]);
 
   const control = useMutation({
     mutationFn: ({ action, expected }: { action: string; expected: number }) =>
@@ -107,16 +104,12 @@ export function RunDetailPage() {
     onSuccess: (updated, { action }) => {
       queryClient.setQueryData(options.queryKey, updated);
       setActionError(null);
-      const done = ACTIONS[action]?.done;
+      const done = RUN_ACTIONS[action]?.done;
       setNote(done === undefined || done === null ? null : t(done));
     },
     onError: async (caught) => {
       setNote(null);
       setActionError(problemMessage(caught));
-      // The opposite of the draft editor's conflict handling, and for the
-      // opposite reason: nothing the user typed is at risk here, so the honest
-      // move is to show them where the Run actually is and let them choose
-      // again against the buttons that go with it.
       if (caught instanceof ApiError && caught.code === "state_version_conflict") {
         await snapshot.refetch();
       }
@@ -125,8 +118,6 @@ export function RunDetailPage() {
 
   const retry = useMutation({
     mutationFn: () => {
-      // One key for one intent to retry. A fresh key on a second press would
-      // derive a second Run from the same failure.
       retryKey.current ??= crypto.randomUUID();
       return api<RunResponse>(`/api/v1/runs/${runId}/retry`, {
         workspace: workspaceId ?? "",
@@ -160,9 +151,17 @@ export function RunDetailPage() {
   }
 
   const run = snapshot.data;
+  const turns = messages.data ?? [];
+  const rounds = toolsOf(turns);
+  const files = mergeArtifacts(
+    artifacts.data ?? [],
+    turns.flatMap((message) =>
+      message.parts.flatMap((part) => (part.output === undefined ? [] : artifactIdsIn(part.output))),
+    ),
+  );
 
   function act(action: string): void {
-    const offer = ACTIONS[action];
+    const offer = RUN_ACTIONS[action];
     if (offer === undefined) {
       return;
     }
@@ -171,8 +170,6 @@ export function RunDetailPage() {
         ? retry.mutateAsync()
         : control.mutateAsync({ action, expected: run.state_version });
     if (offer.question === null) {
-      // Pausing and resuming are requests the platform can decline and the
-      // user can reverse; asking first would be ceremony.
       void send().catch(() => undefined);
       return;
     }
@@ -181,8 +178,6 @@ export function RunDetailPage() {
       content: t(offer.question),
       okText: t("confirm"),
       cancelText: t("cancel"),
-      // The dialog closes either way: a refusal is reported on the page, and
-      // an open dialog would cover the message the user has to read.
       onOk: () => send().catch(() => undefined),
     });
   }
@@ -192,9 +187,6 @@ export function RunDetailPage() {
   }
 
   const facts: Rows = [
-    // The state machine's own name, as everywhere else in the console: a second
-    // vocabulary between the user and the events they are reading is a drift
-    // waiting to happen.
     { key: "status", label: t("runStatus"), children: <Tag>{run.status}</Tag> },
     { key: "queue", label: t("runQueue"), children: run.queue.status },
     { key: "session-sequence", label: t("runSessionSequence"), children: run.session_sequence },
@@ -224,8 +216,6 @@ export function RunDetailPage() {
       children: run.finished_at === null ? t("notFinished") : moment(run.finished_at),
     },
   ];
-  // Rows that exist only when the platform has something to put in them. A row
-  // reading "暂停原因 —" invites the reader to look for a reason there isn't.
   if (run.retry_of_run_id !== null) {
     facts.push({ key: "retry-of", label: t("retryOfRun"), children: runLink(run.retry_of_run_id) });
   }
@@ -268,6 +258,10 @@ export function RunDetailPage() {
               <Typography.Text strong>{entry.frame.event_type}</Typography.Text>
               <Typography.Text type="secondary">{`#${entry.frame.sequence}`}</Typography.Text>
               <Typography.Text type="secondary">{moment(entry.frame.occurred_at)}</Typography.Text>
+              <details>
+                <summary>{t("eventPayload")}</summary>
+                <pre>{JSON.stringify(entry.frame.payload, null, 2)}</pre>
+              </details>
             </Space>
           ),
         },
@@ -283,7 +277,7 @@ export function RunDetailPage() {
         </div>
         <Space wrap>
           {run.available_actions.map((action) => {
-            const offer = ACTIONS[action];
+            const offer = RUN_ACTIONS[action];
             return offer === undefined ? null : (
               <Button
                 key={action}
@@ -306,7 +300,68 @@ export function RunDetailPage() {
       <Card title={t("summarySection")} variant="borderless" className="page-alert">
         <Descriptions column={{ xs: 1, sm: 2 }} size="small" items={facts} />
         <Typography.Title level={5}>{t("budgetSection")}</Typography.Title>
-        <Descriptions column={{ xs: 1, sm: 2 }} size="small" items={budgetRows(run.budget)} />
+        <Descriptions column={{ xs: 1, sm: 2 }} size="small" items={budgetRows(run.budget, t)} />
+      </Card>
+      <Card title={t("messagesSection")} variant="borderless" className="page-alert">
+        {turns.length === 0 ? (
+          <Empty description={t("emptyMessages")} />
+        ) : (
+          turns.map((message, index) => (
+            <article className="workspace-row" key={`${message.role}-${index}`}>
+              <Tag>{message.role}</Tag>
+              <Typography.Paragraph className="fact-note">{textOf(message)}</Typography.Paragraph>
+            </article>
+          ))
+        )}
+      </Card>
+      <Card title={t("toolsCallsSection")} variant="borderless" className="page-alert">
+        {rounds.length === 0 ? (
+          <Empty description={t("emptyTools")} />
+        ) : (
+          rounds.map((round) => (
+            <article className="workspace-row" key={round.callId || round.name}>
+              <Typography.Text strong>{round.name}</Typography.Text>
+              <div>
+                <Typography.Paragraph className="fact-note">
+                  {JSON.stringify(round.arguments)}
+                </Typography.Paragraph>
+                <Typography.Paragraph type="secondary">{round.output}</Typography.Paragraph>
+                {round.artifactIds.map((id) => (
+                  <Button
+                    key={id}
+                    onClick={() =>
+                      void downloadArtifact(id, id, workspaceId ?? "").catch((caught) =>
+                        setActionError(problemMessage(caught)),
+                      )
+                    }
+                  >
+                    {t("downloadArtifact")}
+                  </Button>
+                ))}
+              </div>
+            </article>
+          ))
+        )}
+      </Card>
+      <Card title={t("filesSection")} variant="borderless" className="page-alert">
+        {files.length === 0 ? (
+          <Empty description={t("emptyFiles")} />
+        ) : (
+          files.map((file) => (
+            <Space key={file.id} className="workspace-row">
+              <Typography.Text>{file.filename}</Typography.Text>
+              <Button
+                onClick={() =>
+                  void downloadArtifact(file.id, file.filename, workspaceId ?? "").catch((caught) =>
+                    setActionError(problemMessage(caught)),
+                  )
+                }
+              >
+                {t("downloadArtifact")}
+              </Button>
+            </Space>
+          ))
+        )}
       </Card>
       <Card title={t("timelineSection")} variant="borderless">
         {timeline.length === 0 ? (

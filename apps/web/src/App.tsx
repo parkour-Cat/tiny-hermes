@@ -4,7 +4,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import { QueryProvider } from "./api/QueryProvider";
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
-import { t } from "./i18n/zh-CN";
+import { LocaleProvider, useT } from "./i18n/locale";
 import { ConsoleTheme } from "./layout/ConsoleTheme";
 
 const ConsoleLayout = lazy(() =>
@@ -31,8 +31,24 @@ const RunsPage = lazy(() =>
 const WorkspacesPage = lazy(() =>
   import("./pages/WorkspacesPage").then((module) => ({ default: module.WorkspacesPage })),
 );
+const PlaygroundPage = lazy(() =>
+  import("./pages/PlaygroundPage").then((module) => ({ default: module.PlaygroundPage })),
+);
+const MembersPage = lazy(() =>
+  import("./pages/MembersPage").then((module) => ({ default: module.MembersPage })),
+);
+const ApiKeysPage = lazy(() =>
+  import("./pages/ApiKeysPage").then((module) => ({ default: module.ApiKeysPage })),
+);
+const ModelEndpointsPage = lazy(() =>
+  import("./pages/ModelEndpointsPage").then((module) => ({ default: module.ModelEndpointsPage })),
+);
+const SecretsPage = lazy(() =>
+  import("./pages/SecretsPage").then((module) => ({ default: module.SecretsPage })),
+);
 
 function AppRoutes() {
+  const t = useT();
   const auth = useAuth();
   if (auth.loading) {
     return <Spin fullscreen description={t("loading")} />;
@@ -71,8 +87,13 @@ function AppRoutes() {
           <Route index element={<Navigate to="agents" replace />} />
           <Route path="agents" element={<AgentsPage />} />
           <Route path="agents/:agentId" element={<AgentDetailPage />} />
+          <Route path="agents/:agentId/playground" element={<PlaygroundPage />} />
           <Route path="runs" element={<RunsPage />} />
           <Route path="runs/:runId" element={<RunDetailPage />} />
+          <Route path="members" element={<MembersPage />} />
+          <Route path="api-keys" element={<ApiKeysPage />} />
+          <Route path="model-endpoints" element={<ModelEndpointsPage />} />
+          <Route path="secrets" element={<SecretsPage />} />
         </Route>
         <Route
           path="*"
@@ -86,13 +107,15 @@ function AppRoutes() {
 export function App() {
   return (
     <ConsoleTheme>
-      <BrowserRouter>
-        <AuthProvider>
-          <QueryProvider>
-            <AppRoutes />
-          </QueryProvider>
-        </AuthProvider>
-      </BrowserRouter>
+      <LocaleProvider>
+        <BrowserRouter>
+          <AuthProvider>
+            <QueryProvider>
+              <AppRoutes />
+            </QueryProvider>
+          </AuthProvider>
+        </BrowserRouter>
+      </LocaleProvider>
     </ConsoleTheme>
   );
 }

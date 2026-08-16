@@ -8,17 +8,13 @@ cursor is accepted as a query parameter as well as the standard
 ownership are still checked before a single frame is written, and a
 cross-workspace identifier still returns a generic ``404``.
 
-The loop polls committed rows rather than subscribing to the wake-up channel.
-A Redis subscription is a per-connection resource and the application's single
-shared subscription is not safe for concurrent readers, which is a real cost
-to pay for at most half a second of delivery latency.
+Catch-up polls committed rows. The live hold shares one poll per Run
+(see ``EventStreamHub``) so 500 subscribers do not open 500 sessions.
 """
 
-import asyncio
 import json
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
-from time import monotonic
 from typing import Annotated
 from uuid import UUID
 
@@ -43,7 +39,6 @@ CursorHeader = Annotated[str | None, Header(alias="Last-Event-ID")]
 SessionCookie = Annotated[str | None, Cookie(alias=SESSION_COOKIE)]
 
 BATCH = 200
-POLL_SECONDS = 0.5
 
 
 def run_event_router(resources: ApplicationResources) -> APIRouter:
@@ -64,31 +59,20 @@ def run_event_router(resources: ApplicationResources) -> APIRouter:
     ) -> AsyncIterator[bytes]:
         """Yield committed events until the Run ends or the subscriber leaves.
 
-        Every poll opens and closes its own session, so a subscriber that stays
-        connected for an hour never pins a database connection. The poll is
-        shielded because a subscriber can disconnect mid-read, and a read
-        cancelled between its query and its commit would strand the connection
-        instead of returning it to the pool.
+        Catch-up is this subscriber's own read (it may start at a different
+        cursor). The live hold shares one poll per Run so 500 connections do
+        not open 500 sessions every half second.
         """
-        heartbeat_seconds = resources.settings.sse_heartbeat_seconds
-        cursor = after
-        quiet_since = monotonic()
-        while not await request.is_disconnected():
-            records, window = await asyncio.shield(
-                _poll(workspace_id, actor, run_id, cursor)
-            )
-            for record in records:
-                cursor = record.sequence
-                yield _frame(record)
-            if records:
-                quiet_since = monotonic()
-                continue
-            if window.is_terminal and cursor + 1 >= window.next_sequence:
-                return
-            if monotonic() - quiet_since >= heartbeat_seconds:
-                quiet_since = monotonic()
-                yield b": heartbeat\n\n"
-            await asyncio.sleep(POLL_SECONDS)
+        async for chunk in resources.event_stream_hub(_poll).frames(
+            workspace_id,
+            actor,
+            run_id,
+            after,
+            disconnected=request.is_disconnected,
+            heartbeat_seconds=float(resources.settings.sse_heartbeat_seconds),
+            encode=_frame,
+        ):
+            yield chunk
 
     @router.get("/{run_id}/events")
     async def stream_run_events(  # pyright: ignore[reportUnusedFunction]

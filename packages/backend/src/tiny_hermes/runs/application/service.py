@@ -307,6 +307,8 @@ class RunCoordination:
         self, workspace_id: UUID, actor: Actor, session_id: UUID
     ) -> Sequence[CanonicalMessage]:
         await self._require_role(workspace_id, actor, READERS)
+        if await self._store.get_session(workspace_id, session_id) is None:
+            raise UnknownSession
         return await self._store.list_session_messages(workspace_id, session_id)
 
     async def claim_idempotency(

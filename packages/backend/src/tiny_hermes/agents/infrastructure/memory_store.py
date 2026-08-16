@@ -121,6 +121,38 @@ class MemoryAgentStore:
             return None
         return agent
 
+    async def update_agent(
+        self,
+        workspace_id: UUID,
+        agent_id: UUID,
+        name: str | None,
+        alias: str | None,
+    ) -> Agent | None:
+        agent = await self.get_agent(workspace_id, agent_id)
+        if agent is None:
+            return None
+        next_alias = agent.alias if alias is None else alias
+        if alias is not None:
+            taken = any(
+                other.workspace_id == workspace_id
+                and other.alias == next_alias
+                and other.id != agent_id
+                for other in self.agents.values()
+            )
+            if taken:
+                raise AgentAliasAlreadyUsed
+        updated = Agent(
+            agent.id,
+            agent.workspace_id,
+            agent.name if name is None else name,
+            next_alias,
+            agent.status,
+            agent.current_version_id,
+            agent.created_at,
+        )
+        self.agents[agent.id] = updated
+        return updated
+
     async def get_draft(self, workspace_id: UUID, agent_id: UUID) -> AgentDraft | None:
         if await self.get_agent(workspace_id, agent_id) is None:
             return None

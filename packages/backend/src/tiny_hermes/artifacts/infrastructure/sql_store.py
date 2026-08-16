@@ -62,6 +62,19 @@ class SqlArtifactStore:
         )
         return int(total or 0)
 
+    async def list_for_run(self, workspace_id: UUID, run_id: UUID) -> list[Artifact]:
+        rows = (
+            await self._session.scalars(
+                select(ArtifactRow)
+                .where(
+                    ArtifactRow.workspace_id == workspace_id,
+                    ArtifactRow.run_id == run_id,
+                )
+                .order_by(ArtifactRow.created_at, ArtifactRow.id)
+            )
+        ).all()
+        return [self._domain(row) for row in rows]
+
     async def expired(self, now: "datetime", limit: int) -> list[Artifact]:
         rows = await self._session.scalars(
             select(ArtifactRow)

@@ -2,6 +2,7 @@ from uuid import uuid4
 
 import pytest
 from tiny_hermes.agents.application.service import (
+    AgentAliasAlreadyUsed,
     AgentCatalog,
     DraftRevisionConflict,
     ForbiddenAgentAction,
@@ -187,3 +188,56 @@ async def test_alias_must_be_lowercase_slug() -> None:
     for alias in ("Analyst", "an alias", "-analyst", "analyst-", "a" * 81, ""):
         with pytest.raises(InvalidAgentAlias):
             await catalog.create_agent(workspace_id, actor, "Analyst", alias, "req-1")
+
+
+async def test_a_developer_can_rename_an_agent_without_touching_its_draft() -> None:
+    workspace_id = uuid4()
+    actor = Actor(uuid4(), False)
+    store = MemoryAgentStore()
+    store.roles[(workspace_id, actor.id)] = Role.DEVELOPER
+    catalog = AgentCatalog(store)
+    agent = await catalog.create_agent(workspace_id, actor, "Analyst", "analyst", "req-1")
+    draft = await catalog.get_draft(workspace_id, actor, agent.id, "req-2")
+
+    renamed = await catalog.update_agent(
+        workspace_id, actor, agent.id, "Researcher", "researcher", "req-3"
+    )
+
+    assert renamed.name == "Researcher"
+    assert renamed.alias == "researcher"
+    assert renamed.status == "draft"
+    assert renamed.current_version_id is None
+    reloaded = await catalog.get_draft(workspace_id, actor, agent.id, "req-4")
+    assert reloaded.revision == draft.revision
+    assert reloaded.spec == draft.spec
+
+
+async def test_a_viewer_cannot_rename_an_agent() -> None:
+    workspace_id = uuid4()
+    actor = Actor(uuid4(), False)
+    store = MemoryAgentStore()
+    store.roles[(workspace_id, actor.id)] = Role.VIEWER
+    catalog = AgentCatalog(store)
+    store.roles[(workspace_id, actor.id)] = Role.DEVELOPER
+    agent = await catalog.create_agent(workspace_id, actor, "Analyst", "analyst", "req-1")
+    store.roles[(workspace_id, actor.id)] = Role.VIEWER
+
+    with pytest.raises(ForbiddenAgentAction):
+        await catalog.update_agent(
+            workspace_id, actor, agent.id, "Researcher", None, "req-2"
+        )
+
+
+async def test_renaming_to_a_taken_alias_is_refused() -> None:
+    workspace_id = uuid4()
+    actor = Actor(uuid4(), False)
+    store = MemoryAgentStore()
+    store.roles[(workspace_id, actor.id)] = Role.DEVELOPER
+    catalog = AgentCatalog(store)
+    await catalog.create_agent(workspace_id, actor, "Analyst", "analyst", "req-1")
+    other = await catalog.create_agent(workspace_id, actor, "Other", "other", "req-2")
+
+    with pytest.raises(AgentAliasAlreadyUsed):
+        await catalog.update_agent(
+            workspace_id, actor, other.id, None, "analyst", "req-3"
+        )
