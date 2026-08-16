@@ -694,7 +694,7 @@ class SqlRunStore:
             wait_kind=None,
             wait_deadline_at=None,
             request_id=command.request_id,
-            payload={"executed_ms": command.executed_ms},
+            payload=_slice_payload(command.executed_ms, command.checkpoint),
             extra_events=(*extra, *command.events),
         )
         lease.released_at = now
@@ -1626,6 +1626,7 @@ class SqlRunStore:
             checkpoint_replay_safe=run.checkpoint_replay_safe,
             checkpoint_effect_status=CheckpointEffectStatus(run.checkpoint_effect_status),
             checkpoint_usage_quality=_usage_quality(run.checkpoint),
+            failure_reason=_failure_reason(run.checkpoint),
             created_at=run.created_at,
             started_at=run.started_at,
             finished_at=run.finished_at,
@@ -1850,6 +1851,33 @@ def _apply_decision(run: RunRow, decision: StateDecision, now: datetime) -> None
     if decision.is_terminal:
         run.finished_at = now
         run.blocked_by_run_id = None
+
+
+def _slice_payload(executed_ms: int, checkpoint: dict[str, Any] | None) -> dict[str, Any]:
+    """What the round's state-change event carries.
+
+    A `run_failed` event used to carry `executed_ms` alone, so a subscriber
+    watching the stream learned no more than a poller did: that it failed.
+    The reason rides along when there is one.
+    """
+    payload: dict[str, Any] = {"executed_ms": executed_ms}
+    reason = _failure_reason(checkpoint)
+    if reason is not None:
+        payload["failure_reason"] = reason
+    return payload
+
+
+def _failure_reason(checkpoint: dict[str, Any] | None) -> str | None:
+    """Read why the last round failed out of its checkpoint.
+
+    The Worker already writes it there; before this was read, a `failed` Run
+    reported 22 fields and not one of them was the reason, so a caller had to
+    open the transcript and infer from an exit code, or open the database.
+    """
+    if not checkpoint:
+        return None
+    value: Any = checkpoint.get("failure")
+    return str(value) if isinstance(value, str) and value else None
 
 
 def _usage_quality(checkpoint: dict[str, Any] | None) -> str | None:

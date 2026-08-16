@@ -488,6 +488,13 @@ class RunSnapshot:
     #: count: "nothing was used" and "nobody counted" are different facts, and
     #: only one of them means a Token limit was meaningfully enforced.
     checkpoint_usage_quality: str | None
+    #: Why this Run failed, in the platform's own words, or `None` while it
+    #: has not. Read from the checkpoint for the same reason
+    #: `checkpoint_usage_quality` is: the round is described there, and a
+    #: column would have to be kept in step with it. A `failed` Run that
+    #: cannot say why leaves a caller reading the transcript and guessing
+    #: from an exit code.
+    failure_reason: str | None
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
@@ -521,6 +528,7 @@ class RunSnapshot:
             "checkpoint_replay_safe": self.checkpoint_replay_safe,
             "checkpoint_effect_status": self.checkpoint_effect_status.value,
             "checkpoint_usage_quality": self.checkpoint_usage_quality,
+            "failure_reason": self.failure_reason,
             "created_at": self.created_at.isoformat(),
             "started_at": _optional_time(self.started_at),
             "finished_at": _optional_time(self.finished_at),
