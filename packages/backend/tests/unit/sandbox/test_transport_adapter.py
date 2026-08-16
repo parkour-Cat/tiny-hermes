@@ -6,11 +6,12 @@ class name. The adapter has to tell those apart, because only the first one
 is an answer the caller can act on.
 """
 
-from typing import Any
+from typing import Any, cast
+from uuid import uuid4
 
 import pytest
 from tiny_hermes.sandbox.application.controller import RefusalReason, SandboxRefused
-from tiny_hermes.sandbox.transport.adapter import ControllerSocketSandbox
+from tiny_hermes.sandbox.transport.adapter import SandboxClient
 from tiny_hermes.sandbox.transport.client import ControllerClient
 
 
@@ -25,17 +26,15 @@ class _RefusingClient:
         raise ControllerClient.Refused(self._reason)
 
 
-def _sandbox(reason: str) -> ControllerSocketSandbox:
-    adapter = ControllerSocketSandbox.__new__(ControllerSocketSandbox)
-    adapter._client = _RefusingClient(reason)  # type: ignore[attr-defined]  # noqa: SLF001
-    return adapter
+def _sandbox(reason: str) -> SandboxClient:
+    return SandboxClient(cast(ControllerClient, _RefusingClient(reason)))
 
 
 async def test_a_named_refusal_arrives_as_the_platform_type() -> None:
     sandbox = _sandbox(RefusalReason.ALREADY_RESERVED.value)
 
     with pytest.raises(SandboxRefused) as refused:
-        await sandbox._call("acquire", {})  # noqa: SLF001
+        await sandbox.volume_remove(run_id=uuid4(), sandbox_id=uuid4())
 
     assert refused.value.reason is RefusalReason.ALREADY_RESERVED
 
@@ -50,6 +49,6 @@ async def test_an_unnameable_error_keeps_the_transport_error() -> None:
     sandbox = _sandbox("DockerUnavailable")
 
     with pytest.raises(ControllerClient.Refused) as refused:
-        await sandbox._call("volume_remove", {})  # noqa: SLF001
+        await sandbox.volume_remove(run_id=uuid4(), sandbox_id=uuid4())
 
     assert refused.value.reason == "DockerUnavailable"
