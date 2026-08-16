@@ -51,8 +51,13 @@ async def test_a_matching_digest_names_the_account_not_the_key() -> None:
 async def test_a_wrong_token_is_rejected_without_naming_the_reason() -> None:
     store = MemoryMachineIdentityStore()
     service, _, issued = await _issued(store)
+    # Replacing the last character with a fixed "0" is the correct token
+    # whenever the minted one already ends in "0", which is roughly one run
+    # in sixteen: pick a character the token does not end with.
+    wrong = issued.token[:-1] + ("1" if issued.token.endswith("0") else "0")
+    assert wrong != issued.token
     with pytest.raises(InvalidApiKey):
-        await service.authenticate(issued.token[:-1] + "0", None)
+        await service.authenticate(wrong, None)
 
 
 @pytest.mark.asyncio
