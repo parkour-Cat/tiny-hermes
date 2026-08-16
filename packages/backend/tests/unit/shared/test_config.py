@@ -26,7 +26,9 @@ def _settings(**overrides: Any) -> Settings:
         "bootstrap_token": "bootstrap-token-with-at-least-32-characters",
     }
     values.update(overrides)
-    return Settings(_env_file=None, **values)
+    # `_env_file` is pydantic-settings' own keyword; its signature does not
+    # declare it, so the type checker has to be told this is deliberate.
+    return Settings(_env_file=None, **values)  # pyright: ignore[reportCallIssue]
 
 
 EXECUTION_BOUNDS = [
