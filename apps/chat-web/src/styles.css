@@ -463,6 +463,26 @@ button:disabled {
   margin-top: 14px;
 }
 
+.rail-search {
+  margin: 0 0 8px;
+  border: 1px solid var(--th-line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: var(--th-paper);
+  color: var(--th-ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.rail-search::placeholder {
+  color: var(--th-ink-soft);
+}
+
+.rail-search:focus-visible {
+  outline: 2px solid var(--th-copper);
+  outline-offset: 1px;
+}
+
 .rail-sessions {
   display: flex;
   flex-direction: column;
@@ -501,14 +521,16 @@ button:disabled {
   min-width: 0;
   border: 0;
   border-radius: 8px;
-  padding: 7px 6px 7px 10px;
+  padding: 8px 6px 8px 10px;
   background: transparent;
   /* A list, not prose: one line, 13px like every other list in the app, and
      the ellipsis rather than a second line. A wrapped title made one row
      three lines tall and heavier than the brand above it. */
   color: var(--th-ink-soft);
   text-align: left;
-  font-size: 13px;
+  /* 14, not 13: a Chinese glyph carries more strokes in the same em, so the
+     list that reads right in Latin reads cramped here. */
+  font-size: 14px;
   line-height: 1.45;
   white-space: nowrap;
   overflow: hidden;
