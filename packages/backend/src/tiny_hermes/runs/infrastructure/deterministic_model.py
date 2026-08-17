@@ -178,6 +178,56 @@ class DeterministicModelProvider:
                 input_tokens=TOKENS_PER_ROUND // 2,
                 output_tokens=TOKENS_PER_ROUND // 2,
             )
+        if scenario == "skill_once":
+            # The skill drill: the Run input names the skill, the model loads
+            # it, and its answer is the document's own text. Nothing here
+            # touches a sandbox, so this scenario runs anywhere.
+            #
+            # Only results after the last user message count, for the same
+            # reason `shell_from_input` says: a shared Session's transcript
+            # already carries earlier Runs' results under this call id.
+            results = tuple(
+                block
+                for message in request.messages[_last_user_index(request) + 1 :]
+                for block in message.blocks
+                if isinstance(block, ToolResultBlock) and block.call_id == "skill-load-1"
+            )
+            if not results:
+                name = _last_user_text(request) or _first_skill_name(request)
+                if not name:
+                    return ModelResponse(
+                        stop_reason=StopReason.FAILED,
+                        text="",
+                        failure="deterministic_no_skill_named",
+                    )
+                return ModelResponse(
+                    stop_reason=StopReason.TOOL_CALL,
+                    text="Loading the skill the drill named.",
+                    tool_calls=(
+                        ToolCallBlock(
+                            call_id="skill-load-1",
+                            name="skill.load",
+                            arguments={"skill": name},
+                        ),
+                    ),
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                )
+            loaded = results[-1]
+            if loaded.failed:
+                return ModelResponse(
+                    stop_reason=StopReason.FAILED,
+                    text="",
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                    failure="deterministic_skill_load_refused",
+                )
+            return ModelResponse(
+                stop_reason=StopReason.COMPLETED,
+                text=f"skill loaded\n{loaded.output[:2000]}",
+                input_tokens=TOKENS_PER_ROUND // 2,
+                output_tokens=TOKENS_PER_ROUND // 2,
+            )
         if scenario == "fail_replay_safe":
             return ModelResponse(
                 stop_reason=StopReason.FAILED,
@@ -207,6 +257,20 @@ def _last_user_index(request: ModelRequest) -> int:
         if request.messages[index].role == "user":
             return index
     return -1
+
+
+def _first_skill_name(request: ModelRequest) -> str:
+    """The name out of the first summary line, or nothing.
+
+    The summaries the Worker builds read ``- name: description``, and the
+    drill's fallback is to load whichever skill the Version bound first — so a
+    Run started with no input still exercises the path.
+    """
+    for summary in request.skill_summaries:
+        head = summary.lstrip("- ").split(":", 1)[0].strip()
+        if head:
+            return head
+    return ""
 
 
 def _last_user_text(request: ModelRequest) -> str:

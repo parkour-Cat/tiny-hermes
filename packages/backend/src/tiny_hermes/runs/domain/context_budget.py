@@ -270,6 +270,22 @@ def _schema_estimate(schemas: Sequence[Mapping[str, Any]], tokenizer: str | None
 
 
 @dataclass(frozen=True)
+class SkillSummary:
+    """One bound skill as it reaches the model, before anything is loaded.
+
+    ``loaded`` is a fact this Run knows rather than a guess the platform makes:
+    a skill the model already called `skill.load` on left a `skill_loaded`
+    event behind. That is why §10.1 has the model ask instead of having the
+    platform match keywords — "未命中" is only a decidable word if hitting is
+    something that happened.
+    """
+
+    name: str
+    text: str
+    loaded: bool = False
+
+
+@dataclass(frozen=True)
 class TrimRecord:
     """What one step of the fixed order took out, and what it left behind."""
 
@@ -333,6 +349,11 @@ class ContextPlan:
     allowance: int
     trimmed: tuple[TrimRecord, ...] = ()
     compacted: CompactionRecord | None = None
+    #: The summaries that survived, in the order the author bound them. The
+    #: caller sends these rather than the ones it handed in, for the reason it
+    #: sends ``messages`` rather than the transcript: the planner is the only
+    #: thing that decides what one round costs.
+    skill_summaries: tuple[str, ...] = ()
 
     @property
     def changed(self) -> bool:
@@ -400,6 +421,50 @@ def _trim_old_tool_results(
     )
 
 
+def _summary_estimate(summaries: Sequence[SkillSummary], tokenizer: str | None) -> int:
+    """What the summary segment costs, as one system message or nothing."""
+    if not summaries:
+        return 0
+    return MESSAGE_OVERHEAD_TOKENS + sum(
+        estimate_tokens(item.text, tokenizer) for item in summaries
+    )
+
+
+def _drop_unhit_summaries(
+    kept: list[SkillSummary], tokenizer: str | None, *, ceiling: int
+) -> TrimRecord | None:
+    """Take whole summaries out until the segment fits, and never part of one.
+
+    Two rules, both from §7.4.2 and both visible in the loop. Whole entries
+    only: half a summary describes a skill the model would then load for the
+    wrong reason, and it is the roadmap's named exit check. Reverse binding
+    order: the order an author wrote their bindings in is a statement about
+    which ones matter, so the last one written is the first one to go.
+
+    A skill this Run already loaded is not a candidate at all — its text is
+    already in the conversation, and removing the summary that explains it
+    would leave the model holding a document it cannot place.
+    """
+    dropped: list[str] = []
+    freed = 0
+    for index in range(len(kept) - 1, -1, -1):
+        if _summary_estimate(kept, tokenizer) <= ceiling:
+            break
+        if kept[index].loaded:
+            continue
+        freed += estimate_tokens(kept[index].text, tokenizer)
+        dropped.append(kept[index].name)
+        del kept[index]
+    if not dropped:
+        return None
+    return TrimRecord(
+        SegmentName.SKILL_SUMMARIES,
+        dropped=len(dropped),
+        freed_estimate=freed,
+        references=tuple(dropped),
+    )
+
+
 def _summarize(covered: Sequence[StoredMessage]) -> str:
     """A structured summary, generated rather than written.
 
@@ -463,24 +528,42 @@ def plan_context(
     personality: str,
     tool_schemas: Sequence[Mapping[str, Any]],
     history: Sequence[StoredMessage],
-    skill_summaries: Sequence[str] = (),
+    skill_summaries: Sequence[SkillSummary] = (),
     memories: Sequence[str] = (),
+    segments: Mapping[SegmentName, SegmentBudget] = DEFAULT_SEGMENTS,
 ) -> ContextPlan:
     """Decide what this round sends.
 
-    ``skill_summaries`` and ``memories`` are allocated and always empty in this
-    phase (design §7). They are parameters rather than a future edit because
-    the trimming order already names them: when M2B and M2D fill them, the
-    order does not move.
+    ``memories`` is allocated and always empty until M2D fills it. It is a
+    parameter rather than a future edit because the trimming order already
+    names it: when M2D arrives, the order does not move.
+
+    ``segments`` is this Agent's resolved table rather than the platform
+    default, for the same reason the publish check resolves before it measures
+    — an author who widened 技能摘要 is measured against what they widened it
+    to, and one who narrowed it feels that on the next round.
     """
     tokenizer = window.tokenizer
     allowance = window.input_allowance
+    trimmed: list[TrimRecord] = []
+    kept = list(skill_summaries)
+    # The segment's own ceiling, before the window is looked at once. It is not
+    # part of the fixed trimming order: that order answers "this round is too
+    # big", and this answers "this segment was never allowed to be this big",
+    # which is true of a round with all the room in the world.
+    ceiling = segments[SegmentName.SKILL_SUMMARIES].max_tokens
+    if ceiling is not None:
+        capped = _drop_unhit_summaries(kept, tokenizer, ceiling=ceiling)
+        if capped is not None:
+            trimmed.append(capped)
     fixed = (
         estimate_tokens(safety_rules, tokenizer)
         + estimate_tokens(personality, tokenizer)
         + _schema_estimate(tool_schemas, tokenizer)
+        + _summary_estimate(kept, tokenizer)
         + MESSAGE_OVERHEAD_TOKENS * 2
     )
+    surviving = tuple(item.text for item in kept)
     originals = tuple(item.message for item in history)
     # §7.4.2: 当前用户请求必须完整保留. It is the floor together with the fixed
     # segments, so it is measured before anything is allowed to be trimmed.
@@ -488,7 +571,19 @@ def plan_context(
         (item.message for item in reversed(history) if item.message.role == "user"),
         None,
     )
-    floor = fixed + (_message_estimate(request, tokenizer) if request is not None else 0)
+    # Skill summaries are in `fixed` because they are sent every round, but
+    # they are not 不可裁剪内容 — step two of the order may take the unhit ones
+    # out. So the floor is measured with them already gone: an Agent that bound
+    # thirty skills should lose summaries, not go to `paused(context_overflow)`
+    # while holding a segment the platform is allowed to drop.
+    droppable = _summary_estimate(kept, tokenizer) - _summary_estimate(
+        [item for item in kept if item.loaded], tokenizer
+    )
+    floor = (
+        fixed
+        - droppable
+        + (_message_estimate(request, tokenizer) if request is not None else 0)
+    )
     if floor > allowance:
         # Nothing that may be trimmed would help: what is left is what §7.4.2
         # calls 不可裁剪内容. The caller pauses; it does not truncate.
@@ -497,16 +592,22 @@ def plan_context(
             fits=False,
             input_estimate=floor,
             allowance=allowance,
+            trimmed=tuple(trimmed),
+            skill_summaries=surviving,
         )
 
     working = list(originals)
     spent = fixed + sum(_message_estimate(message, tokenizer) for message in working)
     if spent <= allowance:
         return ContextPlan(
-            messages=originals, fits=True, input_estimate=spent, allowance=allowance
+            messages=originals,
+            fits=True,
+            input_estimate=spent,
+            allowance=allowance,
+            trimmed=tuple(trimmed),
+            skill_summaries=surviving,
         )
 
-    trimmed: list[TrimRecord] = []
     record = _trim_old_tool_results(working, tokenizer, fixed=fixed, allowance=allowance)
     if record is not None:
         trimmed.append(record)
@@ -518,24 +619,45 @@ def plan_context(
             input_estimate=spent,
             allowance=allowance,
             trimmed=tuple(trimmed),
+            skill_summaries=surviving,
         )
 
-    # Steps two and three of the fixed order. Both segments are empty in this
-    # phase, so both are no-ops — written out rather than skipped, because the
-    # order is the product rule and a reader should be able to see all four of
-    # its steps in one place.
-    for segment, items in (
-        (SegmentName.SKILL_SUMMARIES, skill_summaries),
-        (SegmentName.MEMORY, memories),
-    ):
-        if items:
-            trimmed.append(
-                TrimRecord(
-                    segment,
-                    dropped=len(items),
-                    freed_estimate=sum(estimate_tokens(item, tokenizer) for item in items),
-                )
+    # Step two: give back as much of the summary segment as this round is over
+    # by, and no more. The segment already fits its own ceiling — what it is
+    # being asked for now is room for the conversation, so the target is the
+    # overage rather than the ceiling, and a round that is 40 tokens over loses
+    # one summary rather than all of them.
+    over = spent - allowance
+    kept_estimate = _summary_estimate(kept, tokenizer)
+    squeezed = _drop_unhit_summaries(
+        kept, tokenizer, ceiling=max(kept_estimate - over, 0)
+    )
+    if squeezed is not None:
+        trimmed.append(squeezed)
+        surviving = tuple(item.text for item in kept)
+        fixed -= kept_estimate - _summary_estimate(kept, tokenizer)
+        spent = fixed + sum(_message_estimate(message, tokenizer) for message in working)
+        if spent <= allowance:
+            return ContextPlan(
+                messages=tuple(working),
+                fits=True,
+                input_estimate=spent,
+                allowance=allowance,
+                trimmed=tuple(trimmed),
+                skill_summaries=surviving,
             )
+
+    # Step three, empty until M2D fills it. Written out rather than skipped,
+    # because the order is the product rule and a reader should be able to see
+    # all four of its steps in one place.
+    if memories:
+        trimmed.append(
+            TrimRecord(
+                SegmentName.MEMORY,
+                dropped=len(memories),
+                freed_estimate=sum(estimate_tokens(item, tokenizer) for item in memories),
+            )
+        )
 
     # Step four: structural compaction of the oldest turns. The boundary walks
     # forward one message at a time and stops at the first one that fits, so a
@@ -563,6 +685,7 @@ def plan_context(
                 allowance=allowance,
                 trimmed=tuple(trimmed),
                 compacted=compaction,
+                skill_summaries=surviving,
             )
 
     # Compaction did not make it fit. §7.4.2: 压缩失败后保留原文；若保留原文又
@@ -574,4 +697,6 @@ def plan_context(
         input_estimate=fixed
         + sum(_message_estimate(message, tokenizer) for message in originals),
         allowance=allowance,
+        trimmed=tuple(trimmed),
+        skill_summaries=surviving,
     )

@@ -200,6 +200,12 @@ def build_payload(
         {"role": "system", "content": SAFETY_PREAMBLE},
         {"role": "system", "content": request.personality},
     ]
+    if request.skill_summaries:
+        # After the persona and before the conversation, in a message of its
+        # own. The markers are the boundary the preamble refers to: what is
+        # between them was written by a workspace, and the model has just been
+        # told that such text is reference material rather than instruction.
+        messages.append({"role": "system", "content": _skill_block(request)})
     if request.cache_hint is CacheStateHint.RESET:
         # With the platform's rules rather than in the conversation, so a later
         # turn cannot talk over it. §11.3 calls it a protected runtime hint.
@@ -223,6 +229,22 @@ def build_payload(
         if policy.temperature is not None:
             payload["temperature"] = policy.temperature
     return payload
+
+
+SKILL_BLOCK_OPEN = "--- begin skills available to you (workspace material) ---"
+SKILL_BLOCK_CLOSE = "--- end skills available to you ---"
+
+
+def _skill_block(request: ModelRequest) -> str:
+    """The bound skills, as the one thing said about them before they load."""
+    lines = [
+        SKILL_BLOCK_OPEN,
+        *request.skill_summaries,
+        SKILL_BLOCK_CLOSE,
+        "Call skill.load to read a skill's full text when its summary covers "
+        "what you are doing.",
+    ]
+    return "\n".join(lines)
 
 
 def _as_messages(message: CanonicalMessage) -> list[dict[str, Any]]:

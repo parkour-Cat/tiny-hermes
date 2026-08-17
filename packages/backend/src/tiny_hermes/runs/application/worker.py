@@ -11,9 +11,18 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from tiny_hermes.agents.domain.models import ContextBudget
 from tiny_hermes.artifacts.application.service import ArtifactLimits, ArtifactRecorder
 from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
-from tiny_hermes.runs.domain.context_budget import ContextPlan, plan_context
+from tiny_hermes.runs.application.tool_answers import (
+    answer_platform_tool,
+    answer_skill_load,
+)
+from tiny_hermes.runs.domain.context_budget import (
+    ContextPlan,
+    SkillSummary,
+    plan_context,
+)
 from tiny_hermes.runs.domain.goal import (
     CompletionCheck,
     GoalEvidence,
@@ -32,7 +41,6 @@ from tiny_hermes.runs.domain.models import (
     RunEventType,
     RunSignal,
     TextBlock,
-    ToolCallBlock,
     ToolResultBlock,
     WorkspaceCleanupTarget,
 )
@@ -50,6 +58,7 @@ from tiny_hermes.runs.ports.model import (
     UsageQuality,
 )
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
+from tiny_hermes.runs.ports.skills import SkillLibrary
 from tiny_hermes.runs.ports.store import (
     AppendEventsCommand,
     ApplySignalCommand,
@@ -91,10 +100,7 @@ from tiny_hermes.tools.domain.files import DATA_ROOT, FILE_HELPER, changes_works
 from tiny_hermes.tools.domain.registry import (
     DEFAULT_OUTPUT_BYTES,
     PLATFORM_TOOLS,
-    RefusalReason,
-    ToolRefused,
     schemas_for,
-    wait_seconds_of,
 )
 
 logger = logging.getLogger(__name__)
@@ -166,6 +172,11 @@ class _RoundWork:
     appended: tuple[CanonicalMessage, ...]
     wrote: bool
     wait_seconds: int | None = None
+    #: Facts the round's own tool calls produced, written in the transaction
+    #: that records the round. A `skill_loaded` written separately could
+    #: survive a rolled-back round, and the next round would then believe it
+    #: was holding text that is not in its conversation.
+    events: tuple[ReservedEvent, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -239,11 +250,17 @@ class WorkerRuntime:
         settings: WorkerSettings,
         sandbox: SandboxSession | None = None,
         workspace: WorkspaceRuntime | None = None,
+        skills: SkillLibrary | None = None,
     ) -> None:
         self._sessions = session_factory
         self._model = model
         self._notifier = notifier
         self._settings = settings
+        # Optional for the same reason the sandbox is: a deployment with no
+        # skill catalog needs none. An Agent that bound a skill and finds this
+        # absent is told so in the tool result rather than reading nothing and
+        # believing the skill was empty.
+        self._skills = skills
         # Optional, because a deployment with no tools configured needs none.
         # A Run that binds a tool and finds this absent fails rather than
         # running the command anywhere else — product design §16 leaves no
@@ -390,7 +407,7 @@ class WorkerRuntime:
                     # round's effects before the next model call.
                     continuation = await self._checkpoint_round(
                         claimed, handle, box, after, decision, response, executed_ms,
-                        appended, judged,
+                        appended, judged, work.events,
                     )
                     if continuation is None:
                         return
@@ -412,6 +429,7 @@ class WorkerRuntime:
                     response,
                     executed_ms,
                     appended=appended,
+                    events=work.events,
                     judged=judged,
                 )
                 if written is False or decision.signal is not None:
@@ -771,11 +789,24 @@ class WorkerRuntime:
         wrote = False
         wait_seconds: int | None = None
         results: list[Block] = []
+        events: list[ReservedEvent] = []
+        # Counted across the whole Run and carried forward inside this round:
+        # eight loads is a Run's ceiling, not a slice's, and a round asking
+        # three times must not get three answers out of one round's worth of
+        # room.
+        loaded = list(context.loaded_skills)
         for call in response.tool_calls:
+            if call.name == "skill.load":
+                answered, event = await answer_skill_load(self._skills, context, call, loaded)
+                results.append(answered)
+                if event is not None:
+                    events.append(event)
+                    loaded.append(UUID(str(event.payload["skill_version_id"])))
+                continue
             if call.name in PLATFORM_TOOLS:
                 # Answered here, never sent down. What this asks for happens to
                 # the Run; the Controller has nothing to do with it.
-                answered, seconds = _answer_platform_tool(call, context.spec.tools)
+                answered, seconds = answer_platform_tool(call, context.spec.tools)
                 results.append(answered)
                 if seconds is not None:
                     # Last one wins, and one is all a round can act on: the Run
@@ -825,7 +856,10 @@ class WorkerRuntime:
                 wrote = True
             results.append(answer)
         return _RoundWork(
-            (assistant, CanonicalMessage("tool", tuple(results))), wrote, wait_seconds
+            (assistant, CanonicalMessage("tool", tuple(results))),
+            wrote,
+            wait_seconds,
+            tuple(events),
         )
 
     async def _checkpoint_round(
@@ -839,6 +873,7 @@ class WorkerRuntime:
         executed_ms: int,
         appended: tuple[CanonicalMessage, ...],
         judged: "_Judged",
+        events: tuple[ReservedEvent, ...] = (),
     ) -> "_Sandbox | None":
         """One write round's whole consequence: scan, commit, dispose, signal.
 
@@ -863,6 +898,7 @@ class WorkerRuntime:
             response,
             executed_ms,
             appended,
+            events=events,
             judged=judged,
         )
         try:
@@ -879,6 +915,7 @@ class WorkerRuntime:
                 response,
                 executed_ms,
                 appended=appended,
+                events=events,
             )
             return None
 
@@ -940,6 +977,7 @@ class WorkerRuntime:
                 response,
                 executed_ms,
                 appended=appended,
+                events=events,
                 judged=judged,
             )
             if written is False or final.signal is not None:
@@ -1429,54 +1467,6 @@ class WorkerRuntime:
                 handle.version = renewed.version
 
 
-def _answer_platform_tool(
-    call: ToolCallBlock, bound: tuple[str, ...]
-) -> tuple[ToolResultBlock, int | None]:
-    """Answer a tool the platform resolves itself.
-
-    Every call gets a result, refused or not, for the reason every other
-    refusal here does: a model left without an answer to a call it made will
-    retry it or invent what it returned.
-
-    The binding check is repeated rather than inherited from `authorize`, which
-    this path deliberately never reaches. The schema list the model was handed
-    is not a control — this is.
-    """
-    if call.name not in bound:
-        return (
-            ToolResultBlock(
-                call_id=call.call_id,
-                output=f"refused: {RefusalReason.NOT_AUTHORIZED.value}",
-                exit_code=126,
-                failed=True,
-            ),
-            None,
-        )
-    try:
-        seconds = wait_seconds_of(call)
-    except ToolRefused as refused:
-        return (
-            ToolResultBlock(
-                call_id=refused.call_id,
-                output=f"refused: {refused.reason.value}",
-                exit_code=126,
-                failed=True,
-            ),
-            None,
-        )
-    # Written in the past tense on purpose: by the time the model reads this
-    # turn, the wait is over and the Run has been woken.
-    return (
-        ToolResultBlock(
-            call_id=call.call_id,
-            output=f"waited {seconds} seconds",
-            exit_code=0,
-            failed=False,
-        ),
-        seconds,
-    )
-
-
 def _streamer_of(sandbox: SandboxSession) -> StreamedCommandRunner | None:
     """The socket client's stream seam, not the Controller's authorize-only ticket.
 
@@ -1549,17 +1539,41 @@ def _round_index(context: ExecutionContext) -> int:
     return context.budget.consumed_model_calls + 1
 
 
+def _summaries(context: ExecutionContext) -> tuple[SkillSummary, ...]:
+    """One line per bound skill, in the order the author bound them.
+
+    A skill this Run has already loaded is marked as hit, so the planner knows
+    not to take away the summary that explains a document already in the
+    conversation.
+    """
+    loaded = set(context.loaded_skills)
+    return tuple(
+        SkillSummary(
+            name=skill.name,
+            text=f"- {skill.name}: {skill.description}",
+            loaded=skill.skill_version_id in loaded,
+        )
+        for skill in context.skills
+    )
+
+
 def _plan(context: ExecutionContext) -> ContextPlan:
     """Decide what this round may send, before it is sent.
 
     An endpoint that declared no window — the deterministic stand-in — gets a
     plan that fits by construction and changes nothing. That is not a bypass:
     there is no window to plan against, so there is no number this could
-    honestly compare the conversation to.
+    honestly compare the conversation to. The summaries still go out: a
+    stand-in with no window is still an Agent whose skills it was bound to.
     """
+    summaries = _summaries(context)
     if context.window is None:
         return ContextPlan(
-            messages=context.messages, fits=True, input_estimate=0, allowance=0
+            messages=context.messages,
+            fits=True,
+            input_estimate=0,
+            allowance=0,
+            skill_summaries=tuple(item.text for item in summaries),
         )
     return plan_context(
         window=context.window,
@@ -1567,6 +1581,8 @@ def _plan(context: ExecutionContext) -> ContextPlan:
         personality=context.spec.personality,
         tool_schemas=tuple(schemas_for(context.spec.tools)),
         history=context.history,
+        skill_summaries=summaries,
+        segments=(context.spec.context_budget or ContextBudget()).resolve(),
     )
 
 
@@ -1586,6 +1602,7 @@ def _request(
         round_index=_round_index(context),
         tools=tuple(schemas_for(context.spec.tools)),
         cache_hint=box.hint if box is not None else None,
+        skill_summaries=plan.skill_summaries,
     )
 
 

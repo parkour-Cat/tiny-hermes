@@ -262,6 +262,7 @@ export const IMPLEMENTED_TOOLS = [
   "file.write",
   "platform.wait",
   "shell.exec",
+  "skill.load",
 ] as const;
 
 /**
@@ -277,5 +278,6 @@ export const MODEL_SCENARIOS = [
   "fail_replay_safe",
   "shell_once",
   "shell_from_input",
+  "skill_once",
   "wait_once",
 ] as const;

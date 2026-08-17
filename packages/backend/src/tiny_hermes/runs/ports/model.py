@@ -53,6 +53,14 @@ class ModelRequest:
     #: The tools this AgentVersion bound, as provider schemas. §10.2's first
     #: step: an Agent that bound none advertises none.
     tools: tuple[dict[str, Any], ...] = ()
+    #: One line per bound skill: what it is called and what it is for, the
+    #: whole of what the model is told before it asks for any of the text.
+    #:
+    #: Its own field rather than something the caller glued onto
+    #: ``personality``. Glued on, the two would be one string on the budget
+    #: table, and neither the planner nor a person reading a Run could say
+    #: which of them cost what — or trim one without touching the other.
+    skill_summaries: tuple[str, ...] = ()
     #: Set when this slice began on a fresh writable layer. The provider places
     #: it with the platform's own rules rather than in the conversation, so a
     #: later turn cannot talk over it.
