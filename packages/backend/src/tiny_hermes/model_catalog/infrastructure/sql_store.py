@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.model_catalog.domain.models import (
+    ContextAccounting,
     EndpointStatus,
     ModelEndpoint,
     ModelEndpointSpec,
@@ -27,6 +28,8 @@ def _to_domain(row: ModelEndpointRow) -> ModelEndpoint:
             max_output_tokens=row.max_output_tokens,
             usage_quality=UsageQuality(row.usage_quality),
             credential_ref=row.credential_ref,
+            context_accounting=ContextAccounting(row.context_accounting),
+            tokenizer=row.tokenizer,
         ),
         status=EndpointStatus(row.status),
         created_by=row.created_by,
@@ -51,6 +54,8 @@ class SqlModelEndpointStore:
             max_output_tokens=spec.max_output_tokens,
             usage_quality=spec.usage_quality.value,
             credential_ref=spec.credential_ref,
+            context_accounting=spec.context_accounting.value,
+            tokenizer=spec.tokenizer,
             status=EndpointStatus.ACTIVE.value,
             created_by=created_by,
             created_at=now,
@@ -89,6 +94,8 @@ class SqlModelEndpointStore:
         row.max_output_tokens = spec.max_output_tokens
         row.usage_quality = spec.usage_quality.value
         row.credential_ref = spec.credential_ref
+        row.context_accounting = spec.context_accounting.value
+        row.tokenizer = spec.tokenizer
         row.updated_at = datetime.now(UTC)
         try:
             await self._session.commit()
