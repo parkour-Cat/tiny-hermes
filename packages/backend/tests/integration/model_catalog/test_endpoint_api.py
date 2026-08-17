@@ -154,7 +154,10 @@ def test_the_list_carries_no_credential_and_no_address(
     """Asserted on the absence of keys, not on the absence of values.
 
     `base_url` is left out because an internal model host is a piece of network
-    map, and the console has no use for it.
+    map, and the console has no use for it. How the window is counted is here
+    for the opposite reason: two endpoints of the same declared size hold
+    different amounts of conversation depending on it, so a list that shows the
+    number without it shows half a fact.
     """
     assert register(client, admin_csrf).status_code == 201
     entry = client.get("/api/v1/model-endpoints").json()[0]
@@ -164,6 +167,8 @@ def test_the_list_carries_no_credential_and_no_address(
         "model",
         "context_window",
         "max_output_tokens",
+        "context_accounting",
+        "tokenizer",
         "usage_quality",
         "status",
     }

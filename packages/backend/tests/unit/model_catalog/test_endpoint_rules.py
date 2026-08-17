@@ -1,6 +1,7 @@
 import pytest
 from pydantic import ValidationError
 from tiny_hermes.model_catalog.domain.models import (
+    ContextAccounting,
     ModelEndpointSpec,
     UsageQuality,
     credential_ref_is_wellformed,
@@ -26,6 +27,28 @@ def test_a_well_formed_endpoint_validates() -> None:
     endpoint = spec()
     assert endpoint.usage_quality is UsageQuality.PROVIDER
     assert endpoint.base_url == "https://models.example.com/v1"
+
+
+def test_an_endpoint_that_says_nothing_about_its_window_is_read_conservatively() -> None:
+    """§7.4.2 wants the accounting declared; the default is the safer reading.
+
+    `shared` gives the budget planner less room than `separate` would. An
+    endpoint that is really `separate` therefore gets a smaller request than it
+    could take, while the opposite default would get requests refused.
+    """
+    endpoint = spec()
+    assert endpoint.context_accounting is ContextAccounting.SHARED
+    assert endpoint.tokenizer is None
+
+
+def test_an_endpoint_may_declare_a_tokenizer_this_platform_has_not_verified() -> None:
+    """A name recorded is not a count promised.
+
+    §9.4 admits an estimate only from a tokenizer verified against the model,
+    and none ships here. Storing the name is how a later release can start
+    honouring it without every endpoint being re-registered.
+    """
+    assert spec(tokenizer="o200k_base").tokenizer == "o200k_base"
 
 
 def test_a_trailing_slash_is_normalized_away() -> None:
@@ -140,4 +163,6 @@ def test_the_spec_holds_no_credential_field_at_all() -> None:
         "max_output_tokens",
         "usage_quality",
         "credential_ref",
+        "context_accounting",
+        "tokenizer",
     }

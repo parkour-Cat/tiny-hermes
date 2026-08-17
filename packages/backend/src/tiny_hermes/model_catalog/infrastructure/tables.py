@@ -9,6 +9,7 @@ from tiny_hermes.shared.database import Base, CreatedAtMixin, IdMixin
 ENDPOINT_KINDS = ("openai_compatible",)
 ENDPOINT_STATUSES = ("active", "disabled")
 USAGE_QUALITIES = ("provider", "unavailable")
+CONTEXT_ACCOUNTINGS = ("shared", "separate")
 
 
 def _in_values(column: str, values: tuple[str, ...]) -> str:
@@ -39,6 +40,10 @@ class ModelEndpointRow(IdMixin, CreatedAtMixin, Base):
         CheckConstraint(
             _in_values("usage_quality", USAGE_QUALITIES), name="ck_model_endpoints_usage"
         ),
+        CheckConstraint(
+            _in_values("context_accounting", CONTEXT_ACCOUNTINGS),
+            name="ck_model_endpoints_context_accounting",
+        ),
         CheckConstraint("context_window > 0", name="ck_model_endpoints_context_window"),
         CheckConstraint(
             "max_output_tokens > 0 AND max_output_tokens <= context_window",
@@ -54,6 +59,13 @@ class ModelEndpointRow(IdMixin, CreatedAtMixin, Base):
     max_output_tokens: Mapped[int] = mapped_column(Integer)
     usage_quality: Mapped[str] = mapped_column(String(20))
     credential_ref: Mapped[str] = mapped_column(String(200))
+    #: Defaulted rather than nullable: every endpoint registered before the
+    #: budget planner existed has a window that behaves one way or the other,
+    #: and `shared` is the reading that sends the smaller request.
+    context_accounting: Mapped[str] = mapped_column(String(20), default="shared")
+    #: Null means "no tokenizer declared", which is every row today. The
+    #: planner's conservative bound is what answers then.
+    tokenizer: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="active")
     created_by: Mapped[UUID] = mapped_column()
     updated_at: Mapped[datetime] = mapped_column(

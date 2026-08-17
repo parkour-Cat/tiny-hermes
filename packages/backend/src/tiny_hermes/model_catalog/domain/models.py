@@ -36,6 +36,18 @@ class UsageQuality(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
+class ContextAccounting(StrEnum):
+    """How an endpoint's window is shared between input and reserved output.
+
+    ``shared`` means one window covers both, so the budget planner must
+    subtract what it reserves for the answer before it decides what to send.
+    ``separate`` means the endpoint bounds them independently.
+    """
+
+    SHARED = "shared"
+    SEPARATE = "separate"
+
+
 class EndpointStatus(StrEnum):
     ACTIVE = "active"
     DISABLED = "disabled"
@@ -64,6 +76,20 @@ class ModelEndpointSpec(BaseModel):
     max_output_tokens: int = Field(ge=1, le=10_000_000)
     usage_quality: UsageQuality
     credential_ref: str = Field(min_length=1, max_length=200)
+    #: Whether the reserved output competes with the input for one window.
+    #: Product design §7.4.2 requires this be declared per endpoint and
+    #: computed from the declaration, never guessed from a provider name — the
+    #: two answers differ by the whole reserved output. ``shared`` is the
+    #: default because it is the conservative one: an endpoint that is really
+    #: `separate` gets a smaller request than it had to take, while the
+    #: opposite mistake gets a request refused.
+    context_accounting: ContextAccounting = ContextAccounting.SHARED
+    #: The local tokenizer the budget planner should use for this endpoint.
+    #: Recorded even though no tokenizer ships verified in this release: the
+    #: planner falls back to a conservative character bound and says so, and
+    #: §9.4 admits a real estimate only from a tokenizer verified against the
+    #: model. A name here is a declaration, never a promise the count is exact.
+    tokenizer: str | None = Field(default=None, max_length=64)
 
     @field_validator("base_url")
     @classmethod
