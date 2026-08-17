@@ -32,6 +32,7 @@ from tiny_hermes.session_workspace.infrastructure.minio_store import MinioObject
 from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.errors import AppError, AuditedDenial
 from tiny_hermes.skills.application.service import SkillCatalog
+from tiny_hermes.skills.infrastructure.outbound_tarball import OutboundTarballSource
 from tiny_hermes.skills.infrastructure.sql_store import SqlSkillStore
 from tiny_hermes.tenancy.application.workspace_service import WorkspaceService
 from tiny_hermes.tenancy.infrastructure.sql_store import SqlWorkspaceStore
@@ -216,7 +217,10 @@ class ApplicationResources:
     async def skill_catalog(self) -> AsyncGenerator[SkillCatalog]:
         async with self.session_factory()() as session:
             try:
-                yield SkillCatalog(SqlSkillStore(session))
+                yield SkillCatalog(
+                    SqlSkillStore(session),
+                    OutboundTarballSource(self.outbound_client),
+                )
             except AuditedDenial:
                 await session.commit()
                 raise

@@ -6,11 +6,16 @@ codes — in particular the 200/201 split on re-upload, which no service-level
 test can see.
 """
 
+from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
+from tiny_hermes.api import resources
+from tiny_hermes.skills.domain.package import SkillFile
+from tiny_hermes.skills.ports.tarball_source import FetchedTarball, TarballUnavailable
 
 SKILL_MD = """---
 name: release-notes
@@ -258,3 +263,145 @@ async def test_creating_a_skill_writes_one_audit_row(
             )
         ).scalars().all()
     assert list(actions) == ["skill.created"]
+
+
+@dataclass
+class Stubbed:
+    """Stands where `OutboundTarballSource` is wired.
+
+    These tests are about the route, the catalog and the audit trail. What
+    happens on the socket — the address policy, the redirect re-check, the four
+    tar ceilings — is `test_tarball_import.py`'s subject, against a real server.
+    """
+
+    files: tuple[SkillFile, ...] = ()
+    ref: str | None = "9f1c2ab"
+    error: str | None = None
+    urls: list[str] = field(default_factory=list[str])
+
+    async def fetch(self, url: str) -> FetchedTarball:
+        self.urls.append(url)
+        if self.error is not None:
+            raise TarballUnavailable(self.error)
+        return FetchedTarball(files=self.files, ref=self.ref)
+
+
+@pytest.fixture
+def remote(monkeypatch: pytest.MonkeyPatch) -> Stubbed:
+    """Replaces the fetcher the resources wire in, leaving everything else."""
+    stub = Stubbed(
+        files=(
+            SkillFile(path="SKILL.md", text=SKILL_MD),
+            SkillFile(path="style.md", text="Short sentences."),
+        )
+    )
+    def build(client: object) -> Stubbed:
+        del client
+        return stub
+
+    monkeypatch.setattr(resources, "OutboundTarballSource", build)
+    return stub
+
+
+def test_a_url_becomes_a_skill_whose_version_remembers_where_it_came_from(
+    client: TestClient, scope: dict[str, str], remote: Stubbed
+) -> None:
+    url = "https://codeload.example.com/house-style/tar.gz/main"
+    created = client.post(
+        "/api/v1/skills/import", headers=scope, json={"scope": "workspace", "url": url}
+    )
+    assert created.status_code == 201, created.text
+    assert remote.urls == [url]
+
+    versions = client.get(
+        f"/api/v1/skills/{created.json()['id']}/versions", headers=scope
+    ).json()
+    assert versions[0]["source"] == "git"
+    assert versions[0]["source_url"] == url
+    assert versions[0]["source_ref"] == "9f1c2ab"
+
+
+def test_re_importing_an_unchanged_source_publishes_nothing(
+    client: TestClient, scope: dict[str, str], remote: Stubbed
+) -> None:
+    """200 rather than 201, the same rule as a re-upload: a source that has
+    not moved is not a new version, however many times somebody asks."""
+    skill_id = client.post(
+        "/api/v1/skills/import",
+        headers=scope,
+        json={"scope": "workspace", "url": "https://example.com/a.tar.gz"},
+    ).json()["id"]
+
+    again = client.post(
+        f"/api/v1/skills/{skill_id}/versions/import",
+        headers=scope,
+        json={"url": "https://example.com/a.tar.gz"},
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["version_number"] == 1
+
+    remote.files = (
+        SkillFile(path="SKILL.md", text=SKILL_MD),
+        SkillFile(path="style.md", text="Shorter sentences."),
+    )
+    remote.ref = "b4d5e6f"
+    moved = client.post(
+        f"/api/v1/skills/{skill_id}/versions/import",
+        headers=scope,
+        json={"url": "https://example.com/a.tar.gz"},
+    )
+    assert moved.status_code == 201, moved.text
+    assert moved.json()["version_number"] == 2
+    assert moved.json()["source_ref"] == "b4d5e6f"
+
+
+def test_an_address_the_platform_will_not_call_is_the_caller_s_to_fix(
+    client: TestClient, scope: dict[str, str], remote: Stubbed
+) -> None:
+    """422, not 502. The URL is the part the person can change."""
+    remote.error = "That address is not one this platform will call."
+    refused = client.post(
+        "/api/v1/skills/import",
+        headers=scope,
+        json={"scope": "workspace", "url": "https://example.com/a.tar.gz"},
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["code"] == "skill_import_failed"
+    assert "will call" in refused.json()["detail"]
+
+
+def test_an_imported_package_is_scanned_like_any_other(
+    client: TestClient, scope: dict[str, str], remote: Stubbed
+) -> None:
+    """Coming from a URL buys a package nothing. The refusal happens before a
+    row exists, so a repository with a key in it leaves no skill behind."""
+    remote.files = (
+        SkillFile(path="SKILL.md", text=SKILL_MD),
+        SkillFile(path="style.md", text="Use AKIAIOSFODNN7EXAMPLE for the demo.\n"),
+    )
+    refused = client.post(
+        "/api/v1/skills/import",
+        headers=scope,
+        json={"scope": "workspace", "url": "https://example.com/a.tar.gz"},
+    )
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["code"] == "skill_scan_refused"
+    assert client.get("/api/v1/skills", headers=scope).json() == []
+
+
+async def test_importing_writes_an_audit_row_naming_the_import(
+    client: TestClient, scope: dict[str, str], remote: Stubbed, engine: AsyncEngine
+) -> None:
+    created = client.post(
+        "/api/v1/skills/import",
+        headers=scope,
+        json={"scope": "workspace", "url": "https://example.com/a.tar.gz"},
+    )
+    assert created.status_code == 201
+    async with engine.connect() as connection:
+        actions = (
+            await connection.execute(
+                text("SELECT action FROM audit_events WHERE action LIKE 'skill.%'")
+            )
+        ).scalars().all()
+    assert list(actions) == ["skill.imported"]

@@ -34,6 +34,11 @@ from tiny_hermes.skills.ports.store import (
     SkillStore,
     VersionResult,
 )
+from tiny_hermes.skills.ports.tarball_source import (
+    FetchedTarball,
+    TarballSource,
+    TarballUnavailable,
+)
 from tiny_hermes.tenancy.domain.models import Actor, Role
 
 WRITERS = frozenset({Role.WORKSPACE_ADMIN, Role.DEVELOPER})
@@ -98,11 +103,28 @@ class VersionNotBindable(SkillCatalogError):
     """Asked to make a withdrawn or blocked version the default for new bindings."""
 
 
+class SkillImportFailed(SkillCatalogError):
+    """The archive at that URL could not be fetched or could not be read.
+
+    One refusal for both, carrying the reason as prose, because from the far
+    side of the form "GitHub answered 404" and "that tar has a symlink in it"
+    are the same kind of problem: the URL that was typed does not work.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class SkillCatalog:
     """The catalog's rules, with persistence one operation at a time behind it."""
 
-    def __init__(self, store: SkillStore) -> None:
+    def __init__(self, store: SkillStore, tarballs: TarballSource | None = None) -> None:
         self._store = store
+        # Optional so the unit tests, which are about who may act and what may
+        # be stored, need no way out of the process. An import without a source
+        # is refused rather than attempted.
+        self._tarballs = tarballs
 
     async def list_skills(
         self, actor: Actor, workspace_id: UUID, request_id: str
@@ -224,6 +246,91 @@ class SkillCatalog:
                 context={"version": str(result.version.version_number)},
             )
         return result
+
+    async def import_skill(
+        self,
+        actor: Actor,
+        workspace_id: UUID,
+        scope: SkillScope,
+        url: str,
+        request_id: str,
+    ) -> tuple[Skill, SkillVersion]:
+        """A new skill from a git tarball, named by the manifest inside it."""
+        await self._require_writer(actor, workspace_id, scope, request_id)
+        fetched = await self._fetch(url)
+        package, findings = _accept(fetched.files)
+        try:
+            skill = await self._store.create_skill(
+                scope=scope,
+                workspace_id=None if scope is SkillScope.PLATFORM else workspace_id,
+                name=package.manifest.name,
+                created_by=actor.id,
+            )
+        except DuplicateSkillName as error:
+            raise SkillNameTaken from error
+        result = await self._store.add_version(
+            skill_id=skill.id,
+            package=package,
+            findings=findings,
+            source=SkillSource.GIT,
+            source_url=url,
+            source_ref=fetched.ref,
+            created_by=actor.id,
+        )
+        created = await self._store.set_current_version(skill.id, result.version.id)
+        if created is None:
+            raise UnknownSkill
+        await self._store.append_audit(
+            workspace_id=workspace_id,
+            actor_id=actor.id,
+            action="skill.imported",
+            resource_id=skill.id,
+            request_id=request_id,
+            context={"scope": scope.value, "name": skill.name, "url": url},
+        )
+        return created, result.version
+
+    async def import_version(
+        self,
+        actor: Actor,
+        workspace_id: UUID,
+        skill_id: UUID,
+        url: str,
+        request_id: str,
+    ) -> VersionResult:
+        """Re-import a skill from source. Unchanged content is not a new version."""
+        skill = await self._writable(actor, workspace_id, skill_id, request_id)
+        fetched = await self._fetch(url)
+        package, findings = _accept(fetched.files)
+        if package.manifest.name != skill.name:
+            raise SkillNameMismatch(skill.name, package.manifest.name)
+        result = await self._store.add_version(
+            skill_id=skill.id,
+            package=package,
+            findings=findings,
+            source=SkillSource.GIT,
+            source_url=url,
+            source_ref=fetched.ref,
+            created_by=actor.id,
+        )
+        if result.created:
+            await self._store.append_audit(
+                workspace_id=workspace_id,
+                actor_id=actor.id,
+                action="skill.version_imported",
+                resource_id=result.version.id,
+                request_id=request_id,
+                context={"version": str(result.version.version_number), "url": url},
+            )
+        return result
+
+    async def _fetch(self, url: str) -> FetchedTarball:
+        if self._tarballs is None:
+            raise SkillImportFailed("Importing from a URL is not configured here.")
+        try:
+            return await self._tarballs.fetch(url)
+        except TarballUnavailable as error:
+            raise SkillImportFailed(str(error)) from error
 
     async def withdraw_version(
         self,
