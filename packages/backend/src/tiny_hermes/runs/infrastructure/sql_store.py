@@ -9,9 +9,10 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tiny_hermes.agents.domain.models import AgentLimits, AgentSpec
+from tiny_hermes.agents.domain.models import AgentLimits, AgentSpec, EndpointModelPolicy
 from tiny_hermes.agents.infrastructure.tables import AgentRow, AgentVersionRow
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
+from tiny_hermes.model_catalog.infrastructure.tables import ModelEndpointRow
 from tiny_hermes.runs.application.service import (
     AgentNotPublished,
     BudgetNotWidened,
@@ -30,6 +31,7 @@ from tiny_hermes.runs.application.service import (
     UnknownRun,
     UnknownSession,
 )
+from tiny_hermes.runs.domain.context_budget import Accounting, ContextWindow
 from tiny_hermes.runs.domain.models import (
     TERMINAL_STATES,
     BudgetSummary,
@@ -50,6 +52,7 @@ from tiny_hermes.runs.domain.models import (
     SessionMode,
     SessionSnapshot,
     StateDecision,
+    StoredMessage,
     WorkspaceCleanupTarget,
     event_type_for,
     message_from_document,
@@ -642,11 +645,45 @@ class SqlRunStore:
             run_id=run.id,
             state_version=run.state_version,
             spec=spec,
-            messages=tuple(_to_message(row) for row in found),
+            history=tuple(
+                StoredMessage(id=row.id, sequence=row.sequence, message=_to_message(row))
+                for row in found
+            ),
             cancel_requested=run.cancel_requested_at is not None,
             pause_requested=run.pause_requested_at is not None,
             budget=_budget_summary(budget),
+            window=await self._context_window(spec),
             compat_deadline_at=deadline,
+        )
+
+    async def _context_window(self, spec: AgentSpec) -> ContextWindow | None:
+        """What the endpoint this Run's policy names declared it can take.
+
+        Read from the endpoint row rather than guessed from the provider name,
+        per §7.4.2 — and read fresh each round rather than frozen into the
+        Version, because the window is a property of the endpoint an
+        administrator maintains, not of the Agent an author published.
+        """
+        policy = spec.model_policy
+        if not isinstance(policy, EndpointModelPolicy):
+            # The deterministic model declares no window. Nothing to plan
+            # against, and inventing one would trim a stand-in's conversation
+            # against a number no endpoint ever gave.
+            return None
+        endpoint = await self._session.get(ModelEndpointRow, policy.endpoint_id)
+        if endpoint is None:
+            return None
+        return ContextWindow(
+            context_window=endpoint.context_window,
+            # The Agent's own ceiling narrows the endpoint's, never widens it —
+            # the same minimum `build_payload` sends, so the round is planned
+            # against the space the request will actually leave.
+            reserved_output_tokens=min(
+                policy.max_output_tokens or endpoint.max_output_tokens,
+                endpoint.max_output_tokens,
+            ),
+            accounting=Accounting(endpoint.context_accounting),
+            tokenizer=endpoint.tokenizer,
         )
 
     async def renew_lease(self, command: RenewLeaseCommand) -> RenewedLease | None:

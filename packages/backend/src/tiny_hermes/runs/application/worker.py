@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tiny_hermes.artifacts.application.service import ArtifactLimits, ArtifactRecorder
 from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
+from tiny_hermes.runs.domain.context_budget import ContextPlan, plan_context
 from tiny_hermes.runs.domain.goal import (
     CompletionCheck,
     GoalEvidence,
@@ -21,6 +22,7 @@ from tiny_hermes.runs.domain.goal import (
     judge,
 )
 from tiny_hermes.runs.domain.models import (
+    SAFETY_PREAMBLE,
     Block,
     CacheStateHint,
     CanonicalMessage,
@@ -307,8 +309,14 @@ class WorkerRuntime:
                 context = await self._read_context(workspace_id, claimed.run.id)
                 if context is None:
                     return
+                plan = _plan(context)
+                if not plan.fits:
+                    await self._overflow(claimed, handle, box, context, plan)
+                    return
+                if plan.changed:
+                    await self._record_planning(claimed, plan)
                 round_started = monotonic()
-                response = await self._model.complete(_request(context, box))
+                response = await self._model.complete(_request(context, box, plan))
                 if box is not None:
                     # Only the first round of a slice is told, because only the
                     # first one is news.
@@ -1216,6 +1224,62 @@ class WorkerRuntime:
             executed_ms=0,
         )
 
+    async def _record_planning(self, claimed: ClaimedRun, plan: ContextPlan) -> None:
+        """Say what was done to the context before the round that used it.
+
+        Written ahead of the model call rather than with the round's own
+        transition: what the planner did is true whatever the call then
+        returns, and a round that fails would otherwise erase the only record
+        of why the model saw less than the transcript holds.
+        """
+        for record in plan.trimmed:
+            await self._append_event(
+                claimed, RunEventType.CONTEXT_TRIMMED, record.payload()
+            )
+        if plan.compacted is not None:
+            await self._append_event(
+                claimed, RunEventType.CONTEXT_COMPACTED, plan.compacted.payload()
+            )
+
+    async def _overflow(
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        box: "_Sandbox | None",
+        context: ExecutionContext,
+        plan: ContextPlan,
+    ) -> None:
+        """§7.4.2's last line: the originals do not fit, so the Run pauses.
+
+        No provider call is made — which is why the round is recorded with
+        `model_calls=0`. Sending a request the endpoint would refuse costs the
+        Run a call it never got and tells a reader the model failed, when what
+        happened is that the platform declined to ask.
+
+        Nothing is trimmed or compacted on this path, so no event says either
+        was. What the pause is about is carried by its reason and by the two
+        numbers below, and the transcript still holds every message.
+        """
+        logger.info(
+            "context overflow",
+            extra={
+                "run_id": str(claimed.run.id),
+                "input_estimate": plan.input_estimate,
+                "allowance": plan.allowance,
+            },
+        )
+        decision = SliceDecision(RunSignal.SAFE_PAUSE_REACHED, PauseReason.CONTEXT_OVERFLOW)
+        if box is not None:
+            decision = await self._close_sandbox(claimed, handle, box, decision)
+        await self._record(
+            claimed,
+            handle,
+            context.state_version,
+            decision,
+            _no_round(),
+            executed_ms=0,
+        )
+
     async def _append_event(
         self,
         claimed: ClaimedRun,
@@ -1485,12 +1549,40 @@ def _round_index(context: ExecutionContext) -> int:
     return context.budget.consumed_model_calls + 1
 
 
-def _request(context: ExecutionContext, box: "_Sandbox | None") -> ModelRequest:
-    """Build one round's request."""
+def _plan(context: ExecutionContext) -> ContextPlan:
+    """Decide what this round may send, before it is sent.
+
+    An endpoint that declared no window — the deterministic stand-in — gets a
+    plan that fits by construction and changes nothing. That is not a bypass:
+    there is no window to plan against, so there is no number this could
+    honestly compare the conversation to.
+    """
+    if context.window is None:
+        return ContextPlan(
+            messages=context.messages, fits=True, input_estimate=0, allowance=0
+        )
+    return plan_context(
+        window=context.window,
+        safety_rules=SAFETY_PREAMBLE,
+        personality=context.spec.personality,
+        tool_schemas=tuple(schemas_for(context.spec.tools)),
+        history=context.history,
+    )
+
+
+def _request(
+    context: ExecutionContext, box: "_Sandbox | None", plan: ContextPlan
+) -> ModelRequest:
+    """Build one round's request.
+
+    The messages come from the plan, never from the context: the planner is the
+    only thing that decides what one round sends, and a caller that reached
+    past it would send a request the window was never measured against.
+    """
     return ModelRequest(
         policy=context.spec.model_policy,
         personality=context.spec.personality,
-        messages=context.messages,
+        messages=plan.messages,
         round_index=_round_index(context),
         tools=tuple(schemas_for(context.spec.tools)),
         cache_hint=box.hint if box is not None else None,

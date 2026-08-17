@@ -5,6 +5,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from tiny_hermes.agents.domain.models import AgentSpec
+from tiny_hermes.runs.domain.context_budget import ContextWindow
 from tiny_hermes.runs.domain.models import (
     BudgetSummary,
     CallerIdentity,
@@ -19,6 +20,7 @@ from tiny_hermes.runs.domain.models import (
     RunSnapshot,
     SessionMode,
     SessionSnapshot,
+    StoredMessage,
     WorkspaceCleanupTarget,
 )
 from tiny_hermes.tenancy.domain.models import Role
@@ -210,13 +212,26 @@ class ExecutionContext:
     #: hands over everything said in it so far; an ephemeral one hands over only
     #: this Run's own input, which is the first behaviour `session_mode` has
     #: ever had.
-    messages: tuple[CanonicalMessage, ...]
+    #:
+    #: Carried with each message's id and sequence, because a compaction has to
+    #: record the range it covered and the ids it stood in for. Anything that
+    #: only wants the conversation reads ``messages`` below.
+    history: tuple[StoredMessage, ...]
     cancel_requested: bool
     pause_requested: bool
     budget: BudgetSummary
+    #: What the endpoint this Run's policy names declared it can take, read at
+    #: the same time as the conversation. ``None`` for a policy that names no
+    #: endpoint — the deterministic model declares no window, and there is
+    #: nothing to plan against.
+    window: ContextWindow | None = None
     #: When set, this Run was admitted by Chat Completions and the Worker must
     #: not emit ``SLICE_ENDED`` for an ordinary slice boundary before it.
     compat_deadline_at: datetime | None = None
+
+    @property
+    def messages(self) -> tuple[CanonicalMessage, ...]:
+        return tuple(item.message for item in self.history)
 
 
 @dataclass(frozen=True)
