@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class AgentLimits(BaseModel):
@@ -60,6 +60,80 @@ class ChatCompletionsDelivery(BaseModel):
     sync_timeout_seconds: int = Field(default=60, ge=1, le=60)
 
 
+class StopConditions(BaseModel):
+    """Ceilings the judge owns, inside the ones the budget already enforces."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    max_rounds: int | None = Field(default=None, ge=1)
+
+
+class CompletionCondition(BaseModel):
+    """What "finished" means for this Agent, declared rather than inferred.
+
+    Product design §12.2. Two of these four the platform can actually check,
+    and a condition that declares neither is refused: `goal.py` answers
+    `continue` for a declared goal with nothing checked, so such an Agent would
+    work until the round ceiling and pause.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    #: Paths relative to `/workspace/data`, written the way the manifest and
+    #: the file tools write them — one spelling, or a check fails on a file
+    #: that exists.
+    expected_artifacts: tuple[str, ...] = ()
+    #: One command, run in the sandbox down `shell.exec`'s path. Never on the
+    #: host: reusing that path is what carries 0.1's host-fallback ban here
+    #: unchanged.
+    verification_command: str | None = Field(default=None, max_length=4096)
+    #: Handed to the model, never machine-checked. Declared as unenforced so
+    #: nobody reads it as a guarantee, and recorded so a reader can see what
+    #: the Agent was told.
+    constraints: str | None = Field(default=None, max_length=4096)
+    stop_conditions: StopConditions = StopConditions()
+
+    @field_validator("expected_artifacts")
+    @classmethod
+    def normalize_artifact_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        from tiny_hermes.session_workspace.domain.manifest import (  # noqa: PLC0415 - cycle
+            InvalidWorkspacePath,
+            normalize_workspace_path,
+        )
+
+        normalized: list[str] = []
+        for path in value:
+            try:
+                clean = normalize_workspace_path(path)
+            except InvalidWorkspacePath as refused:
+                raise ValueError(f"expected artifact: {refused}") from refused
+            if clean in normalized:
+                # Two spellings of one file would be counted twice by a check
+                # that can only answer once.
+                raise ValueError(f"an artifact may be expected once: {clean}")
+            normalized.append(clean)
+        return tuple(normalized)
+
+    @field_validator("verification_command")
+    @classmethod
+    def reject_blank_command(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("verification_command cannot be blank")
+        return stripped
+
+    @model_validator(mode="after")
+    def require_something_checkable(self) -> "CompletionCondition":
+        if not self.expected_artifacts and self.verification_command is None:
+            raise ValueError(
+                "a completion condition needs something checkable: "
+                "expected_artifacts or verification_command"
+            )
+        return self
+
+
 #: Discriminated, so a `provider` the platform does not understand is refused
 #: rather than falling through to the stand-in. An Agent that answers from a
 #: `match` statement while its author believes it is talking to a model is the
@@ -98,6 +172,12 @@ class AgentSpec(BaseModel):
     #: Omitted from the normalized document when it equals the default, so a
     #: spec that never heard of Chat Completions still hashes as it did.
     delivery: ChatCompletionsDelivery = ChatCompletionsDelivery()
+    #: What the platform checks before it accepts a model's claim to be done.
+    #: Absent for every version published before M2A, and for those the claim
+    #: is still the whole of the answer — 0.1's behaviour, unchanged. Omitted
+    #: from the normalized document when absent, so those versions keep their
+    #: content hashes.
+    completion: CompletionCondition | None = None
 
     @field_validator("tools")
     @classmethod
@@ -119,6 +199,35 @@ class AgentSpec(BaseModel):
                 raise ValueError(f"unknown tool: {name}")
         return value
 
+    @model_validator(mode="after")
+    def require_the_means_to_check_completion(self) -> "AgentSpec":
+        """Refused at publish, for the same reason an unknown tool is.
+
+        Both of these describe a check the platform could never run, and a
+        check that never runs is a Run that works until the round ceiling and
+        pauses — a runtime mystery for whoever submitted it, caused by
+        something its author could have been told while writing it.
+        """
+        completion = self.completion
+        if completion is None:
+            return self
+        if completion.verification_command is not None and "shell.exec" not in self.tools:
+            raise ValueError(
+                "a verification_command runs down shell.exec's path; bind shell.exec"
+            )
+        if completion.expected_artifacts and not self.tools:
+            # No bound tool means no sandbox for the slice at all
+            # (`worker.py:249`), so nothing could write the artifact.
+            raise ValueError(
+                "an expected artifact needs a tool that can produce it; bind one"
+            )
+        declared = completion.stop_conditions.max_rounds
+        if declared is not None and declared > self.limits.max_model_calls:
+            # The budget would stop the Run first, while the Agent's author
+            # reads the declared ceiling as the one in force.
+            raise ValueError("stop_conditions.max_rounds exceeds limits.max_model_calls")
+        return self
+
     @field_validator("personality")
     @classmethod
     def normalize_personality(cls, value: str) -> str:
@@ -133,6 +242,11 @@ def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
     default_delivery = ChatCompletionsDelivery().model_dump(mode="json")
     if normalized.get("delivery") == default_delivery:
         del normalized["delivery"]
+    if normalized.get("completion") is None:
+        # Not "equals the default": there is no default condition. A spec that
+        # declares none carries no key at all, which is what keeps every
+        # version published before M2A hashing exactly as it did.
+        normalized.pop("completion", None)
     encoded = json.dumps(
         normalized,
         ensure_ascii=False,
