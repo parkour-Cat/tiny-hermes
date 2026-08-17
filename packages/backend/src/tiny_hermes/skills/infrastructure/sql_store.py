@@ -137,6 +137,12 @@ class SqlSkillStore:
             # whatever else the caller's transaction had already done.
             async with self._session.begin_nested():
                 self._session.add(row)
+                # Flushed on its own before the files that point at it. The
+                # ORM cannot derive the order here: `skills` and
+                # `skill_versions` reference each other, and a cycle in the
+                # metadata costs the flush its table sort, so the file rows
+                # would otherwise be free to go first and hit the foreign key.
+                await self._session.flush()
                 for entry in package.files:
                     self._session.add(
                         SkillFileRow(

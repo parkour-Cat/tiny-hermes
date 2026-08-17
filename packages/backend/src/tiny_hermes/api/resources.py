@@ -31,6 +31,8 @@ from tiny_hermes.secrets.infrastructure.sql_store import SqlSecretStore
 from tiny_hermes.session_workspace.infrastructure.minio_store import MinioObjectStore
 from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.errors import AppError, AuditedDenial
+from tiny_hermes.skills.application.service import SkillCatalog
+from tiny_hermes.skills.infrastructure.sql_store import SqlSkillStore
 from tiny_hermes.tenancy.application.workspace_service import WorkspaceService
 from tiny_hermes.tenancy.infrastructure.sql_store import SqlWorkspaceStore
 
@@ -210,6 +212,19 @@ class ApplicationResources:
         """Reads only: nothing here writes, so nothing here commits."""
         async with self.session_factory()() as session:
             yield ArtifactService(SqlArtifactStore(session), self.object_store())
+
+    async def skill_catalog(self) -> AsyncGenerator[SkillCatalog]:
+        async with self.session_factory()() as session:
+            try:
+                yield SkillCatalog(SqlSkillStore(session))
+            except AuditedDenial:
+                await session.commit()
+                raise
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
 
     async def secret_service(self) -> AsyncGenerator[SecretService]:
         async with self.session_factory()() as session:
