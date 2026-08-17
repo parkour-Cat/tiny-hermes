@@ -54,11 +54,15 @@
 
 ## 3. 把 `StopReason` 换成 `GoalVerdict`（纯重构）
 
-- [ ] `slice_policy.py`：`RoundOutcome.stop_reason` → `RoundOutcome.verdict`。
+- [x] `slice_policy.py`：`RoundOutcome.stop_reason` → `RoundOutcome.verdict`。
       `decide_after_round` 的优先级顺序不变（取消 > 暂停 > 预算 > 判定 > 兼容超时 > 时间片）。
-- [ ] `worker.py:_execute_slice`：调用 `judge()` 得到 verdict 再交给
-      `decide_after_round`。此时证据恒为「无完成条件」，判定与 0.1 等价。
-- [ ] 出口：`uv run pytest` 全绿，`tests/e2e/console.spec.ts` 不改一行。
+      `undecidable` → `paused(operator)`、`wait` → `EXTERNAL_WAIT_STARTED` 这两条
+      映射一并写好；它们的生产者分别在第 4 步和第 7 步才出现，所以此刻不可达。
+- [x] `worker.py:_execute_slice`：调用 `judge()` 得到 verdict 再交给
+      `decide_after_round`。此时证据恒为「无完成条件」，判定与 0.1 等价：
+      `COMPLETED`→`done`、`FAILED`→`failed`、`CONTINUE`/`TOOL_CALL`→`continue`。
+- [x] `test_slice_policy.py` 补一条：`done` 判定仍然输给取消、暂停和预算。
+- [x] 出口：单测 718 全绿，ruff 与 pyright 干净，`tests/e2e/console.spec.ts` 不改一行。
 
 ## 4. 校验命令：让虚假的 `done` 站不住
 
