@@ -46,6 +46,8 @@ const ACTIVE_ENDPOINT = {
   context_window: 128000,
   max_output_tokens: 4096,
   usage_quality: "provider",
+  context_accounting: "shared",
+  tokenizer: null,
   status: "active",
 };
 

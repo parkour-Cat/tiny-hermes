@@ -8,6 +8,7 @@ import { expect, test, beforeEach } from "vitest";
 import { RunDetailPage } from "./RunDetailPage";
 import { moment } from "../i18n/moment";
 import { t } from "../i18n/zh-CN";
+import { fill } from "../runs/explain";
 import { server } from "../test/server";
 import { TestTheme } from "../test/TestTheme";
 
@@ -302,7 +303,9 @@ test("what the platform cannot produce is absent, not empty", async () => {
   await screen.findByText(t("summarySection"));
 
   // A pane that says "no data" reads as "nothing happened". These are M2/M3;
-  // the console does not stand in for them. 产物 is the Files card now.
+  // the console does not stand in for them. 产物 is the Files card now, and
+  // context and compaction are sentences on the timeline rather than a pane —
+  // a Run that trimmed nothing should say nothing, which is this case.
   for (const absent of ["父子任务树", "上下文和压缩事件", "Token 和费用"]) {
     expect(screen.queryByText(absent)).not.toBeInTheDocument();
   }
@@ -360,6 +363,38 @@ test("the session transcript and the run's files are listed", async () => {
   expect(screen.getByText("file.list")).toBeInTheDocument();
   expect(screen.getByText("stdout.log")).toBeInTheDocument();
   expect(screen.getAllByRole("button", { name: t("downloadArtifact") }).length).toBeGreaterThan(0);
+});
+
+test("a trimmed context is said in words, not left as a payload to decode", async () => {
+  // The one class of event that reports a decision nobody asked for: the round
+  // was sent something other than what the transcript holds. `context_trimmed`
+  // and a JSON blob leave a reader wondering what was lost — nothing was, and
+  // the sentence is where that is said.
+  server.use(http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run())));
+  stream([
+    `id: 3\nevent: context_trimmed\ndata: ${JSON.stringify({
+      sequence: 3,
+      event_type: "context_trimmed",
+      occurred_at: "2026-08-10T02:00:07Z",
+      payload: {
+        segment: "old_tool_results",
+        dropped: 2,
+        freed_estimate: 9000,
+        references: ["c1", "c2"],
+      },
+    })}\n\n`,
+  ]);
+
+  renderRun();
+  const timeline = within((await screen.findByText(t("timelineSection"))).closest(
+    ".ant-card",
+  ) as HTMLElement);
+
+  const said = fill(t("contextTrimmedOldToolResults"), { dropped: "2", freed: "9000" });
+  expect(await timeline.findByText(said)).toBeInTheDocument();
+  // Still folded underneath it: the sentence is the reading, the payload is the
+  // record, and neither replaces the other.
+  expect(timeline.getByText(t("eventPayload")).closest("details")).not.toHaveAttribute("open");
 });
 
 test("a timeline event keeps its payload folded", async () => {

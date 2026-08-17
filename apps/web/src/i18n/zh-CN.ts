@@ -118,6 +118,16 @@ export const zhCN = {
   waitingTimerNote: "这次任务自己要求稍后再继续。到等待截止时间会被自动放回队列，期间不占执行槽位，也没有沙箱在运行，不需要任何人处理。",
   waitingExternalNote: "这次任务在等平台之外的答复。到期仍没有答复会转为暂停，等的是什么见「等待类型」。",
   pausedLimitNote: "共享预算用完了，所以停在这里，而不是判失败。放宽预算后可以从停下的地方继续，已经用掉的量不会清零。",
+  pausedContextOverflowNote:
+    "裁剪和压缩都做过了，这一轮要发的内容仍然装不进模型的上下文窗口，所以平台没有发出任何请求，任务停在这里。当前请求本身不会被截断。换一个窗口更大的模型端点，或者把输入拆短，就可以从停下的地方继续。",
+  contextTrimmedOldToolResults:
+    "为了装进模型窗口，{dropped} 条较早的工具结果被换成了说明它有多大的占位文本，预计省出 {freed} 个 token（这是计划估算，不是用量）。原始输出仍完整留在会话记录里，每个工具调用也仍然是被回答过的。",
+  contextTrimmedSkillSummaries:
+    "为了装进模型窗口，{dropped} 条未命中的技能摘要没有随这一轮发出，预计省出 {freed} 个 token（这是计划估算，不是用量）。",
+  contextTrimmedMemory:
+    "为了装进模型窗口，{dropped} 条低相关记忆没有随这一轮发出，预计省出 {freed} 个 token（这是计划估算，不是用量）。",
+  contextCompactedNote:
+    "第 {first}–{last} 条消息（共 {covered} 条）被一条结构化摘要顶替，预计省出 {freed} 个 token（这是计划估算，不是用量）。原文一条不少地留在会话记录里；摘要由平台按固定规则生成，没有为此多调一次模型。",
   runBlockedBy: "阻塞于",
   runStartedAt: "开始时间",
   runSession: "会话",
@@ -229,6 +239,12 @@ export const zhCN = {
   endpointContextWindow: "上下文窗口",
   endpointMaxOutput: "最大输出 token",
   endpointUsageQuality: "用量质量",
+  endpointContextAccounting: "窗口计算方式",
+  endpointAccountingShared: "输入与输出共用一个窗口",
+  endpointAccountingSeparate: "输入与输出分别计算",
+  endpointTokenizer: "分词器",
+  endpointTokenizerNote: "只记录名称，本版本仍按字符保守估算，并会如实说明。",
+  endpointWindowSummary: "{window} token，最多输出 {output}。{accounting}。",
   endpointCredentialRef: "凭证环境变量",
   checkEndpoint: "测试连接",
   enableEndpoint: "启用",
