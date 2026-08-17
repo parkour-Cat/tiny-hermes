@@ -94,7 +94,7 @@ function renderDetail(): void {
  *
  * By role and accessible name rather than by label text: Ant Design puts the
  * selected option's text in a `title` attribute, and `findByLabelText` falls
- * back to `title`, so a select showing "模型端点" answers to that name as well
+ * back to `title`, so a select showing "模型接入" answers to that name as well
  * as the field actually called it.
  */
 function field(label: string): Promise<HTMLElement> {
@@ -132,14 +132,14 @@ test("a deterministic draft shows the scenario and no endpoint", async () => {
   renderDetail();
 
   expect(await field("模型场景")).toBeVisible();
-  expect(screen.queryByRole("combobox", { name: "模型端点" })).toBeNull();
+  expect(screen.queryByRole("combobox", { name: "模型接入" })).toBeNull();
 });
 
 test("an endpoint draft shows the endpoint and no scenario", async () => {
   loaded({ provider: "openai_compatible", endpoint_id: ENDPOINT });
   renderDetail();
 
-  expect(await field("模型端点")).toBeVisible();
+  expect(await field("模型接入")).toBeVisible();
   expect(screen.queryByRole("combobox", { name: "模型场景" })).toBeNull();
 });
 
@@ -148,9 +148,9 @@ test("switching the provider swaps which field is offered", async () => {
   renderDetail();
   await field("模型场景");
 
-  await choose("模型提供方", "模型端点");
+  await choose("模型提供方", "模型接入");
 
-  expect(await field("模型端点")).toBeVisible();
+  expect(await field("模型接入")).toBeVisible();
   expect(screen.queryByRole("combobox", { name: "模型场景" })).toBeNull();
 });
 
@@ -161,7 +161,7 @@ test("a disabled endpoint is not offered", async () => {
   ]);
   renderDetail();
 
-  await userEvent.click(await field("模型端点"));
+  await userEvent.click(await field("模型接入"));
   await waitFor(() => expect(options()).toContain("acme-gpt"));
   expect(options()).not.toContain("retired-gpt");
 });
@@ -171,11 +171,11 @@ test("an empty endpoint list says so rather than offering an empty dropdown", as
   renderDetail();
   await field("模型场景");
 
-  await choose("模型提供方", "模型端点");
+  await choose("模型提供方", "模型接入");
 
   // A dropdown with nothing in it looks like a loading bug. Saying that no
   // endpoint is registered points at the person who can fix it.
-  expect(await screen.findByText("平台管理员尚未注册任何模型端点")).toBeVisible();
+  expect(await screen.findByText("平台管理员尚未接入任何模型服务")).toBeVisible();
 });
 
 test("saving sends the policy the selection implies", async () => {
@@ -202,8 +202,8 @@ test("saving sends the policy the selection implies", async () => {
   renderDetail();
   await field("模型场景");
 
-  await choose("模型提供方", "模型端点");
-  await choose("模型端点", "acme-gpt");
+  await choose("模型提供方", "模型接入");
+  await choose("模型接入", "acme-gpt");
   await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
 
   await waitFor(() => expect(sent).not.toBeNull());
@@ -232,7 +232,7 @@ test("a deterministic selection still sends a deterministic policy", async () =>
     }),
   );
   renderDetail();
-  await field("模型端点");
+  await field("模型接入");
 
   await choose("模型提供方", "确定性场景");
   await choose("模型场景", "fail_replay_safe");

@@ -192,7 +192,7 @@ test("暂停 sends the state version it read, and reports a request rather than 
   expect(await screen.findByText(t("pauseRequested"))).toBeInTheDocument();
 });
 
-test("取消运行 sends nothing until the question is answered", async () => {
+test("取消任务 sends nothing until the question is answered", async () => {
   let cancels = 0;
   server.use(
     http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run())),

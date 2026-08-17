@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Form, Input, Select, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Empty, Form, Input, Select, Space, Tag, Typography , Modal } from "antd";
 import { useState } from "react";
 
 import { api } from "../api/client";
@@ -17,6 +17,7 @@ type CreateValues = {
 
 export function SecretsPage() {
   const t = useT();
+  const [modal, contextHolder] = Modal.useModal();
   const auth = useAuth();
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
@@ -91,6 +92,7 @@ export function SecretsPage() {
 
   return (
     <>
+      {contextHolder}
       <div className="page-heading">
         <div>
           <Typography.Title level={2}>{t("secretsTitle")}</Typography.Title>
@@ -142,7 +144,18 @@ export function SecretsPage() {
       </Card>
       {admin ? (
         <Card variant="borderless" className="page-alert">
-          <Button loading={rewrap.isPending} onClick={() => rewrap.mutate()}>
+          <Button
+            loading={rewrap.isPending}
+            onClick={() =>
+                            void modal.confirm({
+                              title: t("rewrapSecrets"),
+                              content: t("rewrapWarning"),
+                              okText: t("confirm"),
+                              cancelText: t("cancel"),
+                              onOk: () => rewrap.mutateAsync().catch(() => undefined),
+                            })
+                          }
+          >
             {t("rewrapSecrets")}
           </Button>
         </Card>
@@ -162,7 +175,15 @@ export function SecretsPage() {
                   {secret.status === "active" ? (
                     <Button
                       loading={disable.isPending}
-                      onClick={() => disable.mutate(secret.id)}
+                      onClick={() =>
+                            void modal.confirm({
+                              title: t("disableSecret"),
+                              content: t("disableSecretWarning"),
+                              okText: t("confirm"),
+                              cancelText: t("cancel"),
+                              onOk: () => disable.mutateAsync(secret.id).catch(() => undefined),
+                            })
+                          }
                     >
                       {t("disableSecret")}
                     </Button>

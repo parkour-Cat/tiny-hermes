@@ -41,6 +41,10 @@ function renderAgents(workspace = WORKSPACE): void {
         <MemoryRouter initialEntries={[`/workspaces/${workspace}/agents`]}>
           <Routes>
             <Route path="/workspaces/:workspaceId/agents" element={<AgentsPage />} />
+            <Route
+              path="/workspaces/:workspaceId/agents/:agentId"
+              element={<p>builder for the new agent</p>}
+            />
             <Route path="*" element={<p>somewhere else</p>} />
           </Routes>
         </MemoryRouter>
@@ -103,7 +107,10 @@ test("creating an agent sends its name and alias", async () => {
   await userEvent.type(screen.getByLabelText("别名"), "analyst");
   await userEvent.click(screen.getByRole("button", { name: "创建" }));
 
-  expect(await screen.findByText("Analyst")).toBeInTheDocument();
+  // A new Agent has no persona, model or tools, so creating one lands in the
+  // builder rather than back on a list where the way in is the name in small
+  // type.
+  expect(await screen.findByText("builder for the new agent")).toBeInTheDocument();
   expect(created).toEqual([{ name: "Analyst", alias: "analyst" }]);
 });
 

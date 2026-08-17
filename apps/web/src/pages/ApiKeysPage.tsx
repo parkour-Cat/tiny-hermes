@@ -1,5 +1,5 @@
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Checkbox, Empty, Form, Input, Select, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Checkbox, Empty, Form, Input, Select, Space, Tag, Typography , Modal } from "antd";
 import { useState } from "react";
 
 import { api } from "../api/client";
@@ -24,6 +24,7 @@ type KeyValues = {
 
 export function ApiKeysPage() {
   const t = useT();
+  const [modal, contextHolder] = Modal.useModal();
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
   const [accountForm] = Form.useForm<AccountValues>();
@@ -127,6 +128,7 @@ export function ApiKeysPage() {
 
   return (
     <>
+      {contextHolder}
       <div className="page-heading">
         <div>
           <Typography.Title level={2}>{t("serviceAccountsTitle")}</Typography.Title>
@@ -199,7 +201,15 @@ export function ApiKeysPage() {
                     {account.status === "active" ? (
                       <Button
                         loading={disableAccount.isPending}
-                        onClick={() => disableAccount.mutate(account.id)}
+                        onClick={() =>
+                            void modal.confirm({
+                              title: t("disableAccount"),
+                              content: t("disableAccountWarning"),
+                              okText: t("confirm"),
+                              cancelText: t("cancel"),
+                              onOk: () => disableAccount.mutateAsync(account.id).catch(() => undefined),
+                            })
+                          }
                       >
                         {t("disableAccount")}
                       </Button>
@@ -213,7 +223,19 @@ export function ApiKeysPage() {
                         <Typography.Text code>{key.prefix}</Typography.Text>
                         <Typography.Text type="secondary">{key.scopes.join(", ")}</Typography.Text>
                         {key.revoked_at === null ? (
-                          <Button onClick={() => revoke.mutate(key.id)}>{t("revokeKey")}</Button>
+                          <Button
+                            onClick={() =>
+                            void modal.confirm({
+                              title: t("revokeKey"),
+                              content: t("revokeKeyWarning"),
+                              okText: t("confirm"),
+                              cancelText: t("cancel"),
+                              onOk: () => revoke.mutateAsync(key.id).catch(() => undefined),
+                            })
+                          }
+                          >
+                            {t("revokeKey")}
+                          </Button>
                         ) : (
                           <Tag>{key.revoked_at}</Tag>
                         )}
