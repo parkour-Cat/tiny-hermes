@@ -10,7 +10,8 @@ model, decides that a Run is finished. Nine planned steps, all landed.
 M2A-2 (context budget, trimming, compaction) is **not** in this slice and is
 not claimed here.
 
-Commits on `feat/goal-loop`, branched from `main` at `ce9bf35`:
+Commits on `feat/goal-loop`, branched from `main` at `5ad0e00` (the M2
+roadmap, PR #19):
 
 | Commit | Result |
 |---|---|
