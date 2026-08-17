@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import (
 
 from tiny_hermes.agents.application.service import AgentCatalog
 from tiny_hermes.agents.domain.models import PlatformCeilings
+from tiny_hermes.agents.infrastructure.skill_bindings import CatalogSkillBindings
 from tiny_hermes.agents.infrastructure.sql_store import SqlAgentStore
 from tiny_hermes.artifacts.application.service import ArtifactService
 from tiny_hermes.artifacts.infrastructure.sql_store import SqlArtifactStore
@@ -170,6 +171,7 @@ class ApplicationResources:
                     PlatformCeilings(
                         max_model_calls=self.settings.agent_max_model_calls
                     ),
+                    CatalogSkillBindings(SqlSkillStore(session)),
                 )
             except AuditedDenial:
                 await session.commit()
