@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
+from tiny_hermes.runs.domain.models import ToolCallBlock
 from tiny_hermes.runs.ports.model import ModelResponse, StopReason
 from tiny_hermes.sandbox.domain.command import CommandResult, SandboxCommand
 
@@ -340,6 +341,62 @@ async def test_the_round_a_reader_sees_is_the_round_the_model_was_given(
 
     assert [request.round_index for request in model.requests] == [1, 2]
     assert [entry["round"] for entry in await verdicts(engine, run)] == [1, 2]
+
+
+def calls_shell(command: str, call_id: str) -> ModelResponse:
+    """A round that does a piece of the work rather than claiming to be done."""
+    return ModelResponse(
+        stop_reason=StopReason.TOOL_CALL,
+        text=f"Next: {command}",
+        tool_calls=(
+            ToolCallBlock(call_id=call_id, name="shell.exec", arguments={"command": command}),
+        ),
+    )
+
+
+async def test_a_task_that_takes_several_rounds_of_work_is_ended_by_the_judge(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_that_declares: Any
+) -> None:
+    """The phase exit, in one Run.
+
+    Three rounds that each do a piece of work, then a fourth that claims to be
+    finished — and the claim is checked before it is believed. What ends this
+    Run is the judge accepting a verified `done`, not the model announcing one
+    and not a budget running out. Every one of those rounds is on the timeline
+    with what the platform decided about it.
+    """
+    agent = agent_that_declares({"verification_command": "pytest -q"}, rounds=6)
+    run = submit(client, scope, agent, "do the three steps and then check")
+    sandbox = ScriptedSandbox()
+    model = Recording(
+        calls_shell("./step-one", "s1"),
+        calls_shell("./step-two", "s2"),
+        calls_shell("./step-three", "s3"),
+        claims_done("all three steps are done"),
+    )
+
+    # Driven until it settles rather than once: whether these rounds fall in one
+    # slice or four is the platform's business, and the count a reader sees has
+    # to survive either answer.
+    for _ in range(4):
+        if status(client, scope, run)["finished_at"] is not None:
+            break
+        await drive(engine, model, sandbox)
+
+    body = status(client, scope, run)
+    assert body["status"] == "completed"
+    assert body["goal"] == {"round": 4, "outcome": "done", "unmet": []}
+    assert sandbox.commands[:3] == ["./step-one", "./step-two", "./step-three"]
+    assert "pytest -q" in sandbox.commands
+
+    recorded = await verdicts(engine, run)
+    assert [entry["round"] for entry in recorded] == [1, 2, 3, 4]
+    assert [entry["outcome"] for entry in recorded] == [
+        "continue",
+        "continue",
+        "continue",
+        "done",
+    ]
 
 
 async def test_a_run_that_has_not_run_yet_has_no_verdict_to_report(
