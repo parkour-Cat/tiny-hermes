@@ -43,6 +43,10 @@ class DeterministicModelPolicy(BaseModel):
         # The workspace drill's scenario: the Run input is one shell command,
         # and the model itself asserts the outcome.
         "shell_from_input",
+        # Asks to be woken later, then finishes. `waiting_external` needs a
+        # producer that is not a test double, the same as every other state
+        # this provider can reach.
+        "wait_once",
     ] = "complete"
 
 

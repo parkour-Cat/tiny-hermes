@@ -187,7 +187,9 @@ def agent_with_scenario(
 ) -> Callable[..., str]:
     """Publish an Agent whose validated policy selects a model scenario."""
 
-    def publish(scenario: str, alias: str = "runner") -> str:
+    def publish(
+        scenario: str, alias: str = "runner", tools: list[str] | None = None
+    ) -> str:
         agent_id = str(
             client.post(
                 "/api/v1/agents",
@@ -198,6 +200,7 @@ def agent_with_scenario(
         spec = {
             **VALID_SPEC,
             "model_policy": {"provider": "deterministic", "scenario": scenario},
+            **({} if tools is None else {"tools": tools}),
         }
         draft = client.put(
             f"/api/v1/agents/{agent_id}/draft",

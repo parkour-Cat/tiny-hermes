@@ -259,6 +259,51 @@ def test_a_round_that_waits_gives_up_its_slice() -> None:
     assert decision.keeps_lease is False
 
 
+def test_a_wait_names_its_kind_and_carries_its_duration() -> None:
+    """`RunStateMachine` refuses a `waiting_external` without a `wait_kind`, and
+    it is right to: a Run waiting for nothing named is a Run nobody can tell
+    how to wake. M2A ships one kind; approval and child runs reuse this seam.
+
+    The duration travels as seconds rather than as a deadline because the
+    deadline belongs to the moment the transition is *written*, not to the
+    moment the round decided — those are two different clocks and one
+    transaction apart.
+    """
+    decision = decide_after_round(
+        RoundOutcome(
+            verdict=WAIT,
+            cancel_requested=False,
+            pause_requested=False,
+            budget_allows=True,
+            slice_expired=False,
+        )
+    )
+
+    assert decision.wait_kind == "timer"
+    assert decision.wait_seconds == 30
+
+
+def test_nothing_but_a_wait_carries_a_wait() -> None:
+    """A pause is not a wait with a shorter name.
+
+    `RunStateMachine` refuses wait fields on any other target, so a decision
+    that carried them by accident would turn a paused Run into a crash.
+    """
+    decision = decide_after_round(
+        RoundOutcome(
+            verdict=WAIT,
+            cancel_requested=True,
+            pause_requested=False,
+            budget_allows=True,
+            slice_expired=False,
+        )
+    )
+
+    assert decision.signal is RunSignal.SAFE_CANCEL_STARTED
+    assert decision.wait_kind is None
+    assert decision.wait_seconds is None
+
+
 @pytest.mark.parametrize(
     ("outcome", "cancel", "pause", "budget", "expired"),
     [

@@ -11,6 +11,10 @@ from tiny_hermes.runs.ports.model import (
 
 MAX_DELAY_MS = 5_000
 TOKENS_PER_ROUND = 32
+#: Long enough that a test can see the Run sitting in `waiting_external`, short
+#: enough that a real deployment's drill is not left there. Tests that want the
+#: deadline reached move it in the row rather than sleeping through it.
+WAIT_SECONDS = 60
 
 
 class DeterministicModelProvider:
@@ -142,6 +146,35 @@ class DeterministicModelProvider:
             return ModelResponse(
                 stop_reason=StopReason.COMPLETED,
                 text=f"exit=0\n{outcome.output[:2000]}",
+                input_tokens=TOKENS_PER_ROUND // 2,
+                output_tokens=TOKENS_PER_ROUND // 2,
+            )
+        if scenario == "wait_once":
+            # Asked for once per Run, not once per slice. The wait's own result
+            # turn is in the transcript when the Scheduler wakes this Run, so
+            # the second round sees it and moves on instead of waiting again.
+            waited = any(
+                isinstance(block, ToolResultBlock) and block.call_id == "wait-1"
+                for message in request.messages
+                for block in message.blocks
+            )
+            if not waited:
+                return ModelResponse(
+                    stop_reason=StopReason.TOOL_CALL,
+                    text="The deterministic scenario waits for something outside it.",
+                    tool_calls=(
+                        ToolCallBlock(
+                            call_id="wait-1",
+                            name="platform.wait",
+                            arguments={"seconds": WAIT_SECONDS},
+                        ),
+                    ),
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                )
+            return ModelResponse(
+                stop_reason=StopReason.COMPLETED,
+                text="The deterministic scenario was woken and finished.",
                 input_tokens=TOKENS_PER_ROUND // 2,
                 output_tokens=TOKENS_PER_ROUND // 2,
             )

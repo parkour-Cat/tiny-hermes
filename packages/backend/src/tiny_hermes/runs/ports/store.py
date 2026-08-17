@@ -186,6 +186,12 @@ class RecordSliceCommand:
     #: their reason here). Only written when ``signal`` is not None — a round
     #: that keeps the lease has no transition to attach them to.
     events: tuple["ReservedEvent", ...] = ()
+    #: Set only with ``EXTERNAL_WAIT_STARTED``. The store turns the duration
+    #: into ``wait_deadline_at`` against the same ``now`` it stamps the rest of
+    #: the transition with, so the deadline the Scheduler scans for cannot
+    #: predate the row that announced it.
+    wait_kind: str | None = None
+    wait_seconds: int | None = None
 
 
 @dataclass(frozen=True)
