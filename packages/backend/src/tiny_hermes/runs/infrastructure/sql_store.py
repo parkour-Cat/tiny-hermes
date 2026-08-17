@@ -34,6 +34,7 @@ from tiny_hermes.runs.application.service import (
 from tiny_hermes.runs.domain.context_budget import Accounting, ContextWindow
 from tiny_hermes.runs.domain.models import (
     TERMINAL_STATES,
+    BoundSkill,
     BudgetSummary,
     CallerIdentity,
     CallerType,
@@ -93,6 +94,7 @@ from tiny_hermes.runs.ports.store import (
     RunEventWindow,
     WidenBudgetCommand,
 )
+from tiny_hermes.skills.infrastructure.tables import SkillRow, SkillVersionRow
 from tiny_hermes.tenancy.domain.models import Role
 from tiny_hermes.tenancy.infrastructure.tables import MembershipRow
 
@@ -654,7 +656,66 @@ class SqlRunStore:
             budget=_budget_summary(budget),
             window=await self._context_window(spec),
             compat_deadline_at=deadline,
+            skills=await self._bound_skills(spec),
+            loaded_skills=await self._loaded_skills(run.id),
         )
+
+    async def _bound_skills(self, spec: AgentSpec) -> tuple[BoundSkill, ...]:
+        """What the Version bound, in the order the author bound it.
+
+        Read by version id and nothing else. The skill's own name column
+        answers what the model calls it, and the version's manifest answers
+        what it is for — read from the version rather than from the skill,
+        because a later version may describe itself differently and this Run is
+        not on it.
+
+        A binding whose rows are gone is skipped rather than failing the round.
+        Publishing checked every one of them, so this can only happen after a
+        deletion, and a Run that cannot start because one of four skills was
+        deleted is worse off than one running with three.
+        """
+        if not spec.skills:
+            return ()
+        wanted = [binding.skill_version_id for binding in spec.skills]
+        found = await self._session.execute(
+            select(SkillVersionRow.id, SkillVersionRow.manifest, SkillRow.name)
+            .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+            .where(SkillVersionRow.id.in_(wanted))
+        )
+        rows = {
+            version_id: (manifest, name) for version_id, manifest, name in found.all()
+        }
+        skills: list[BoundSkill] = []
+        for version_id in wanted:
+            row = rows.get(version_id)
+            if row is None:
+                continue
+            manifest, name = row
+            skills.append(
+                BoundSkill(
+                    skill_version_id=version_id,
+                    name=name,
+                    description=str(manifest.get("description", "")),
+                )
+            )
+        return tuple(skills)
+
+    async def _loaded_skills(self, run_id: UUID) -> tuple[UUID, ...]:
+        """Which versions this Run has already read text from, oldest first."""
+        found = await self._session.scalars(
+            select(RunEventRow.payload)
+            .where(
+                RunEventRow.run_id == run_id,
+                RunEventRow.event_type == RunEventType.SKILL_LOADED.value,
+            )
+            .order_by(RunEventRow.sequence)
+        )
+        loaded: list[UUID] = []
+        for payload in found:
+            raw = payload.get("skill_version_id")
+            if isinstance(raw, str):
+                loaded.append(UUID(raw))
+        return tuple(loaded)
 
     async def _context_window(self, spec: AgentSpec) -> ContextWindow | None:
         """What the endpoint this Run's policy names declared it can take.

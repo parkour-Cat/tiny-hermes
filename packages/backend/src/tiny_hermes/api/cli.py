@@ -24,6 +24,7 @@ from tiny_hermes.runs.infrastructure.deterministic_model import (
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 from tiny_hermes.runs.infrastructure.openai_model import RetryPolicy
 from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
+from tiny_hermes.runs.infrastructure.skill_library import SqlSkillLibrary
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
 from tiny_hermes.sandbox.transport.adapter import SandboxClient
 from tiny_hermes.sandbox.transport.client import ControllerClient
@@ -88,6 +89,9 @@ async def _worker() -> None:
         # running the command anywhere else.
         sandbox=_controller(settings),
         workspace=workspace,
+        # Skill text is read from the catalog the same database holds, so a
+        # deployment configures nothing extra to give an Agent skills.
+        skills=SqlSkillLibrary(sessions),
         settings=WorkerSettings(
             worker_id=worker_id,
             lease_seconds=settings.worker_lease_seconds,

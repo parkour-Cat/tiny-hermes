@@ -7,6 +7,7 @@ from uuid import UUID
 from tiny_hermes.agents.domain.models import AgentSpec
 from tiny_hermes.runs.domain.context_budget import ContextWindow
 from tiny_hermes.runs.domain.models import (
+    BoundSkill,
     BudgetSummary,
     CallerIdentity,
     CallerType,
@@ -228,6 +229,17 @@ class ExecutionContext:
     #: When set, this Run was admitted by Chat Completions and the Worker must
     #: not emit ``SLICE_ENDED`` for an ordinary slice boundary before it.
     compat_deadline_at: datetime | None = None
+    #: What the Version bound, in the order the author bound it. Read with the
+    #: conversation and the window rather than on demand: what one round sends
+    #: is decided at one moment, and a summary read later than the history it
+    #: is planned against would be planned against the wrong history.
+    skills: tuple[BoundSkill, ...] = ()
+    #: The versions this Run has already loaded text from, oldest first. Two
+    #: questions come from one fact — how many loads are left, and which
+    #: summaries count as 命中 — and reading it as events rather than counting
+    #: `skill.load` calls in the transcript keeps it a fact about *this Run*
+    #: even when a persistent Session hands over another Run's turns.
+    loaded_skills: tuple[UUID, ...] = ()
 
     @property
     def messages(self) -> tuple[CanonicalMessage, ...]:

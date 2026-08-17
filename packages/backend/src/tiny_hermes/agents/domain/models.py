@@ -54,6 +54,10 @@ class DeterministicModelPolicy(BaseModel):
         # producer that is not a test double, the same as every other state
         # this provider can reach.
         "wait_once",
+        # Loads one bound skill named by the Run input, then answers with what
+        # the document said. `skill.load` is a platform tool, so this scenario
+        # proves the whole progressive-loading path on a host with no sandbox.
+        "skill_once",
     ] = "complete"
 
 
