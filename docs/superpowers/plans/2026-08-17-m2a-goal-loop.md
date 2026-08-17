@@ -178,8 +178,27 @@
 
 ## 9. 阶段出口（对应设计 §2）
 
-- [ ] 需要三轮以上工具调用的任务由判断器判 `done` 结束。
-- [ ] 模型判 `done` 但校验命令失败时服务端不接受。
-- [ ] 轮数上限触发后可恢复，累计值不重置。
-- [ ] `wait` 的 Run 释放租约、销毁沙箱，到期被唤醒；超期进入 `paused(external_timeout)`。
-- [ ] `uv run pytest`、静态检查、前端单测与 e2e 全部通过。
+记录在 `docs/superpowers/verification/2026-08-17-m2a-goal-loop.md`。
+
+- [x] 需要三轮以上工具调用的任务由判断器判 `done` 结束：
+      `test_a_task_that_takes_several_rounds_of_work_is_ended_by_the_judge`。
+      三轮各干一件事，第四轮才说完成，且这句话先被校验命令核过。结束它的是
+      「判定接受了一个经过核对的 `done`」，既不是模型宣布，也不是预算耗尽。
+      驱动到停下为止而不是只驱动一次——轮次跨不跨 slice 是平台的事，读到的数
+      两种情况下都得对。
+- [x] 模型判 `done` 但校验命令失败时服务端不接受：
+      `test_a_claim_the_verification_contradicts_does_not_end_the_run`。
+      校验跑不了时既不接受也不拒绝，落在 `paused(operator)`。
+- [x] 轮数上限触发后可恢复，累计值不重置：`test_budget_expansion.py`。扩容命令
+      里根本不带 `consumed_*`，所以「顺手清零的扩容」不是这个 API 能表达的东西。
+- [x] `wait` 的 Run 释放租约、不开沙箱、到期被唤醒：`test_external_wait.py`。
+      **两半合不到一个 wait kind 上，这是设计而不是覆盖缺口：** 定时器的截止时刻
+      是平台自己的，到点即唤醒；只有醒来要靠外面的 kind 才谈得上「没人答复」，
+      而那两种（approval 是 M2C，child_runs 是 M2E）都还没到。所以
+      `paused(external_timeout)` 在 `test_scheduler.py` 里以一行该状态的数据验证，
+      不是端到端走出来的。
+- [x] `uv run pytest`、静态检查、前端单测与 e2e：后端 1165 通过，ruff 与 pyright
+      干净，前端 94 通过，e2e 7 通过。两处失败都是环境的，且在本分支改动 stash
+      掉之后同样复现：Windows 上 Docker SDK 的具名管道，和本机并行跑前端单测时的
+      `findBy*` 超时（`--no-file-parallelism` 全绿）。e2e 那一条失败是本机
+      `SANDBOX_IMAGE_DIGEST` 为空，绑定沙箱工具的 Run 只能 `sandbox_not_configured`。
