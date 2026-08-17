@@ -26,6 +26,7 @@ from tiny_hermes.outbound.client import SafeOutboundClient
 from tiny_hermes.outbound.errors import OutboundError, OutboundRefused
 from tiny_hermes.runs.domain.models import (
     CACHE_RESET_HINT,
+    SAFETY_PREAMBLE,
     CacheStateHint,
     CanonicalMessage,
     TextBlock,
@@ -40,16 +41,6 @@ from tiny_hermes.runs.ports.model import (
 )
 
 logger = logging.getLogger(__name__)
-
-#: Prepended to every conversation, ahead of the Agent's own personality. Fixed
-#: text in this slice: a configurable safety preamble is a policy surface, and
-#: there is nowhere to administer one yet.
-SAFETY_PREAMBLE = (
-    "You are running inside tiny-hermes, a controlled execution platform. "
-    "You have no tools, no file access, and no network access. "
-    "Answer with text only. If a request needs a capability you do not have, "
-    "say so plainly instead of pretending to act."
-)
 
 #: Statuses worth trying again. A rejection on the merits will be rejected
 #: again, and three attempts would turn one clear failure into a
