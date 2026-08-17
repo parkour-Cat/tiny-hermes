@@ -16,6 +16,7 @@ from tiny_hermes.runs.domain.models import (
     RunState,
     WorkspaceCleanupTarget,
 )
+from tiny_hermes.runs.domain.slice_policy import WAIT_TIMER
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.infrastructure.tables import RunRow
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
@@ -98,7 +99,7 @@ class SchedulerRuntime:
         await self._reclaim_sandboxes(now)
         await self._recover_interrupted()
         await self._repair_session_heads()
-        await self._time_out_waits(now)
+        await self._settle_due_waits(now)
         await self._cancel_aged_compat_timeouts(now)
         await self._collect_expired_records(now)
         await self._collect_upload_garbage(now)
@@ -275,19 +276,31 @@ class SchedulerRuntime:
             ):
                 await store.repair_session_head(session_id, "scheduler-head-repair")
 
-    async def _time_out_waits(self, now: datetime) -> None:
-        """Dormant until phase 3.
+    async def _settle_due_waits(self, now: datetime) -> None:
+        """What a passed deadline means, which depends on who owned it.
 
-        Phase 2B never produces a ``waiting_external`` Run, so this scan is
-        written and tested through the signal seam but has nothing to find in
-        normal operation.
+        A ``timer`` is the platform's own deadline: reaching it *is* the wake,
+        so the Run goes back to the queue. Every other kind waits on something
+        outside — an approval, a child Run — and a deadline reached without one
+        means nobody answered, which is ``paused(external_timeout)``.
         """
+        woken: list[UUID] = []
         async with self._sessions.begin() as session:
             store = SqlRunStore(session)
             if not await store.try_scan_lock(WAITS):
                 return
-            for run_id in await store.expired_wait_runs(now, self._settings.batch_size):
-                await store.time_out_external_wait(run_id, "scheduler-wait-timeout")
+            due = await store.expired_wait_runs(now, self._settings.batch_size)
+            for run_id, wait_kind in due:
+                if wait_kind == WAIT_TIMER:
+                    if await store.wake_external_wait(run_id, "scheduler-wait-wake"):
+                        woken.append(run_id)
+                else:
+                    await store.time_out_external_wait(run_id, "scheduler-wait-timeout")
+        for run_id in woken:
+            # Announced after the transaction commits, like every other requeue
+            # here: a Worker told to look before the row is visible finds a Run
+            # that is still waiting and goes back to sleep.
+            await self._announce(run_id)
 
     async def _cancel_aged_compat_timeouts(self, now: datetime) -> None:
         async with self._sessions.begin() as session:

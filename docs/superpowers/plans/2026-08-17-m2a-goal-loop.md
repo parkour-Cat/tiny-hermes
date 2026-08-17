@@ -126,11 +126,27 @@
 
 ## 7. `wait`：`waiting_external` 第一次有生产者
 
-- [ ] 集成测试：判定 `wait` 的 Run 进入 `waiting_external`，`wait_kind="timer"`，
-      带 `wait_deadline_at`；断言租约已释放、沙箱已销毁。
-- [ ] Scheduler 到期把它重新排进 `queued`；超期无唤醒 → `paused(external_timeout)`。
-      Scheduler 那条从未被触发的等待扫描第一次有输入，删掉 `scheduler.py:281`
-      那句「阶段 2B 从不产生 waiting_external」的注释。
+- [x] 生产者是一个绑定工具 `platform.wait`。工具调用是模型向平台开口的唯一通道，
+      而 `authorize()` 的产物是 `SandboxCommand`——平台工具没有命令可交，所以
+      `PLATFORM_TOOLS` 在授权**之前**分叉，由 Worker 自己应答，永不下发给 Controller。
+- [x] 时长在纯 registry 里校验：`1..86_400` 秒，无默认值（缺参即拒），
+      `isinstance(True, int)` 为真所以布尔先于范围被排除。不合法的调用是
+      `INVALID_ARGUMENTS` 拒绝，不是一次崩溃的轮次。
+- [x] 只绑定平台工具的 Agent 不开沙箱。没有东西要放进容器，而为它开一个，
+      就等于让一个即将等待的 Run 攥着实例去等——正是 §12.3 承诺不会发生的事。
+- [x] 截止时刻的算术归 store：`SliceDecision`/`RecordSliceCommand` 只带
+      `wait_seconds`（一个时长），`record_slice` 用它给这次事务盖章的同一个 `now`
+      算出 `wait_deadline_at`，Scheduler 扫到的截止时刻不可能早于宣布它的那一行。
+- [x] 集成测试（8 个）：判定 `wait` 的 Run 进入 `waiting_external`，`wait_kind="timer"`，
+      截止时刻来自模型请求的时长；租约已释放、`sandbox_reservations` 一行没有；
+      未绑定该工具的 Agent 发同样的调用只会被拒，永远到不了 `waiting_external`。
+- [x] **到期意味着什么，取决于截止时刻归谁。** 定时器的截止时刻是平台自己的，
+      到点即唤醒 → 回 `queued`；等待外部的种类（M2C 的审批、M2E 的子 Run）到点
+      才是「没人应答」→ `paused(external_timeout)`。所以扫描按 `wait_kind` 分叉，
+      `scheduler.py` 那句「阶段 2B 从不产生 waiting_external」的注释已删除，
+      方法改名 `_settle_due_waits`，唤醒的 Run 在事务提交后才 `_announce`。
+- [x] 不新增 run event 类型，因而不需要 Alembic 迁移（迁移留给第 8 步的
+      `goal_verdict` 一并做）。
 
 ## 8. 让外面看得见
 

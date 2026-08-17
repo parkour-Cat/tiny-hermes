@@ -29,6 +29,7 @@ from tiny_hermes.runs.domain.models import (
     RunEventType,
     RunSignal,
     TextBlock,
+    ToolCallBlock,
     ToolResultBlock,
     WorkspaceCleanupTarget,
 )
@@ -84,7 +85,14 @@ from tiny_hermes.tools.application.execute import (
     run_tool_call,
 )
 from tiny_hermes.tools.domain.files import DATA_ROOT, FILE_HELPER, changes_workspace
-from tiny_hermes.tools.domain.registry import DEFAULT_OUTPUT_BYTES, schemas_for
+from tiny_hermes.tools.domain.registry import (
+    DEFAULT_OUTPUT_BYTES,
+    PLATFORM_TOOLS,
+    RefusalReason,
+    ToolRefused,
+    schemas_for,
+    wait_seconds_of,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +149,20 @@ class _LeaseHandle:
     lease_id: UUID
     version: int
     lost: bool = False
+
+
+@dataclass(frozen=True)
+class _RoundWork:
+    """What one round's tool calls produced.
+
+    ``wait_seconds`` is set only when the round called `platform.wait` and the
+    call was well formed. It is a *request*: `judge` decides whether waiting is
+    what this round actually gets, the same as it does for a completion claim.
+    """
+
+    appended: tuple[CanonicalMessage, ...]
+    wrote: bool
+    wait_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -258,7 +280,11 @@ class WorkerRuntime:
             first = await self._read_context(workspace_id, claimed.run.id)
             if first is None:
                 return
-            if first.spec.tools:
+            if any(tool not in PLATFORM_TOOLS for tool in first.spec.tools):
+                # Platform tools do not run anywhere. An Agent that binds only
+                # those has nothing to put in a container, and starting one for
+                # it would mean a Run about to wait held an instance while it
+                # waited — the opposite of what §12.3 promises.
                 box = await self._open_sandbox(claimed, handle, first)
                 if box is None:
                     return
@@ -275,9 +301,10 @@ class WorkerRuntime:
                     box = replace(box, hint=None)
                 executed_ms = int((monotonic() - round_started) * 1000)
 
-                appended, wrote = await self._answer_tools(
+                work = await self._answer_tools(
                     claimed, handle, box, response, context
                 )
+                appended, wrote = work.appended, work.wrote
                 # Before the re-read, for the same reason the tool calls are:
                 # a cancellation that arrives while a check is running should
                 # be seen by the read that follows it.
@@ -296,7 +323,13 @@ class WorkerRuntime:
                     after.compat_deadline_at is not None
                     and now >= after.compat_deadline_at
                 )
-                verdict = judge(GoalProposal(stop_reason=response.stop_reason), evidence)
+                verdict = judge(
+                    GoalProposal(
+                        stop_reason=response.stop_reason,
+                        wait_seconds=work.wait_seconds,
+                    ),
+                    evidence,
+                )
                 if verdict.instruction is not None:
                     # §12.1: continue 生成下一轮指令. Recorded even if the Run
                     # then pauses for some other reason — why the platform
@@ -686,18 +719,20 @@ class WorkerRuntime:
         box: "_Sandbox | None",
         response: ModelResponse,
         context: ExecutionContext,
-    ) -> tuple[tuple[CanonicalMessage, ...], bool]:
+    ) -> "_RoundWork":
         """Run whatever the round asked for, and build the turns to append.
 
-        The second value answers design §8's question: may this round have
-        changed `/workspace/data`? A refused call never ran, so it cannot
-        have; a successful `file.read` looked and touched nothing.
+        ``wrote`` answers design §8's question: may this round have changed
+        `/workspace/data`? A refused call never ran, so it cannot have; a
+        successful `file.read` looked and touched nothing.
         """
         if response.stop_reason is StopReason.FAILED:
             # A failed round said nothing the transcript should keep.
-            return (), False
+            return _RoundWork((), False)
         if response.stop_reason is not StopReason.TOOL_CALL:
-            return (CanonicalMessage("assistant", (TextBlock(text=response.text),)),), False
+            return _RoundWork(
+                (CanonicalMessage("assistant", (TextBlock(text=response.text),)),), False
+            )
 
         blocks: list[Block] = []
         if response.text:
@@ -706,8 +741,19 @@ class WorkerRuntime:
         assistant = CanonicalMessage("assistant", tuple(blocks))
 
         wrote = False
+        wait_seconds: int | None = None
         results: list[Block] = []
         for call in response.tool_calls:
+            if call.name in PLATFORM_TOOLS:
+                # Answered here, never sent down. What this asks for happens to
+                # the Run; the Controller has nothing to do with it.
+                answered, seconds = _answer_platform_tool(call, context.spec.tools)
+                results.append(answered)
+                if seconds is not None:
+                    # Last one wins, and one is all a round can act on: the Run
+                    # enters a single `waiting_external` with a single deadline.
+                    wait_seconds = seconds
+                continue
             if box is None or self._sandbox is None:
                 # A tool round only follows a slice that opened a sandbox, so
                 # this is unreachable today. Written as an answer rather than
@@ -750,7 +796,9 @@ class WorkerRuntime:
             if not answer.failed and changes_workspace(call.name):
                 wrote = True
             results.append(answer)
-        return (assistant, CanonicalMessage("tool", tuple(results))), wrote
+        return _RoundWork(
+            (assistant, CanonicalMessage("tool", tuple(results))), wrote, wait_seconds
+        )
 
     async def _checkpoint_round(
         self,
@@ -1187,6 +1235,8 @@ class WorkerRuntime:
             signal=decision.signal,
             pause_reason=decision.pause_reason,
             limit_reached=decision.limit_reached,
+            wait_kind=decision.wait_kind,
+            wait_seconds=decision.wait_seconds,
             checkpoint=_checkpoint(response),
             checkpoint_replay_safe=response.replay_safe,
             checkpoint_effect_status=(
@@ -1281,6 +1331,54 @@ class WorkerRuntime:
                     handle.lost = True
                     return
                 handle.version = renewed.version
+
+
+def _answer_platform_tool(
+    call: ToolCallBlock, bound: tuple[str, ...]
+) -> tuple[ToolResultBlock, int | None]:
+    """Answer a tool the platform resolves itself.
+
+    Every call gets a result, refused or not, for the reason every other
+    refusal here does: a model left without an answer to a call it made will
+    retry it or invent what it returned.
+
+    The binding check is repeated rather than inherited from `authorize`, which
+    this path deliberately never reaches. The schema list the model was handed
+    is not a control — this is.
+    """
+    if call.name not in bound:
+        return (
+            ToolResultBlock(
+                call_id=call.call_id,
+                output=f"refused: {RefusalReason.NOT_AUTHORIZED.value}",
+                exit_code=126,
+                failed=True,
+            ),
+            None,
+        )
+    try:
+        seconds = wait_seconds_of(call)
+    except ToolRefused as refused:
+        return (
+            ToolResultBlock(
+                call_id=refused.call_id,
+                output=f"refused: {refused.reason.value}",
+                exit_code=126,
+                failed=True,
+            ),
+            None,
+        )
+    # Written in the past tense on purpose: by the time the model reads this
+    # turn, the wait is over and the Run has been woken.
+    return (
+        ToolResultBlock(
+            call_id=call.call_id,
+            output=f"waited {seconds} seconds",
+            exit_code=0,
+            failed=False,
+        ),
+        seconds,
+    )
 
 
 def _streamer_of(sandbox: SandboxSession) -> StreamedCommandRunner | None:

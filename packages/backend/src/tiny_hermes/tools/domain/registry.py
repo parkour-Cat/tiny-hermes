@@ -30,7 +30,26 @@ from tiny_hermes.tools.domain.files import (
 #: Every tool this platform implements. An AgentVersion may bind a subset;
 #: publishing refuses a name outside it, so a Run cannot fail on its first call
 #: for a reason its author could have been told about.
-IMPLEMENTED_TOOLS = ("shell.exec", "file.list", "file.read", "file.write")
+IMPLEMENTED_TOOLS = (
+    "shell.exec",
+    "file.list",
+    "file.read",
+    "file.write",
+    "platform.wait",
+)
+
+#: Tools the platform answers itself. `authorize` turns a call into a
+#: `SandboxCommand`, and these have no command to turn into — what they ask for
+#: happens to the Run, not inside its container. Split before authorization
+#: rather than given a no-op command, because a no-op that reached the
+#: Controller would be a live container doing nothing while the Run is meant to
+#: be holding none at all.
+PLATFORM_TOOLS = frozenset({"platform.wait"})
+
+#: The longest a round may ask to sleep, a little over a day. A Run in
+#: `waiting_external` holds its Session's head, so the model does not get to
+#: decide that a conversation is unavailable until next year.
+MAX_WAIT_SECONDS = 86_400
 
 DEFAULT_WORKING_DIRECTORY = "/workspace/data"
 DEFAULT_TIMEOUT_SECONDS = 60
@@ -74,6 +93,33 @@ SHELL_EXEC_SCHEMA: dict[str, Any] = {
 }
 
 SHELL_EXEC_ARGUMENTS = frozenset({"command", "cwd", "timeout_seconds"})
+
+PLATFORM_WAIT_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "platform.wait",
+        "description": (
+            "Stop working and be woken later. The Run gives up its sandbox, so "
+            "anything in /workspace/cache is gone when it resumes and only "
+            "committed work in /workspace/data survives. Use this to wait for "
+            "something outside the Run, never to pause between steps of your "
+            "own work."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "seconds": {
+                    "type": "integer",
+                    "description": f"How long to wait, up to {MAX_WAIT_SECONDS}.",
+                },
+            },
+            "required": ["seconds"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+PLATFORM_WAIT_ARGUMENTS = frozenset({"seconds"})
 
 
 def _file_schema(
@@ -173,14 +219,40 @@ def schemas_for(bound: tuple[str, ...]) -> list[dict[str, Any]]:
     for name in bound:
         if name == "shell.exec":
             schemas.append(SHELL_EXEC_SCHEMA)
+        elif name == "platform.wait":
+            schemas.append(PLATFORM_WAIT_SCHEMA)
         elif name in FILE_SCHEMAS:
             schemas.append(FILE_SCHEMAS[name])
     return schemas
 
 
+def wait_seconds_of(call: ToolCallBlock) -> int:
+    """How long `platform.wait` asked to sleep, or a refusal.
+
+    Bounds only. Whether the Run is *allowed* to wait — and what that does to
+    its state — is `decide_after_round`'s and `RunStateMachine`'s to answer, the
+    same as every other outcome.
+    """
+    unknown = set(call.arguments) - PLATFORM_WAIT_ARGUMENTS
+    if unknown:
+        raise ToolRefused(
+            RefusalReason.INVALID_ARGUMENTS, call.call_id, ",".join(sorted(unknown))
+        )
+    seconds = call.arguments.get("seconds")
+    # `isinstance(True, int)` is true, and a model that sent `true` did not name
+    # a duration. Booleans are excluded before the range is looked at.
+    if not isinstance(seconds, int) or isinstance(seconds, bool):
+        raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "seconds")
+    if not 1 <= seconds <= MAX_WAIT_SECONDS:
+        raise ToolRefused(
+            RefusalReason.INVALID_ARGUMENTS, call.call_id, f"seconds={seconds}"
+        )
+    return seconds
+
+
 def authorize(*, bound: tuple[str, ...], call: ToolCallBlock) -> AuthorizedCall:
     """Step two: what actually runs, against the arguments that arrived."""
-    if call.name not in IMPLEMENTED_TOOLS:
+    if call.name not in IMPLEMENTED_TOOLS or call.name in PLATFORM_TOOLS:
         raise ToolRefused(RefusalReason.UNKNOWN_TOOL, call.call_id, call.name)
     if call.name not in bound:
         # Nothing about the call may be wrong except this. The schema list the

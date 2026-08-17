@@ -753,8 +753,16 @@ class SqlRunStore:
             session,
             command.signal,
             pause_reason=command.pause_reason,
-            wait_kind=None,
-            wait_deadline_at=None,
+            wait_kind=command.wait_kind,
+            # Measured from this transaction's `now`, the same instant the
+            # transition and its event are stamped with. A deadline carried in
+            # from the Worker would be a few hundred milliseconds older than
+            # the row announcing it, and on a slow round rather more.
+            wait_deadline_at=(
+                None
+                if command.wait_seconds is None
+                else now + timedelta(seconds=command.wait_seconds)
+            ),
             request_id=command.request_id,
             payload=_slice_payload(command.executed_ms, command.checkpoint),
             extra_events=(*extra, *command.events),
@@ -1117,9 +1125,18 @@ class SqlRunStore:
         rows = await self._session.scalars(statement)
         return list(rows.all())
 
-    async def expired_wait_runs(self, now: datetime, limit: int) -> Sequence[UUID]:
-        rows = await self._session.scalars(
-            select(RunRow.id)
+    async def expired_wait_runs(
+        self, now: datetime, limit: int
+    ) -> Sequence[tuple[UUID, str | None]]:
+        """Runs whose deadline has passed, each with what it was waiting for.
+
+        The kind comes back with the id because it decides what reaching the
+        deadline *means*. For a timer the platform owns the deadline and
+        reaching it is the wake; for a kind whose wake comes from outside —
+        an approval, a child Run — reaching it means nobody answered.
+        """
+        rows = await self._session.execute(
+            select(RunRow.id, RunRow.wait_kind)
             .where(
                 RunRow.status == RunState.WAITING_EXTERNAL.value,
                 RunRow.wait_deadline_at.is_not(None),
@@ -1128,7 +1145,27 @@ class SqlRunStore:
             .order_by(RunRow.wait_deadline_at)
             .limit(limit)
         )
-        return list(rows.all())
+        return [(row.id, row.wait_kind) for row in rows.all()]
+
+    async def wake_external_wait(self, run_id: UUID, request_id: str) -> bool:
+        """A timer that came due. Back to the queue, not into a pause."""
+        run = await self._lock_run_any_workspace(run_id)
+        if run is None or RunState(run.status) is not RunState.WAITING_EXTERNAL:
+            return False
+        session = await self._lock_session(run.workspace_id, run.session_id)
+        if session is None:
+            return False
+        await self._decide_and_write(
+            run,
+            session,
+            RunSignal.EXTERNAL_READY,
+            pause_reason=None,
+            wait_kind=None,
+            wait_deadline_at=None,
+            request_id=request_id,
+            payload={"reason": "wait_timer_elapsed"},
+        )
+        return True
 
     async def aged_compat_timeout_runs(self, now: datetime, limit: int) -> Sequence[UUID]:
         cutoff = now - timedelta(hours=24)
