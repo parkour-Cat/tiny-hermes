@@ -129,6 +129,13 @@ class RunEventType(StrEnum):
     # them — which is the one question a person watching a long Run has.
     GOAL_VERDICT = "goal_verdict"
 
+    # Also not derived from a signal, and for the same reason `goal_verdict` is
+    # not: §7.4.2 requires that a compaction record what it covered, and a
+    # transformation nobody can see is indistinguishable from a deletion. Both
+    # are written on rounds that change no state at all.
+    CONTEXT_TRIMMED = "context_trimmed"
+    CONTEXT_COMPACTED = "context_compacted"
+
     # Also not derived from a signal: it records that a slice began on a fresh
     # writable layer, which is a fact about the sandbox rather than a state
     # transition. Technical design §11.3 requires the Agent be told, and this
@@ -231,6 +238,21 @@ CACHE_RESET_HINT = (
     "virtual environments, background processes or build caches from earlier "
     "in this Run are gone and must be rebuilt before they are used. Files under "
     "/workspace/data are unaffected."
+)
+
+
+#: Prepended to every conversation, ahead of the Agent's own personality. Fixed
+#: text in this slice: a configurable safety preamble is a policy surface, and
+#: there is nowhere to administer one yet.
+#:
+#: Here rather than in the provider adapter, where it started, because the
+#: budget planner has to charge for it. Something the planner must measure and
+#: may never trim cannot live behind the boundary the planner sits in front of.
+SAFETY_PREAMBLE = (
+    "You are running inside tiny-hermes, a controlled execution platform. "
+    "You have no tools, no file access, and no network access. "
+    "Answer with text only. If a request needs a capability you do not have, "
+    "say so plainly instead of pretending to act."
 )
 
 
@@ -349,6 +371,22 @@ class CanonicalMessage:
         if self.author is not None:
             document["author"] = self.author
         return document
+
+
+@dataclass(frozen=True)
+class StoredMessage:
+    """A message together with where it sits in the Session transcript.
+
+    Two fields the kernel had never needed: a compaction has to record the
+    range it covered and the ids it stood in for, and a parallel list of
+    sequences beside a list of messages is a pairing nothing enforces. Anything
+    that only wants the conversation reads ``ExecutionContext.messages``, which
+    is still a tuple of ``CanonicalMessage``.
+    """
+
+    id: UUID
+    sequence: int
+    message: CanonicalMessage
 
 
 def message_from_document(document: dict[str, Any]) -> CanonicalMessage:
