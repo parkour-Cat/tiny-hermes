@@ -15,6 +15,7 @@ from tiny_hermes.agents.domain.models import (
     initial_agent_spec,
     rounds_above_ceiling,
 )
+from tiny_hermes.agents.ports.skills import SkillBindingReader, SkillBindingView
 from tiny_hermes.agents.ports.store import AgentStore, PublishResult
 from tiny_hermes.model_catalog.domain.models import ModelEndpoint
 from tiny_hermes.model_catalog.ports.store import ModelEndpointStore
@@ -22,6 +23,8 @@ from tiny_hermes.runs.domain.context_budget import (
     Accounting,
     BudgetFit,
     ContextWindow,
+    SegmentName,
+    estimate_tokens,
     fit_budget,
 )
 from tiny_hermes.tenancy.domain.models import Actor, Role
@@ -101,6 +104,52 @@ class ContextWindowTooSmall(AgentCatalogError):
         self.allowance = allowance
 
 
+class SkillBindingUnavailable(AgentCatalogError):
+    """A bound skill version this Agent may not run with, and why not.
+
+    The same reasoning as `unknown tool`: a version that was withdrawn, or that
+    the scan blocks, or that belongs to another workspace, is a Run that fails
+    on its first round — found by whoever submitted it rather than by the
+    author who could have fixed it in the editor.
+
+    `reasons` is keyed by version id because a draft binding four skills should
+    not have to publish four times to find all four problems.
+    """
+
+    def __init__(self, reasons: Mapping[UUID, str]) -> None:
+        super().__init__("; ".join(f"{key}: {value}" for key, value in reasons.items()))
+        self.reasons = dict(reasons)
+
+
+class SkillBoundTwice(AgentCatalogError):
+    """Two versions of the same skill in one spec.
+
+    Refused rather than resolved: nothing in the platform would be able to say
+    which of the two `skill.load` means, and picking the higher version number
+    would be this platform inventing an answer the author did not give.
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"{name} is bound at two versions")
+        self.name = name
+
+
+class SkillSummaryBudgetExceeded(AgentCatalogError):
+    """The bound summaries do not fit the segment that carries them.
+
+    Sixteen skills at 200 characters is about 3200 characters against a
+    `skill_summaries` ceiling of 1536 tokens, so this check is real rather than
+    ceremonial. It carries the estimate for every summary, the same rule
+    `ContextBudgetUnsatisfied` set: a refusal with a number in it is one the
+    author can act on.
+    """
+
+    def __init__(self, estimates: Mapping[str, int], allowance: int) -> None:
+        super().__init__(f"{sum(estimates.values())} tokens of summaries, {allowance} available")
+        self.estimates = dict(estimates)
+        self.allowance = allowance
+
+
 class RoundCeilingExceeded(AgentCatalogError):
     """The draft asks for more model rounds than this platform allows.
 
@@ -126,6 +175,7 @@ class AgentCatalog:
         store: AgentStore,
         endpoints: ModelEndpointStore | None = None,
         ceilings: PlatformCeilings | None = None,
+        skills: SkillBindingReader | None = None,
     ) -> None:
         self._store = store
         # Defaulted rather than required so the domain tests, which are about
@@ -137,6 +187,10 @@ class AgentCatalog:
         # never reaches the check, and an endpoint-backed one cannot be
         # published without a catalog to check against.
         self._endpoints = endpoints
+        # Optional for the same reason, with the same consequence: a draft that
+        # binds no skill never asks, and one that binds a skill without a
+        # reader to check it against cannot be published.
+        self._skills = skills
 
     async def create_agent(
         self, workspace_id: UUID, actor: Actor, name: str, alias: str, request_id: str
@@ -303,6 +357,7 @@ class AgentCatalog:
         draft = await self._store.get_draft(workspace_id, agent_id)
         if draft is not None:
             await self._check_endpoint(draft.spec)
+            await self._check_skills(workspace_id, draft.spec)
             # Again here, and not only on save: this draft was measured against
             # whatever the ceiling was the day it was written.
             self._check_ceilings(draft.spec)
@@ -354,6 +409,64 @@ class AgentCatalog:
             # nothing anywhere would say so.
             raise ModelOutputLimitTooHigh
         self._check_context_budget(spec, endpoint, wanted)
+
+    async def _check_skills(self, workspace_id: UUID, spec: AgentSpec) -> None:
+        """Refuse a version that binds a skill it cannot actually load.
+
+        Four ways a binding can be wrong, and all four are found here rather
+        than on the Run's first round: the version is not visible from this
+        workspace, it was withdrawn, the scan blocks it, or two of them are
+        versions of one skill.
+        """
+        if not spec.skills:
+            return
+        wanted = [binding.skill_version_id for binding in spec.skills]
+        if self._skills is None:
+            raise SkillBindingUnavailable(
+                {version_id: "no skill catalog is configured" for version_id in wanted}
+            )
+        found = {
+            view.version_id: view
+            for view in await self._skills.visible_versions(workspace_id, wanted)
+        }
+        reasons: dict[UUID, str] = {}
+        for version_id in wanted:
+            view = found.get(version_id)
+            if view is None:
+                # Not "does not exist": from here the two are the same answer,
+                # and telling them apart would say whether another workspace
+                # holds this version.
+                reasons[version_id] = "no such skill version is visible here"
+            elif not view.active:
+                reasons[version_id] = f"{view.name} was withdrawn at this version"
+            elif view.blocked_by_scan:
+                reasons[version_id] = f"{view.name} has a blocking scan finding"
+        if reasons:
+            raise SkillBindingUnavailable(reasons)
+        by_skill: dict[UUID, str] = {}
+        for view in (found[version_id] for version_id in wanted):
+            if view.skill_id in by_skill:
+                raise SkillBoundTwice(by_skill[view.skill_id])
+            by_skill[view.skill_id] = view.name
+        self._check_summary_budget(spec, [found[version_id] for version_id in wanted])
+
+    def _check_summary_budget(
+        self, spec: AgentSpec, views: Sequence[SkillBindingView]
+    ) -> None:
+        """Whether the bound summaries fit the segment that carries them.
+
+        No tokenizer here: which endpoint will serve this Agent is a question
+        `_check_endpoint` answers, and the character-based bound is the
+        conservative one, so a spec that passes this check passes it on every
+        endpoint. §7.4.2's ceiling for the segment, as this spec resolves it.
+        """
+        budget = (spec.context_budget or ContextBudget()).resolve()
+        allowance = budget[SegmentName.SKILL_SUMMARIES].max_tokens
+        if allowance is None:
+            return
+        estimates = {view.name: estimate_tokens(view.description) for view in views}
+        if sum(estimates.values()) > allowance:
+            raise SkillSummaryBudgetExceeded(estimates, allowance)
 
     def _check_context_budget(
         self, spec: AgentSpec, endpoint: ModelEndpoint, wanted: int | None

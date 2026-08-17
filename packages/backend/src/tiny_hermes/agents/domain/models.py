@@ -240,6 +240,26 @@ class ContextBudget(BaseModel):
         return resolved
 
 
+#: A spec may bind at most this many skills. Not a performance number: sixteen
+#: summaries is already more than the `skill_summaries` segment will hold, so
+#: the arithmetic below refuses most drafts long before this does.
+MAX_SKILL_BINDINGS = 16
+
+
+class SkillBinding(BaseModel):
+    """One skill version an Agent may load from, named by version id.
+
+    Red line two of M2B: a binding names a version, never a skill. Binding a
+    name would mean a published Agent's behaviour changes when somebody
+    uploads to the catalog — the immutability an AgentVersion promises would
+    stop at the edge of its own row.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    skill_version_id: UUID
+
+
 #: Discriminated, so a `provider` the platform does not understand is refused
 #: rather than falling through to the stand-in. An Agent that answers from a
 #: `match` statement while its author believes it is talking to a model is the
@@ -289,6 +309,31 @@ class AgentSpec(BaseModel):
     #: document when absent, the third widening to make that promise and the
     #: third to have it pinned by a test.
     context_budget: ContextBudget | None = None
+    #: The skill versions this Agent may load from, fixed when the version was
+    #: made immutable — §10.2's first step, exactly as `tools` does it. Omitted
+    #: from the normalized document when empty, the fourth widening to make
+    #: that promise and the fourth to have it pinned by a test.
+    #:
+    #: M2E (§27.2.3) gives a sub-Agent the intersection of its parent's skills
+    #: and the delegation policy. A binding is a set of version ids, so that
+    #: intersection is a set intersection and nothing here has to change shape
+    #: for it. Written down rather than built: this phase does not delegate.
+    skills: tuple[SkillBinding, ...] = ()
+
+    @field_validator("skills")
+    @classmethod
+    def reject_repeated_versions(
+        cls, value: tuple[SkillBinding, ...]
+    ) -> tuple[SkillBinding, ...]:
+        """One version, once. Two versions of one skill is refused at publish,
+        where the store can say which skill a version belongs to; this catches
+        the case a draft can settle on its own."""
+        if len(value) > MAX_SKILL_BINDINGS:
+            raise ValueError(f"an Agent may bind at most {MAX_SKILL_BINDINGS} skills")
+        seen = {binding.skill_version_id for binding in value}
+        if len(seen) != len(value):
+            raise ValueError("a skill version may be bound only once")
+        return value
 
     @field_validator("tools")
     @classmethod
@@ -386,6 +431,11 @@ def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
         # platform table an absent budget means. A spec that declares none
         # carries no key, and hashes as it did before this field existed.
         normalized.pop("context_budget", None)
+    if not normalized.get("skills"):
+        # `tools` could keep its empty list because the key was there from the
+        # first published version. This one was not, so an empty binding set
+        # has to carry no key at all to leave those hashes alone.
+        normalized.pop("skills", None)
     encoded = json.dumps(
         normalized,
         ensure_ascii=False,

@@ -19,6 +19,9 @@ from tiny_hermes.agents.application.service import (
     ModelEndpointUnavailable,
     ModelOutputLimitTooHigh,
     RoundCeilingExceeded,
+    SkillBindingUnavailable,
+    SkillBoundTwice,
+    SkillSummaryBudgetExceeded,
     UnknownAgent,
 )
 from tiny_hermes.agents.domain.models import Agent, AgentDraft, AgentVersion
@@ -473,6 +476,53 @@ def _as_app_error(error: AgentCatalogError) -> AppError:
                 )
                 + ". Nothing is changed until you publish these."
             ),
+        )
+    if isinstance(error, SkillBindingUnavailable):
+        return AppError(
+            code="skill_binding_unavailable",
+            title="A bound skill cannot be used",
+            status=422,
+            detail="; ".join(
+                f"{version_id}: {reason}"
+                for version_id, reason in error.reasons.items()
+            ),
+            # Every failing binding, not the first one: an author with four
+            # bound skills should not learn about them one publish at a time.
+            context={
+                "bindings": [
+                    {"skill_version_id": str(version_id), "reason": reason}
+                    for version_id, reason in error.reasons.items()
+                ]
+            },
+        )
+    if isinstance(error, SkillBoundTwice):
+        return AppError(
+            code="skill_bound_twice",
+            title="One skill, two versions",
+            status=422,
+            detail=(
+                f"This agent binds two versions of {error.name}. Keep the one "
+                "it should load from."
+            ),
+        )
+    if isinstance(error, SkillSummaryBudgetExceeded):
+        return AppError(
+            code="skill_summary_budget_exceeded",
+            title="Skill summaries do not fit",
+            status=422,
+            detail=(
+                f"The bound summaries estimate {sum(error.estimates.values())} "
+                f"tokens and the skill_summaries segment holds {error.allowance}. "
+                "Bind fewer skills or shorten their descriptions."
+            ),
+            # Per summary, so the author can see which description is the
+            # expensive one rather than shortening all of them.
+            context={
+                "summaries": [
+                    {"skill": name, "estimated_tokens": tokens}
+                    for name, tokens in error.estimates.items()
+                ]
+            },
         )
     if isinstance(error, RoundCeilingExceeded):
         return AppError(
