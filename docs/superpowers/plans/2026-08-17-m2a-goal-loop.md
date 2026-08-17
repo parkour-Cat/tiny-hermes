@@ -66,20 +66,37 @@
 
 ## 4. 校验命令：让虚假的 `done` 站不住
 
-- [ ] 集成测试：Agent 声明一个必然失败的 `verification_command`，模型第一轮就
-      报 `COMPLETED`，断言 Run 没有结束，且事件里有未满足项。
-- [ ] Worker 在收到 `done` 提议且存在完成条件时，于当前沙箱执行校验命令，
-      结果作为 `GoalEvidence` 交给判断器。复用现有 `command.run` 执行路径，
-      不新开执行入口——宿主机回退禁令因此原样覆盖。
-- [ ] `expected_artifacts` 用现有 `/workspace/data` 冻结扫描的结果判定存在性。
-- [ ] 校验无法执行（无沙箱、控制器拒绝）→ `paused(operator)`，不静默接受也不静默否决。
+- [x] 集成测试 `tests/integration/runs/test_worker_goal.py`（8 条）：必然失败的
+      `verification_command` + 第一轮就报 `COMPLETED` → Run 没有结束；校验通过 →
+      结束；第一次失败第二次通过 → 结束且校验跑了两次；不声明完成条件的 Agent
+      一条命令都不执行（0.1 行为）；缺失的 `expected_artifacts` 是未通过的检查。
+      **事件断言挪到第 8 步**：`run_events.event_type` 上有一条从枚举生成的
+      CHECK 约束，新增事件类型要带迁移，和第 8 步的 `RunSnapshot` 字段合成一次。
+- [x] Worker 在收到 `done` 提议且存在完成条件时，于当前沙箱执行校验命令，
+      结果作为 `GoalEvidence` 交给判断器。走的就是 `shell.exec` 那条
+      `sandbox.execute` 路径，不新开执行入口——宿主机回退禁令因此原样覆盖。
+- [x] `expected_artifacts` 用沙箱里的 `test -e` 判定存在性，而不是冻结扫描：
+      判定必须发生在 `decide_after_round` 之前，而冻结扫描发生在 `_checkpoint_round`
+      里、也就是决定之后；为了几个路径把整棵树扫一遍也不划算。
+- [x] 校验的副作用不提交。检查是观察，写入是 Agent 自己的轮次干的事；一次通过的
+      检查顺手往工作区里加文件，会让记录本身变得不对。
+- [x] 校验无法执行（控制器拒绝、命令超时被杀）→ `paused(operator)`，
+      不静默接受也不静默否决。超时算「没有回答」而不是「没通过」，
+      否则一个跑得慢的检查会把 Run 一路循环到预算耗尽。
 
 ## 5. `continue` 的下一轮指令
 
-- [ ] 集成测试：第 4 步那个 Run 的下一轮请求里出现一条平台指令，且它命名了
-      失败的校验，没有复述任务。
-- [ ] 判断器生成指令文本，Worker 作为 `role="user"` 的 `CanonicalMessage` 追加，
-      检查点记录平台作者标记，使抄本读者能与人类输入区分。
+- [x] 集成测试（2 条）：第 4 步那个 Run 的下一轮请求里恰好一条平台指令，它出现
+      `pytest -q`、不出现任务原文；抄本里那一轮存成 `role="user"` 但带作者标记，
+      与人类那一条区分得开。
+- [x] 判断器生成指令文本（`goal.py:_instruction_for`），Worker 作为 `role="user"`
+      的 `CanonicalMessage` 追加。指令只说明哪几项没通过——任务本身已经在对话里，
+      复述它是在花上下文买模型已经能读到的东西。
+- [x] 作者标记是 `CanonicalMessage.author`，加宽方式与第 2 步同：默认 `None`、
+      为空时不进 document，所以本切片之前写下的每一行抄本字节不变
+      （`test_platform_messages.py` 用人类那一条的 document 逐字节钉住）。
+      读回时只认识 `"platform"`，其它值一律当人类——这个方向是安全的那个，
+      把一条读不懂的记录说成平台的，等于替别人说话。
 
 ## 6. 轮数上限从常量变成平台设置
 

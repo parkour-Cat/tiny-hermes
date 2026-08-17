@@ -311,6 +311,13 @@ class CanonicalMessage:
 
     role: Literal["user", "assistant", "tool"]
     blocks: tuple[Block, ...]
+    #: Who wrote this turn, when it was not whoever the role suggests. The
+    #: Goal loop's instruction is a `user` turn because that is the only role
+    #: the kernel has for "what the agent is being asked", and a transcript in
+    #: which it cannot be told from something a person typed is a transcript
+    #: that misattributes the platform's words. Absent on every other turn, so
+    #: the stored document is unchanged for rows written before this slice.
+    author: Literal["platform"] | None = None
 
     def __post_init__(self) -> None:
         if not self.blocks:
@@ -328,7 +335,13 @@ class CanonicalMessage:
         return "".join(block.text for block in self.blocks if isinstance(block, TextBlock))
 
     def document(self) -> dict[str, Any]:
-        return {"role": self.role, "parts": [block.document() for block in self.blocks]}
+        document: dict[str, Any] = {
+            "role": self.role,
+            "parts": [block.document() for block in self.blocks],
+        }
+        if self.author is not None:
+            document["author"] = self.author
+        return document
 
 
 def message_from_document(document: dict[str, Any]) -> CanonicalMessage:
@@ -371,9 +384,14 @@ def message_from_document(document: dict[str, Any]) -> CanonicalMessage:
             )
 
     role = str(document.get("role", "user"))
+    # An author this version does not recognize reads back as no author at
+    # all. Claiming a turn is the platform's on the strength of a word written
+    # by a later version would put words in someone else's mouth.
+    author = "platform" if document.get("author") == "platform" else None
     return CanonicalMessage(
         role=role if role in ("user", "assistant", "tool") else "user",  # pyright: ignore[reportArgumentType]
         blocks=tuple(blocks) or (TextBlock(text=""),),
+        author=author,
     )
 
 

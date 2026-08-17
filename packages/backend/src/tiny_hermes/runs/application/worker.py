@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import logging
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -13,9 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tiny_hermes.artifacts.application.service import ArtifactLimits, ArtifactRecorder
 from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
 from tiny_hermes.runs.domain.goal import (
+    CompletionCheck,
     GoalEvidence,
     GoalProposal,
-    GoalVerdict,
     judge,
 )
 from tiny_hermes.runs.domain.models import (
@@ -88,6 +89,11 @@ from tiny_hermes.tools.domain.registry import DEFAULT_OUTPUT_BYTES, schemas_for
 logger = logging.getLogger(__name__)
 
 PLATFORM = RunCapabilities(can_control=True, can_retry=True)
+
+#: How long a declared verification command may take. Long enough for a real
+#: test suite, short enough that a check which hangs pauses the Run for a
+#: person inside one slice rather than spending the whole budget on silence.
+_VERIFICATION_TIMEOUT_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -272,6 +278,12 @@ class WorkerRuntime:
                 appended, wrote = await self._answer_tools(
                     claimed, handle, box, response, context
                 )
+                # Before the re-read, for the same reason the tool calls are:
+                # a cancellation that arrives while a check is running should
+                # be seen by the read that follows it.
+                evidence = await self._completion_evidence(
+                    claimed, handle, box, context, response
+                )
 
                 # Re-read after the call: a user may have asked to pause or
                 # cancel while the model was working, and the request flag bumps
@@ -284,9 +296,23 @@ class WorkerRuntime:
                     after.compat_deadline_at is not None
                     and now >= after.compat_deadline_at
                 )
+                verdict = judge(GoalProposal(stop_reason=response.stop_reason), evidence)
+                if verdict.instruction is not None:
+                    # §12.1: continue 生成下一轮指令. Recorded even if the Run
+                    # then pauses for some other reason — why the platform
+                    # disagreed with the claim stays true, and the next round
+                    # after a resume is the one that needs to read it.
+                    appended = (
+                        *appended,
+                        CanonicalMessage(
+                            role="user",
+                            blocks=(TextBlock(text=verdict.instruction),),
+                            author="platform",
+                        ),
+                    )
                 decision = decide_after_round(
                     RoundOutcome(
-                        verdict=_verdict_for(response),
+                        verdict=verdict,
                         cancel_requested=after.cancel_requested,
                         pause_requested=after.pause_requested,
                         budget_allows=_budget_after(after, response, executed_ms),
@@ -469,6 +495,101 @@ class WorkerRuntime:
             )
             return None
         return replace(box, revision=result.revision_id)
+
+    async def _completion_evidence(
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        box: "_Sandbox | None",
+        context: ExecutionContext,
+        response: ModelResponse,
+    ) -> GoalEvidence:
+        """Check the claim, in this Run's own sandbox.
+
+        Only a claim is worth checking: a round that asked for a tool has not
+        said it is finished, and an Agent that declared no condition has given
+        the platform nothing to check. Both of those leave here having run no
+        command at all, which is why an Agent published before this slice
+        costs exactly what it used to.
+
+        Whatever the checks write is not committed. A check observes; the
+        Agent's own rounds are what produce the workspace, and a passing check
+        that quietly added files to the record would make the record wrong.
+        """
+        condition = context.spec.completion
+        if condition is None or response.stop_reason is not StopReason.COMPLETED:
+            return GoalEvidence(declared=condition is not None)
+        if box is None or self._sandbox is None:  # pragma: no cover - publish refuses it
+            return GoalEvidence(declared=True, observable=False)
+
+        checks: list[CompletionCheck] = []
+        for path in condition.expected_artifacts:
+            # `test -e` and not a stat of the host: the artifact is a path
+            # inside the sandbox, and this is the only place it exists.
+            met = await self._check_holds(
+                claimed, handle, box, f"test -e {shlex.quote(f'{DATA_ROOT}/{path}')}", 30
+            )
+            if met is None:
+                return GoalEvidence(declared=True, observable=False)
+            checks.append(CompletionCheck(name=path, met=met))
+
+        if condition.verification_command is not None:
+            met = await self._check_holds(
+                claimed,
+                handle,
+                box,
+                condition.verification_command,
+                _VERIFICATION_TIMEOUT_SECONDS,
+            )
+            if met is None:
+                return GoalEvidence(declared=True, observable=False)
+            checks.append(CompletionCheck(name=condition.verification_command, met=met))
+
+        return GoalEvidence(declared=True, checks=tuple(checks))
+
+    async def _check_holds(
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        box: _Sandbox,
+        line: str,
+        timeout_seconds: int,
+    ) -> bool | None:
+        """Run one check. ``None`` means it did not answer.
+
+        A command that was killed on its timeout, or a controller that refused
+        to run it, said nothing about whether the goal was met. Reporting
+        either as "not met" would loop a healthy Run against a broken sandbox
+        until the budget stopped it, and reporting it as met would accept a
+        claim on no evidence.
+        """
+        sandbox = self._sandbox
+        if sandbox is None:  # pragma: no cover - guarded by the caller
+            return None
+        try:
+            result = await sandbox.execute(
+                run_id=claimed.run.id,
+                lease_id=handle.lease_id,
+                sandbox_id=box.sandbox_id,
+                command=SandboxCommand(
+                    # The same shell the Agent's own commands get, so the
+                    # verification an author wrote and tested by hand is the
+                    # one that runs — and so §16's no-host-fallback rule
+                    # covers it without a second execution path existing.
+                    argv=["/bin/bash", "-lc", line],
+                    cwd=DATA_ROOT,
+                    timeout_seconds=timeout_seconds,
+                    output_limit=DEFAULT_OUTPUT_BYTES,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "completion check could not run", extra={"run_id": str(claimed.run.id)}
+            )
+            return None
+        if result.timed_out:
+            return None
+        return int(result.exit_code) == 0
 
     async def _file_safety_holds(
         self, claimed: ClaimedRun, handle: _LeaseHandle, box: _Sandbox
@@ -1238,20 +1359,6 @@ def _request(context: ExecutionContext, box: "_Sandbox | None") -> ModelRequest:
         round_index=context.budget.consumed_model_calls + 1,
         tools=tuple(schemas_for(context.spec.tools)),
         cache_hint=box.hint if box is not None else None,
-    )
-
-
-def _verdict_for(response: ModelResponse) -> GoalVerdict:
-    """Turn what the round reported into the platform's own answer.
-
-    The evidence is empty for every Agent here, so this is 0.1's behaviour
-    reached through the judge: a completion claim from an Agent that declared
-    no condition is still the whole of the answer. Running the declared checks
-    and filling this in is the next step.
-    """
-    return judge(
-        GoalProposal(stop_reason=response.stop_reason),
-        GoalEvidence(declared=False),
     )
 
 
