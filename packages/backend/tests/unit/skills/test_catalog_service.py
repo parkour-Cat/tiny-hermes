@@ -7,6 +7,7 @@ make them, which is the part a route could get wrong without any test failing:
 Product design §15.1 for the two levels, §9.3 for workspace scope.
 """
 
+from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import pytest
@@ -14,15 +15,22 @@ from tiny_hermes.skills.application.service import (
     ForbiddenSkillAction,
     InvalidSkillPackage,
     SkillCatalog,
+    SkillImportFailed,
     SkillNameMismatch,
     SkillNameTaken,
     SkillScanRefused,
     UnknownSkill,
     VersionNotBindable,
 )
-from tiny_hermes.skills.domain.models import Skill, SkillScope, SkillVersionStatus
+from tiny_hermes.skills.domain.models import (
+    Skill,
+    SkillScope,
+    SkillSource,
+    SkillVersionStatus,
+)
 from tiny_hermes.skills.domain.package import SkillFile
 from tiny_hermes.skills.infrastructure.memory_store import MemorySkillStore
+from tiny_hermes.skills.ports.tarball_source import FetchedTarball, TarballUnavailable
 from tiny_hermes.tenancy.domain.models import Actor, Role
 
 REQUEST = "request-1"
@@ -327,3 +335,148 @@ async def test_a_platform_admin_outside_the_workspace_leaves_an_audit_trail(
     silent."""
     await create(catalog, platform_admin(), workspace_id)
     assert "skill.write_by_platform_admin" in store.audit_actions
+
+
+@dataclass
+class Source:
+    """A tarball source with no socket under it.
+
+    Where the bytes come from is `tests/integration/skills/test_tarball_import`'s
+    subject. These say what the catalog does with what arrives.
+    """
+
+    files: tuple[SkillFile, ...] = ()
+    ref: str | None = "9f1c2ab"
+    error: str | None = None
+
+    async def fetch(self, url: str) -> FetchedTarball:
+        del url
+        if self.error is not None:
+            raise TarballUnavailable(self.error)
+        return FetchedTarball(files=self.files, ref=self.ref)
+
+
+@pytest.fixture
+def source() -> Source:
+    return Source(files=files())
+
+
+@pytest.fixture
+def importing(store: MemorySkillStore, source: Source) -> SkillCatalog:
+    return SkillCatalog(store, source)
+
+
+async def test_an_import_records_where_the_version_came_from(
+    importing: SkillCatalog, store: MemorySkillStore, workspace_id: UUID
+) -> None:
+    actor = member(store, workspace_id, Role.DEVELOPER)
+    url = "https://codeload.example.com/house-style/tar.gz/main"
+
+    _, version = await importing.import_skill(
+        actor, workspace_id, SkillScope.WORKSPACE, url, REQUEST
+    )
+
+    assert version.source is SkillSource.GIT
+    assert version.source_url == url
+    assert version.source_ref == "9f1c2ab"
+
+
+async def test_a_viewer_may_not_import(
+    importing: SkillCatalog, store: MemorySkillStore, workspace_id: UUID
+) -> None:
+    """Import is a write. Reaching the network does not make it less of one."""
+    actor = member(store, workspace_id, Role.VIEWER)
+
+    with pytest.raises(ForbiddenSkillAction):
+        await importing.import_skill(
+            actor, workspace_id, SkillScope.WORKSPACE, "https://x/y.tar.gz", REQUEST
+        )
+
+
+async def test_an_unreachable_source_leaves_nothing_behind(
+    importing: SkillCatalog,
+    store: MemorySkillStore,
+    source: Source,
+    workspace_id: UUID,
+) -> None:
+    """The permission check runs first and the row is written last, so a fetch
+    that fails in between cannot leave a skill with no version in it."""
+    actor = member(store, workspace_id, Role.DEVELOPER)
+    source.error = "That address could not be reached."
+
+    with pytest.raises(SkillImportFailed, match="could not be reached"):
+        await importing.import_skill(
+            actor, workspace_id, SkillScope.WORKSPACE, "https://x/y.tar.gz", REQUEST
+        )
+    assert store.skills == {}
+
+
+async def test_a_catalog_with_no_source_says_so_rather_than_failing_late(
+    catalog: SkillCatalog, store: MemorySkillStore, workspace_id: UUID
+) -> None:
+    """The store-only catalog the manual path uses. Importing through it is a
+    wiring mistake, and it should read as one."""
+    actor = member(store, workspace_id, Role.DEVELOPER)
+
+    with pytest.raises(SkillImportFailed, match="not configured"):
+        await catalog.import_skill(
+            actor, workspace_id, SkillScope.WORKSPACE, "https://x/y.tar.gz", REQUEST
+        )
+
+
+async def test_re_importing_unchanged_content_publishes_nothing(
+    importing: SkillCatalog, store: MemorySkillStore, workspace_id: UUID
+) -> None:
+    actor = member(store, workspace_id, Role.DEVELOPER)
+    skill, _ = await importing.import_skill(
+        actor, workspace_id, SkillScope.WORKSPACE, "https://x/y.tar.gz", REQUEST
+    )
+
+    again = await importing.import_version(
+        actor, workspace_id, skill.id, "https://x/y.tar.gz", REQUEST
+    )
+
+    assert again.created is False
+    assert again.version.version_number == 1
+
+
+async def test_an_import_may_not_rename_the_skill_it_lands_in(
+    importing: SkillCatalog,
+    store: MemorySkillStore,
+    source: Source,
+    workspace_id: UUID,
+) -> None:
+    """A name is what an AgentSpec binds, so the source moving to a new one is
+    a different skill, not the same skill with a different label."""
+    actor = member(store, workspace_id, Role.DEVELOPER)
+    skill, _ = await importing.import_skill(
+        actor, workspace_id, SkillScope.WORKSPACE, "https://x/y.tar.gz", REQUEST
+    )
+    source.files = (
+        SkillFile(path="SKILL.md", text=SKILL_MD.replace("release-notes", "changelog")),
+    )
+
+    with pytest.raises(SkillNameMismatch) as raised:
+        await importing.import_version(
+            actor, workspace_id, skill.id, "https://x/y.tar.gz", REQUEST
+        )
+    assert raised.value.expected == skill.name
+    assert raised.value.found == "changelog"
+
+
+async def test_an_imported_package_is_scanned_like_any_other(
+    importing: SkillCatalog,
+    store: MemorySkillStore,
+    source: Source,
+    workspace_id: UUID,
+) -> None:
+    """Coming from a URL buys a package nothing."""
+    actor = member(store, workspace_id, Role.DEVELOPER)
+    source.files = files("Use AKIAIOSFODNN7EXAMPLE for the demo.\n")
+
+    with pytest.raises(SkillScanRefused):
+        await importing.import_skill(
+            actor, workspace_id, SkillScope.WORKSPACE, "https://x/y.tar.gz", REQUEST
+        )
+    assert store.skills == {}
+    assert store.versions == {}

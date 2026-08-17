@@ -55,6 +55,10 @@ def test_no_module_but_the_engine_and_the_helper_speaks_tar() -> None:
         "packages/backend/src/tiny_hermes/sandbox/infrastructure/docker_engine.py",
         "packages/backend/src/tiny_hermes/session_workspace/application/service.py",
         "packages/backend/src/tiny_hermes/session_workspace/infrastructure/sandbox_port.py",
+        # The fourth, added for skill import (M2B §4). It is the only member of
+        # this list that reads an archive somebody outside the platform wrote,
+        # so it is the only one whose ceilings are asserted below.
+        "packages/backend/src/tiny_hermes/skills/infrastructure/tarball.py",
     }
     importers = {
         str(source.relative_to(ROOT)).replace("\\", "/")
@@ -62,3 +66,25 @@ def test_no_module_but_the_engine_and_the_helper_speaks_tar() -> None:
         if re.search(r"^\s*import tarfile", source.read_text(encoding="utf-8"), re.M)
     }
     assert importers <= allowed, f"unexpected tar handling in: {sorted(importers - allowed)}"
+
+
+def test_the_import_reader_pays_for_its_place_on_that_list() -> None:
+    """The one module that reads an archive written outside this platform.
+
+    Its allowance was granted against four ceilings and one reading method. If
+    somebody deletes a ceiling, the allowance should stop holding, and the only
+    way to make that true is to check here rather than in a test named after
+    the feature.
+    """
+    source = (SRC / "skills" / "infrastructure" / "tarball.py").read_text(
+        encoding="utf-8"
+    )
+    for ceiling in (
+        "MAX_MEMBERS",
+        "MAX_MEMBER_BYTES",
+        "MAX_TOTAL_BYTES",
+        "MAX_COMPRESSION_RATIO",
+    ):
+        assert re.search(rf"^{ceiling} = ", source, re.M), f"{ceiling} is gone"
+    assert ".extractfile(" in source
+    assert "open(" not in source.replace("tarfile.open(", "")

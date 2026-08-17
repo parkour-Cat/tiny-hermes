@@ -33,6 +33,7 @@ from tiny_hermes.skills.application.service import (
     ForbiddenSkillAction,
     InvalidSkillPackage,
     SkillCatalog,
+    SkillImportFailed,
     SkillNameMismatch,
     SkillNameTaken,
     SkillScanRefused,
@@ -70,6 +71,17 @@ class CreateSkillRequest(BaseModel):
 
 class UploadVersionRequest(BaseModel):
     files: list[SkillFilePayload] = Field(min_length=1, max_length=MAX_FILES)
+
+
+class ImportSkillRequest(BaseModel):
+    scope: Literal["workspace", "platform"]
+    #: An HTTPS tarball URL. The fetch goes through the platform's outbound
+    #: face, so the address policy and the redirect rules apply unchanged.
+    url: str = Field(min_length=1, max_length=2048)
+
+
+class ImportVersionRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=2048)
 
 
 class SetCurrentVersionRequest(BaseModel):
@@ -210,6 +222,45 @@ def skill_router(resources: ApplicationResources) -> APIRouter:
             raise _scan_refused(error) from error
         return SkillResponse.from_domain(skill)
 
+    @router.post(
+        "/import", response_model=SkillResponse, status_code=status.HTTP_201_CREATED
+    )
+    async def import_skill(  # pyright: ignore[reportUnusedFunction]
+        payload: ImportSkillRequest,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[SkillCatalog, Depends(catalog_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> SkillResponse:
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            skill, _ = await catalog.import_skill(
+                _actor(user),
+                workspace_id,
+                SkillScope(payload.scope),
+                payload.url,
+                request.state.request_id,
+            )
+        except ForbiddenSkillAction as error:
+            raise forbidden() from error
+        except SkillImportFailed as error:
+            raise _import_failed(error) from error
+        except SkillNameTaken as error:
+            raise AppError(
+                code="skill_name_taken",
+                title="Skill name taken",
+                status=409,
+                detail="A skill by that name already exists at this level.",
+            ) from error
+        except InvalidSkillPackage as error:
+            raise _invalid_package(error) from error
+        except SkillScanRefused as error:
+            raise _scan_refused(error) from error
+        return SkillResponse.from_domain(skill)
+
     @router.get("/{skill_id}", response_model=SkillResponse)
     async def get_skill(  # pyright: ignore[reportUnusedFunction]
         skill_id: UUID,
@@ -285,20 +336,56 @@ def skill_router(resources: ApplicationResources) -> APIRouter:
         except InvalidSkillPackage as error:
             raise _invalid_package(error) from error
         except SkillNameMismatch as error:
-            raise AppError(
-                code="skill_name_mismatch",
-                title="Skill name mismatch",
-                status=422,
-                detail=(
-                    f"This skill is named {error.expected!r}, "
-                    f"but the uploaded SKILL.md names {error.found!r}."
-                ),
-            ) from error
+            raise _name_mismatch(error) from error
         except SkillScanRefused as error:
             raise _scan_refused(error) from error
         if not result.created:
             # Same content, same version, nothing published. 200 rather than
             # 201 is the roadmap's exit check for re-import spoken in HTTP.
+            response.status_code = status.HTTP_200_OK
+        return SkillVersionResponse.from_domain(result.version)
+
+    @router.post(
+        "/{skill_id}/versions/import",
+        response_model=SkillVersionResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def import_version(  # pyright: ignore[reportUnusedFunction]
+        skill_id: UUID,
+        payload: ImportVersionRequest,
+        request: Request,
+        response: Response,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[SkillCatalog, Depends(catalog_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> SkillVersionResponse:
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            result = await catalog.import_version(
+                _actor(user),
+                workspace_id,
+                skill_id,
+                payload.url,
+                request.state.request_id,
+            )
+        except ForbiddenSkillAction as error:
+            raise forbidden() from error
+        except UnknownSkill as error:
+            raise _skill_not_found() from error
+        except SkillImportFailed as error:
+            raise _import_failed(error) from error
+        except InvalidSkillPackage as error:
+            raise _invalid_package(error) from error
+        except SkillNameMismatch as error:
+            raise _name_mismatch(error) from error
+        except SkillScanRefused as error:
+            raise _scan_refused(error) from error
+        if not result.created:
+            # The source has not changed since the last import. Same rule as a
+            # re-upload: nothing was published, so nothing was created.
             response.status_code = status.HTTP_200_OK
         return SkillVersionResponse.from_domain(result.version)
 
@@ -426,6 +513,28 @@ def _version_not_found() -> AppError:
         title="Skill version not found",
         status=404,
         detail="That skill has no version by that identifier.",
+    )
+
+
+def _name_mismatch(error: SkillNameMismatch) -> AppError:
+    return AppError(
+        code="skill_name_mismatch",
+        title="Skill name mismatch",
+        status=422,
+        detail=(
+            f"This skill is named {error.expected!r}, "
+            f"but the SKILL.md that arrived names {error.found!r}."
+        ),
+    )
+
+
+def _import_failed(error: SkillImportFailed) -> AppError:
+    """422, not 502. The URL is the part the person can change."""
+    return AppError(
+        code="skill_import_failed",
+        title="Skill import failed",
+        status=422,
+        detail=error.reason,
     )
 
 
