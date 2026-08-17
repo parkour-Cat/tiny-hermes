@@ -64,7 +64,9 @@ async function publishAgent(page: Page, scenario: string): Promise<string> {
   await page.getByLabel("别名").fill(name.toLowerCase().replace(/_/g, "-"));
   await page.getByRole("button", { name: "创建", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "新建 Agent" })).toBeHidden();
-  await page.getByRole("link", { name, exact: true }).click();
+  // Creating an Agent lands in its builder. The list row was too quiet a door:
+  // a name that looked like a label was the only way in.
+  await expect(page).toHaveURL(/\/agents\/[0-9a-f-]{36}$/);
 
   await expect(page.getByText("草稿修订 1")).toBeVisible();
   await page.getByLabel("人格").fill(`A ${scenario} agent for the console acceptance walk.`);
@@ -183,7 +185,7 @@ test("the builder binds a tool, playground sends, and rollback restores v1", asy
   await page.getByLabel("别名").fill(name.toLowerCase().replace(/_/g, "-"));
   await page.getByRole("button", { name: "创建" }).click();
   await expect(page.getByRole("dialog", { name: "新建 Agent" })).toBeHidden();
-  await page.getByRole("link", { name, exact: true }).click();
+  await expect(page).toHaveURL(/\/agents\/[0-9a-f-]{36}$/);
 
   await page.getByLabel("人格").fill("A playground agent for the console acceptance walk.");
   await choose(page, "模型场景", "continue_once");
