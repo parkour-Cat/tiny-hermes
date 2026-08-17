@@ -612,6 +612,7 @@ $endpoint = Invoke-RestMethod -Uri "$api/model-endpoints" -Method Post -WebSessi
     name = "acme-gpt"; kind = "openai_compatible"
     base_url = "https://models.example.com/v1"; model = "acme-large"
     context_window = 128000; max_output_tokens = 4096
+    context_accounting = "shared"; tokenizer = $null
     usage_quality = "provider"; credential_ref = "TINY_HERMES_MODEL_KEY_ACME"
   } | ConvertTo-Json)
 
@@ -660,6 +661,38 @@ Publishing refuses an endpoint that does not exist or has been disabled, and an
 because an Agent that quietly produces less than it was configured for behaves
 unlike the one its author published. A draft may name anything; the check is at
 publish, which is the last moment a mistake is still cheap.
+
+### The context window, and what an Agent may plan to fill it with
+
+`context_accounting` says whether the endpoint's window holds the output as well
+as the input. `shared` is the default and the conservative answer: the reserved
+output is subtracted, so a 128,000 window with 4,096 reserved has an input
+allowance of 123,904. `separate` leaves the whole window for input. It is
+declared rather than guessed from the provider's name, because two endpoints of
+the same size hold different amounts of conversation depending on it.
+
+`tokenizer` records a name and nothing more in this version. No tokenizer ships
+verified here, so every endpoint is planned with a conservative
+characters-based upper bound; the field exists so a verified implementation can
+be added later without moving the planner. Every number the planner produces is
+a plan estimate and is never added to `consumed_tokens` — billing still comes
+only from what the provider reported.
+
+Publishing checks that the endpoint can serve the Agent's segment budget. The
+platform default sums to 9,472 tokens, so an endpoint whose *input allowance* is
+below that is refused with `context_budget_unsatisfied`, and the refusal carries
+a suggested number for every segment rather than the word "invalid". The advice
+does not apply itself: take it into the draft and publish again. An endpoint
+that cannot hold even the 768-token floor is `context_window_too_small`, which
+no advice would fix.
+
+At run time the same shortage is `paused(context_overflow)`: the round is not
+sent, no model call is spent, and the transcript keeps every message. Before
+that the platform trims the oldest large tool results (leaving each call
+answered by a stub naming its `call_id` and its size) and then compacts the
+oldest turns into one generated summary, recording the range and the ids it
+stood in for. Both leave a `context_trimmed` or `context_compacted` event on the
+Run, and the console says in words what each one did.
 
 ### Outbound safety
 
