@@ -51,6 +51,17 @@ class ControlRunRequest(BaseModel):
     expected_state_version: int = Field(ge=1)
 
 
+class WidenBudgetRequest(BaseModel):
+    """Product design §12.3's explicit act, spelled out as one.
+
+    The new ceiling is named in full rather than as an increment, so the value
+    the operator approved is the value the audit row records.
+    """
+
+    expected_state_version: int = Field(ge=1)
+    max_model_calls: int = Field(ge=1)
+
+
 class SessionResponse(BaseModel):
     id: UUID
     agent_id: UUID
@@ -551,6 +562,44 @@ def run_router(resources: ApplicationResources) -> APIRouter:
             selected_workspace,
             authorization,
         )
+
+    @router.post("/{run_id}/budget", response_model=RunResponse)
+    async def widen_run_budget(  # pyright: ignore[reportUnusedFunction]
+        run_id: UUID,
+        payload: WidenBudgetRequest,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[
+            MachineIdentityService, Depends(machines_dependency, scope="function")
+        ],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+        authorization: AuthorizationHeader = None,
+    ) -> RunResponse:
+        caller = await resolve_workspace_caller(
+            auth,
+            machines,
+            session_token=session_token,
+            authorization=authorization,
+            csrf_token=csrf_token,
+            workspace_header=selected_workspace,
+            write=True,
+            required_scope="runs.control",
+        )
+        try:
+            updated = await runs.widen_budget(
+                caller.workspace_id,
+                caller.actor,
+                run_id,
+                payload.expected_state_version,
+                payload.max_model_calls,
+                request.state.request_id,
+            )
+        except RunCoordinationError as error:
+            raise as_app_error(error) from error
+        return RunResponse.from_domain(updated)
 
     @router.post("/{run_id}/cancel", response_model=RunResponse)
     async def cancel_run(  # pyright: ignore[reportUnusedFunction]

@@ -100,12 +100,29 @@
 
 ## 6. 轮数上限从常量变成平台设置
 
-- [ ] 单元测试：平台上限调高后 `AgentLimits(max_model_calls=40)` 通过校验；
-      调低到 10 时同一个值被拒。
-- [ ] `AgentLimits.max_model_calls` 的字面 `le=20` 改为对平台设置的校验，
-      默认仍是 20。已发布 spec 不因此失效。
-- [ ] 集成测试：撞上限的 Run 进入 `paused(limit)` 并写 `run_limit_reached`；
-      有权限主体扩大预算后继续，`consumed_*` 全部不重置。
+- [x] 单元测试：`test_round_ceiling.py`，平台上限调高后 40 存得下、调低到 10 时
+      同一个值被拒，而且昨天在 40 下存好的草稿今天也发布不出去——草稿是拿当天的
+      上限量过的，发布是错误还便宜的最后一刻，所以两处都查。
+- [x] 上限搬到 `PlatformCeilings`（`agents/domain/models.py`），字段只留 `ge=1`。
+      `le=` 不能留在字段上：已发布的 AgentVersion 是一份文档，Run 每次启动都要把它
+      解析回 `AgentLimits`，字段上的上限意味着管理员调低设置就让一批线上 Agent
+      的文档解析失败——一次配置改动打断了正在跑的活，设计 §4.7 明确排除这件事。
+      上限只在**写入**处查（存草稿、发布），读回永不查。
+- [x] §12.3 的「默认」那一半仍是字段字面量 20，没有跟着设置走：默认决定了
+      省略 `limits` 的 spec 规范化成什么，跟着配置走就会让同一份提交的 spec
+      在两套安装上算出不同的 content hash。设置项是 `agent_max_model_calls`。
+- [x] 集成测试：`test_budget_expansion.py`，撞上限的 Run 进入 `paused(limit)`、
+      写 `run_limit_reached`、`available_actions` 里没有 `resume`；扩大预算后
+      `resume` 自己回来了——扩容不碰 Run 状态，它改的是
+      `RunStateMachine.budget_allows_execution` 读到的那个数。
+- [x] 扩容是 `POST /api/v1/runs/{id}/budget`，只给 `BUDGET_HOLDERS =
+      {Role.WORKSPACE_ADMIN}`：开发者能启停 Run，但决定这个工作区要比约定的花得更多
+      是管理员的事。带 `expected_state_version`，只升不降，审计写
+      `run.budget_widened`（拒绝写 `run.budget_widen_denied`）。
+- [x] 命令里根本不带 `consumed_*`：计数器不是这个操作的事，一个能顺手清零的扩容
+      就是重花同一笔预算的后门，正是 §12.3 最后一句要堵的。暂不写新的 run event，
+      `run_events.event_type` 的 CHECK 是从枚举生成的，新事件要一支 Alembic
+      迁移——留给第 8 步的 `goal_verdict` 一起做。
 
 ## 7. `wait`：`waiting_external` 第一次有生产者
 

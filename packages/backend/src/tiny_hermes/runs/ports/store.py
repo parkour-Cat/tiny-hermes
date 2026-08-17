@@ -75,6 +75,26 @@ class ControlRunCommand:
 
 
 @dataclass(frozen=True)
+class WidenBudgetCommand:
+    """Raise one ceiling on a Run's shared budget scope.
+
+    Product design §12.3 requires an explicit act by an authorized subject, so
+    this is its own command rather than a field someone can set while doing
+    something else. It carries no `consumed_*` value at all: the counters are
+    not this operation's business, and a widening that could reset one would be
+    a way to defeat the safety valve by re-spending the same budget.
+    """
+
+    workspace_id: UUID
+    run_id: UUID
+    caller: CallerIdentity
+    capabilities: RunCapabilities
+    expected_state_version: int
+    max_model_calls: int
+    request_id: str
+
+
+@dataclass(frozen=True)
 class ApplySignalCommand:
     """The one seam future Worker and Scheduler code uses for state signals.
 
@@ -292,6 +312,8 @@ class RunStore(Protocol):
     ) -> Sequence[RunSnapshot]: ...
 
     async def control_run(self, command: ControlRunCommand) -> RunSnapshot: ...
+
+    async def widen_budget(self, command: WidenBudgetCommand) -> RunSnapshot: ...
 
     async def apply_signal(self, command: ApplySignalCommand) -> RunSnapshot: ...
 

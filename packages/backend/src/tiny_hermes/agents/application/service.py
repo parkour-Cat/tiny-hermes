@@ -10,7 +10,9 @@ from tiny_hermes.agents.domain.models import (
     AgentSpec,
     AgentVersion,
     EndpointModelPolicy,
+    PlatformCeilings,
     initial_agent_spec,
+    rounds_above_ceiling,
 )
 from tiny_hermes.agents.ports.store import AgentStore, PublishResult
 from tiny_hermes.model_catalog.ports.store import ModelEndpointStore
@@ -64,6 +66,19 @@ class ModelOutputLimitTooHigh(AgentCatalogError):
     """The draft asks for more output than the endpoint will produce."""
 
 
+class RoundCeilingExceeded(AgentCatalogError):
+    """The draft asks for more model rounds than this platform allows.
+
+    Carries both numbers: an author who typed 40 and is told only "invalid"
+    has no way to find out that 20 was the answer.
+    """
+
+    def __init__(self, asked: int, allowed: int) -> None:
+        super().__init__(f"{asked} model calls asked, {allowed} allowed")
+        self.asked = asked
+        self.allowed = allowed
+
+
 class AgentCatalog:
     """Agent publication rules.
 
@@ -71,8 +86,17 @@ class AgentCatalog:
     delegates one whole business transaction per operation to its store.
     """
 
-    def __init__(self, store: AgentStore, endpoints: ModelEndpointStore | None = None) -> None:
+    def __init__(
+        self,
+        store: AgentStore,
+        endpoints: ModelEndpointStore | None = None,
+        ceilings: PlatformCeilings | None = None,
+    ) -> None:
         self._store = store
+        # Defaulted rather than required so the domain tests, which are about
+        # publication rules and not about configuration, keep reading the way
+        # they did. The default is the same 20 the field used to spell out.
+        self._ceilings = ceilings or PlatformCeilings()
         # Optional so the in-memory adapter and the fast domain tests, which
         # know nothing about endpoints, keep working. A deterministic Agent
         # never reaches the check, and an endpoint-backed one cannot be
@@ -213,8 +237,13 @@ class AgentCatalog:
         request_id: str,
     ) -> AgentDraft:
         platform = await self._require_role(workspace_id, actor, WRITERS)
+        spec = _valid_spec(spec_values)
+        # Checked on save as well as on publish, unlike the endpoint rules: the
+        # ceiling is a number the author typed, and telling them at the moment
+        # they typed it costs nothing.
+        self._check_ceilings(spec)
         draft = await self._store.replace_draft(
-            workspace_id, agent_id, actor.id, expected_revision, _valid_spec(spec_values)
+            workspace_id, agent_id, actor.id, expected_revision, spec
         )
         if draft is None:
             raise UnknownAgent
@@ -239,6 +268,9 @@ class AgentCatalog:
         draft = await self._store.get_draft(workspace_id, agent_id)
         if draft is not None:
             await self._check_endpoint(draft.spec)
+            # Again here, and not only on save: this draft was measured against
+            # whatever the ceiling was the day it was written.
+            self._check_ceilings(draft.spec)
         result = await self._store.publish_draft(
             workspace_id, agent_id, actor.id, expected_revision
         )
@@ -264,6 +296,11 @@ class AgentCatalog:
             workspace_id, actor, "agent.version_activated", version.id, request_id, platform
         )
         return version
+
+    def _check_ceilings(self, spec: AgentSpec) -> None:
+        asked = rounds_above_ceiling(spec, self._ceilings)
+        if asked is not None:
+            raise RoundCeilingExceeded(asked, self._ceilings.max_model_calls)
 
     async def _check_endpoint(self, spec: AgentSpec) -> None:
         """Refuse a version that names an endpoint it cannot actually use."""
