@@ -150,11 +150,31 @@
 
 ## 8. 让外面看得见
 
-- [ ] 新事件类型 `goal_verdict`；`RunSnapshot` 增加当前轮次与最近一次判定，
-      `RunResponse` 随之扩展。
-- [ ] 控制台 Run Detail 显示轮次与判定理由；`waiting_external` 与
-      `paused(limit)` 各有明确文案，不是一个通用的「等待中」。
-- [ ] `tests/e2e/console.spec.ts` 增加一条：多轮任务在控制台上可以看出它为什么还没结束。
+- [x] 新事件类型 `goal_verdict`，带 Alembic 迁移（`20260817_0012`）：`event_type`
+      的 CHECK 是从 `RunEventType` 机械推出来的，多一个名字就得多一次迁移。
+- [x] **一轮判定写在 checkpoint 里，不是新开一列。** `round`、`goal_outcome`、
+      `goal_unmet` 与 `failure`、`usage_quality` 是同一类东西——都在描述某一轮，
+      单独开列也得跟 checkpoint 保持一致，那不如只有一处。`RunSnapshot` 从
+      checkpoint 读出来，`RunResponse` 以一个 `goal` 对象暴露：三者是一件事，
+      让调用方分别判断三个键在不在，多出来的分支换不到任何信息。
+- [x] **补上一个结构性的洞：一轮判定「继续」的 Run 原来什么都不写。**
+      `record_slice` 在 `command.signal is None` 时提前返回——那一轮不改状态，
+      没有转换可以挂事件，于是连 `command.events` 一起丢掉了。而那恰好就是
+      时间线该有话说的 Run：它干了好几轮，时间线上一片空白。现在这条路径单独
+      写事件。5 条集成测试，其中一条就是「每一轮都在时间线上留下判定」。
+- [x] 轮次用 `_round_index(context) = consumed_model_calls + 1`，模型收到的
+      `round_index` 与人读到的 `goal.round` 是同一个数，跨 slice 也不会各算各的。
+      被回滚的那一轮不带判定——判定没有生效，这是实话。
+- [x] 控制台 Run Detail 显示轮次、判定与未通过的检查；`waiting_external`（分定时器
+      与外部答复两种）与 `paused(limit)` 各有一条说明文案。措辞逻辑抽到
+      `apps/web/src/runs/explain.ts`，因为「这个状态该说什么」是可以单测的，
+      而组件不是。
+- [x] 顺手补上第 7 步漏掉的一半：`IMPLEMENTED_TOOLS` 少了 `platform.wait`，
+      `MODEL_SCENARIOS` 少了三个后端已实现的场景。平台跑得了而控制台叫不出名字的
+      场景，等于从界面上根本发不起——`waiting_external` 一度就是这样没法从 UI 走到。
+- [x] `tests/e2e/console.spec.ts` 增加一条：`wait_once` 的 Run 停在
+      `waiting_external`，页面上写着第几轮、判定是「等待」、等的是定时器；
+      被唤醒后完成时轮次是 2 而不是重新从 1 数，两轮判定都还留在时间线上。
 
 ## 9. 阶段出口（对应设计 §2）
 

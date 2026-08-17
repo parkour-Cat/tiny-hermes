@@ -131,6 +131,10 @@ class RunResponse(BaseModel):
     checkpoint_effect_status: str
     checkpoint_usage_quality: str | None
     failure_reason: str | None
+    #: ``{"round", "outcome", "unmet"}`` — which round the Run is on and what
+    #: the platform decided about it. A status says a Run is still going; this
+    #: says why.
+    goal: dict[str, Any]
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None

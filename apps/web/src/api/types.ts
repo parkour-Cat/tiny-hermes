@@ -131,6 +131,13 @@ export type BudgetDocument = {
   derived_retry_count: number;
 };
 
+/** Which round the Run is on, and what the platform decided about it. */
+export type GoalDocument = {
+  round: number | null;
+  outcome: string | null;
+  unmet: string[];
+};
+
 export type RunResponse = {
   id: string;
   session_id: string;
@@ -150,6 +157,7 @@ export type RunResponse = {
   available_actions: string[];
   checkpoint_replay_safe: boolean;
   checkpoint_effect_status: string;
+  goal: GoalDocument;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -246,7 +254,26 @@ export const API_KEY_SCOPES = ["runs.read", "runs.write", "runs.control", "agent
 export const VIEWER_API_KEY_SCOPES = ["runs.read", "agents.read"] as const;
 
 /** Every tool this platform implements. An Agent may bind a subset. */
-export const IMPLEMENTED_TOOLS = ["file.list", "file.read", "file.write", "shell.exec"] as const;
+export const IMPLEMENTED_TOOLS = [
+  "file.list",
+  "file.read",
+  "file.write",
+  "platform.wait",
+  "shell.exec",
+] as const;
 
-/** The three scenarios the deterministic substitute actually implements. */
-export const MODEL_SCENARIOS = ["complete", "continue_once", "fail_replay_safe"] as const;
+/**
+ * Every scenario the deterministic substitute implements.
+ *
+ * The list the builder offers, so a scenario the platform can run but the
+ * console does not name is a Run nobody can start from here — which is how
+ * `waiting_external` went unreachable through the UI for a while.
+ */
+export const MODEL_SCENARIOS = [
+  "complete",
+  "continue_once",
+  "fail_replay_safe",
+  "shell_once",
+  "shell_from_input",
+  "wait_once",
+] as const;

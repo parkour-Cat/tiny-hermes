@@ -17,6 +17,7 @@ from tiny_hermes.runs.domain.goal import (
     CompletionCheck,
     GoalEvidence,
     GoalProposal,
+    GoalVerdict,
     judge,
 )
 from tiny_hermes.runs.domain.models import (
@@ -163,6 +164,19 @@ class _RoundWork:
     appended: tuple[CanonicalMessage, ...]
     wrote: bool
     wait_seconds: int | None = None
+
+
+@dataclass(frozen=True)
+class _Judged:
+    """One round's number and what the platform decided about it.
+
+    The two travel together because neither is legible alone: a `continue`
+    without a round number does not say how long this has been going on, and a
+    round number without a verdict does not say why it went on.
+    """
+
+    round: int
+    verdict: GoalVerdict
 
 
 @dataclass(frozen=True)
@@ -330,6 +344,10 @@ class WorkerRuntime:
                     ),
                     evidence,
                 )
+                # The number the model was given for this round, not the one
+                # the next read would compute: the two differ the moment this
+                # round's own model call is counted.
+                judged = _Judged(round=_round_index(context), verdict=verdict)
                 if verdict.instruction is not None:
                     # §12.1: continue 生成下一轮指令. Recorded even if the Run
                     # then pauses for some other reason — why the platform
@@ -363,7 +381,8 @@ class WorkerRuntime:
                     # the data mount, one frozen scan and one commit cover the
                     # round's effects before the next model call.
                     continuation = await self._checkpoint_round(
-                        claimed, handle, box, after, decision, response, executed_ms, appended
+                        claimed, handle, box, after, decision, response, executed_ms,
+                        appended, judged,
                     )
                     if continuation is None:
                         return
@@ -385,6 +404,7 @@ class WorkerRuntime:
                     response,
                     executed_ms,
                     appended=appended,
+                    judged=judged,
                 )
                 if written is False or decision.signal is not None:
                     return
@@ -810,6 +830,7 @@ class WorkerRuntime:
         response: ModelResponse,
         executed_ms: int,
         appended: tuple[CanonicalMessage, ...],
+        judged: "_Judged",
     ) -> "_Sandbox | None":
         """One write round's whole consequence: scan, commit, dispose, signal.
 
@@ -834,6 +855,7 @@ class WorkerRuntime:
             response,
             executed_ms,
             appended,
+            judged=judged,
         )
         try:
             await sandbox.freeze(
@@ -910,6 +932,7 @@ class WorkerRuntime:
                 response,
                 executed_ms,
                 appended=appended,
+                judged=judged,
             )
             if written is False or final.signal is not None:
                 return None
@@ -1226,7 +1249,14 @@ class WorkerRuntime:
         events: tuple[ReservedEvent, ...] = (),
         cleanup_target: "WorkspaceCleanupTarget | None" = None,
         cleanup_sandbox_id: UUID | None = None,
+        judged: "_Judged | None" = None,
     ) -> RecordSliceCommand:
+        if judged is not None:
+            # Every write of a judged round carries the verdict, whichever path
+            # got here: the commit that lands a write round, and the plain
+            # record that lands every other. A round whose write was rolled
+            # back carries none, which is the truth — the verdict did not take.
+            events = (*events, _verdict_event(judged))
         return RecordSliceCommand(
             workspace_id=claimed.run.workspace_id,
             run_id=claimed.run.id,
@@ -1237,7 +1267,7 @@ class WorkerRuntime:
             limit_reached=decision.limit_reached,
             wait_kind=decision.wait_kind,
             wait_seconds=decision.wait_seconds,
-            checkpoint=_checkpoint(response),
+            checkpoint=_checkpoint(response, judged),
             checkpoint_replay_safe=response.replay_safe,
             checkpoint_effect_status=(
                 CheckpointEffectStatus.UNKNOWN
@@ -1269,6 +1299,7 @@ class WorkerRuntime:
         events: tuple[ReservedEvent, ...] = (),
         cleanup_target: "WorkspaceCleanupTarget | None" = None,
         cleanup_sandbox_id: UUID | None = None,
+        judged: "_Judged | None" = None,
     ) -> bool:
         """Persist the round. Returns False when this Worker lost the Run."""
         async with self._lease_lock:
@@ -1287,6 +1318,7 @@ class WorkerRuntime:
                             events=events,
                             cleanup_target=cleanup_target,
                             cleanup_sandbox_id=cleanup_sandbox_id,
+                            judged=judged,
                         )
                     )
                     if decision.signal is RunSignal.SAFE_CANCEL_STARTED:
@@ -1443,18 +1475,23 @@ def _no_round(failure: str | None = None) -> ModelResponse:
     )
 
 
-def _request(context: ExecutionContext, box: "_Sandbox | None") -> ModelRequest:
-    """Build one round's request.
+def _round_index(context: ExecutionContext) -> int:
+    """Which round this is, counted across the Run rather than the slice.
 
-    The round number counts the Run's model calls so far rather than this
-    slice's, so a scenario that needs a second round still gets one after the
-    Run has been re-queued at a slice boundary.
+    So a scenario that needs a second round still gets one after the Run has
+    been re-queued at a slice boundary — and so the number the model is told
+    and the number a person reads off the Run are the same number.
     """
+    return context.budget.consumed_model_calls + 1
+
+
+def _request(context: ExecutionContext, box: "_Sandbox | None") -> ModelRequest:
+    """Build one round's request."""
     return ModelRequest(
         policy=context.spec.model_policy,
         personality=context.spec.personality,
         messages=context.messages,
-        round_index=context.budget.consumed_model_calls + 1,
+        round_index=_round_index(context),
         tools=tuple(schemas_for(context.spec.tools)),
         cache_hint=box.hint if box is not None else None,
     )
@@ -1473,17 +1510,45 @@ def _budget_after(
     return projected.allows_execution(datetime.now(UTC))
 
 
-def _checkpoint(response: ModelResponse) -> dict[str, object]:
+def _checkpoint(
+    response: ModelResponse, judged: "_Judged | None" = None
+) -> dict[str, object]:
     """What the round was, in terms a reader of the Run can act on.
 
     ``usage_quality`` is recorded rather than merely implied by a zero count:
     "nothing was used" and "nobody counted" are different facts, and only one of
     them means the Token limit was meaningfully enforced.
+
+    The round number and the verdict ride here rather than in columns of their
+    own for the reason ``failure`` already does: all of it describes one round,
+    this is where a round is described, and a column would have to be kept in
+    step with it.
     """
-    return {
+    checkpoint: dict[str, object] = {
         "kind": "model_call",
         "stop_reason": response.stop_reason.value,
         "tokens": response.billable_tokens,
         "usage_quality": response.usage_quality.value,
         "failure": response.failure,
     }
+    if judged is not None:
+        checkpoint["round"] = judged.round
+        checkpoint["goal_outcome"] = judged.verdict.outcome.value
+        checkpoint["goal_unmet"] = list(judged.verdict.unmet)
+    return checkpoint
+
+
+def _verdict_event(judged: "_Judged") -> ReservedEvent:
+    """The judge's answer, on the timeline where a person is watching.
+
+    The instruction is left out: it is derived from ``unmet`` and is already in
+    the transcript, where the model that has to act on it will read it.
+    """
+    return ReservedEvent(
+        event_type=RunEventType.GOAL_VERDICT,
+        payload={
+            "round": judged.round,
+            "outcome": judged.verdict.outcome.value,
+            "unmet": list(judged.verdict.unmet),
+        },
+    )

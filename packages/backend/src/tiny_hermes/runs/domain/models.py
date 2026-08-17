@@ -122,6 +122,13 @@ class RunEventType(StrEnum):
     # refuses to invent names, so this member must be written explicitly.
     RUN_LIMIT_REACHED = "run_limit_reached"
 
+    # Also not derived from a signal: §12.1's judge answers every round, and
+    # most of those answers change no state at all. Without a name of its own,
+    # a Run that keeps going shows the timeline round after round of
+    # `run_slice_ended` and never says what the platform decided about any of
+    # them — which is the one question a person watching a long Run has.
+    GOAL_VERDICT = "goal_verdict"
+
     # Also not derived from a signal: it records that a slice began on a fresh
     # writable layer, which is a fact about the sandbox rather than a state
     # transition. Technical design §11.3 requires the Agent be told, and this
@@ -524,6 +531,16 @@ class RunSnapshot:
     head_wait_kind: str | None = None
     head_wait_deadline_at: datetime | None = None
     queue_available_actions: tuple[str, ...] = ()
+    #: Which round the last recorded one was, counted across the whole Run
+    #: rather than the slice, and what the platform decided about it. `None`
+    #: and `()` before any round has been judged.
+    #:
+    #: Read out of the checkpoint like `failure_reason` and
+    #: `checkpoint_usage_quality`: all three describe one round, and a column
+    #: of its own would have to be kept in step with the checkpoint anyway.
+    current_round: int | None = None
+    goal_outcome: str | None = None
+    goal_unmet: tuple[str, ...] = ()
 
     def document(self) -> dict[str, Any]:
         return {
@@ -547,9 +564,25 @@ class RunSnapshot:
             "checkpoint_effect_status": self.checkpoint_effect_status.value,
             "checkpoint_usage_quality": self.checkpoint_usage_quality,
             "failure_reason": self.failure_reason,
+            "goal": self._goal_document(),
             "created_at": self.created_at.isoformat(),
             "started_at": _optional_time(self.started_at),
             "finished_at": _optional_time(self.finished_at),
+        }
+
+    def _goal_document(self) -> dict[str, Any]:
+        """Why the Run is still going, or why it stopped where it did.
+
+        One object rather than three flat keys, and always present rather than
+        omitted before the first round: the three are one fact — a verdict is
+        about a round, an unmet condition is about a verdict — and a caller
+        that has to branch on whether the key exists learns nothing extra for
+        the trouble.
+        """
+        return {
+            "round": self.current_round,
+            "outcome": self.goal_outcome,
+            "unmet": list(self.goal_unmet),
         }
 
     def _queue_document(self) -> dict[str, Any]:
