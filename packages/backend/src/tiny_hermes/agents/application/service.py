@@ -9,13 +9,21 @@ from tiny_hermes.agents.domain.models import (
     AgentDraft,
     AgentSpec,
     AgentVersion,
+    ContextBudget,
     EndpointModelPolicy,
     PlatformCeilings,
     initial_agent_spec,
     rounds_above_ceiling,
 )
 from tiny_hermes.agents.ports.store import AgentStore, PublishResult
+from tiny_hermes.model_catalog.domain.models import ModelEndpoint
 from tiny_hermes.model_catalog.ports.store import ModelEndpointStore
+from tiny_hermes.runs.domain.context_budget import (
+    Accounting,
+    BudgetFit,
+    ContextWindow,
+    fit_budget,
+)
 from tiny_hermes.tenancy.domain.models import Actor, Role
 
 WRITERS = {Role.WORKSPACE_ADMIN, Role.DEVELOPER}
@@ -64,6 +72,33 @@ class ModelEndpointUnavailable(AgentCatalogError):
 
 class ModelOutputLimitTooHigh(AgentCatalogError):
     """The draft asks for more output than the endpoint will produce."""
+
+
+class ContextBudgetUnsatisfied(AgentCatalogError):
+    """The segment targets do not fit the endpoint, though the minimums do.
+
+    Carries the per-segment advice §7.4.2 asks for, and applies none of it. An
+    author whose 4096-token tool schema budget were silently cut to 900 would
+    have published an Agent that behaves unlike the one they wrote.
+    """
+
+    def __init__(self, fit: BudgetFit) -> None:
+        super().__init__(f"{fit.asked} tokens of targets, {fit.allowance} available")
+        self.fit = fit
+
+
+class ContextWindowTooSmall(AgentCatalogError):
+    """Not even the untrimmable minimum fits this endpoint's window.
+
+    A different refusal from the one above because nothing an author can scale
+    would help: §7.4.2 sends this case to a static publish failure, and its
+    runtime twin is `paused(context_overflow)`.
+    """
+
+    def __init__(self, floor: int, allowance: int) -> None:
+        super().__init__(f"{floor} tokens are kept regardless, {allowance} available")
+        self.floor = floor
+        self.allowance = allowance
 
 
 class RoundCeilingExceeded(AgentCatalogError):
@@ -318,6 +353,29 @@ class AgentCatalog:
             # 4096 has an Agent that behaves unlike the one they published, and
             # nothing anywhere would say so.
             raise ModelOutputLimitTooHigh
+        self._check_context_budget(spec, endpoint, wanted)
+
+    def _check_context_budget(
+        self, spec: AgentSpec, endpoint: ModelEndpoint, wanted: int | None
+    ) -> None:
+        """Whether this Agent's context budget can be served by this endpoint.
+
+        Only for endpoint-backed Agents, and not because the stand-in is a test
+        double: it declares no window, so there is no number here to check
+        against and nothing to refuse.
+        """
+        window = ContextWindow(
+            context_window=endpoint.spec.context_window,
+            reserved_output_tokens=wanted or endpoint.spec.max_output_tokens,
+            accounting=Accounting(endpoint.spec.context_accounting.value),
+            tokenizer=endpoint.spec.tokenizer,
+        )
+        budget = spec.context_budget or ContextBudget()
+        fit = fit_budget(window, budget.resolve())
+        if not fit.floor_fits:
+            raise ContextWindowTooSmall(fit.floor, fit.allowance)
+        if not fit.targets_fit:
+            raise ContextBudgetUnsatisfied(fit)
 
     async def _require_role(
         self, workspace_id: UUID, actor: Actor, allowed: set[Role]

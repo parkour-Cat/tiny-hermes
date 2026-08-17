@@ -1,11 +1,18 @@
 import hashlib
 import json
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from tiny_hermes.runs.domain.context_budget import (
+    DEFAULT_SEGMENTS,
+    SegmentBudget,
+    SegmentName,
+)
 
 
 class AgentLimits(BaseModel):
@@ -144,6 +151,95 @@ class CompletionCondition(BaseModel):
         return self
 
 
+class SegmentOverride(BaseModel):
+    """One segment's budget, as an Agent author chose to change it.
+
+    Both numbers are optional because an author who only wants more memory
+    should not have to restate a target they are happy with. What is left out
+    keeps the platform default.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    segment: SegmentName
+    target_tokens: int | None = Field(default=None, ge=0)
+    max_tokens: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def stay_inside_the_platform_caps(self) -> "SegmentOverride":
+        default = DEFAULT_SEGMENTS[self.segment]
+        if default.max_tokens is None:
+            # 最近历史 is given 剩余空间 rather than a number, so there is no cap
+            # here to raise and no target to set: it receives whatever the
+            # other segments did not use.
+            raise ValueError(f"{self.segment.value} takes what is left; it has no budget to set")
+        cap = self.max_tokens if self.max_tokens is not None else default.max_tokens
+        if self.max_tokens is not None and self.max_tokens > default.max_tokens:
+            # §7.4.2 gives the hard cap to the platform administrator and the
+            # adjustment to the author, inside it.
+            raise ValueError(
+                f"{self.segment.value} max_tokens {self.max_tokens} is above "
+                f"this platform's cap of {default.max_tokens}"
+            )
+        if self.target_tokens is None:
+            return self
+        if self.target_tokens < default.min_tokens:
+            # A target under the floor is not a smaller budget, it is an
+            # unreachable one: the floor is kept regardless.
+            raise ValueError(
+                f"{self.segment.value} target_tokens {self.target_tokens} is below "
+                f"its minimum of {default.min_tokens}"
+            )
+        if self.target_tokens > cap:
+            raise ValueError(
+                f"{self.segment.value} target_tokens {self.target_tokens} is above "
+                f"its max_tokens of {cap}"
+            )
+        return self
+
+
+class ContextBudget(BaseModel):
+    """Per-segment adjustments to §7.4.2's table, inside the platform's caps.
+
+    A tuple rather than a mapping so the normalized document has one spelling
+    and one order — the same reason `tools` and `expected_artifacts` are
+    tuples. What is not named here is the platform default, so a budget that
+    changes one segment says one thing.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    segments: tuple[SegmentOverride, ...] = ()
+
+    @field_validator("segments")
+    @classmethod
+    def one_entry_per_segment(
+        cls, value: tuple[SegmentOverride, ...]
+    ) -> tuple[SegmentOverride, ...]:
+        named = [override.segment for override in value]
+        if len(set(named)) != len(named):
+            raise ValueError("a segment may be adjusted once")
+        return value
+
+    def resolve(self) -> Mapping[SegmentName, SegmentBudget]:
+        """The effective table: the platform's, with this Agent's changes on top."""
+        resolved = dict(DEFAULT_SEGMENTS)
+        for override in self.segments:
+            budget = resolved[override.segment]
+            resolved[override.segment] = replace(
+                budget,
+                target_tokens=(
+                    override.target_tokens
+                    if override.target_tokens is not None
+                    else budget.target_tokens
+                ),
+                max_tokens=(
+                    override.max_tokens if override.max_tokens is not None else budget.max_tokens
+                ),
+            )
+        return resolved
+
+
 #: Discriminated, so a `provider` the platform does not understand is refused
 #: rather than falling through to the stand-in. An Agent that answers from a
 #: `match` statement while its author believes it is talking to a model is the
@@ -188,6 +284,11 @@ class AgentSpec(BaseModel):
     #: from the normalized document when absent, so those versions keep their
     #: content hashes.
     completion: CompletionCondition | None = None
+    #: Absent means §7.4.2's table as this platform configured it, which is what
+    #: every version published before M2A gets. Omitted from the normalized
+    #: document when absent, the third widening to make that promise and the
+    #: third to have it pinned by a test.
+    context_budget: ContextBudget | None = None
 
     @field_validator("tools")
     @classmethod
@@ -280,6 +381,11 @@ def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
         # declares none carries no key at all, which is what keeps every
         # version published before M2A hashing exactly as it did.
         normalized.pop("completion", None)
+    if normalized.get("context_budget") is None:
+        # Same reasoning again: there is no default budget *document*, only a
+        # platform table an absent budget means. A spec that declares none
+        # carries no key, and hashes as it did before this field existed.
+        normalized.pop("context_budget", None)
     encoded = json.dumps(
         normalized,
         ensure_ascii=False,
