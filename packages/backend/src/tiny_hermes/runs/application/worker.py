@@ -12,6 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tiny_hermes.artifacts.application.service import ArtifactLimits, ArtifactRecorder
 from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
+from tiny_hermes.runs.domain.goal import (
+    GoalEvidence,
+    GoalProposal,
+    GoalVerdict,
+    judge,
+)
 from tiny_hermes.runs.domain.models import (
     Block,
     CacheStateHint,
@@ -280,7 +286,7 @@ class WorkerRuntime:
                 )
                 decision = decide_after_round(
                     RoundOutcome(
-                        stop_reason=response.stop_reason,
+                        verdict=_verdict_for(response),
                         cancel_requested=after.cancel_requested,
                         pause_requested=after.pause_requested,
                         budget_allows=_budget_after(after, response, executed_ms),
@@ -1232,6 +1238,20 @@ def _request(context: ExecutionContext, box: "_Sandbox | None") -> ModelRequest:
         round_index=context.budget.consumed_model_calls + 1,
         tools=tuple(schemas_for(context.spec.tools)),
         cache_hint=box.hint if box is not None else None,
+    )
+
+
+def _verdict_for(response: ModelResponse) -> GoalVerdict:
+    """Turn what the round reported into the platform's own answer.
+
+    The evidence is empty for every Agent here, so this is 0.1's behaviour
+    reached through the judge: a completion claim from an Agent that declared
+    no condition is still the whole of the answer. Running the declared checks
+    and filling this in is the next step.
+    """
+    return judge(
+        GoalProposal(stop_reason=response.stop_reason),
+        GoalEvidence(declared=False),
     )
 
 
