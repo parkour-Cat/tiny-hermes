@@ -1,6 +1,8 @@
 import { expect, test } from "vitest";
 
-import { outcomeLabel, statusNote } from "./explain";
+import { enUS } from "../i18n/en-US";
+import { t } from "../i18n/zh-CN";
+import { eventNote, fill, outcomeLabel, statusNote } from "./explain";
 
 function situation(
   status: string,
@@ -32,6 +34,14 @@ test("only an exhausted budget explains a pause", () => {
   expect(statusNote(situation("paused", { pause: "operator" }))).toBeNull();
 });
 
+test("a run that overflowed the window says nothing was sent", () => {
+  // The one pause reason a reader cannot act on without being told what it
+  // means: no request was made, so the timeline shows no round to look at.
+  expect(statusNote(situation("paused", { pause: "context_overflow" }))).toBe(
+    "pausedContextOverflowNote",
+  );
+});
+
 test("a run that is simply working needs no note", () => {
   expect(statusNote(situation("running"))).toBeNull();
   expect(statusNote(situation("completed"))).toBeNull();
@@ -48,4 +58,57 @@ test("a verdict this console has never heard of is not translated", () => {
   // still the reason the Run is where it is.
   expect(outcomeLabel("something_newer")).toBeNull();
   expect(outcomeLabel(null)).toBeNull();
+});
+
+function frame(event_type: string, payload: Record<string, unknown>) {
+  return { event_type, payload };
+}
+
+const TRIM = { segment: "old_tool_results", dropped: 2, freed_estimate: 9_000, references: ["c1"] };
+const COMPACTION = {
+  first_sequence: 1,
+  last_sequence: 6,
+  covered: 6,
+  message_ids: ["one", "two"],
+  freed_estimate: 7_400,
+};
+
+test("a trimmed tool result is explained with its count and what it freed", () => {
+  const said = eventNote(frame("context_trimmed", TRIM));
+  expect(said).not.toBeNull();
+  const sentence = fill(t(said?.key ?? "appName"), said?.values ?? {});
+  expect(sentence).toContain("2");
+  expect(sentence).toContain("9000");
+  // Both halves of the fact: the numbers are estimates, and nothing was lost.
+  expect(sentence).toContain("估算");
+  expect(sentence).toContain("会话记录");
+});
+
+test("a compaction says which messages it stood in for", () => {
+  const said = eventNote(frame("context_compacted", COMPACTION));
+  const sentence = fill(enUS[said?.key ?? "appName"], said?.values ?? {});
+  expect(sentence).toContain("1");
+  expect(sentence).toContain("6");
+  expect(sentence).toContain("7400");
+  expect(sentence).not.toContain("{");
+});
+
+test("each trimmable segment has its own words", () => {
+  for (const segment of ["old_tool_results", "skill_summaries", "memory"]) {
+    expect(eventNote(frame("context_trimmed", { ...TRIM, segment }))).not.toBeNull();
+  }
+});
+
+test("a payload this console does not fully understand gets no sentence", () => {
+  // A newer server could trim a segment this build has never heard of, or say
+  // it in fields this build does not read. Either way the entry still carries
+  // its raw payload, and a half-written sentence would be worse than none.
+  expect(eventNote(frame("context_trimmed", { ...TRIM, segment: "something_newer" }))).toBeNull();
+  expect(eventNote(frame("context_trimmed", { segment: "memory" }))).toBeNull();
+  expect(eventNote(frame("context_compacted", { first_sequence: 1 }))).toBeNull();
+});
+
+test("an ordinary event is left to speak for itself", () => {
+  expect(eventNote(frame("run_started", {}))).toBeNull();
+  expect(eventNote(frame("model_call_completed", { round_index: 1 }))).toBeNull();
 });

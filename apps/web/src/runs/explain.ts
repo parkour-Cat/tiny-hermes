@@ -1,4 +1,4 @@
-import type { RunResponse } from "../api/types";
+import type { RunEventFrame, RunResponse } from "../api/types";
 import type { MessageKey } from "../i18n/zh-CN";
 
 type Situation = Pick<RunResponse, "status" | "pause_reason" | "wait_kind">;
@@ -19,6 +19,9 @@ export function statusNote(run: Situation): MessageKey | null {
   if (run.status === "paused" && run.pause_reason === "limit") {
     return "pausedLimitNote";
   }
+  if (run.status === "paused" && run.pause_reason === "context_overflow") {
+    return "pausedContextOverflowNote";
+  }
   return null;
 }
 
@@ -33,4 +36,73 @@ const OUTCOMES: Record<string, MessageKey> = {
 /** The judge's answer in words, or null for one this console does not know. */
 export function outcomeLabel(outcome: string | null): MessageKey | null {
   return outcome === null ? null : (OUTCOMES[outcome] ?? null);
+}
+
+/** A sentence for a timeline entry, and the numbers to put in it. */
+export type EventNote = { key: MessageKey; values: Record<string, string> };
+
+const TRIMMED: Record<string, MessageKey> = {
+  old_tool_results: "contextTrimmedOldToolResults",
+  skill_summaries: "contextTrimmedSkillSummaries",
+  memory: "contextTrimmedMemory",
+};
+
+/**
+ * The numbers a note needs, or null if the payload does not carry them all.
+ *
+ * A sentence with a hole in it reads like a bug in the platform rather than a
+ * fact about the Run, so a payload this console does not fully understand gets
+ * no sentence at all — the raw payload is on the entry either way.
+ */
+function filled(
+  payload: Record<string, unknown>,
+  fields: Record<string, string>,
+): Record<string, string> | null {
+  const values: Record<string, string> = {};
+  for (const [placeholder, field] of Object.entries(fields)) {
+    const value = payload[field];
+    if (typeof value !== "number") {
+      return null;
+    }
+    values[placeholder] = String(value);
+  }
+  return values;
+}
+
+/**
+ * What the platform did to the context before a round, said in words.
+ *
+ * `context_trimmed` and `context_compacted` are the two events that report a
+ * decision nobody asked for: the conversation was too large for the window, so
+ * the round was sent something other than what the transcript holds. An event
+ * name and a JSON blob leave a reader guessing whether anything was lost —
+ * nothing is, and that is the part worth writing out.
+ *
+ * Every number here is a plan estimate, and the messages say so. None of them
+ * is usage, and none of them is billed.
+ */
+export function eventNote(frame: Pick<RunEventFrame, "event_type" | "payload">): EventNote | null {
+  if (frame.event_type === "context_trimmed") {
+    const key = TRIMMED[String(frame.payload.segment)];
+    const values = filled(frame.payload, { dropped: "dropped", freed: "freed_estimate" });
+    return key === undefined || values === null ? null : { key, values };
+  }
+  if (frame.event_type === "context_compacted") {
+    const values = filled(frame.payload, {
+      first: "first_sequence",
+      last: "last_sequence",
+      covered: "covered",
+      freed: "freed_estimate",
+    });
+    return values === null ? null : { key: "contextCompactedNote", values };
+  }
+  return null;
+}
+
+/** Puts a note's numbers into its translated sentence. */
+export function fill(said: string, values: Record<string, string>): string {
+  return Object.entries(values).reduce(
+    (text, [placeholder, value]) => text.replace(`{${placeholder}}`, value),
+    said,
+  );
 }

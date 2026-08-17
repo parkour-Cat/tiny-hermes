@@ -37,6 +37,8 @@ export type ModelEndpointSummary = {
   context_window: number;
   max_output_tokens: number;
   usage_quality: string;
+  context_accounting: string;
+  tokenizer: string | null;
   status: string;
 };
 

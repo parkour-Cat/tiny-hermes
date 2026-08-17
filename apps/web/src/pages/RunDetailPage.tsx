@@ -12,7 +12,7 @@ import { moment } from "../i18n/moment";
 import { useT } from "../i18n/locale";
 import type { MessageKey } from "../i18n/zh-CN";
 import { RUN_ACTIONS } from "../runs/actions";
-import { outcomeLabel, statusNote } from "../runs/explain";
+import { eventNote, fill, outcomeLabel, statusNote } from "../runs/explain";
 import { artifactIdsIn, mergeArtifacts, textOf, toolsOf } from "../runs/transcript";
 import { runQueryOptions, useRunEvents } from "../runs/useRunEvents";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
@@ -264,32 +264,41 @@ export function RunDetailPage() {
     });
   }
 
-  const timeline = events.entries.map((entry) =>
-    entry.kind === "gap"
-      ? {
-          key: `gap-${entry.after}`,
-          color: "red",
-          children: (
-            <Typography.Text type="danger">
-              {`${t("eventGapPrefix")}${entry.missing}${t("eventGapSuffix")}`}
-            </Typography.Text>
-          ),
-        }
-      : {
-          key: `event-${entry.frame.sequence}`,
-          children: (
-            <Space size="middle" wrap>
-              <Typography.Text strong>{entry.frame.event_type}</Typography.Text>
-              <Typography.Text type="secondary">{`#${entry.frame.sequence}`}</Typography.Text>
-              <Typography.Text type="secondary">{moment(entry.frame.occurred_at)}</Typography.Text>
-              <details>
-                <summary>{t("eventPayload")}</summary>
-                <pre>{JSON.stringify(entry.frame.payload, null, 2)}</pre>
-              </details>
-            </Space>
-          ),
-        },
-  );
+  const timeline = events.entries.map((entry) => {
+    if (entry.kind === "gap") {
+      return {
+        key: `gap-${entry.after}`,
+        color: "red",
+        children: (
+          <Typography.Text type="danger">
+            {`${t("eventGapPrefix")}${entry.missing}${t("eventGapSuffix")}`}
+          </Typography.Text>
+        ),
+      };
+    }
+    const said = eventNote(entry.frame);
+    return {
+      key: `event-${entry.frame.sequence}`,
+      children: (
+        <>
+          <Space size="middle" wrap>
+            <Typography.Text strong>{entry.frame.event_type}</Typography.Text>
+            <Typography.Text type="secondary">{`#${entry.frame.sequence}`}</Typography.Text>
+            <Typography.Text type="secondary">{moment(entry.frame.occurred_at)}</Typography.Text>
+            <details>
+              <summary>{t("eventPayload")}</summary>
+              <pre>{JSON.stringify(entry.frame.payload, null, 2)}</pre>
+            </details>
+          </Space>
+          {said === null ? null : (
+            <Typography.Paragraph className="fact-note">
+              {fill(t(said.key), said.values)}
+            </Typography.Paragraph>
+          )}
+        </>
+      ),
+    };
+  });
 
   return (
     <>
