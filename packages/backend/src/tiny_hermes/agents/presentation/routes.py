@@ -16,6 +16,7 @@ from tiny_hermes.agents.application.service import (
     InvalidAgentSpec,
     ModelEndpointUnavailable,
     ModelOutputLimitTooHigh,
+    RoundCeilingExceeded,
     UnknownAgent,
 )
 from tiny_hermes.agents.domain.models import Agent, AgentDraft, AgentVersion
@@ -441,6 +442,18 @@ def _as_app_error(error: AgentCatalogError) -> AppError:
             detail=(
                 "The agent asks for more output than the selected endpoint "
                 "produces. Lower it rather than relying on the endpoint to."
+            ),
+        )
+    if isinstance(error, RoundCeilingExceeded):
+        return AppError(
+            code="round_ceiling_exceeded",
+            title="Too many model rounds",
+            status=422,
+            # Both numbers, so the author can act on this without asking an
+            # administrator what the ceiling happens to be today.
+            detail=(
+                f"The agent asks for {error.asked} model calls and this "
+                f"platform allows {error.allowed}."
             ),
         )
     if isinstance(error, InvalidAgentSpec):

@@ -61,6 +61,14 @@ class Settings(BaseSettings):
     #: link-local stay refused however wide the range is.
     outbound_allowed_cidrs: str = ""
 
+    #: The most model rounds an Agent author may ask for (product design §12.3,
+    #: M2A design §4.7). 20 was a literal on `AgentLimits.max_model_calls`
+    #: chosen when a Run could not run long; a Goal loop that must finish inside
+    #: 20 calls cannot do much. Checked when a draft is saved and again when it
+    #: is published — never when a published version is read back, so lowering
+    #: this cannot break an Agent already published above it.
+    agent_max_model_calls: int = Field(default=20, ge=1, le=200)
+
     #: Attempts per model round, on the same endpoint. A workspace may lower
     #: this; nothing may raise it.
     model_max_attempts: int = Field(default=3, ge=1, le=3)

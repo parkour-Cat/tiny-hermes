@@ -13,7 +13,13 @@ class AgentLimits(BaseModel):
 
     max_execution_seconds: int = Field(default=900, ge=1, le=900)
     max_elapsed_seconds: int = Field(default=86_400, ge=60, le=86_400)
-    max_model_calls: int = Field(default=20, ge=1, le=20)
+    # No upper literal. This model is also what a published AgentVersion's
+    # stored document parses back into, and a Run loads that document every
+    # time it starts; a `le=` here would mean an administrator lowering the
+    # platform ceiling stopped work that was already published under the old
+    # one. The ceiling is checked where a value is *written* instead — see
+    # `PlatformCeilings` and `AgentCatalog`.
+    max_model_calls: int = Field(default=20, ge=1)
     max_tool_calls: int = Field(default=50, ge=0, le=50)
     max_derived_retries: int = Field(default=3, ge=0, le=3)
 
@@ -235,6 +241,29 @@ class AgentSpec(BaseModel):
         if not normalized:
             raise ValueError("personality cannot be blank")
         return normalized
+
+
+@dataclass(frozen=True)
+class PlatformCeilings:
+    """What a platform administrator lets an Agent author ask for.
+
+    Product design §12.3 gives administrators the default and the maximum for
+    each safety valve. Only the maximum is here: the default stays on
+    `AgentLimits`, because the default is what an omitted `limits` normalizes
+    to, and a default that moved with configuration would give the same
+    submitted spec a different content hash on two installations.
+
+    Read at the moment a value is written, never at the moment one is read
+    back — see the comment on `AgentLimits.max_model_calls`.
+    """
+
+    max_model_calls: int = 20
+
+
+def rounds_above_ceiling(spec: AgentSpec, ceilings: PlatformCeilings) -> int | None:
+    """The asked-for round count when it is above the ceiling, else `None`."""
+    asked = spec.limits.max_model_calls
+    return asked if asked > ceilings.max_model_calls else None
 
 
 def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:

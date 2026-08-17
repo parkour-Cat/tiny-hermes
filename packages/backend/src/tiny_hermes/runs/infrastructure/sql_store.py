@@ -14,6 +14,7 @@ from tiny_hermes.agents.infrastructure.tables import AgentRow, AgentVersionRow
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
 from tiny_hermes.runs.application.service import (
     AgentNotPublished,
+    BudgetNotWidened,
     DeniedRunControl,
     EventSequenceConflict,
     ForbiddenRunAction,
@@ -87,6 +88,7 @@ from tiny_hermes.runs.ports.store import (
     RetryRunCommand,
     RunEventRecord,
     RunEventWindow,
+    WidenBudgetCommand,
 )
 from tiny_hermes.tenancy.domain.models import Role
 from tiny_hermes.tenancy.infrastructure.tables import MembershipRow
@@ -417,6 +419,66 @@ class SqlRunStore:
                 actor_type=command.caller.caller_type.value,
             )
             raise DeniedRunControl(_denial_code(error)) from error
+
+    async def widen_budget(self, command: WidenBudgetCommand) -> RunSnapshot:
+        """Raise one ceiling on the shared scope, leaving every counter alone.
+
+        Not routed through `RunStateMachine`: this changes no Run state. What
+        it changes is whether the machine's own `budget_allows_execution` is
+        true, so a `paused(limit)` Run starts offering `resume` again without
+        anything here deciding that it should.
+        """
+        if not command.capabilities.can_control:
+            raise ForbiddenRunAction
+        run = await self._lock_run(command.workspace_id, command.run_id)
+        if run is None:
+            raise UnknownRun
+        if run.state_version != command.expected_state_version:
+            raise StateVersionConflict
+        budget = await self._session.scalar(
+            select(RunBudgetScopeRow)
+            .where(RunBudgetScopeRow.root_run_id == run.budget_root_run_id)
+            .with_for_update()
+        )
+        if budget is None:
+            raise UnknownRun
+        if command.max_model_calls <= budget.max_model_calls:
+            self._audit(
+                command.workspace_id,
+                command.caller.caller_id,
+                "run.budget_widen_denied",
+                "run",
+                command.run_id,
+                command.request_id,
+                result="denied",
+                context={
+                    "asked": command.max_model_calls,
+                    "in_force": budget.max_model_calls,
+                },
+                actor_type=command.caller.caller_type.value,
+            )
+            raise BudgetNotWidened
+        previous = budget.max_model_calls
+        budget.max_model_calls = command.max_model_calls
+        budget.version += 1
+        self._audit(
+            command.workspace_id,
+            command.caller.caller_id,
+            "run.budget_widened",
+            "run",
+            command.run_id,
+            command.request_id,
+            context={
+                "max_model_calls": {"from": previous, "to": command.max_model_calls},
+                # The counters are recorded, not changed. An auditor reading
+                # this row can see how much of the old ceiling was already
+                # spent at the moment the new one was granted.
+                "consumed_model_calls": budget.consumed_model_calls,
+            },
+            actor_type=command.caller.caller_type.value,
+        )
+        await self._session.flush()
+        return await self._snapshot(run, command.capabilities)
 
     async def apply_signal(self, command: ApplySignalCommand) -> RunSnapshot:
         """Apply exactly the mutation ``RunStateMachine`` returns, once."""
