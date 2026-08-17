@@ -118,6 +118,7 @@ async def test_a_complete_run_finishes_without_any_manual_signal(
         "run_created",
         "run_lease_acquired",
         "run_completed",
+        "goal_verdict",
     ]
 
     async with engine.connect() as connection:
@@ -176,8 +177,10 @@ async def test_continue_once_crosses_a_slice_boundary(
         "run_created",
         "run_lease_acquired",
         "run_slice_ended",
+        "goal_verdict",
         "run_lease_acquired",
         "run_completed",
+        "goal_verdict",
     ]
     _, model_calls, _ = await _budget(engine, run["budget_root_run_id"])
     assert model_calls == 2
@@ -277,6 +280,7 @@ async def test_a_pause_requested_while_running_pauses_after_the_round(
         "run_lease_acquired",
         "run_pause_requested",
         "run_safe_pause_reached",
+        "goal_verdict",
     ]
 
 
@@ -312,6 +316,7 @@ async def test_a_cancel_requested_while_running_cancels_at_the_checkpoint(
         "run_lease_acquired",
         "run_cancel_requested",
         "run_safe_cancel_started",
+        "goal_verdict",
         "run_safe_cancel_finished",
     ]
     session = client.get(f"/api/v1/sessions/{session_id}", headers=scope).json()
@@ -351,6 +356,7 @@ async def test_the_safety_valve_stops_a_run_before_another_model_call(
         "run_lease_acquired",
         "run_safe_pause_reached",
         "run_limit_reached",
+        "goal_verdict",
     ]
 
 

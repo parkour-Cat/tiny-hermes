@@ -1,7 +1,7 @@
 import hashlib
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, func, select, text, update
@@ -740,6 +740,17 @@ class SqlRunStore:
         )
 
         if command.signal is None:
+            # A round that keeps the slice changes no state, so it has no
+            # transition to hang an event on — and that is exactly the Run
+            # whose timeline would otherwise be empty for however many rounds
+            # it worked. Its events are written on their own.
+            await self.append_events(
+                AppendEventsCommand(
+                    workspace_id=command.workspace_id,
+                    run_id=command.run_id,
+                    events=command.events,
+                )
+            )
             await self._session.flush()
             return await self._snapshot(run, command.capabilities)
 
@@ -1726,6 +1737,9 @@ class SqlRunStore:
             checkpoint_effect_status=CheckpointEffectStatus(run.checkpoint_effect_status),
             checkpoint_usage_quality=_usage_quality(run.checkpoint),
             failure_reason=_failure_reason(run.checkpoint),
+            current_round=_round(run.checkpoint),
+            goal_outcome=_goal_outcome(run.checkpoint),
+            goal_unmet=_goal_unmet(run.checkpoint),
             created_at=run.created_at,
             started_at=run.started_at,
             finished_at=run.finished_at,
@@ -1990,6 +2004,42 @@ def _usage_quality(checkpoint: dict[str, Any] | None) -> str | None:
         return None
     value: Any = checkpoint.get("usage_quality")
     return str(value) if isinstance(value, str) else None
+
+
+def _round(checkpoint: dict[str, Any] | None) -> int | None:
+    """Which round the checkpoint describes, counted across the whole Run.
+
+    Written by the Worker from the same number it gave the model, so what a
+    reader sees and what the round saw are one count. Absent for the writes
+    that record something other than a judged round — a rolled-back commit, a
+    slice that ended before any model call.
+    """
+    if not checkpoint:
+        return None
+    value: Any = checkpoint.get("round")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _goal_outcome(checkpoint: dict[str, Any] | None) -> str | None:
+    if not checkpoint:
+        return None
+    value: Any = checkpoint.get("goal_outcome")
+    return str(value) if isinstance(value, str) and value else None
+
+
+def _goal_unmet(checkpoint: dict[str, Any] | None) -> tuple[str, ...]:
+    """The declared conditions the last judged round did not meet.
+
+    Empty both when everything passed and when the Agent declared nothing to
+    check; `goal_outcome` is what tells those apart.
+    """
+    if not checkpoint:
+        return ()
+    value: Any = checkpoint.get("goal_unmet")
+    if not isinstance(value, list):
+        return ()
+    names = cast(list[Any], value)
+    return tuple(name for name in names if isinstance(name, str))
 
 
 def _to_message(row: SessionMessageRow) -> CanonicalMessage:

@@ -53,8 +53,14 @@ async function bindTool(page: Page, name: string): Promise<void> {
   await expect(box).toBeChecked();
 }
 
-/** Creates an Agent, writes the scenario into its draft, and publishes v1. */
-async function publishAgent(page: Page, scenario: string): Promise<string> {
+/**
+ * Creates an Agent, writes the scenario into its draft, and publishes v1.
+ *
+ * `tool` binds one tool in the same save, for the scenarios whose behaviour is
+ * a tool call: an unbound name is refused at publish, so the scenario would
+ * never get to ask for it.
+ */
+async function publishAgent(page: Page, scenario: string, tool?: string): Promise<string> {
   const name = unique(scenario);
   await page.getByRole("link", { name: "Agent", exact: true }).click();
   await page.getByRole("button", { name: "新建 Agent" }).click();
@@ -71,6 +77,9 @@ async function publishAgent(page: Page, scenario: string): Promise<string> {
   await expect(page.getByText("草稿修订 1")).toBeVisible();
   await page.getByLabel("人格").fill(`A ${scenario} agent for the console acceptance walk.`);
   await choose(page, "模型场景", scenario);
+  if (tool !== undefined) {
+    await bindTool(page, tool);
+  }
   await page.getByRole("button", { name: "保存草稿" }).click();
   await expect(page.getByText("草稿修订 2")).toBeVisible();
 
@@ -96,6 +105,19 @@ async function submitRun(page: Page, agentName: string): Promise<string> {
 /** The 概要 card, so a status is read where the page states it. */
 function summary(page: Page) {
   return page.locator(".ant-card", { hasText: "概要" }).first();
+}
+
+/**
+ * What the 概要 card shows under one labelled row.
+ *
+ * By the label rather than by the value: a round number is `1`, and a bare `1`
+ * matches half the page.
+ */
+function fact(page: Page, label: string) {
+  return summary(page)
+    .locator(".ant-descriptions-item")
+    .filter({ has: page.getByText(label, { exact: true }) })
+    .locator(".ant-descriptions-item-content");
 }
 
 function timeline(page: Page) {
@@ -174,6 +196,38 @@ test("the panes phase two cannot fill are absent, not empty", async ({ page }) =
   for (const absent of ["父子任务树", "上下文和压缩事件", "Token 和费用"]) {
     await expect(page.getByText(absent)).toHaveCount(0);
   }
+});
+
+test("a run that has not finished says which round it is on and why", async ({ page }) => {
+  await openWorkspace(page);
+  const agent = await publishAgent(page, "wait_once", "platform.wait");
+  await submitRun(page, agent);
+
+  // Not a race. The round asked to be woken a minute later, so the Run sits in
+  // this state long enough that reading it is reading the platform, not
+  // catching a frame.
+  await expect(summary(page).getByText("waiting_external", { exact: true })).toBeVisible();
+  await expect(fact(page, "当前轮次")).toHaveText("1");
+  await expect(fact(page, "上一轮判定")).toHaveText("等待");
+  await expect(fact(page, "等待类型")).toHaveText("timer");
+  // A status word says the Run stopped; this says who it is stopped on. A
+  // timer is the platform's own deadline, so nobody has to do anything — the
+  // opposite of what a generic "等待中" would leave a reader assuming.
+  await expect(page.getByText("这次任务自己要求稍后再继续", { exact: false })).toBeVisible();
+
+  // Woken by the Scheduler when the deadline passed, then finished on the next
+  // round. The wait is a minute and the wake is a scan behind it, so this one
+  // outlasts the default expectation window on purpose.
+  await expect(summary(page).getByText("completed", { exact: true })).toBeVisible({
+    timeout: 120_000,
+  });
+  // Two, not one: the count is across the Run, so a Run that resumed in a new
+  // slice did not start counting again.
+  await expect(fact(page, "当前轮次")).toHaveText("2");
+  await expect(fact(page, "上一轮判定")).toHaveText("已完成");
+  // And both verdicts are still on the timeline, so the reason it went on is
+  // readable after the fact rather than only while it was going on.
+  await expect(timeline(page).getByText("goal_verdict")).toHaveCount(2);
 });
 
 test("the builder binds a tool, playground sends, and rollback restores v1", async ({ page }) => {

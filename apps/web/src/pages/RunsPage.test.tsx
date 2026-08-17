@@ -51,6 +51,7 @@ function runRow(overrides: Record<string, unknown>) {
     available_actions: ["pause", "cancel"],
     checkpoint_replay_safe: true,
     checkpoint_effect_status: "none",
+    goal: { round: null, outcome: null, unmet: [] },
     created_at: "2026-08-10T02:00:00Z",
     started_at: "2026-08-10T02:00:05Z",
     finished_at: null,

@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 from tiny_hermes.runs.ports.model import ModelResponse, StopReason
 from tiny_hermes.sandbox.domain.command import CommandResult, SandboxCommand
@@ -259,3 +260,97 @@ async def test_a_verification_that_ran_out_of_time_is_not_a_verdict_either(
     body = status(client, scope, run)
     assert body["status"] == "paused"
     assert body["pause_reason"] == "operator"
+
+
+async def verdicts(engine: AsyncEngine, run: str) -> list[dict[str, Any]]:
+    """Every judge's answer this Run has on its timeline, in order."""
+    async with engine.connect() as connection:
+        rows = await connection.execute(
+            text(
+                "SELECT payload FROM run_events WHERE run_id = :id "
+                "AND event_type = 'goal_verdict' ORDER BY sequence"
+            ),
+            {"id": UUID(run)},
+        )
+        return [dict(row.payload) for row in rows.all()]
+
+
+async def test_a_run_still_working_says_which_round_and_what_did_not_pass(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_that_declares: Any
+) -> None:
+    """The status of a Run in its second round is the same word as in its first.
+
+    Before this, a person watching a long Run could see it was not finished and
+    nothing else — not how far along it was, and not what the platform kept
+    disagreeing with. Both were already known; neither was said out loud.
+    """
+    agent = agent_that_declares({"verification_command": "pytest -q"}, rounds=2)
+    run = submit(client, scope, agent, "write the report")
+
+    await drive(engine, Recording(claims_done("all done"), claims_done("still done")),
+                ScriptedSandbox(failing=("pytest -q",)))
+
+    goal = status(client, scope, run)["goal"]
+    assert goal["round"] == 2
+    assert goal["outcome"] == "continue"
+    assert goal["unmet"] == ["pytest -q"]
+
+
+async def test_every_round_leaves_its_verdict_on_the_timeline(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_that_declares: Any
+) -> None:
+    """The snapshot holds the latest one; the timeline holds all of them.
+
+    A judge that answers every round but is only ever readable at the last one
+    cannot explain a Run that ran out of budget four rounds after the mistake.
+    """
+    agent = agent_that_declares({"verification_command": "pytest -q"}, rounds=2)
+    run = submit(client, scope, agent, "write the report")
+
+    await drive(engine, Recording(claims_done("all done"), claims_done("still done")),
+                ScriptedSandbox(failing=("pytest -q",)))
+
+    recorded = await verdicts(engine, run)
+    assert [entry["round"] for entry in recorded] == [1, 2]
+    assert {entry["outcome"] for entry in recorded} == {"continue"}
+    assert recorded[0]["unmet"] == ["pytest -q"]
+
+
+async def test_a_completed_run_reports_the_verdict_that_let_it_finish(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_that_declares: Any
+) -> None:
+    agent = agent_that_declares({"verification_command": "pytest -q"})
+    run = submit(client, scope, agent, "write the report")
+
+    await drive(engine, Recording(claims_done("all done")), ScriptedSandbox())
+
+    goal = status(client, scope, run)["goal"]
+    assert goal == {"round": 1, "outcome": "done", "unmet": []}
+
+
+async def test_the_round_a_reader_sees_is_the_round_the_model_was_given(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_that_declares: Any
+) -> None:
+    """One count, not two that drift the moment a round's own call is tallied."""
+    agent = agent_that_declares({"verification_command": "pytest -q"})
+    run = submit(client, scope, agent, "write the report")
+    model = Recording(claims_done("all done"), claims_done("fixed it"))
+
+    await drive(engine, model, ScriptedSandbox(failing=("pytest -q",), failures=1))
+
+    assert [request.round_index for request in model.requests] == [1, 2]
+    assert [entry["round"] for entry in await verdicts(engine, run)] == [1, 2]
+
+
+async def test_a_run_that_has_not_run_yet_has_no_verdict_to_report(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_that_declares: Any
+) -> None:
+    del engine
+    agent = agent_that_declares({"verification_command": "pytest -q"})
+    run = submit(client, scope, agent, "write the report")
+
+    assert status(client, scope, run)["goal"] == {
+        "round": None,
+        "outcome": None,
+        "unmet": [],
+    }

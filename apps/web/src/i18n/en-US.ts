@@ -112,6 +112,21 @@ export const enUS: Record<MessageKey, string> = {
   runPauseReason: "Pause reason",
   runWaitKind: "Waiting on",
   runWaitDeadline: "Wait deadline",
+  runGoalRound: "Round",
+  runGoalOutcome: "Last verdict",
+  runGoalUnmet: "Checks that did not pass",
+  runGoalNotJudged: "Not judged yet",
+  goalOutcomeDone: "Done",
+  goalOutcomeContinue: "Keep working",
+  goalOutcomeWait: "Waiting",
+  goalOutcomeFailed: "The round failed",
+  goalOutcomeUndecidable: "Could not be decided",
+  waitingTimerNote:
+    "This Run asked to continue later. It goes back in the queue at the wait deadline on its own, holding no execution slot and no sandbox in the meantime. Nobody has to do anything.",
+  waitingExternalNote:
+    "This Run is waiting on an answer from outside the platform. If none arrives by the deadline it pauses instead. What it is waiting for is under Wait kind.",
+  pausedLimitNote:
+    "The shared budget ran out, so the Run stopped here rather than failing. Widen the budget and it continues from where it stopped; nothing already spent is reset.",
   runBlockedBy: "Blocked by",
   runStartedAt: "Started",
   runSession: "Session",

@@ -128,8 +128,9 @@ async def test_a_finished_run_streams_every_event_then_closes(
         "run_created",
         "run_lease_acquired",
         "run_completed",
+        "goal_verdict",
     ]
-    assert [frame.id for frame in frames] == ["1", "2", "3"]
+    assert [frame.id for frame in frames] == ["1", "2", "3", "4"]
     assert frames[0].json() == {
         "sequence": 1,
         "event_type": "run_created",
@@ -150,7 +151,7 @@ async def test_resuming_from_a_cursor_replays_neither_more_nor_less(
         events_url(submitted_run["id"]), {"Last-Event-ID": "2"}
     )
 
-    assert [frame.id for frame in resumed] == ["3"]
+    assert [frame.id for frame in resumed] == ["3", "4"]
 
 
 async def test_the_cursor_query_matches_the_header_and_the_header_wins(
@@ -166,8 +167,8 @@ async def test_the_cursor_query_matches_the_header_and_the_header_wins(
         events_url(submitted_run["id"], 1), {"Last-Event-ID": "2"}
     )
 
-    assert [frame.id for frame in queried] == ["2", "3"]
-    assert [frame.id for frame in both] == ["3"]
+    assert [frame.id for frame in queried] == ["2", "3", "4"]
+    assert [frame.id for frame in both] == ["3", "4"]
 
 
 async def test_a_cursor_below_the_retained_window_is_gone(
@@ -206,9 +207,9 @@ async def test_a_fully_pruned_run_is_gone_rather_than_silently_empty(
     refused = await browser.get(events_url(run_id))
 
     assert refused.status_code == 410
-    assert refused.json()["context"]["earliest_available_sequence"] == 4
+    assert refused.json()["context"]["earliest_available_sequence"] == 5
     # A subscriber that already saw everything is caught up, not stale.
-    assert await read_stream(events_url(run_id, 3)) == []
+    assert await read_stream(events_url(run_id, 4)) == []
 
 
 async def test_a_live_run_streams_until_it_terminalizes(
@@ -232,10 +233,12 @@ async def test_a_live_run_streams_until_it_terminalizes(
         "run_created",
         "run_lease_acquired",
         "run_slice_ended",
+        "goal_verdict",
         "run_lease_acquired",
         "run_completed",
+        "goal_verdict",
     ]
-    assert [frame.id for frame in frames] == ["1", "2", "3", "4", "5"]
+    assert [frame.id for frame in frames] == ["1", "2", "3", "4", "5", "6", "7"]
 
 
 @pytest.mark.settings(sse_heartbeat_seconds=5)

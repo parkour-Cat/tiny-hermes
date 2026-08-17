@@ -12,6 +12,7 @@ import { moment } from "../i18n/moment";
 import { useT } from "../i18n/locale";
 import type { MessageKey } from "../i18n/zh-CN";
 import { RUN_ACTIONS } from "../runs/actions";
+import { outcomeLabel, statusNote } from "../runs/explain";
 import { artifactIdsIn, mergeArtifacts, textOf, toolsOf } from "../runs/transcript";
 import { runQueryOptions, useRunEvents } from "../runs/useRunEvents";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
@@ -186,9 +187,25 @@ export function RunDetailPage() {
     return <Link to={`/workspaces/${workspaceId ?? ""}/runs/${id}`}>{id}</Link>;
   }
 
+  const situation = statusNote(run);
+  const outcome = outcomeLabel(run.goal.outcome);
+
   const facts: Rows = [
     { key: "status", label: t("runStatus"), children: <Tag>{run.status}</Tag> },
     { key: "queue", label: t("runQueue"), children: run.queue.status },
+    {
+      key: "goal-round",
+      label: t("runGoalRound"),
+      children: run.goal.round === null ? t("runGoalNotJudged") : run.goal.round,
+    },
+    {
+      key: "goal-outcome",
+      label: t("runGoalOutcome"),
+      // The raw value when this console has no word for it: a verdict it does
+      // not recognise is still the reason the Run is where it is.
+      children:
+        outcome === null ? (run.goal.outcome ?? t("runGoalNotJudged")) : t(outcome),
+    },
     { key: "session-sequence", label: t("runSessionSequence"), children: run.session_sequence },
     { key: "state-version", label: t("runStateVersion"), children: run.state_version },
     {
@@ -237,6 +254,13 @@ export function RunDetailPage() {
       key: "wait-deadline",
       label: t("runWaitDeadline"),
       children: moment(run.wait_deadline_at),
+    });
+  }
+  if (run.goal.unmet.length > 0) {
+    facts.push({
+      key: "goal-unmet",
+      label: t("runGoalUnmet"),
+      children: run.goal.unmet.join("; "),
     });
   }
 
@@ -296,6 +320,9 @@ export function RunDetailPage() {
       )}
       {events.error === null ? null : (
         <Alert className="page-alert" type="warning" title={events.error} showIcon />
+      )}
+      {situation === null ? null : (
+        <Alert className="page-alert" type="info" title={t(situation)} showIcon />
       )}
       <Card title={t("summarySection")} variant="borderless" className="page-alert">
         <Descriptions column={{ xs: 1, sm: 2 }} size="small" items={facts} />
