@@ -383,7 +383,10 @@ async def test_a_run_reaches_completed_with_text_the_endpoint_produced(
             "kind": "openai_compatible",
             "base_url": base_url,
             "model": "stand-in-large",
-            "context_window": 8_192,
+            # Room for the default segment budget: publishing against a window
+            # that cannot serve it is refused, and this test is about the
+            # provider round trip rather than that refusal.
+            "context_window": 32_768,
             "max_output_tokens": 512,
             "usage_quality": "provider",
             "credential_ref": CREDENTIAL,

@@ -9,6 +9,8 @@ from tiny_hermes.agents.application.service import (
     AgentAliasAlreadyUsed,
     AgentCatalog,
     AgentCatalogError,
+    ContextBudgetUnsatisfied,
+    ContextWindowTooSmall,
     DraftRevisionConflict,
     ForbiddenAgentAction,
     InvalidAgentAlias,
@@ -442,6 +444,34 @@ def _as_app_error(error: AgentCatalogError) -> AppError:
             detail=(
                 "The agent asks for more output than the selected endpoint "
                 "produces. Lower it rather than relying on the endpoint to."
+            ),
+        )
+    if isinstance(error, ContextWindowTooSmall):
+        return AppError(
+            code="context_window_too_small",
+            title="Context window too small",
+            status=422,
+            detail=(
+                f"This endpoint leaves {error.allowance} tokens for input and "
+                f"{error.floor} are kept no matter what. Choose an endpoint "
+                "with a larger window, or lower the reserved output."
+            ),
+        )
+    if isinstance(error, ContextBudgetUnsatisfied):
+        return AppError(
+            code="context_budget_unsatisfied",
+            title="Context budget does not fit this endpoint",
+            status=422,
+            # The advice travels with the refusal and is applied by nobody:
+            # §7.4.2 requires the author accept or change it themselves.
+            detail=(
+                f"The context budget asks for {error.fit.asked} tokens and this "
+                f"endpoint leaves {error.fit.allowance}. Suggested targets: "
+                + ", ".join(
+                    f"{advice.segment.value} {advice.asked} to {advice.suggested}"
+                    for advice in error.fit.advice
+                )
+                + ". Nothing is changed until you publish these."
             ),
         )
     if isinstance(error, RoundCeilingExceeded):
