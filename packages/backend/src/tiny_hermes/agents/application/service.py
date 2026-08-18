@@ -16,6 +16,7 @@ from tiny_hermes.agents.domain.models import (
     initial_agent_spec,
     rounds_above_ceiling,
 )
+from tiny_hermes.agents.ports.http_tools import HttpToolBindingReader
 from tiny_hermes.agents.ports.skills import SkillBindingReader, SkillBindingView
 from tiny_hermes.agents.ports.store import AgentStore, PublishResult
 from tiny_hermes.model_catalog.domain.models import ModelEndpoint
@@ -153,6 +154,26 @@ class SkillBindingUnavailable(AgentCatalogError):
         self.reasons = dict(reasons)
 
 
+class HttpToolBindingUnavailable(AgentCatalogError):
+    """A bound HTTP tool version this Agent may not call, and why not.
+
+    Four ways to be wrong, and the same reason as `SkillBindingUnavailable` for
+    finding all four here: a version that is not visible, one that was
+    withdrawn, an operation the document does not declare, or a host outside
+    this Agent's own `network.allow`.
+
+    That last one is worth stating. The host was inside the *workspace* scope
+    when the tool was registered; whether this Agent may reach it is a
+    different question, asked of a different layer, and §16.5 says a layer may
+    narrow. An Agent that binds a tool it may not connect to would publish
+    cleanly and refuse on first use.
+    """
+
+    def __init__(self, reasons: Mapping[UUID, str]) -> None:
+        super().__init__("; ".join(f"{key}: {value}" for key, value in reasons.items()))
+        self.reasons = dict(reasons)
+
+
 class SkillBoundTwice(AgentCatalogError):
     """Two versions of the same skill in one spec.
 
@@ -209,6 +230,7 @@ class AgentCatalog:
         ceilings: PlatformCeilings | None = None,
         skills: SkillBindingReader | None = None,
         scopes: WorkspaceScopeReader | None = None,
+        http_tools: HttpToolBindingReader | None = None,
     ) -> None:
         self._store = store
         # Defaulted rather than required so the domain tests, which are about
@@ -228,6 +250,8 @@ class AgentCatalog:
         # binds no skill never asks, and one that binds a skill without a
         # reader to check it against cannot be published.
         self._skills = skills
+        # And once more, for HTTP tools.
+        self._http_tools = http_tools
 
     async def create_agent(
         self, workspace_id: UUID, actor: Actor, name: str, alias: str, request_id: str
@@ -396,6 +420,10 @@ class AgentCatalog:
             await self._check_endpoint(draft.spec)
             await self._check_skills(workspace_id, draft.spec)
             await self._check_network(workspace_id, draft.spec)
+            # After the network check, so a host measured against
+            # `network.allow` is measured against entries already known to be
+            # inside the workspace's.
+            await self._check_http_tools(workspace_id, draft.spec)
             # Again here, and not only on save: this draft was measured against
             # whatever the ceiling was the day it was written.
             self._check_ceilings(draft.spec)
@@ -471,6 +499,47 @@ class AgentCatalog:
         )
         if outside:
             raise AgentNetworkOutsideWorkspace(outside)
+
+    async def _check_http_tools(self, workspace_id: UUID, spec: AgentSpec) -> None:
+        """Refuse a version that binds an HTTP operation it cannot actually call."""
+        if not spec.http_tools:
+            return
+        wanted = [binding.http_tool_version_id for binding in spec.http_tools]
+        if self._http_tools is None:
+            raise HttpToolBindingUnavailable(
+                {version_id: "no HTTP tool catalog is configured" for version_id in wanted}
+            )
+        found = {
+            view.version_id: view
+            for view in await self._http_tools.visible_versions(workspace_id, wanted)
+        }
+        allowed = spec.network.allow if spec.network is not None else ()
+        parsed = [parse_entry(entry) for entry in allowed]
+        reasons: dict[UUID, str] = {}
+        for binding in spec.http_tools:
+            version_id = binding.http_tool_version_id
+            view = found.get(version_id)
+            if view is None:
+                # Not "does not exist", for the reason `_check_skills` gives.
+                reasons[version_id] = "no such HTTP tool version is visible here"
+                continue
+            if not view.active:
+                reasons[version_id] = f"{view.tool_name} was withdrawn at this version"
+                continue
+            missing = sorted(set(binding.operations) - set(view.operation_ids))
+            if missing:
+                reasons[version_id] = (
+                    f"{view.tool_name} declares no operation named {', '.join(missing)}"
+                )
+                continue
+            wanted_host = parse_entry(view.host)
+            if not any(entry.contains(wanted_host) for entry in parsed):
+                reasons[version_id] = (
+                    f"{view.tool_name} is at {view.host}, which this Agent's "
+                    "network.allow does not cover"
+                )
+        if reasons:
+            raise HttpToolBindingUnavailable(reasons)
 
     async def _check_skills(self, workspace_id: UUID, spec: AgentSpec) -> None:
         """Refuse a version that binds a skill it cannot actually load.

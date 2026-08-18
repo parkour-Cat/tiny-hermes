@@ -19,6 +19,7 @@ from ipaddress import ip_network
 from tiny_hermes.egress.application.proxy import EgressProxy, ProxySettings
 from tiny_hermes.egress.domain.decision import AddressPolicy
 from tiny_hermes.egress.infrastructure.memory_directory import MemoryScopeDirectory
+from tiny_hermes.egress.ports.directory import ScopeDirectory
 from tiny_hermes.outbound.domain.address_policy import (
     Address,
     AddressVerdict,
@@ -54,6 +55,7 @@ async def running_proxy(
     *,
     approved: Sequence[Network] = LOOPBACK,
     policy: AddressPolicy = loopback_is_reachable,
+    directory: ScopeDirectory | None = None,
 ) -> AsyncGenerator[ProxyHandle]:
     """A real egress proxy, because the client can no longer reach past one.
 
@@ -67,9 +69,14 @@ async def running_proxy(
     listening.close()
     await listening.wait_closed()
 
-    directory = MemoryScopeDirectory(platform=OutboundScope.of(["127.0.0.1", "localhost"]))
+    memory = MemoryScopeDirectory(platform=OutboundScope.of(["127.0.0.1", "localhost"]))
+    # A suite that wants the real chain — platform, workspace and the Agent's
+    # own `network` out of its published version — passes the SQL directory
+    # instead. The in-memory one stays the default because most suites are
+    # about the client rather than about the layers.
+    asked = directory or memory
     server = EgressProxy(
-        directory,
+        asked,
         ProxySettings(
             token=PROXY_TOKEN,
             approved_networks=approved,
@@ -93,7 +100,7 @@ async def running_proxy(
             writer.close()
             del reader
             break
-        yield ProxyHandle(url=f"http://127.0.0.1:{port}", directory=directory)
+        yield ProxyHandle(url=f"http://127.0.0.1:{port}", directory=memory)
     finally:
         stop.set()
         await asyncio.wait_for(task, timeout=5)

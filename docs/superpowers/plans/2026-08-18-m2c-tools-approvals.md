@@ -44,37 +44,37 @@ egress-proxy，没配 proxy 就一个字节也发不出去，沙箱挂在一张�
 
 ## 1. HTTP / OpenAPI 工具：注册、绑定、只读执行
 
-- [ ] `packages/backend/tests/unit/tools/test_openapi_document.py`：先写会失败的测试。
+- [x] `packages/backend/tests/unit/tools/test_openapi_document.py`：先写会失败的测试。
       纯函数解析一份 OpenAPI 文档，得出**可绑定的操作列表**：
       `operationId`、方法、路径模板、参数 schema。拒绝没有 `operationId` 的操作
       （名字是绑定的键，一个没有名字的操作没法被稳定地绑定），
       拒绝路径里带模板注入的写法。
-- [ ] `tools/domain/openapi.py`：上面那个解析器，纯的。文档从哪来是别人的事。
+- [x] `tools/domain/openapi.py`：上面那个解析器，纯的。文档从哪来是别人的事。
       同时给出**工具 schema 的估算尺寸**，第 3 步的预算要用同一个函数，
       否则两处会对「这个工具多大」给出不同答案。
-- [ ] 数据模型与迁移 `0018`：`http_tools`（工作空间级，名称、base_url、
+- [x] 数据模型与迁移 `0018`：`http_tools`（工作空间级，名称、base_url、
       OpenAPI 文档内容哈希、可绑定操作、凭据引用、创建人）。
       文档本身按 §1 的内容哈希存一份不可变副本——**绑定的是版本，不是 URL**，
       理由和技能一样：远端文档改了不该悄悄改变已发布 Agent 的行为。
-- [ ] 注册时把 `base_url` 的 host 当作出站目标校验：不在工作空间已批准范围内就拒绝，
+- [x] 注册时把 `base_url` 的 host 当作出站目标校验：不在工作空间已批准范围内就拒绝，
       并说出缺哪一条。这是 M2C-1 那两级范围的第一个真实消费者。
-- [ ] `AgentSpec` 加 `http_tools: tuple[HttpToolBinding, ...]`，绑的是
+- [x] `AgentSpec` 加 `http_tools: tuple[HttpToolBinding, ...]`，绑的是
       `http_tool_version_id` + 允许的 `operation_id` 子集。发布时校验：
       版本可见、操作存在、host 在 Agent 的 `network.allow` 内。
       第六次「不写就不进规范化文档」的加宽承诺，照旧要有测试钉住内容哈希不变。
-- [ ] `tools/domain/registry.py`：HTTP 工具不是一个固定名字的工具，
+- [x] `tools/domain/registry.py`：HTTP 工具不是一个固定名字的工具，
       而是**一族**由绑定生成的工具名（`http.<tool>.<operation>`）。
       `schemas_for` 因此要能接受绑定信息，而不只是一串名字——
       这是 registry 第一次需要知道「这个 Agent 绑了什么」，
       改动要小心，并且 `authorize` 的第二次检查仍然只认绑定，不认名字。
-- [ ] 执行：请求由**平台**发出（不是沙箱内），走 `SafeOutboundClient`，
+- [x] 执行：请求由**平台**发出（不是沙箱内），走 `SafeOutboundClient`，
       于是自动经过 proxy 并被四层范围检查一遍。凭据从 Secret 取，
       注入到请求头，**永不进提示词、永不进事件、永不进日志**。
-- [ ] **只读方法先行**：`GET`/`HEAD`/`OPTIONS` 直接执行；
+- [x] **只读方法先行**：`GET`/`HEAD`/`OPTIONS` 直接执行；
       `POST`/`PUT`/`PATCH`/`DELETE` 在这一步返回具名拒绝
       `approval_required`，并写一条事件说明「审批尚未交付」。
       测试要断言这一条——它是第 2 步之前唯一正确的行为。
-- [ ] 集成测试：真起一个 stand-in HTTP 服务与真 proxy，
+- [x] 集成测试：真起一个 stand-in HTTP 服务与真 proxy，
       绑定 → 发布 → 跑一轮 → 工具结果回到会话；未绑定的 operation 被拒；
       host 不在范围内的注册被拒。
 
@@ -85,12 +85,12 @@ egress-proxy，没配 proxy 就一个字节也发不出去，沙箱挂在一张�
       是否仍然覆盖这次调用。§16.3 的「参数变化使原批准失效」全部落在这两个函数里，
       并且穷举测试：改工具名、改一个参数、改工作目录、改目标资源、
       调换参数顺序（不应失效）、改一个数值的精度（应失效）。
-- [ ] 数据模型与迁移 `0019`：`approvals`。字段照 §16.3 逐条来：
+- [ ] 数据模型与迁移 `0020`：`approvals`。（原写作 `0019`；那个号被第 1 步的 `http_call_refused` 事件类型用掉了。）字段照 §16.3 逐条来：
       `approval_type`（`user_confirmation` / `governance_approval`）、
       `required_permission`、`requested_by`、`expires_at`、规范化参数哈希、
       `decided_by`、`decided_at`、`decision_reason`、以及它属于哪个 Run 与哪次调用。
       默认有效期 24 小时，工作空间可在 5 分钟到 7 天之间配置。
-- [ ] `Run.end_user_id`：迁移 `0019` 一并加。§16.3 的 `user_confirmation`
+- [ ] `Run.end_user_id`：迁移 `0020` 一并加。§16.3 的 `user_confirmation`
       只能由**发起该 Run 的 EndUser 本人**决定，所以 Run 必须记住那是谁。
       这一阶段的落法写在 §9 的决定里。
 - [ ] Worker 侧：一次需要审批的调用不执行，写 `RUN_APPROVAL_REQUESTED`，

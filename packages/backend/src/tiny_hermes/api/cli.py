@@ -21,11 +21,13 @@ from tiny_hermes.runs.application.worker import (
 from tiny_hermes.runs.infrastructure.deterministic_model import (
     DeterministicModelProvider,
 )
+from tiny_hermes.runs.infrastructure.http_tool_sender import OutboundHttpToolSender
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 from tiny_hermes.runs.infrastructure.openai_model import RetryPolicy
 from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
 from tiny_hermes.runs.infrastructure.skill_library import SqlSkillLibrary
 from tiny_hermes.runs.infrastructure.skill_proposals import SqlSkillProposals
+from tiny_hermes.runs.ports.http_calls import EgressClaim
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
 from tiny_hermes.sandbox.transport.adapter import SandboxClient
 from tiny_hermes.sandbox.transport.client import ControllerClient
@@ -102,6 +104,24 @@ async def _worker() -> None:
         # The Agent's half of §15.3. It writes proposals and can approve
         # none of them, which is the whole governance story in one field.
         proposals=SqlSkillProposals(sessions),
+        # An Agent's calls to somebody else's API leave from here rather than
+        # from the sandbox, so the credential stays on this side and the
+        # request passes the same egress boundary as every other outbound
+        # call. Unconfigured egress makes this refuse, not connect.
+        http_sender=OutboundHttpToolSender(
+            sessions,
+            lambda claim: SafeOutboundClient(
+                # Unlike a model call, this one names its layers: the Agent's
+                # own `network.allow` is one of them, and a call that named
+                # nothing would be measured against the platform alone.
+                egress=_egress(settings, claim),
+                connect_timeout=settings.outbound_connect_timeout_seconds,
+                read_timeout=settings.outbound_read_timeout_seconds,
+                max_redirects=settings.outbound_max_redirects,
+                max_response_bytes=settings.outbound_max_response_bytes,
+            ),
+            kek=optional_kek(settings.tiny_hermes_kek),
+        ),
         settings=WorkerSettings(
             worker_id=worker_id,
             lease_seconds=settings.worker_lease_seconds,
@@ -119,7 +139,7 @@ async def _worker() -> None:
     logger.info("worker stopped", extra={"worker_id": worker_id})
 
 
-def _egress(settings: Settings) -> EgressRoute | None:
+def _egress(settings: Settings, claim: EgressClaim | None = None) -> EgressRoute | None:
     """The route out, when this deployment has one.
 
     `None` when either half is unset, and a client built with `None` refuses
@@ -129,7 +149,16 @@ def _egress(settings: Settings) -> EgressRoute | None:
     """
     if not settings.egress_proxy_url or not settings.egress_proxy_token:
         return None
-    return EgressRoute(url=settings.egress_proxy_url, token=settings.egress_proxy_token)
+    return EgressRoute(
+        url=settings.egress_proxy_url,
+        token=settings.egress_proxy_token,
+        # Named only when a caller has layers to be measured against. Naming
+        # them can only narrow what the request may reach — the proxy looks
+        # each id up itself.
+        workspace_id=None if claim is None else claim.workspace_id,
+        agent_version_id=None if claim is None else claim.agent_version_id,
+        run_id=None if claim is None else claim.run_id,
+    )
 
 
 def _controller(settings: Settings) -> SandboxClient | None:

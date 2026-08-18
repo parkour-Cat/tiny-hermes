@@ -23,9 +23,11 @@ from tiny_hermes.runs.domain.models import (
     ToolCallBlock,
     ToolResultBlock,
 )
+from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolSender
 from tiny_hermes.runs.ports.proposals import SkillProposals
 from tiny_hermes.runs.ports.skills import SkillLibrary
 from tiny_hermes.runs.ports.store import ExecutionContext, ReservedEvent
+from tiny_hermes.tools.domain.http_calls import HttpCallRefused, http_call_of
 from tiny_hermes.tools.domain.registry import (
     MAX_SKILL_FILE_BYTES,
     MAX_SKILL_LOADS,
@@ -210,4 +212,88 @@ async def answer_skill_propose(
                 "files": len(asked.files),
             },
         ),
+    )
+
+
+async def answer_http_call(
+    sender: HttpToolSender | None,
+    context: ExecutionContext,
+    call: ToolCallBlock,
+    claim: EgressClaim,
+) -> tuple[ToolResultBlock, ReservedEvent | None]:
+    """Call somebody else's API, or say why not.
+
+    Answered on the platform's side for the same reason `skill.load` is: what
+    this asks for happens outside the container, and the credential must never
+    be inside one.
+
+    **A write does not run here.** §16.3 requires a person's approval before an
+    Agent changes something at an external endpoint, and approvals arrive in the
+    next step of the plan. Until then a write is refused by name, with an event
+    on the timeline, and the model is told plainly that this is a missing
+    capability rather than a permission it could argue its way past.
+    """
+    bound = list(context.http_operations)
+    entry = next((item for item in bound if item.call_name == call.name), None)
+    if entry is None:
+        # The same refusal `http_call_of` would give, made here because the
+        # binding has to be known before the write check below.
+        return refusal(call.call_id, RefusalReason.NOT_AUTHORIZED, call.name), None
+    if not entry.operation.read_only:
+        # Checked before the arguments, on purpose. Whether a person must
+        # approve this is a fact about the operation; a model that also got the
+        # arguments wrong would otherwise be told to fix them and would try
+        # again, at something it may not do either way.
+        return (
+            text_refusal(
+                call.call_id,
+                "approval_required: this operation changes data at the far end, "
+                "and this platform cannot yet ask a person to approve that. Do "
+                "not retry it; report what you were unable to do.",
+            ),
+            ReservedEvent(
+                event_type=RunEventType.HTTP_CALL_REFUSED,
+                payload={
+                    "tool": entry.tool_name,
+                    "operation": entry.operation.operation_id,
+                    "method": entry.operation.method,
+                    "reason": "approval_required",
+                },
+            ),
+        )
+    try:
+        plan = http_call_of(call, bound)
+    except HttpCallRefused as refused:
+        reason = (
+            RefusalReason.NOT_AUTHORIZED
+            if refused.reason == "tool_not_authorized"
+            else RefusalReason.INVALID_ARGUMENTS
+        )
+        return refusal(call.call_id, reason, refused.detail), None
+    if sender is None:
+        return text_refusal(call.call_id, "no outbound face is configured here"), None
+    answer = await sender.send(plan, entry.credential_ref, claim)
+    if answer.refusal is not None:
+        return (
+            text_refusal(call.call_id, answer.refusal),
+            ReservedEvent(
+                event_type=RunEventType.HTTP_CALL_REFUSED,
+                payload={
+                    "tool": entry.tool_name,
+                    "operation": entry.operation.operation_id,
+                    "method": plan.method,
+                    "reason": answer.refusal,
+                },
+            ),
+        )
+    return (
+        ToolResultBlock(
+            call_id=call.call_id,
+            # The status travels with the body because a model given only a
+            # body cannot tell an answer from an error document.
+            output=f"HTTP {answer.status_code}\n{answer.body}",
+            exit_code=0 if not answer.failed else 1,
+            failed=answer.failed,
+        ),
+        None,
     )

@@ -150,6 +150,14 @@ class RunEventType(StrEnum):
     # cannot trace back to anything.
     SKILL_PROPOSED = "skill_proposed"
 
+    # And a third fact of the same kind: §16.3 requires a person's approval
+    # before an Agent changes something at somebody else's endpoint, and until
+    # that approval exists the platform refuses the call. A tool result saying
+    # so is inside a transcript the context planner may trim; this is the half
+    # that stays, so a person reading the timeline can see that the Run wanted
+    # to write and was stopped rather than that it simply did not.
+    HTTP_CALL_REFUSED = "http_call_refused"
+
     # Also not derived from a signal: it records that a slice began on a fresh
     # writable layer, which is a fact about the sandbox rather than a state
     # transition. Technical design §11.3 requires the Agent be told, and this
