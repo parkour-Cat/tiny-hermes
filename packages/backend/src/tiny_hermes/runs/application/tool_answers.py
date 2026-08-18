@@ -16,18 +16,27 @@ Every path returns a result. A model left without an answer to a call it made
 will retry it or invent what it returned.
 """
 
+from dataclasses import dataclass
 from uuid import UUID
 
+from tiny_hermes.agents.domain.models import WritePolicy
+from tiny_hermes.runs.domain.approval import ApprovalType, normalize_call
 from tiny_hermes.runs.domain.models import (
     RunEventType,
     ToolCallBlock,
     ToolResultBlock,
 )
+from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalGate
 from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolSender
 from tiny_hermes.runs.ports.proposals import SkillProposals
 from tiny_hermes.runs.ports.skills import SkillLibrary
 from tiny_hermes.runs.ports.store import ExecutionContext, ReservedEvent
-from tiny_hermes.tools.domain.http_calls import HttpCallRefused, http_call_of
+from tiny_hermes.tools.domain.http_calls import (
+    BoundOperation,
+    HttpCallRefused,
+    HttpRequestPlan,
+    http_call_of,
+)
 from tiny_hermes.tools.domain.registry import (
     MAX_SKILL_FILE_BYTES,
     MAX_SKILL_LOADS,
@@ -215,51 +224,59 @@ async def answer_skill_propose(
     )
 
 
+@dataclass(frozen=True)
+class HttpCallOutcome:
+    """What a round does with one HTTP tool call.
+
+    Three shapes rather than one, because a call that is waiting for a person
+    is not a call that failed. `result` is `None` exactly when the Run must
+    stop: nothing is appended to the transcript, so the resumed Run asks the
+    model again and the gate answers `approved` the second time.
+
+    Appending nothing is the decision worth stating. A tool result saying "you
+    are waiting" would be in the conversation forever, and the model would have
+    to be trusted to reissue the same call after being told it had already made
+    it.
+    """
+
+    result: ToolResultBlock | None
+    event: ReservedEvent | None = None
+    #: Set when the Run must stop, carrying which of the three not-approved
+    #: answers came back.
+    approval: ApprovalCheck | None = None
+
+
 async def answer_http_call(
     sender: HttpToolSender | None,
     context: ExecutionContext,
     call: ToolCallBlock,
     claim: EgressClaim,
-) -> tuple[ToolResultBlock, ReservedEvent | None]:
-    """Call somebody else's API, or say why not.
+    gate: ApprovalGate | None = None,
+) -> HttpCallOutcome:
+    """Call somebody else's API, wait for a person, or say why not.
 
     Answered on the platform's side for the same reason `skill.load` is: what
     this asks for happens outside the container, and the credential must never
     be inside one.
 
-    **A write does not run here.** §16.3 requires a person's approval before an
-    Agent changes something at an external endpoint, and approvals arrive in the
-    next step of the plan. Until then a write is refused by name, with an event
-    on the timeline, and the model is told plainly that this is a missing
-    capability rather than a permission it could argue its way past.
+    §16.3 in three lines. A read runs. A write runs only under the policy its
+    Version chose at publish: `disabled` refuses, `preauthorized` proceeds
+    because a workspace administrator already approved this narrow scope, and
+    `governance` asks and the Run waits.
+
+    The approval is bound to the **composed** call: a person is shown the URL
+    that would actually be requested, and the hash covers it. That is why the
+    arguments are validated first — an approval document carrying a parameter
+    the operation never declared would describe a request this platform would
+    refuse to make anyway.
     """
     bound = list(context.http_operations)
     entry = next((item for item in bound if item.call_name == call.name), None)
     if entry is None:
         # The same refusal `http_call_of` would give, made here because the
-        # binding has to be known before the write check below.
-        return refusal(call.call_id, RefusalReason.NOT_AUTHORIZED, call.name), None
-    if not entry.operation.read_only:
-        # Checked before the arguments, on purpose. Whether a person must
-        # approve this is a fact about the operation; a model that also got the
-        # arguments wrong would otherwise be told to fix them and would try
-        # again, at something it may not do either way.
-        return (
-            text_refusal(
-                call.call_id,
-                "approval_required: this operation changes data at the far end, "
-                "and this platform cannot yet ask a person to approve that. Do "
-                "not retry it; report what you were unable to do.",
-            ),
-            ReservedEvent(
-                event_type=RunEventType.HTTP_CALL_REFUSED,
-                payload={
-                    "tool": entry.tool_name,
-                    "operation": entry.operation.operation_id,
-                    "method": entry.operation.method,
-                    "reason": "approval_required",
-                },
-            ),
+        # binding has to be known before anything else is decided.
+        return HttpCallOutcome(
+            refusal(call.call_id, RefusalReason.NOT_AUTHORIZED, call.name)
         )
     try:
         plan = http_call_of(call, bound)
@@ -269,24 +286,24 @@ async def answer_http_call(
             if refused.reason == "tool_not_authorized"
             else RefusalReason.INVALID_ARGUMENTS
         )
-        return refusal(call.call_id, reason, refused.detail), None
+        return HttpCallOutcome(refusal(call.call_id, reason, refused.detail))
+
+    if not plan.read_only:
+        stopped = await _cleared_to_write(entry, plan, call, gate, context)
+        if stopped is not None:
+            return stopped
+
     if sender is None:
-        return text_refusal(call.call_id, "no outbound face is configured here"), None
+        return HttpCallOutcome(
+            text_refusal(call.call_id, "no outbound face is configured here")
+        )
     answer = await sender.send(plan, entry.credential_ref, claim)
     if answer.refusal is not None:
-        return (
+        return HttpCallOutcome(
             text_refusal(call.call_id, answer.refusal),
-            ReservedEvent(
-                event_type=RunEventType.HTTP_CALL_REFUSED,
-                payload={
-                    "tool": entry.tool_name,
-                    "operation": entry.operation.operation_id,
-                    "method": plan.method,
-                    "reason": answer.refusal,
-                },
-            ),
+            _refused_event(entry, plan, answer.refusal),
         )
-    return (
+    return HttpCallOutcome(
         ToolResultBlock(
             call_id=call.call_id,
             # The status travels with the body because a model given only a
@@ -294,6 +311,91 @@ async def answer_http_call(
             output=f"HTTP {answer.status_code}\n{answer.body}",
             exit_code=0 if not answer.failed else 1,
             failed=answer.failed,
+        )
+    )
+
+
+async def _cleared_to_write(
+    entry: BoundOperation,
+    plan: HttpRequestPlan,
+    call: ToolCallBlock,
+    gate: ApprovalGate | None,
+    context: ExecutionContext,
+) -> HttpCallOutcome | None:
+    """`None` when the write may proceed; an outcome when it may not.
+
+    The policy comes from the binding rather than from anything the model or
+    the far end says, and a binding with no policy is read as `disabled`.
+    Publishing refuses that combination, so reaching it means a version
+    published before the check existed — and refusing is the safe reading of
+    silence.
+    """
+    policy = _write_policy(entry, context)
+    if policy is WritePolicy.PREAUTHORIZED:
+        # A workspace administrator approved this narrow scope when the version
+        # was published. Nothing to ask at runtime: that is what the choice
+        # means, and the version records who made it.
+        return None
+    if policy is not WritePolicy.GOVERNANCE:
+        return HttpCallOutcome(
+            text_refusal(
+                call.call_id,
+                "write_disabled: this Agent was published with writes to this "
+                "tool turned off. Do not retry it; report what you were unable "
+                "to do.",
+            ),
+            _refused_event(entry, plan, "write_disabled"),
+        )
+    if gate is None:
+        return HttpCallOutcome(
+            text_refusal(call.call_id, "no approval gate is configured here"),
+            _refused_event(entry, plan, "approval_unavailable"),
+        )
+    permission = f"http.{entry.tool_name}.write"
+    normalized = normalize_call(
+        call.name,
+        call.arguments,
+        target=plan.url,
+        required_permission=permission,
+    )
+    checked = await gate.check(
+        run_id=context.run_id,
+        approval_type=ApprovalType.GOVERNANCE_APPROVAL,
+        tool=call.name,
+        call_id=call.call_id,
+        call=normalized,
+        required_permission=permission,
+    )
+    if checked.proceeds:
+        return None
+    # Nothing appended: the Run stops here and asks the model again when it
+    # resumes. See `HttpCallOutcome`.
+    return HttpCallOutcome(None, approval=checked)
+
+
+def _write_policy(
+    entry: BoundOperation, context: ExecutionContext
+) -> WritePolicy | None:
+    binding = next(
+        (
+            item
+            for item in context.spec.http_tools
+            if item.http_tool_version_id == entry.version_id
         ),
         None,
+    )
+    return None if binding is None else binding.write_policy
+
+
+def _refused_event(
+    entry: BoundOperation, plan: HttpRequestPlan, reason: str
+) -> ReservedEvent:
+    return ReservedEvent(
+        event_type=RunEventType.HTTP_CALL_REFUSED,
+        payload={
+            "tool": entry.tool_name,
+            "operation": entry.operation.operation_id,
+            "method": plan.method,
+            "reason": reason,
+        },
     )

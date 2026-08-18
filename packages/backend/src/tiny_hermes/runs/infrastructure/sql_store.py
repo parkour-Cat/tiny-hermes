@@ -36,6 +36,7 @@ from tiny_hermes.runs.application.service import (
     UnknownRun,
     UnknownSession,
 )
+from tiny_hermes.runs.domain.approval import ApprovalStatus
 from tiny_hermes.runs.domain.context_budget import Accounting, ContextWindow
 from tiny_hermes.runs.domain.models import (
     TERMINAL_STATES,
@@ -71,6 +72,7 @@ from tiny_hermes.runs.domain.state_machine import (
     RunStateMachine,
 )
 from tiny_hermes.runs.infrastructure.tables import (
+    ApprovalRow,
     IdempotencyRecordRow,
     RunBudgetScopeRow,
     RunEventRow,
@@ -234,6 +236,16 @@ class SqlRunStore:
             checkpoint_effect_status=CheckpointEffectStatus.NONE.value,
             checkpoint_workspace_revision_id=session.workspace_revision_id,
             delivery_mode=command.delivery_mode,
+            # §16.3's `user_confirmation` may only be answered by the EndUser
+            # who started the Run. Through M2 that is the logged-in caller;
+            # a ServiceAccount's Run gets none, which is why such an Agent has
+            # to have chosen a pre-authorization or a governance approval at
+            # publish rather than relying on somebody being there.
+            end_user_id=(
+                command.caller.caller_id
+                if command.caller.caller_type is CallerType.USER
+                else None
+            ),
             created_at=now,
             updated_at=now,
         )
@@ -1336,6 +1348,60 @@ class SqlRunStore:
         )
         return True
 
+    async def expired_approvals(
+        self, now: datetime, limit: int
+    ) -> Sequence[tuple[UUID, UUID]]:
+        """Pending approvals nobody answered in time, with the Run each stopped.
+
+        Read from the approvals rather than from the Runs, because the approval
+        is where the deadline was written and a Run's `wait_deadline_at` is a
+        copy of it. One source, so the sweep and the person clicking cannot
+        disagree about whether there was still time.
+        """
+        rows = await self._session.execute(
+            select(ApprovalRow.id, ApprovalRow.run_id)
+            .where(
+                ApprovalRow.status == ApprovalStatus.PENDING.value,
+                ApprovalRow.expires_at <= now,
+            )
+            .order_by(ApprovalRow.expires_at)
+            .limit(limit)
+        )
+        return [(row.id, row.run_id) for row in rows.all()]
+
+    async def expire_approval(
+        self, approval_id: UUID, run_id: UUID, request_id: str, now: datetime
+    ) -> None:
+        """Nobody answered. The row says so and the Run pauses.
+
+        The Run is moved only if it is still waiting: it may have been
+        cancelled, or answered a moment ago by somebody whose click and this
+        sweep raced. Forcing the transition would turn that race into an error
+        for the person who clicked in time.
+        """
+        approval = await self._session.get(ApprovalRow, approval_id)
+        if approval is None or approval.status != ApprovalStatus.PENDING.value:
+            return
+        approval.status = ApprovalStatus.EXPIRED.value
+        approval.decided_at = now
+        await self._session.flush()
+        run = await self._lock_run_any_workspace(run_id)
+        if run is None or RunState(run.status) is not RunState.WAITING_APPROVAL:
+            return
+        session = await self._lock_session(run.workspace_id, run.session_id)
+        if session is None:  # pragma: no cover - a Run always has one
+            return
+        await self._decide_and_write(
+            run,
+            session,
+            RunSignal.APPROVAL_PAUSED,
+            pause_reason=PauseReason.APPROVAL_EXPIRED,
+            wait_kind=None,
+            wait_deadline_at=None,
+            request_id=request_id,
+            payload={"approval_id": str(approval_id)},
+        )
+
     async def aged_compat_timeout_runs(self, now: datetime, limit: int) -> Sequence[UUID]:
         cutoff = now - timedelta(hours=24)
         rows = await self._session.scalars(
@@ -1580,6 +1646,11 @@ class SqlRunStore:
             checkpoint_effect_status=CheckpointEffectStatus.NONE.value,
             checkpoint_workspace_revision_id=session.workspace_revision_id,
             delivery_mode=source.delivery_mode,
+            # Carried from the Run being retried rather than from whoever asked
+            # for the retry: the confirmations this Run may need are about the
+            # original caller's data, and an operator retrying somebody's work
+            # does not become the person who may confirm it.
+            end_user_id=source.end_user_id,
             created_at=now,
             updated_at=now,
         )

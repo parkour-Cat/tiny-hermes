@@ -52,6 +52,7 @@ from tiny_hermes.runs.domain.slice_policy import (
     decide_after_round,
 )
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
+from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalGate
 from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolSender
 from tiny_hermes.runs.ports.model import (
     ModelProvider,
@@ -177,6 +178,10 @@ class _RoundWork:
     appended: tuple[CanonicalMessage, ...]
     wrote: bool
     wait_seconds: int | None = None
+    #: Set when a call in this round needs a person and did not get one. The
+    #: round's turns are discarded rather than appended — see `HttpCallOutcome`
+    #: — so a resumed Run asks the model again and the approved call runs then.
+    approval: ApprovalCheck | None = None
     #: Facts the round's own tool calls produced, written in the transaction
     #: that records the round. A `skill_loaded` written separately could
     #: survive a rolled-back round, and the next round would then believe it
@@ -258,6 +263,7 @@ class WorkerRuntime:
         skills: SkillLibrary | None = None,
         proposals: SkillProposals | None = None,
         http_sender: HttpToolSender | None = None,
+        approvals: ApprovalGate | None = None,
     ) -> None:
         self._sessions = session_factory
         self._model = model
@@ -270,6 +276,9 @@ class WorkerRuntime:
         self._skills = skills
         self._proposals = proposals
         self._http_sender = http_sender
+        # Absent, a write that would need a person is refused rather than run:
+        # a platform that cannot ask must not decide.
+        self._approvals = approvals
         # Optional, because a deployment with no tools configured needs none.
         # A Run that binds a tool and finds this absent fails rather than
         # running the command anywhere else — product design §16 leaves no
@@ -398,6 +407,7 @@ class WorkerRuntime:
                 decision = decide_after_round(
                     RoundOutcome(
                         verdict=verdict,
+                        approval=work.approval,
                         cancel_requested=after.cancel_requested,
                         pause_requested=after.pause_requested,
                         budget_allows=_budget_after(after, response, executed_ms),
@@ -825,7 +835,7 @@ class WorkerRuntime:
                 # credential belongs on this side of the boundary, and the
                 # request has to leave through the egress proxy like every
                 # other outbound call this process makes.
-                answered, event = await answer_http_call(
+                outcome = await answer_http_call(
                     self._http_sender,
                     context,
                     call,
@@ -834,10 +844,17 @@ class WorkerRuntime:
                         agent_version_id=claimed.run.agent_version_id,
                         run_id=claimed.run.id,
                     ),
+                    self._approvals,
                 )
-                results.append(answered)
-                if event is not None:
-                    events.append(event)
+                if outcome.event is not None:
+                    events.append(outcome.event)
+                if outcome.result is None:
+                    # A person has to answer before this call can run. Nothing
+                    # this round produced is kept: the Run stops here, and when
+                    # it resumes the model is asked from the same history it
+                    # had, so the call it makes is the one that was approved.
+                    return _RoundWork((), False, approval=outcome.approval)
+                results.append(outcome.result)
                 continue
             if call.name in PLATFORM_TOOLS:
                 # Answered here, never sent down. What this asks for happens to
@@ -895,7 +912,7 @@ class WorkerRuntime:
             (assistant, CanonicalMessage("tool", tuple(results))),
             wrote,
             wait_seconds,
-            tuple(events),
+            events=tuple(events),
         )
 
     async def _checkpoint_round(

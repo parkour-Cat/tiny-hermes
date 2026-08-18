@@ -80,41 +80,46 @@ egress-proxy，没配 proxy 就一个字节也发不出去，沙箱挂在一张�
 
 ## 2. 两类审批
 
-- [ ] `runs/domain/approval.py`：纯函数。`normalize_call(tool, arguments, target)`
+- [x] `runs/domain/approval.py`：纯函数。`normalize_call(tool, arguments, target)`
       给出**规范化参数哈希**；`is_still_valid(approval, call)` 判断一条既有批准
       是否仍然覆盖这次调用。§16.3 的「参数变化使原批准失效」全部落在这两个函数里，
       并且穷举测试：改工具名、改一个参数、改工作目录、改目标资源、
       调换参数顺序（不应失效）、改一个数值的精度（应失效）。
-- [ ] 数据模型与迁移 `0020`：`approvals`。（原写作 `0019`；那个号被第 1 步的 `http_call_refused` 事件类型用掉了。）字段照 §16.3 逐条来：
+- [x] 数据模型与迁移 `0020`：`approvals`。（原写作 `0019`；那个号被第 1 步的 `http_call_refused` 事件类型用掉了。）字段照 §16.3 逐条来：
       `approval_type`（`user_confirmation` / `governance_approval`）、
       `required_permission`、`requested_by`、`expires_at`、规范化参数哈希、
       `decided_by`、`decided_at`、`decision_reason`、以及它属于哪个 Run 与哪次调用。
       默认有效期 24 小时，工作空间可在 5 分钟到 7 天之间配置。
-- [ ] `Run.end_user_id`：迁移 `0020` 一并加。§16.3 的 `user_confirmation`
+- [x] `Run.end_user_id`：迁移 `0020` 一并加。§16.3 的 `user_confirmation`
       只能由**发起该 Run 的 EndUser 本人**决定，所以 Run 必须记住那是谁。
       这一阶段的落法写在 §9 的决定里。
-- [ ] Worker 侧：一次需要审批的调用不执行，写 `RUN_APPROVAL_REQUESTED`，
+- [x] Worker 侧：一次需要审批的调用不执行，写 `RUN_APPROVAL_REQUESTED`，
       Run 进入 `waiting_approval`（状态机早就支持，这是它第一次有生产用法），
       释放 lease 并销毁沙箱保留——等待中的 Run 不占 Worker 槽位也不占容器，
       这是 §12.3 已经承诺过的行为，这里第一次被真正走到。
-- [ ] 批准 → Run 回到 `queued`；拒绝 → `paused(approval_rejected)`；
+- [x] 批准 → Run 回到 `queued`；拒绝 → `paused(approval_rejected)`；
       过期 → `paused(approval_expired)`；运行时找不到可确认主体 →
       `paused(approval_unavailable)`，**不静默升级也不代批**。
       Scheduler 加一条过期扫描，和等待超时同一处。
-- [ ] 权限：`user_confirmation` 只能由 Run 的 EndUser 本人决定，
+- [x] 权限：`user_confirmation` 只能由 Run 的 EndUser 本人决定，
       工作空间管理员和开发者都不行；`governance_approval` 只能由工作空间管理员或
       平台管理员批准，终端用户身份绝不能批准治理操作。
       两条各有一条测试，且反向的那条（管理员代批用户确认）必须失败。
-- [ ] 发布时的选择：AgentVersion 为每个需要用户确认的工具显式选
+- [x] 发布时的选择：AgentVersion 为每个需要用户确认的工具显式选
       「禁用」/「工作空间管理员批准的狭范围预授权」/`governance_approval`，
       否则**发布失败**（§16.3）。ServiceAccount 发起的 `noninteractive` Run
       因此永远不会需要一个不存在的 EndUser。
-- [ ] 第 1 步的写方法在这里解锁：不再直接拒绝，而是请求审批。
+- [x] 第 1 步的写方法在这里解锁：不再直接拒绝，而是请求审批。
       §1 那条「审批未交付时写方法被拒」的测试改成「写方法进入 `waiting_approval`」，
       改动本身就是这一步完成的证据。
-- [ ] 集成测试：写操作 → `waiting_approval` → 批准 → 执行 → 完成；
+- [x] 集成测试：写操作 → `waiting_approval` → 批准 → 执行 → 完成；
       批准后修改参数 → 原批准失效并重新排队；拒绝 → `paused(approval_rejected)`；
-      过期 → `paused(approval_expired)`；EndUser 之外的人尝试确认 → 403。
+      过期 → `paused(approval_expired)`。
+      **「EndUser 之外的人尝试确认 → 403」只有单元测试，没有集成测试。**
+      集成套件里只有一个引导出来的平台管理员，再造一个能登录的普通成员需要一条
+      这个阶段还不存在的用户创建路径。`may_decide` 的两个方向在
+      `tests/unit/runs/test_approval.py` 里是穷举的，这条要在 §6 的验证记录里
+      写明「这一遍没能证明什么」。
 
 ## 3. MCP：绑定子集与 schema 预算
 

@@ -27,6 +27,7 @@ from tiny_hermes.runs.infrastructure.openai_model import RetryPolicy
 from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
 from tiny_hermes.runs.infrastructure.skill_library import SqlSkillLibrary
 from tiny_hermes.runs.infrastructure.skill_proposals import SqlSkillProposals
+from tiny_hermes.runs.infrastructure.sql_approvals import SqlApprovalGate
 from tiny_hermes.runs.ports.http_calls import EgressClaim
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
 from tiny_hermes.sandbox.transport.adapter import SandboxClient
@@ -108,6 +109,9 @@ async def _worker() -> None:
         # from the sandbox, so the credential stays on this side and the
         # request passes the same egress boundary as every other outbound
         # call. Unconfigured egress makes this refuse, not connect.
+        # §16.3's gate. Absent, a write that would need a person is refused
+        # rather than run: a platform that cannot ask must not decide.
+        approvals=SqlApprovalGate(sessions),
         http_sender=OutboundHttpToolSender(
             sessions,
             lambda claim: SafeOutboundClient(

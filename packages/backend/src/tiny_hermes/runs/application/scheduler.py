@@ -34,6 +34,7 @@ LEASES = "leases"
 RECOVERY = "recovery"
 HEADS = "heads"
 WAITS = "waits"
+APPROVALS = "approval_expiry"
 COMPAT = "compat_timeouts"
 RETENTION = "retention"
 UPLOADS = "workspace_uploads"
@@ -100,6 +101,7 @@ class SchedulerRuntime:
         await self._recover_interrupted()
         await self._repair_session_heads()
         await self._settle_due_waits(now)
+        await self._expire_approvals(now)
         await self._cancel_aged_compat_timeouts(now)
         await self._collect_expired_records(now)
         await self._collect_upload_garbage(now)
@@ -301,6 +303,28 @@ class SchedulerRuntime:
             # here: a Worker told to look before the row is visible finds a Run
             # that is still waiting and goes back to sleep.
             await self._announce(run_id)
+
+    async def _expire_approvals(self, now: datetime) -> None:
+        """§16.3's deadline, enforced by the only process that can.
+
+        A Run in `waiting_approval` holds no lease and no container, so nothing
+        else is watching its clock. Without this sweep a question nobody
+        answered would keep a Session's head forever.
+
+        Not announced afterwards, unlike a timer that came due: an expired
+        approval pauses the Run rather than requeueing it, and there is nothing
+        for a Worker to pick up.
+        """
+        async with self._sessions.begin() as session:
+            store = SqlRunStore(session)
+            if not await store.try_scan_lock(APPROVALS):
+                return
+            for approval_id, run_id in await store.expired_approvals(
+                now, self._settings.batch_size
+            ):
+                await store.expire_approval(
+                    approval_id, run_id, "scheduler-approval-expiry", now
+                )
 
     async def _cancel_aged_compat_timeouts(self, now: datetime) -> None:
         async with self._sessions.begin() as session:
