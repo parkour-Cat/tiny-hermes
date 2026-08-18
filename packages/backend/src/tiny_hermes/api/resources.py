@@ -13,6 +13,7 @@ from tiny_hermes.agents.domain.models import PlatformCeilings
 from tiny_hermes.agents.infrastructure.http_tool_bindings import (
     CatalogHttpToolBindings,
 )
+from tiny_hermes.agents.infrastructure.mcp_bindings import CatalogMcpBindings
 from tiny_hermes.agents.infrastructure.skill_bindings import CatalogSkillBindings
 from tiny_hermes.agents.infrastructure.sql_store import SqlAgentStore
 from tiny_hermes.artifacts.application.service import ArtifactService
@@ -23,6 +24,11 @@ from tiny_hermes.identity.application.auth_service import AuthService
 from tiny_hermes.identity.application.machine_service import MachineIdentityService
 from tiny_hermes.identity.infrastructure.sql_machine_store import SqlMachineIdentityStore
 from tiny_hermes.identity.infrastructure.sql_store import SqlAuthStore
+from tiny_hermes.mcp.application.service import McpCatalog
+from tiny_hermes.mcp.infrastructure.outbound_reader import (
+    OutboundCapabilityReader,
+)
+from tiny_hermes.mcp.infrastructure.sql_store import SqlMcpStore
 from tiny_hermes.model_catalog.application.service import ModelEndpointService
 from tiny_hermes.model_catalog.infrastructure.sql_store import SqlModelEndpointStore
 from tiny_hermes.outbound.application.service import OutboundScopes
@@ -219,6 +225,7 @@ class ApplicationResources:
                     # never name a target its workspace has not.
                     OutboundScopes(SqlScopeStore(session)),
                     CatalogHttpToolBindings(SqlHttpToolStore(session)),
+                    CatalogMcpBindings(SqlMcpStore(session)),
                 )
             except AuditedDenial:
                 await session.commit()
@@ -304,6 +311,33 @@ class ApplicationResources:
                     SqlHttpToolStore(session),
                     # Registration is refused unless the host is already inside
                     # what this workspace approved — M2C-1's first consumer.
+                    OutboundScopes(SqlScopeStore(session)),
+                )
+            except AuditedDenial:
+                await session.commit()
+                raise
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
+
+    async def mcp_catalog(self) -> AsyncGenerator[McpCatalog]:
+        """Registering a server reads it, so this one needs the way out.
+
+        A deployment with no egress route therefore cannot register a server —
+        which is right: a row that looks usable and answers nothing is worse
+        than no row.
+        """
+        async with self.session_factory()() as session:
+            try:
+                yield McpCatalog(
+                    SqlMcpStore(session),
+                    OutboundCapabilityReader(
+                        self.session_factory(),
+                        lambda: self.outbound_client(),
+                        kek=optional_kek(self.settings.tiny_hermes_kek),
+                    ),
                     OutboundScopes(SqlScopeStore(session)),
                 )
             except AuditedDenial:

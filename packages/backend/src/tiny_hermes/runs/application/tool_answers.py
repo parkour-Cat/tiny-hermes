@@ -28,6 +28,7 @@ from tiny_hermes.runs.domain.models import (
 )
 from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalGate
 from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolSender
+from tiny_hermes.runs.ports.mcp import BoundMcpTool, McpGateway
 from tiny_hermes.runs.ports.proposals import SkillProposals
 from tiny_hermes.runs.ports.skills import SkillLibrary
 from tiny_hermes.runs.ports.store import ExecutionContext, ReservedEvent
@@ -37,6 +38,7 @@ from tiny_hermes.tools.domain.http_calls import (
     HttpRequestPlan,
     http_call_of,
 )
+from tiny_hermes.tools.domain.mcp import call_name as mcp_call_name
 from tiny_hermes.tools.domain.registry import (
     MAX_SKILL_FILE_BYTES,
     MAX_SKILL_LOADS,
@@ -396,6 +398,127 @@ def _refused_event(
             "tool": entry.tool_name,
             "operation": entry.operation.operation_id,
             "method": plan.method,
+            "reason": reason,
+        },
+    )
+
+
+async def answer_mcp_call(
+    gateway: McpGateway | None,
+    context: ExecutionContext,
+    call: ToolCallBlock,
+    revalidated: tuple[BoundMcpTool, ...],
+    claim: EgressClaim,
+    approvals: ApprovalGate | None = None,
+) -> HttpCallOutcome:
+    """Call a bound MCP tool, wait for a person, or say why not.
+
+    §16.2's second step, and the important half: the call is authorized against
+    the **revalidated subset**, never against the name the model typed. A tool
+    the Version did not bind is not in that subset no matter what the server
+    advertises, and a tool the server dropped is not in it either.
+
+    §16.3's approval applies exactly as it does to an HTTP write, with one
+    difference that is a fact about MCP rather than a choice: a server does not
+    say which of its tools change something — there is no `GET` to read — so
+    the platform cannot tell, and every MCP call is treated as one that might.
+    A binding therefore chooses a policy for all of its tools or for none, and
+    `disabled` is what silence means.
+    """
+    entry = next(
+        (
+            item
+            for item in revalidated
+            if mcp_call_name(item.server_name, item.tool.name) == call.name
+        ),
+        None,
+    )
+    if entry is None:
+        # The same refusal an unbound HTTP operation gets. What the model may
+        # reach is what the Version bound and the server still offers.
+        return HttpCallOutcome(
+            refusal(call.call_id, RefusalReason.NOT_AUTHORIZED, call.name)
+        )
+    policy = _mcp_policy(entry, context)
+    if policy is WritePolicy.PREAUTHORIZED:
+        pass
+    elif policy is not WritePolicy.GOVERNANCE:
+        return HttpCallOutcome(
+            text_refusal(
+                call.call_id,
+                "write_disabled: this Agent was published with calls to this "
+                "server turned off. Do not retry it; report what you were "
+                "unable to do.",
+            ),
+            _mcp_event(entry, "write_disabled"),
+        )
+    else:
+        if approvals is None:
+            return HttpCallOutcome(
+                text_refusal(call.call_id, "no approval gate is configured here"),
+                _mcp_event(entry, "approval_unavailable"),
+            )
+        permission = f"mcp.{entry.server_name}.call"
+        normalized = normalize_call(
+            call.name,
+            call.arguments,
+            target=f"mcp://{entry.server_name}/{entry.tool.name}",
+            required_permission=permission,
+        )
+        checked = await approvals.check(
+            run_id=context.run_id,
+            approval_type=ApprovalType.GOVERNANCE_APPROVAL,
+            tool=call.name,
+            call_id=call.call_id,
+            call=normalized,
+            required_permission=permission,
+        )
+        if not checked.proceeds:
+            # Nothing appended: the Run stops here and asks the model again
+            # when it resumes. See `HttpCallOutcome`.
+            return HttpCallOutcome(None, approval=checked)
+
+    if gateway is None:
+        return HttpCallOutcome(
+            text_refusal(call.call_id, "no MCP gateway is configured here")
+        )
+    answer = await gateway.call(entry, dict(call.arguments), claim)
+    if answer.failed:
+        return HttpCallOutcome(
+            text_refusal(call.call_id, f"{answer.refusal}: {answer.content}".strip(": ")),
+            _mcp_event(entry, answer.refusal or "refused"),
+        )
+    return HttpCallOutcome(
+        ToolResultBlock(
+            call_id=call.call_id,
+            # The server's own words, unread. A tool result is reference
+            # material the model weighs, not instructions this platform follows.
+            output=answer.content,
+            exit_code=0,
+            failed=False,
+        )
+    )
+
+
+def _mcp_policy(entry: BoundMcpTool, context: ExecutionContext) -> WritePolicy | None:
+    binding = next(
+        (
+            item
+            for item in context.spec.mcp_tools
+            if item.mcp_server_version_id == entry.version_id
+        ),
+        None,
+    )
+    return None if binding is None else binding.write_policy
+
+
+def _mcp_event(entry: BoundMcpTool, reason: str) -> ReservedEvent:
+    return ReservedEvent(
+        event_type=RunEventType.HTTP_CALL_REFUSED,
+        payload={
+            "tool": entry.server_name,
+            "operation": entry.tool.name,
+            "method": "mcp",
             "reason": reason,
         },
     )

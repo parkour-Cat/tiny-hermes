@@ -22,6 +22,7 @@ from tiny_hermes.runs.infrastructure.deterministic_model import (
     DeterministicModelProvider,
 )
 from tiny_hermes.runs.infrastructure.http_tool_sender import OutboundHttpToolSender
+from tiny_hermes.runs.infrastructure.mcp_gateway import OutboundMcpGateway
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 from tiny_hermes.runs.infrastructure.openai_model import RetryPolicy
 from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
@@ -112,6 +113,19 @@ async def _worker() -> None:
         # §16.3's gate. Absent, a write that would need a person is refused
         # rather than run: a platform that cannot ask must not decide.
         approvals=SqlApprovalGate(sessions),
+        # §16.2's revalidation and calls, out through the same boundary and
+        # with the same layers named.
+        mcp=OutboundMcpGateway(
+            sessions,
+            lambda claim: SafeOutboundClient(
+                egress=_egress(settings, claim),
+                connect_timeout=settings.outbound_connect_timeout_seconds,
+                read_timeout=settings.outbound_read_timeout_seconds,
+                max_redirects=settings.outbound_max_redirects,
+                max_response_bytes=settings.outbound_max_response_bytes,
+            ),
+            kek=optional_kek(settings.tiny_hermes_kek),
+        ),
         http_sender=OutboundHttpToolSender(
             sessions,
             lambda claim: SafeOutboundClient(

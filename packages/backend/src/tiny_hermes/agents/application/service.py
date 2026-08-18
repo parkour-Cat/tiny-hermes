@@ -21,6 +21,7 @@ from tiny_hermes.agents.ports.http_tools import (
     HttpToolBindingReader,
     HttpToolBindingView,
 )
+from tiny_hermes.agents.ports.mcp import McpBindingReader
 from tiny_hermes.agents.ports.skills import SkillBindingReader, SkillBindingView
 from tiny_hermes.agents.ports.store import AgentStore, PublishResult
 from tiny_hermes.model_catalog.domain.models import ModelEndpoint
@@ -158,6 +159,19 @@ class SkillBindingUnavailable(AgentCatalogError):
         self.reasons = dict(reasons)
 
 
+class McpBindingUnavailable(AgentCatalogError):
+    """A bound MCP server version this Agent may not call, and why not.
+
+    The same four ways to be wrong as an HTTP binding, and found here for the
+    same reason: the author is the person who can fix it, and publish is the
+    last moment they are still holding it.
+    """
+
+    def __init__(self, reasons: Mapping[UUID, str]) -> None:
+        super().__init__("; ".join(f"{key}: {value}" for key, value in reasons.items()))
+        self.reasons = dict(reasons)
+
+
 class WritePolicyNotChosen(AgentCatalogError):
     """A bound operation writes and the version did not say what happens then.
 
@@ -264,6 +278,7 @@ class AgentCatalog:
         skills: SkillBindingReader | None = None,
         scopes: WorkspaceScopeReader | None = None,
         http_tools: HttpToolBindingReader | None = None,
+        mcp: McpBindingReader | None = None,
     ) -> None:
         self._store = store
         # Defaulted rather than required so the domain tests, which are about
@@ -283,8 +298,9 @@ class AgentCatalog:
         # binds no skill never asks, and one that binds a skill without a
         # reader to check it against cannot be published.
         self._skills = skills
-        # And once more, for HTTP tools.
+        # And once more, for HTTP tools, and once more for MCP.
         self._http_tools = http_tools
+        self._mcp = mcp
 
     async def create_agent(
         self, workspace_id: UUID, actor: Actor, name: str, alias: str, request_id: str
@@ -457,6 +473,7 @@ class AgentCatalog:
             # `network.allow` is measured against entries already known to be
             # inside the workspace's.
             await self._check_http_tools(workspace_id, actor, draft.spec)
+            await self._check_mcp_tools(workspace_id, actor, draft.spec)
             # Again here, and not only on save: this draft was measured against
             # whatever the ceiling was the day it was written.
             self._check_ceilings(draft.spec)
@@ -576,6 +593,70 @@ class AgentCatalog:
         if reasons:
             raise HttpToolBindingUnavailable(reasons)
         self._check_write_policies(spec, found, await self._publisher_role(workspace_id, actor))
+
+    async def _check_mcp_tools(
+        self, workspace_id: UUID, actor: Actor, spec: AgentSpec
+    ) -> None:
+        """Refuse a version that binds an MCP tool it cannot actually call.
+
+        The write policy is required for *every* MCP binding, unlike an HTTP
+        one where only a bound write needs it. An MCP server does not say which
+        of its tools change something — there is no `GET` to read — so the
+        platform cannot tell, and §16.3's choice has to be made for all of them
+        or for none.
+        """
+        if not spec.mcp_tools:
+            return
+        wanted = [binding.mcp_server_version_id for binding in spec.mcp_tools]
+        if self._mcp is None:
+            raise McpBindingUnavailable(
+                {version_id: "no MCP catalog is configured" for version_id in wanted}
+            )
+        found = {
+            view.version_id: view
+            for view in await self._mcp.visible_versions(workspace_id, wanted)
+        }
+        allowed = spec.network.allow if spec.network is not None else ()
+        parsed = [parse_entry(entry) for entry in allowed]
+        reasons: dict[UUID, str] = {}
+        missing: dict[str, tuple[str, ...]] = {}
+        presumed: list[str] = []
+        role = await self._publisher_role(workspace_id, actor)
+        for binding in spec.mcp_tools:
+            version_id = binding.mcp_server_version_id
+            view = found.get(version_id)
+            if view is None:
+                reasons[version_id] = "no such MCP server version is visible here"
+                continue
+            if not view.active:
+                reasons[version_id] = f"{view.server_name} was withdrawn at this version"
+                continue
+            unknown = sorted(set(binding.tools) - set(view.tool_names))
+            if unknown:
+                reasons[version_id] = (
+                    f"{view.server_name} advertised no tool named {', '.join(unknown)}"
+                )
+                continue
+            wanted_host = parse_entry(view.host)
+            if not any(entry.contains(wanted_host) for entry in parsed):
+                reasons[version_id] = (
+                    f"{view.server_name} is at {view.host}, which this Agent's "
+                    "network.allow does not cover"
+                )
+                continue
+            if binding.write_policy is None:
+                missing[view.server_name] = tuple(binding.tools)
+            elif binding.write_policy is WritePolicy.PREAUTHORIZED and role not in (
+                Role.WORKSPACE_ADMIN,
+                None,
+            ):
+                presumed.append(view.server_name)
+        if reasons:
+            raise McpBindingUnavailable(reasons)
+        if missing:
+            raise WritePolicyNotChosen(missing)
+        if presumed:
+            raise PreauthorizationNotPermitted(tuple(presumed))
 
     async def _publisher_role(self, workspace_id: UUID, actor: Actor) -> Role | None:
         """The role this publication is being made with.

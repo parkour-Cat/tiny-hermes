@@ -16,12 +16,14 @@ from tiny_hermes.artifacts.application.service import ArtifactLimits, ArtifactRe
 from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
 from tiny_hermes.runs.application.tool_answers import (
     answer_http_call,
+    answer_mcp_call,
     answer_platform_tool,
     answer_skill_load,
     answer_skill_propose,
 )
 from tiny_hermes.runs.domain.context_budget import (
     ContextPlan,
+    SegmentName,
     SkillSummary,
     plan_context,
 )
@@ -54,6 +56,7 @@ from tiny_hermes.runs.domain.slice_policy import (
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalGate
 from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolSender
+from tiny_hermes.runs.ports.mcp import BoundMcpTool, McpGateway
 from tiny_hermes.runs.ports.model import (
     ModelProvider,
     ModelRequest,
@@ -103,6 +106,13 @@ from tiny_hermes.tools.application.execute import (
 )
 from tiny_hermes.tools.domain.files import DATA_ROOT, FILE_HELPER, changes_workspace
 from tiny_hermes.tools.domain.http_calls import HTTP_PREFIX
+from tiny_hermes.tools.domain.mcp import (
+    MCP_PREFIX,
+    estimated_tokens,
+    fits_schema_budget,
+    schemas_for_tools,
+)
+from tiny_hermes.tools.domain.openapi import estimated_tokens_of
 from tiny_hermes.tools.domain.registry import (
     DEFAULT_OUTPUT_BYTES,
     PLATFORM_TOOLS,
@@ -264,6 +274,7 @@ class WorkerRuntime:
         proposals: SkillProposals | None = None,
         http_sender: HttpToolSender | None = None,
         approvals: ApprovalGate | None = None,
+        mcp: McpGateway | None = None,
     ) -> None:
         self._sessions = session_factory
         self._model = model
@@ -279,6 +290,9 @@ class WorkerRuntime:
         # Absent, a write that would need a person is refused rather than run:
         # a platform that cannot ask must not decide.
         self._approvals = approvals
+        # Absent, a Version that bound MCP tools runs without them and says
+        # so, rather than pretending it was never bound any.
+        self._mcp = mcp
         # Optional, because a deployment with no tools configured needs none.
         # A Run that binds a tool and finds this absent fails rather than
         # running the command anywhere else — product design §16 leaves no
@@ -331,6 +345,12 @@ class WorkerRuntime:
             first = await self._read_context(workspace_id, claimed.run.id)
             if first is None:
                 return
+            mcp = await self._revalidate(claimed, handle, first)
+            if mcp is None:
+                # The bound subset does not fit the segment that carries it.
+                # §16.2: measured, never truncated, so the Run stops before it
+                # spends a model call on a tool list it cannot send.
+                return
             if any(tool not in PLATFORM_TOOLS for tool in first.spec.tools):
                 # Platform tools do not run anywhere. An Agent that binds only
                 # those has nothing to put in a container, and starting one for
@@ -344,14 +364,16 @@ class WorkerRuntime:
                 context = await self._read_context(workspace_id, claimed.run.id)
                 if context is None:
                     return
-                plan = _plan(context)
+                plan = _plan(context, mcp)
                 if not plan.fits:
                     await self._overflow(claimed, handle, box, context, plan)
                     return
                 if plan.changed:
                     await self._record_planning(claimed, plan)
                 round_started = monotonic()
-                response = await self._model.complete(_request(context, box, plan))
+                response = await self._model.complete(
+                    _request(context, box, plan, mcp)
+                )
                 if box is not None:
                     # Only the first round of a slice is told, because only the
                     # first one is news.
@@ -359,7 +381,7 @@ class WorkerRuntime:
                 executed_ms = int((monotonic() - round_started) * 1000)
 
                 work = await self._answer_tools(
-                    claimed, handle, box, response, context
+                    claimed, handle, box, response, context, mcp
                 )
                 appended, wrote = work.appended, work.wrote
                 # Before the re-read, for the same reason the tool calls are:
@@ -456,6 +478,71 @@ class WorkerRuntime:
         finally:
             renewal.cancel()
             await asyncio.gather(renewal, return_exceptions=True)
+
+    async def _revalidate(
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        context: ExecutionContext,
+    ) -> tuple[BoundMcpTool, ...] | None:
+        """§16.2's check, once per slice. `None` means the Run must stop.
+
+        Before the Run works rather than during it: a subset measured after the
+        first model call would already have been sent, and a remote that
+        changed shape mid-slice would give one round a different tool list from
+        the next.
+
+        Nothing is charged here. The revalidation makes no model call, so a Run
+        that paused on the budget and was resumed is measured again from the
+        same place — the earlier attempt cost it nothing to repeat.
+        """
+        if not context.spec.mcp_tools:
+            return ()
+        if self._mcp is None:
+            await self._append_event(
+                claimed,
+                RunEventType.MCP_TOOLS_REVALIDATED,
+                {"tools": 0, "unreachable": [], "missing": [], "configured": False},
+            )
+            return ()
+        checked = await self._mcp.revalidate(
+            context.spec.mcp_tools, _claim_of(claimed)
+        )
+        if checked.unreachable or checked.missing:
+            # Written whenever the subset came back short. A Run that quietly
+            # had fewer tools than its Version bound is one whose behaviour
+            # changed with nobody publishing anything.
+            await self._append_event(
+                claimed,
+                RunEventType.MCP_TOOLS_REVALIDATED,
+                {
+                    "tools": len(checked.tools),
+                    "unreachable": list(checked.unreachable),
+                    "missing": list(checked.missing),
+                    "configured": True,
+                },
+            )
+        budget = fits_schema_budget(
+            _schema_estimate(context, checked.tools), _schema_allowance(context)
+        )
+        if budget.fits:
+            return checked.tools
+        await self._append_event(
+            claimed,
+            RunEventType.TOOL_SCHEMA_BUDGET_EXCEEDED,
+            {"estimate": budget.estimate, "allowance": budget.allowance},
+        )
+        await self._record(
+            claimed,
+            handle,
+            context.state_version,
+            SliceDecision(
+                RunSignal.SAFE_PAUSE_REACHED, PauseReason.TOOL_BUDGET_EXCEEDED
+            ),
+            _no_round(),
+            executed_ms=0,
+        )
+        return None
 
     async def _open_sandbox(
         self, claimed: ClaimedRun, handle: _LeaseHandle, context: ExecutionContext
@@ -784,6 +871,7 @@ class WorkerRuntime:
         box: "_Sandbox | None",
         response: ModelResponse,
         context: ExecutionContext,
+        mcp: tuple[BoundMcpTool, ...] = (),
     ) -> "_RoundWork":
         """Run whatever the round asked for, and build the turns to append.
 
@@ -830,6 +918,24 @@ class WorkerRuntime:
                 if event is not None:
                     events.append(event)
                 continue
+            if call.name.startswith(f"{MCP_PREFIX}."):
+                # Sent by the platform, like an HTTP tool call and for the same
+                # reasons: the credential belongs on this side, and the request
+                # leaves through the egress proxy with this Run's layers named.
+                outcome = await answer_mcp_call(
+                    self._mcp,
+                    context,
+                    call,
+                    mcp,
+                    _claim_of(claimed),
+                    self._approvals,
+                )
+                if outcome.event is not None:
+                    events.append(outcome.event)
+                if outcome.result is None:
+                    return _RoundWork((), False, approval=outcome.approval)
+                results.append(outcome.result)
+                continue
             if call.name.startswith(f"{HTTP_PREFIX}."):
                 # Sent by the platform rather than by the sandbox: the
                 # credential belongs on this side of the boundary, and the
@@ -839,11 +945,7 @@ class WorkerRuntime:
                     self._http_sender,
                     context,
                     call,
-                    EgressClaim(
-                        workspace_id=claimed.run.workspace_id,
-                        agent_version_id=claimed.run.agent_version_id,
-                        run_id=claimed.run.id,
-                    ),
+                    _claim_of(claimed),
                     self._approvals,
                 )
                 if outcome.event is not None:
@@ -1610,7 +1712,56 @@ def _summaries(context: ExecutionContext) -> tuple[SkillSummary, ...]:
     )
 
 
-def _plan(context: ExecutionContext) -> ContextPlan:
+def _claim_of(claimed: ClaimedRun) -> EgressClaim:
+    return EgressClaim(
+        workspace_id=claimed.run.workspace_id,
+        agent_version_id=claimed.run.agent_version_id,
+        run_id=claimed.run.id,
+    )
+
+
+def _schema_estimate(
+    context: ExecutionContext, mcp: tuple[BoundMcpTool, ...]
+) -> int:
+    """What this Agent's whole tool list costs, MCP and everything else.
+
+    Measured together because the segment carries them together: an MCP subset
+    that fits on its own and not beside four HTTP operations does not fit.
+    """
+    servers = dict.fromkeys(item.server_name for item in mcp)
+    mcp_total = sum(
+        estimated_tokens(
+            server, [item.tool for item in mcp if item.server_name == server]
+        )
+        for server in servers
+    )
+    named = estimated_tokens_of(
+        [
+            schema["function"]
+            for schema in schemas_for_agent(
+                context.spec.tools, context.http_operations
+            )
+        ]
+    )
+    return mcp_total + named
+
+
+def _schema_allowance(context: ExecutionContext) -> int:
+    """What the segment that carries tool schemas will hold.
+
+    §7.4.2's table as this Agent adjusted it. Read from the same resolved
+    budget the planner uses, so an author who raised the segment gets the room
+    they asked for here too.
+    """
+    budget = (context.spec.context_budget or ContextBudget()).resolve()
+    ceiling = budget[SegmentName.TOOL_SCHEMAS].max_tokens
+    # `None` would mean "whatever is left", which this segment never is.
+    return ceiling if ceiling is not None else 0
+
+
+def _plan(
+    context: ExecutionContext, mcp: tuple[BoundMcpTool, ...] = ()
+) -> ContextPlan:
     """Decide what this round may send, before it is sent.
 
     An endpoint that declared no window — the deterministic stand-in — gets a
@@ -1632,19 +1783,40 @@ def _plan(context: ExecutionContext) -> ContextPlan:
         window=context.window,
         safety_rules=SAFETY_PREAMBLE,
         personality=context.spec.personality,
-        tool_schemas=_tool_schemas(context),
+        tool_schemas=_tool_schemas(context, mcp),
         history=context.history,
         skill_summaries=summaries,
         segments=(context.spec.context_budget or ContextBudget()).resolve(),
     )
 
 
-def _tool_schemas(context: ExecutionContext) -> tuple[dict[str, Any], ...]:
-    return tuple(schemas_for_agent(context.spec.tools, context.http_operations))
+def _tool_schemas(
+    context: ExecutionContext, mcp: tuple[BoundMcpTool, ...] = ()
+) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        schemas_for_agent(context.spec.tools, context.http_operations)
+        + _mcp_schemas(mcp)
+    )
+
+
+def _mcp_schemas(mcp: tuple[BoundMcpTool, ...]) -> list[dict[str, Any]]:
+    """One schema list per server, so two servers offering a `search` do
+    not fight over the name."""
+    schemas: list[dict[str, Any]] = []
+    for server in dict.fromkeys(item.server_name for item in mcp):
+        schemas.extend(
+            schemas_for_tools(
+                server, [item.tool for item in mcp if item.server_name == server]
+            )
+        )
+    return schemas
 
 
 def _request(
-    context: ExecutionContext, box: "_Sandbox | None", plan: ContextPlan
+    context: ExecutionContext,
+    box: "_Sandbox | None",
+    plan: ContextPlan,
+    mcp: tuple[BoundMcpTool, ...] = (),
 ) -> ModelRequest:
     """Build one round's request.
 
@@ -1657,7 +1829,7 @@ def _request(
         personality=context.spec.personality,
         messages=plan.messages,
         round_index=_round_index(context),
-        tools=_tool_schemas(context),
+        tools=_tool_schemas(context, mcp),
         cache_hint=box.hint if box is not None else None,
         skill_summaries=plan.skill_summaries,
     )
