@@ -2,6 +2,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Literal, cast
 from uuid import UUID
@@ -527,6 +528,16 @@ class BudgetSummary:
     consumed_tokens: int
     max_derived_retries: int
     derived_retry_count: int
+    #: The most this Run may spend, copied from the workspace when it was
+    #: created. `None` is no ceiling rather than a ceiling of zero.
+    max_cost: Decimal | None = None
+    cost_currency: str | None = None
+    #: What it has spent. **`None` is unknown, not zero.** A Run whose endpoint
+    #: has no configured price never gets a number here, and §12.4 is explicit
+    #: that an unknown price must not be counted as free.
+    consumed_cost: Decimal | None = None
+    #: How that number was arrived at: `provider`, `estimated` or `unknown`.
+    cost_quality: str = "unknown"
 
     def allows_execution(self, now: datetime) -> bool:
         if now >= self.elapsed_deadline_at:
@@ -551,6 +562,15 @@ class BudgetSummary:
             "consumed_tokens": self.consumed_tokens,
             "max_derived_retries": self.max_derived_retries,
             "derived_retry_count": self.derived_retry_count,
+            # Serialized as strings: a JSON number would put money through a
+            # float on the way to a screen, which is the one place this
+            # platform is careful never to do it.
+            "max_cost": None if self.max_cost is None else str(self.max_cost),
+            "cost_currency": self.cost_currency,
+            "consumed_cost": (
+                None if self.consumed_cost is None else str(self.consumed_cost)
+            ),
+            "cost_quality": self.cost_quality,
         }
 
 

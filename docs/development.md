@@ -857,6 +857,43 @@ oldest turns into one generated summary, recording the range and the ids it
 stood in for. Both leave a `context_trimmed` or `context_compacted` event on the
 Run, and the console says in words what each one did.
 
+### What a Run cost, and what the platform will not claim
+
+Prices live on the model endpoint, as versions rather than as a current value.
+Only a platform administrator sets one:
+
+    POST /api/v1/model-endpoints/{id}/pricing
+    {"currency": "USD", "input_per_million": "3", "output_per_million": "15"}
+
+Amounts are **strings**, and they are parsed with `Decimal`. A JSON number
+would be a float before the server could object, and what got stored would not
+be what was typed.
+
+Entering a price never edits the old one. A Run fixes the version that was in
+force when it was created, so a correction entered tomorrow does not rewrite
+what today's Runs cost — which is the whole reason the old row has to survive.
+
+**No price is not a price of zero.** An endpoint an administrator priced at
+zero has a row saying so and reports a cost of `0`; an endpoint nobody has
+priced reports `unknown`, and the console says so in those words rather than
+showing a zero. The difference matters most when a workspace has a spending
+limit: a Run whose cost cannot be counted is **stopped** rather than allowed
+through on a total nobody is keeping. Set the limit on the workspace
+(`max_run_cost` and `cost_currency`); leave it null for no limit, in which case
+an unpriced endpoint costs the Run nothing.
+
+Every model call is checked before it is made, against the estimated input and
+the *largest* output the endpoint may produce. There is one honest gap, and it
+is worth knowing rather than discovering from a bill: a streaming provider only
+reports its final usage when the round ends, so **a single call may pass the
+limit before the platform can see that it did**. The limit stops the next one.
+
+An endpoint registered with `usage_quality=unavailable` reports no token counts
+at all. Its token and money ceilings are therefore disabled — there is nothing
+to count them against — while the elapsed-time limit, the model-call limit and
+the per-call maximum output stay enforced. Such an endpoint is not unlimited;
+it is limited by the three valves that do not depend on it reporting anything.
+
 ### Outbound safety
 
 Every model call and every endpoint check goes through `SafeOutboundClient`, and

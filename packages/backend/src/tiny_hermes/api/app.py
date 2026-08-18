@@ -20,6 +20,7 @@ from tiny_hermes.http_tools.presentation.routes import http_tool_router
 from tiny_hermes.identity.presentation.machine_routes import machine_router
 from tiny_hermes.identity.presentation.routes import identity_router
 from tiny_hermes.mcp.presentation.routes import mcp_router
+from tiny_hermes.model_catalog.presentation.pricing_routes import pricing_router
 from tiny_hermes.model_catalog.presentation.routes import model_endpoint_router
 from tiny_hermes.outbound.presentation.routes import outbound_scope_router
 from tiny_hermes.runs.presentation.approval_routes import approval_router
@@ -87,6 +88,7 @@ def create_app(
     app.include_router(http_tool_router(resources))
     app.include_router(approval_router(resources))
     app.include_router(mcp_router(resources))
+    app.include_router(pricing_router(resources))
     app.include_router(skill_proposal_router(resources))
     return app
 

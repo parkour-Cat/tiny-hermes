@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 from uuid import UUID
@@ -12,12 +13,14 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    Numeric,
     String,
     UniqueConstraint,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from tiny_hermes.model_catalog.domain.pricing import CostQuality
 from tiny_hermes.runs.domain.approval import ApprovalStatus, ApprovalType
 from tiny_hermes.runs.domain.models import (
     CallerType,
@@ -207,6 +210,11 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
         ForeignKey("users.id", ondelete="RESTRICT", name="fk_runs_end_user"),
         nullable=True,
     )
+    #: The price this Run is measured at, fixed when it was created (§12.4).
+    #: An administrator correcting a price afterwards does not rewrite what
+    #: this Run cost, and a Run started before anybody entered one carries
+    #: null — which reads as "unknown", never as "free".
+    model_pricing_version_id: Mapped[UUID | None] = mapped_column(nullable=True)
 
 
 class ApprovalRow(IdMixin, CreatedAtMixin, Base):
@@ -311,6 +319,21 @@ class RunBudgetScopeRow(Base):
     consumed_tokens: Mapped[int] = mapped_column(BigInteger, default=0)
     max_derived_retries: Mapped[int] = mapped_column(Integer)
     derived_retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    #: The workspace's ceiling, copied here when the Run was created so the
+    #: valve a Run is measured against cannot move underneath it.
+    max_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    cost_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    #: What has been spent. **Null is unknown, not zero** — a Run whose
+    #: endpoint has no price never gets a number here, and a ceiling that met
+    #: one refuses rather than assuming it was satisfied.
+    consumed_cost: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 6), nullable=True
+    )
+    #: How that number was arrived at, in the same three words a person already
+    #: sees beside token counts.
+    cost_quality: Mapped[str] = mapped_column(
+        String(16), default=CostQuality.UNKNOWN.value, server_default="unknown"
+    )
     version: Mapped[int] = mapped_column(Integer, default=1)
 
 

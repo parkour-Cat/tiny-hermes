@@ -11,8 +11,19 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from tiny_hermes.agents.domain.models import ContextBudget
+from tiny_hermes.agents.domain.models import ContextBudget, EndpointModelPolicy
 from tiny_hermes.artifacts.application.service import ArtifactLimits, ArtifactRecorder
+from tiny_hermes.model_catalog.domain.pricing import (
+    CeilingVerdict,
+    Cost,
+    CostCeiling,
+    CostQuality,
+    TokenPrices,
+    cost_of,
+    projected_cost,
+    within_ceiling,
+)
+from tiny_hermes.model_catalog.domain.pricing import unknown as unknown_cost
 from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
 from tiny_hermes.runs.application.tool_answers import (
     answer_http_call,
@@ -370,6 +381,15 @@ class WorkerRuntime:
                     return
                 if plan.changed:
                     await self._record_planning(claimed, plan)
+                spend = _cost_precheck(context, plan)
+                if not spend.allowed:
+                    # §12.4: checked before the call, because a limit tested
+                    # afterwards is a limit that has already been passed. The
+                    # projection uses the largest output the endpoint may
+                    # produce, so a valve cannot be talked past by a round that
+                    # was going to be cheap.
+                    await self._cost_exceeded(claimed, handle, box, context, spend)
+                    return
                 round_started = monotonic()
                 response = await self._model.complete(
                     _request(context, box, plan, mcp)
@@ -472,6 +492,7 @@ class WorkerRuntime:
                     appended=appended,
                     events=work.events,
                     judged=judged,
+                    prices=context.prices,
                 )
                 if written is False or decision.signal is not None:
                     return
@@ -1055,6 +1076,7 @@ class WorkerRuntime:
             appended,
             events=events,
             judged=judged,
+            prices=after.prices,
         )
         try:
             await sandbox.freeze(
@@ -1473,6 +1495,42 @@ class WorkerRuntime:
             executed_ms=0,
         )
 
+    async def _cost_exceeded(
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        box: "_Sandbox | None",
+        context: ExecutionContext,
+        verdict: CeilingVerdict,
+    ) -> None:
+        """The spending valve, reached. No provider call was made.
+
+        Recorded with `model_calls=0` for the same reason a context overflow
+        is: sending a request this platform had already decided not to pay for
+        would cost the Run a call it never got, and would tell a reader the
+        model did something.
+        """
+        logger.info(
+            "cost ceiling reached",
+            extra={"run_id": str(claimed.run.id), "reason": verdict.reason},
+        )
+        await self._append_event(
+            claimed, RunEventType.RUN_LIMIT_REACHED, {"valve": "cost", "reason": verdict.reason}
+        )
+        decision = SliceDecision(
+            RunSignal.SAFE_PAUSE_REACHED, PauseReason.LIMIT, limit_reached=True
+        )
+        if box is not None:
+            decision = await self._close_sandbox(claimed, handle, box, decision)
+        await self._record(
+            claimed,
+            handle,
+            context.state_version,
+            decision,
+            _no_round(),
+            executed_ms=0,
+        )
+
     async def _append_event(
         self,
         claimed: ClaimedRun,
@@ -1507,6 +1565,7 @@ class WorkerRuntime:
         cleanup_target: "WorkspaceCleanupTarget | None" = None,
         cleanup_sandbox_id: UUID | None = None,
         judged: "_Judged | None" = None,
+        prices: TokenPrices | None = None,
     ) -> RecordSliceCommand:
         if judged is not None:
             # Every write of a judged round carries the verdict, whichever path
@@ -1534,6 +1593,11 @@ class WorkerRuntime:
             executed_ms=executed_ms,
             model_calls=response.model_calls,
             tokens=response.billable_tokens,
+            # The correction half of §12.4: what the round actually cost, at
+            # the price this Run fixed, from whatever the provider reported.
+            # `None` when nothing can be said, which makes the Run's total
+            # unknown from here on rather than adding a zero.
+            cost=_cost_from(response, prices),
             # A failed round said nothing the transcript should
             # keep, so nothing is appended for it.
             appended=appended,
@@ -1557,6 +1621,7 @@ class WorkerRuntime:
         cleanup_target: "WorkspaceCleanupTarget | None" = None,
         cleanup_sandbox_id: UUID | None = None,
         judged: "_Judged | None" = None,
+        prices: TokenPrices | None = None,
     ) -> bool:
         """Persist the round. Returns False when this Worker lost the Run."""
         async with self._lease_lock:
@@ -1576,6 +1641,7 @@ class WorkerRuntime:
                             cleanup_target=cleanup_target,
                             cleanup_sandbox_id=cleanup_sandbox_id,
                             judged=judged,
+                            prices=prices,
                         )
                     )
                     if decision.signal is RunSignal.SAFE_CANCEL_STARTED:
@@ -1709,6 +1775,67 @@ def _summaries(context: ExecutionContext) -> tuple[SkillSummary, ...]:
             loaded=skill.skill_version_id in loaded,
         )
         for skill in context.skills
+    )
+
+
+def _cost_precheck(context: ExecutionContext, plan: ContextPlan) -> CeilingVerdict:
+    """Whether one more round fits under this Run's spending limit.
+
+    A Run with no limit is allowed without asking anything, so a deployment
+    that never set one is not made to configure prices it does not need.
+
+    Streaming is the honest gap: a provider's final usage only arrives when the
+    round ends, so a single call may pass the ceiling before the platform can
+    see that it did. The ceiling stops the *next* one. That is written here,
+    in `docs/development.md` and in the console rather than left for somebody
+    to discover from a bill.
+    """
+    budget = context.budget
+    if budget.max_cost is None:
+        return CeilingVerdict(allowed=True)
+    consumed = (
+        unknown_cost()
+        if budget.consumed_cost is None
+        else Cost(
+            amount=budget.consumed_cost,
+            currency=budget.cost_currency,
+            quality=CostQuality(budget.cost_quality),
+        )
+    )
+    projected = projected_cost(
+        context.prices,
+        input_estimate=plan.input_estimate,
+        max_output_tokens=_max_output(context),
+    )
+    return within_ceiling(
+        CostCeiling(max_amount=budget.max_cost, currency=budget.cost_currency),
+        consumed,
+        projected,
+    )
+
+
+def _max_output(context: ExecutionContext) -> int:
+    """The largest answer this Run may be charged for.
+
+    The Agent's own cap when it set one, and the window's reserved output
+    otherwise. Never a guess at the likely length: the pre-check exists to
+    stop the expensive round, and the expensive round is the long one.
+    """
+    policy = context.spec.model_policy
+    if isinstance(policy, EndpointModelPolicy) and policy.max_output_tokens is not None:
+        return policy.max_output_tokens
+    return 0 if context.window is None else context.window.reserved_output_tokens
+
+
+def _cost_from(response: ModelResponse, prices: TokenPrices | None = None) -> Cost | None:
+    """One round's cost, or `None` when the platform cannot state it."""
+    if prices is None:
+        return None
+    return cost_of(
+        prices,
+        input_tokens=response.input_tokens,
+        output_tokens=response.output_tokens,
+        usage_quality=response.usage_quality,
     )
 
 

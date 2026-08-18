@@ -29,7 +29,11 @@ from tiny_hermes.mcp.infrastructure.outbound_reader import (
     OutboundCapabilityReader,
 )
 from tiny_hermes.mcp.infrastructure.sql_store import SqlMcpStore
+from tiny_hermes.model_catalog.application.pricing_service import PricingService
 from tiny_hermes.model_catalog.application.service import ModelEndpointService
+from tiny_hermes.model_catalog.infrastructure.sql_pricing_store import (
+    SqlPricingStore,
+)
 from tiny_hermes.model_catalog.infrastructure.sql_store import SqlModelEndpointStore
 from tiny_hermes.outbound.application.service import OutboundScopes
 from tiny_hermes.outbound.client import EgressRoute, SafeOutboundClient
@@ -340,6 +344,19 @@ class ApplicationResources:
                     ),
                     OutboundScopes(SqlScopeStore(session)),
                 )
+            except AuditedDenial:
+                await session.commit()
+                raise
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
+
+    async def pricing_service(self) -> AsyncGenerator[PricingService]:
+        async with self.session_factory()() as session:
+            try:
+                yield PricingService(SqlPricingStore(session))
             except AuditedDenial:
                 await session.commit()
                 raise
