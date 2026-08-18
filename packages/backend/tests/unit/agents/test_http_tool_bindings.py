@@ -23,12 +23,15 @@ from pydantic import ValidationError
 from tiny_hermes.agents.application.service import (
     AgentCatalog,
     HttpToolBindingUnavailable,
+    PreauthorizationNotPermitted,
+    WritePolicyNotChosen,
 )
 from tiny_hermes.agents.domain.models import (
     MAX_BOUND_OPERATIONS,
     MAX_HTTP_TOOL_BINDINGS,
     AgentSpec,
     AgentVersion,
+    WritePolicy,
     normalize_agent_spec,
 )
 from tiny_hermes.agents.infrastructure.memory_store import MemoryAgentStore
@@ -66,7 +69,13 @@ def test_a_binding_survives_normalization() -> None:
     document, content_hash = normalize_agent_spec(spec)
 
     assert document["http_tools"] == [
-        {"http_tool_version_id": str(version_id), "operations": ["listOrders"]}
+        {
+            "http_tool_version_id": str(version_id),
+            "operations": ["listOrders"],
+            # Present and null for a read-only binding: §16.3's choice is only
+            # required where something could write.
+            "write_policy": None,
+        }
     ]
     assert content_hash != DETERMINISTIC_HASH
 
@@ -183,6 +192,7 @@ def view(
     tool_name: str = "orders",
     host: str = "api.example.com",
     operation_ids: tuple[str, ...] = ("listOrders", "createOrder"),
+    write_operation_ids: tuple[str, ...] = ("createOrder",),
     active: bool = True,
 ) -> HttpToolBindingView:
     return HttpToolBindingView(
@@ -191,6 +201,7 @@ def view(
         tool_name=tool_name,
         host=host,
         operation_ids=operation_ids,
+        write_operation_ids=write_operation_ids,
         active=active,
     )
 
@@ -217,11 +228,13 @@ async def publishing_with(
     allow: tuple[str, ...] = ("api.example.com",),
     reader: bool = True,
     visible: bool = True,
+    write_policy: WritePolicy | None = None,
+    role: Role = Role.DEVELOPER,
 ) -> Publishing:
     workspace_id = uuid4()
     actor = Actor(uuid4(), False)
     store = MemoryAgentStore()
-    store.roles[(workspace_id, actor.id)] = Role.DEVELOPER
+    store.roles[(workspace_id, actor.id)] = role
     catalog = AgentCatalog(
         store,
         scopes=Scopes(OutboundScope.of(allow)) if allow else None,
@@ -239,6 +252,7 @@ async def publishing_with(
             {
                 "http_tool_version_id": str(bound.version_id),
                 "operations": list(operations),
+                "write_policy": None if write_policy is None else write_policy.value,
             }
         ],
     }
@@ -253,7 +267,11 @@ async def test_a_visible_active_version_inside_the_network_publishes() -> None:
     published = await publishing.publish()
 
     assert published.spec["http_tools"] == [
-        {"http_tool_version_id": str(bound.version_id), "operations": ["listOrders"]}
+        {
+            "http_tool_version_id": str(bound.version_id),
+            "operations": ["listOrders"],
+            "write_policy": None,
+        }
     ]
 
 
@@ -280,7 +298,7 @@ async def test_a_withdrawn_version_is_refused() -> None:
 
 
 async def test_an_operation_the_document_does_not_declare_is_refused() -> None:
-    bound = view(operation_ids=("listOrders",))
+    bound = view(operation_ids=("listOrders",), write_operation_ids=())
     publishing = await publishing_with(bound, operations=("listOrders", "deleteAll"))
 
     with pytest.raises(HttpToolBindingUnavailable) as refused:
@@ -319,3 +337,74 @@ async def test_a_platform_with_no_http_catalog_refuses_rather_than_allows() -> N
         await publishing.publish()
 
     assert "configured" in refused.value.reasons[bound.version_id]
+
+
+# -- and the choice §16.3 will not let a version skip ------------------------
+
+
+async def test_binding_a_write_without_choosing_what_happens_is_refused() -> None:
+    """All three answers are defensible and none is a safe default: silently
+    disabling surprises the author, silently pre-authorizing grants a
+    permission nobody granted, silently escalating makes administrators a
+    queue. So the version has to say."""
+    bound = view()
+    publishing = await publishing_with(bound, operations=("createOrder",))
+
+    with pytest.raises(WritePolicyNotChosen) as refused:
+        await publishing.publish()
+
+    assert refused.value.offending == {"orders": ("createOrder",)}
+
+
+async def test_a_read_only_binding_needs_no_choice() -> None:
+    """The check is about what could write, not about HTTP tools in general."""
+    bound = view()
+    publishing = await publishing_with(bound, operations=("listOrders",))
+
+    published = await publishing.publish()
+
+    assert published.version_number == 1
+
+
+@pytest.mark.parametrize(
+    "policy", [WritePolicy.DISABLED, WritePolicy.GOVERNANCE]
+)
+async def test_a_developer_may_choose_disabled_or_governance(
+    policy: WritePolicy,
+) -> None:
+    publishing = await publishing_with(
+        view(), operations=("createOrder",), write_policy=policy
+    )
+
+    published = await publishing.publish()
+
+    assert published.spec["http_tools"][0]["write_policy"] == policy.value  # pyright: ignore[reportIndexIssue]
+
+
+async def test_a_developer_may_not_preauthorize_their_own_writes() -> None:
+    """§16.3 calls it "a narrow scope a workspace administrator approved". A
+    developer publishing one would be granting themselves that approval."""
+    publishing = await publishing_with(
+        view(),
+        operations=("createOrder",),
+        write_policy=WritePolicy.PREAUTHORIZED,
+        role=Role.DEVELOPER,
+    )
+
+    with pytest.raises(PreauthorizationNotPermitted) as refused:
+        await publishing.publish()
+
+    assert refused.value.tools == ("orders",)
+
+
+async def test_a_workspace_admin_may_preauthorize() -> None:
+    publishing = await publishing_with(
+        view(),
+        operations=("createOrder",),
+        write_policy=WritePolicy.PREAUTHORIZED,
+        role=Role.WORKSPACE_ADMIN,
+    )
+
+    published = await publishing.publish()
+
+    assert published.spec["http_tools"][0]["write_policy"] == "preauthorized"  # pyright: ignore[reportIndexIssue]

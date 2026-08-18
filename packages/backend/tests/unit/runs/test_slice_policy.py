@@ -11,12 +11,19 @@ This is the one place that turns a verdict into a signal. The judge does not
 decide Run state and `RunStateMachine` is still the only authority over it.
 """
 
+from datetime import UTC, datetime, timedelta
 from itertools import product
+from uuid import uuid4
 
 import pytest
 from tiny_hermes.runs.domain.goal import GoalOutcome, GoalVerdict
 from tiny_hermes.runs.domain.models import PauseReason, RunSignal
-from tiny_hermes.runs.domain.slice_policy import RoundOutcome, decide_after_round
+from tiny_hermes.runs.domain.slice_policy import (
+    WAIT_APPROVAL,
+    RoundOutcome,
+    decide_after_round,
+)
+from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalVerdict
 
 DONE = GoalVerdict(GoalOutcome.DONE)
 CONTINUE = GoalVerdict(GoalOutcome.CONTINUE)
@@ -353,3 +360,93 @@ def test_every_combination_returns_a_documented_outcome(
         }
     else:
         assert decision.pause_reason is None
+
+
+# -- approvals ---------------------------------------------------------------
+
+
+def _outcome(**overrides: object) -> RoundOutcome:
+    fields: dict[str, object] = {
+        "verdict": CONTINUE,
+        "cancel_requested": False,
+        "pause_requested": False,
+        "budget_allows": True,
+        "slice_expired": False,
+    }
+    fields.update(overrides)
+    return RoundOutcome(**fields)  # type: ignore[arg-type]
+
+
+
+def _check(
+    verdict: ApprovalVerdict, expires_in: timedelta | None = timedelta(hours=1)
+) -> ApprovalCheck:
+    return ApprovalCheck(
+        verdict,
+        uuid4(),
+        None if expires_in is None else datetime.now(UTC) + expires_in,
+    )
+
+
+def test_a_round_waiting_for_a_person_enters_waiting_approval() -> None:
+    decision = decide_after_round(
+        _outcome(approval=_check(ApprovalVerdict.REQUESTED))
+    )
+
+    assert decision.signal is RunSignal.APPROVAL_REQUESTED
+    assert decision.wait_kind == WAIT_APPROVAL
+    assert decision.wait_seconds is not None and decision.wait_seconds > 0
+
+
+def test_a_run_already_being_asked_about_waits_too() -> None:
+    decision = decide_after_round(_outcome(approval=_check(ApprovalVerdict.PENDING)))
+
+    assert decision.signal is RunSignal.APPROVAL_REQUESTED
+
+
+def test_nobody_who_may_decide_is_a_pause_and_not_an_escalation() -> None:
+    """§16.3: a Run that reaches a confirmation with no subject pauses. It does
+    not quietly become an administrator's decision."""
+    decision = decide_after_round(
+        _outcome(approval=_check(ApprovalVerdict.UNAVAILABLE))
+    )
+
+    assert decision.signal is RunSignal.SAFE_PAUSE_REACHED
+    assert decision.pause_reason is PauseReason.APPROVAL_UNAVAILABLE
+
+
+def test_an_approval_with_no_deadline_pauses_rather_than_waiting_forever() -> None:
+    decision = decide_after_round(
+        _outcome(approval=_check(ApprovalVerdict.REQUESTED, None))
+    )
+
+    assert decision.signal is RunSignal.SAFE_PAUSE_REACHED
+    assert decision.pause_reason is PauseReason.APPROVAL_UNAVAILABLE
+
+
+def test_an_approval_already_out_of_time_pauses_as_expired() -> None:
+    decision = decide_after_round(
+        _outcome(approval=_check(ApprovalVerdict.REQUESTED, timedelta(seconds=-1)))
+    )
+
+    assert decision.signal is RunSignal.SAFE_PAUSE_REACHED
+    assert decision.pause_reason is PauseReason.APPROVAL_EXPIRED
+
+
+def test_a_cancellation_outranks_a_question_nobody_answered() -> None:
+    """A person who asked the Run to stop does not have to answer a question
+    first."""
+    decision = decide_after_round(
+        _outcome(approval=_check(ApprovalVerdict.REQUESTED), cancel_requested=True)
+    )
+
+    assert decision.signal is RunSignal.SAFE_CANCEL_STARTED
+
+
+def test_the_shared_budget_outranks_it_too() -> None:
+    decision = decide_after_round(
+        _outcome(approval=_check(ApprovalVerdict.REQUESTED), budget_allows=False)
+    )
+
+    assert decision.signal is RunSignal.SAFE_PAUSE_REACHED
+    assert decision.pause_reason is PauseReason.LIMIT

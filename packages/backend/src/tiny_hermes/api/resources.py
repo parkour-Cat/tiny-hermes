@@ -28,10 +28,12 @@ from tiny_hermes.model_catalog.infrastructure.sql_store import SqlModelEndpointS
 from tiny_hermes.outbound.application.service import OutboundScopes
 from tiny_hermes.outbound.client import EgressRoute, SafeOutboundClient
 from tiny_hermes.outbound.infrastructure.sql_store import SqlScopeStore
+from tiny_hermes.runs.application.approvals import ApprovalService
 from tiny_hermes.runs.application.event_stream import EventStreamHub, Poll
 from tiny_hermes.runs.application.service import RunCoordination
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
+from tiny_hermes.runs.infrastructure.sql_approval_store import SqlApprovalStore
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
 from tiny_hermes.secrets.application.service import KekSettings, SecretService
@@ -268,6 +270,24 @@ class ApplicationResources:
                     SqlSkillStore(session),
                     OutboundTarballSource(self.outbound_client),
                 )
+            except AuditedDenial:
+                await session.commit()
+                raise
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
+
+    async def approval_service(self) -> AsyncGenerator[ApprovalService]:
+        """One transaction for the decision and the Run's transition both.
+
+        A decision that landed without the Run moving is a Run parked in
+        `waiting_approval` with its question already answered.
+        """
+        async with self.session_factory()() as session:
+            try:
+                yield ApprovalService(SqlApprovalStore(session))
             except AuditedDenial:
                 await session.commit()
                 raise

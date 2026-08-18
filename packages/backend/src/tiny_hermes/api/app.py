@@ -21,6 +21,7 @@ from tiny_hermes.identity.presentation.machine_routes import machine_router
 from tiny_hermes.identity.presentation.routes import identity_router
 from tiny_hermes.model_catalog.presentation.routes import model_endpoint_router
 from tiny_hermes.outbound.presentation.routes import outbound_scope_router
+from tiny_hermes.runs.presentation.approval_routes import approval_router
 from tiny_hermes.runs.presentation.completions import completions_router
 from tiny_hermes.runs.presentation.events import run_event_router
 from tiny_hermes.runs.presentation.routes import run_router, session_router
@@ -83,6 +84,7 @@ def create_app(
     app.include_router(outbound_scope_router(resources))
     app.include_router(skill_router(resources))
     app.include_router(http_tool_router(resources))
+    app.include_router(approval_router(resources))
     app.include_router(skill_proposal_router(resources))
     return app
 

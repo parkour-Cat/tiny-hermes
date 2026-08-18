@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Integer,
     String,
     UniqueConstraint,
@@ -17,6 +18,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from tiny_hermes.runs.domain.approval import ApprovalStatus, ApprovalType
 from tiny_hermes.runs.domain.models import (
     CallerType,
     CheckpointEffectStatus,
@@ -197,6 +199,89 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
     #: Set only when Chat Completions created the Run. The Worker holds the
     #: lease across ordinary slice boundaries until ``sync_timeout_seconds``.
     delivery_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: Who may answer a `user_confirmation` for this Run, and nobody else
+    #: (§16.3). Set to the caller for a `caller_type=user` Run and left null
+    #: for a ServiceAccount's, which therefore has no EndUser to confirm
+    #: anything — that is the section's requirement rather than a gap in it.
+    end_user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT", name="fk_runs_end_user"),
+        nullable=True,
+    )
+
+
+class ApprovalRow(IdMixin, CreatedAtMixin, Base):
+    """One request for a person's decision, and what became of it.
+
+    §16.3. Two things about the shape are decisions rather than convention.
+
+    The normalized call is stored **twice**: `content_hash` is what the
+    platform compares and `document` is what the person is shown. Storing only
+    the hash would mean a reviewer approving a string of hex; storing only the
+    document would mean recomputing the hash on every read, and a normalization
+    that changed would silently revalidate old approvals.
+
+    `decided_by` is a plain user id with no foreign key to a role. Who was
+    *allowed* to decide is checked when the decision is made and recorded in
+    the audit trail; a role that changes afterwards must not rewrite the fact
+    that this person decided this.
+    """
+
+    __tablename__ = "approvals"
+    __table_args__ = (
+        CheckConstraint(
+            _in_enum("approval_type", ApprovalType), name="ck_approvals_type"
+        ),
+        CheckConstraint(_in_enum("status", ApprovalStatus), name="ck_approvals_status"),
+        CheckConstraint(
+            "(status = 'pending') = (decided_at IS NULL AND decided_by IS NULL)",
+            name="ck_approvals_decision_complete",
+        ),
+        ForeignKeyConstraint(
+            ["run_id", "workspace_id"],
+            ["runs.id", "runs.workspace_id"],
+            name="fk_approvals_run",
+        ),
+        # One pending approval per Run. A Run is stopped while it waits, so a
+        # second pending row could only come from a duplicate request — and two
+        # rows a person could answer differently is a state nothing downstream
+        # knows how to read.
+        Index(
+            "uq_approvals_pending_run",
+            "run_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+        ),
+        Index("ix_approvals_workspace_status", "workspace_id", "status"),
+        Index(
+            "ix_approvals_expiry",
+            "expires_at",
+            postgresql_where=text("status = 'pending'"),
+        ),
+    )
+
+    workspace_id: Mapped[UUID] = mapped_column(index=True)
+    run_id: Mapped[UUID] = mapped_column(index=True)
+    approval_type: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(
+        String(16), default=ApprovalStatus.PENDING.value
+    )
+    #: The tool call by name, so a list is readable without opening every row.
+    tool: Mapped[str] = mapped_column(String(128))
+    #: Which call in the round this is about. Carried so a resumed Run can tell
+    #: an approved call from another call the same round made.
+    call_id: Mapped[str] = mapped_column(String(128))
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    document: Mapped[dict[str, Any]] = mapped_column(JSON)
+    required_permission: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    requested_by: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT", name="fk_approvals_requested_by")
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    decided_by: Mapped[UUID | None] = mapped_column(nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    decision_reason: Mapped[str | None] = mapped_column(String(2048), nullable=True)
 
 
 class RunBudgetScopeRow(Base):

@@ -13,10 +13,14 @@ from tiny_hermes.agents.domain.models import (
     ContextBudget,
     EndpointModelPolicy,
     PlatformCeilings,
+    WritePolicy,
     initial_agent_spec,
     rounds_above_ceiling,
 )
-from tiny_hermes.agents.ports.http_tools import HttpToolBindingReader
+from tiny_hermes.agents.ports.http_tools import (
+    HttpToolBindingReader,
+    HttpToolBindingView,
+)
 from tiny_hermes.agents.ports.skills import SkillBindingReader, SkillBindingView
 from tiny_hermes.agents.ports.store import AgentStore, PublishResult
 from tiny_hermes.model_catalog.domain.models import ModelEndpoint
@@ -152,6 +156,35 @@ class SkillBindingUnavailable(AgentCatalogError):
     def __init__(self, reasons: Mapping[UUID, str]) -> None:
         super().__init__("; ".join(f"{key}: {value}" for key, value in reasons.items()))
         self.reasons = dict(reasons)
+
+
+class WritePolicyNotChosen(AgentCatalogError):
+    """A bound operation writes and the version did not say what happens then.
+
+    §16.3 requires the choice at publish and refuses the version without it.
+    Named per tool and per operation, because an author binding four tools
+    should be told which one is missing rather than that something is.
+    """
+
+    def __init__(self, offending: Mapping[str, tuple[str, ...]]) -> None:
+        listed = "; ".join(
+            f"{tool}: {', '.join(names)}" for tool, names in offending.items()
+        )
+        super().__init__(f"no write policy chosen for {listed}")
+        self.offending = dict(offending)
+
+
+class PreauthorizationNotPermitted(AgentCatalogError):
+    """A pre-authorization published by somebody who cannot grant one.
+
+    §16.3 calls it "a narrow scope a workspace administrator approved", so a
+    developer publishing one would be granting themselves the approval the
+    section requires somebody else to give.
+    """
+
+    def __init__(self, tools: tuple[str, ...]) -> None:
+        super().__init__(f"a workspace administrator publishes a pre-authorization: {tools}")
+        self.tools = tools
 
 
 class HttpToolBindingUnavailable(AgentCatalogError):
@@ -423,7 +456,7 @@ class AgentCatalog:
             # After the network check, so a host measured against
             # `network.allow` is measured against entries already known to be
             # inside the workspace's.
-            await self._check_http_tools(workspace_id, draft.spec)
+            await self._check_http_tools(workspace_id, actor, draft.spec)
             # Again here, and not only on save: this draft was measured against
             # whatever the ceiling was the day it was written.
             self._check_ceilings(draft.spec)
@@ -500,7 +533,9 @@ class AgentCatalog:
         if outside:
             raise AgentNetworkOutsideWorkspace(outside)
 
-    async def _check_http_tools(self, workspace_id: UUID, spec: AgentSpec) -> None:
+    async def _check_http_tools(
+        self, workspace_id: UUID, actor: Actor, spec: AgentSpec
+    ) -> None:
         """Refuse a version that binds an HTTP operation it cannot actually call."""
         if not spec.http_tools:
             return
@@ -540,6 +575,57 @@ class AgentCatalog:
                 )
         if reasons:
             raise HttpToolBindingUnavailable(reasons)
+        self._check_write_policies(spec, found, await self._publisher_role(workspace_id, actor))
+
+    async def _publisher_role(self, workspace_id: UUID, actor: Actor) -> Role | None:
+        """The role this publication is being made with.
+
+        A service account carries its own; a person's comes from the
+        membership. `None` is the platform administrator, who has no
+        membership row and whose authority `_require_role` already audited.
+        """
+        if actor.is_service_account:
+            return actor.role
+        return await self._store.role_for(workspace_id, actor.id)
+
+    def _check_write_policies(
+        self,
+        spec: AgentSpec,
+        found: Mapping[UUID, HttpToolBindingView],
+        role: Role | None,
+    ) -> None:
+        """§16.3's choice, forced at publish for every bound write.
+
+        Two refusals rather than one. A version that bound a write and chose
+        nothing is refused because the section says the choice must be made;
+        a version that chose `preauthorized` without an administrator
+        publishing it is refused because a developer granting themselves the
+        approval is not the approval the section describes.
+        """
+        missing: dict[str, tuple[str, ...]] = {}
+        presumed: list[str] = []
+        for binding in spec.http_tools:
+            view = found.get(binding.http_tool_version_id)
+            if view is None:  # pragma: no cover - `reasons` caught it already
+                continue
+            writes = tuple(
+                name for name in binding.operations if name in view.write_operation_ids
+            )
+            if not writes:
+                continue
+            if binding.write_policy is None:
+                missing[view.tool_name] = writes
+            elif binding.write_policy is WritePolicy.PREAUTHORIZED and role not in (
+                Role.WORKSPACE_ADMIN,
+                None,
+            ):
+                # `None` is the platform administrator, who has no membership
+                # row here and is audited separately by `_require_role`.
+                presumed.append(view.tool_name)
+        if missing:
+            raise WritePolicyNotChosen(missing)
+        if presumed:
+            raise PreauthorizationNotPermitted(tuple(presumed))
 
     async def _check_skills(self, workspace_id: UUID, spec: AgentSpec) -> None:
         """Refuse a version that binds a skill it cannot actually load.

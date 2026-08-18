@@ -3,6 +3,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
+from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -280,6 +281,30 @@ MAX_HTTP_TOOL_BINDINGS = 8
 MAX_BOUND_OPERATIONS = 32
 
 
+class WritePolicy(StrEnum):
+    """What happens when a bound operation would change something out there.
+
+    §16.3 requires an AgentVersion to choose one of exactly these three for
+    every tool that could need a person's decision, and to fail publication if
+    it chose none. The point of forcing the choice is that all three are
+    defensible and none of them is a safe default: silently disabling would
+    surprise the author, silently pre-authorizing would be the platform
+    granting a permission nobody granted, and silently escalating everything
+    would turn administrators into a queue.
+    """
+
+    #: The write is refused at runtime and no approval is ever asked for. What
+    #: an Agent that reads an API but must never write to it declares.
+    DISABLED = "disabled"
+    #: A workspace administrator approved this narrow scope when the version
+    #: was published, so the call runs without stopping. Only a workspace or
+    #: platform administrator may publish a version that says this — otherwise
+    #: it would be a developer granting themselves the approval.
+    PREAUTHORIZED = "preauthorized"
+    #: Each call stops and waits for a workspace or platform administrator.
+    GOVERNANCE = "governance"
+
+
 class HttpToolBinding(BaseModel):
     """One HTTP tool version an Agent may call, and which of its operations.
 
@@ -301,6 +326,12 @@ class HttpToolBinding(BaseModel):
 
     http_tool_version_id: UUID
     operations: tuple[str, ...] = Field(min_length=1)
+    #: What happens when one of these operations writes. Absent is refused at
+    #: publish when any bound operation is a write — §16.3 wants the choice
+    #: made rather than defaulted. Absent is fine for a read-only binding,
+    #: which is why the check lives at publish where the operations are known
+    #: and not here where only their names are.
+    write_policy: WritePolicy | None = None
 
     @field_validator("operations")
     @classmethod

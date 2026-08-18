@@ -1,11 +1,18 @@
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from tiny_hermes.runs.domain.goal import GoalOutcome, GoalVerdict
 from tiny_hermes.runs.domain.models import PauseReason, RunSignal
+from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalVerdict
 
 #: The only wait M2A produces (design §4.6): a duration, and a Scheduler that
 #: re-queues the Run when it is up.
 WAIT_TIMER = "timer"
+
+#: What a Run in `waiting_approval` is waiting for. `RunStateMachine` refuses
+#: that state without a kind, and naming it here rather than at the call site
+#: keeps the string one thing rather than three spellings.
+WAIT_APPROVAL = "approval"
 
 
 @dataclass(frozen=True)
@@ -22,6 +29,11 @@ class RoundOutcome:
     slice_expired: bool
     hold_slice: bool = False
     compat_window_expired: bool = False
+    #: Set when a call this round made needs a person's decision and did not
+    #: already have one. Carries which of the three not-approved answers came
+    #: back, because two of them stop the Run for good and one only pauses it
+    #: until somebody clicks.
+    approval: "ApprovalCheck | None" = None
 
 
 @dataclass(frozen=True)
@@ -48,6 +60,39 @@ class SliceDecision:
         return self.signal is None
 
 
+def _awaiting(check: "ApprovalCheck") -> SliceDecision:
+    """What a not-approved answer does to the Run. §16.3, three outcomes.
+
+    Waiting is the ordinary one. The other two are Runs that will not resume on
+    their own: `unavailable` means there is nobody who may decide — which the
+    section requires be a pause rather than a silent escalation — and a gate
+    that answered nothing at all is treated the same way, because a Run left in
+    `waiting_approval` with no row to answer would wait forever.
+    """
+    if check.verdict is ApprovalVerdict.UNAVAILABLE:
+        return SliceDecision(
+            RunSignal.SAFE_PAUSE_REACHED, PauseReason.APPROVAL_UNAVAILABLE
+        )
+    if check.expires_at is None:
+        # A gate that asked nobody and named no deadline would leave a Run in
+        # `waiting_approval` with nothing to answer and nothing to expire it.
+        return SliceDecision(
+            RunSignal.SAFE_PAUSE_REACHED, PauseReason.APPROVAL_UNAVAILABLE
+        )
+    remaining = int((check.expires_at - datetime.now(UTC)).total_seconds())
+    if remaining <= 0:
+        # Asked and already out of time. Pausing now says so, rather than
+        # entering a wait the next sweep would end anyway.
+        return SliceDecision(
+            RunSignal.SAFE_PAUSE_REACHED, PauseReason.APPROVAL_EXPIRED
+        )
+    return SliceDecision(
+        RunSignal.APPROVAL_REQUESTED,
+        wait_kind=WAIT_APPROVAL,
+        wait_seconds=remaining,
+    )
+
+
 def decide_after_round(outcome: RoundOutcome) -> SliceDecision:
     """Choose what ends this round.
 
@@ -68,6 +113,14 @@ def decide_after_round(outcome: RoundOutcome) -> SliceDecision:
         return SliceDecision(
             RunSignal.SAFE_PAUSE_REACHED, PauseReason.LIMIT, limit_reached=True
         )
+    if outcome.approval is not None:
+        # Above the verdict, below the user's own signals. A round that stopped
+        # for an approval produced no tool result, so the judge is looking at a
+        # round that did nothing — its answer is not the one that should decide
+        # what happens to the Run. A cancel or a pause still outranks this: a
+        # person who asked the Run to stop does not have to answer a question
+        # first.
+        return _awaiting(outcome.approval)
     if outcome.verdict.outcome is GoalOutcome.DONE:
         return SliceDecision(RunSignal.COMPLETED)
     if outcome.verdict.outcome is GoalOutcome.FAILED:

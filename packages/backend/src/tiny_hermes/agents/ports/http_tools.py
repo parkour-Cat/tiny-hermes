@@ -32,6 +32,10 @@ class HttpToolBindingView:
     #: Every operation this version declares. The check is a subset test, so it
     #: needs the whole set rather than an "exists" question per id.
     operation_ids: tuple[str, ...]
+    #: Which of those change something at the far end. Carried separately
+    #: because §16.3's publish-time choice is only required where a bound
+    #: operation could write, and the names alone do not say.
+    write_operation_ids: tuple[str, ...]
     active: bool
 
 

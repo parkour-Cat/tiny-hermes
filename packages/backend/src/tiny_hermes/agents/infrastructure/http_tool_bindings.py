@@ -41,6 +41,11 @@ class CatalogHttpToolBindings:
                     operation_ids=tuple(
                         operation.operation_id for operation in version.operations
                     ),
+                    write_operation_ids=tuple(
+                        operation.operation_id
+                        for operation in version.operations
+                        if not operation.read_only
+                    ),
                     active=version.status is HttpToolStatus.ACTIVE,
                 )
             )
