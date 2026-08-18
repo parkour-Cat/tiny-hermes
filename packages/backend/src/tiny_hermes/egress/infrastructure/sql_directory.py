@@ -18,10 +18,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tiny_hermes.agents.infrastructure.tables import AgentVersionRow
-from tiny_hermes.egress.domain.decision import CallerClaim, ScopeLayers
+from tiny_hermes.egress.domain.decision import CallerClaim, CallerKind, ScopeLayers
 from tiny_hermes.outbound.domain.address_policy import Address
 from tiny_hermes.outbound.domain.scope import OutboundScope
 from tiny_hermes.outbound.infrastructure.tables import OutboundScopeRow
+from tiny_hermes.runs.infrastructure.tables import RunRow
+from tiny_hermes.sandbox.infrastructure.tables import SandboxEgressAddressRow
 
 
 class SqlScopeDirectory:
@@ -49,14 +51,39 @@ class SqlScopeDirectory:
             )
 
     async def sandbox_claim(self, address: Address) -> CallerClaim | None:
-        """No sandbox is registered yet; §5 of the plan gives them an address.
+        """Which Run's sandbox is at this address, and what it may be measured
+        against.
 
-        `None` is an unknown caller, which the proxy refuses. Until sandboxes
-        have a network of their own that is exactly right: nothing should be
-        able to present itself as one.
+        The address is the whole of a sandbox's identity: it presents nothing,
+        because a process inside a container that holds a credential is one
+        that can lend it. `None` is an unknown caller, which the proxy refuses
+        before it parses a target — so an address nobody registered cannot even
+        use the proxy as a resolver.
+
+        The workspace and the Agent Version come from the Run rather than from
+        the registration, so a sandbox is measured against the version its Run
+        is executing and nothing has to keep two copies of that agreeing.
         """
-        del address
-        return None
+        async with self._sessions() as session:
+            found = (
+                await session.execute(
+                    select(RunRow.workspace_id, RunRow.agent_version_id, RunRow.id)
+                    .join(
+                        SandboxEgressAddressRow,
+                        SandboxEgressAddressRow.run_id == RunRow.id,
+                    )
+                    .where(SandboxEgressAddressRow.address == str(address))
+                )
+            ).first()
+        if found is None:
+            return None
+        workspace_id, agent_version_id, run_id = found
+        return CallerClaim(
+            kind=CallerKind.SANDBOX,
+            workspace_id=workspace_id,
+            agent_version_id=agent_version_id,
+            run_id=run_id,
+        )
 
 
 async def _level(

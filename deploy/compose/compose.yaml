@@ -40,6 +40,10 @@ x-base-env: &base-env
   EGRESS_PROXY_URL: ${EGRESS_PROXY_URL:-}
   EGRESS_PROXY_TOKEN: ${EGRESS_PROXY_TOKEN:-}
   EGRESS_ALLOWED_HOSTS: ${EGRESS_ALLOWED_HOSTS:-}
+  # The network a sandbox is attached to. Empty leaves a sandbox with no
+  # network at all, which is §16.4's default and what a deployment running no
+  # proxy gets.
+  SANDBOX_EGRESS_NETWORK: ${SANDBOX_EGRESS_NETWORK:-}
   SANDBOX_IDLE_TTL_SECONDS: ${SANDBOX_IDLE_TTL_SECONDS:-300}
   # Present-but-empty for the controller: Settings requires the fields so a
   # credentialless API deployment fails at startup, and empty is exactly what
@@ -243,7 +247,18 @@ services:
       context: ../..
       dockerfile: apps/api/Dockerfile
     command: ["/app/.venv/bin/tiny-hermes-egress"]
-    environment: *base-env
+    environment: *app-env
+    # On both: the default network to reach the internet and the database, and
+    # the sandbox network to be reached *from* a container. A sandbox is on the
+    # second only, and that network is `internal` — so the proxy is the one
+    # thing a sandbox can send a packet to, and that is a property of this file
+    # rather than of anybody's discipline.
+    networks:
+      - default
+      - sandbox-egress
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck: *process-alive
 
   web:
@@ -259,6 +274,14 @@ services:
       timeout: 3s
       retries: 20
     ports: ["3000:3000"]
+
+networks:
+  # Nothing on this network can route anywhere: `internal` is Docker's way of
+  # saying a bridge has no gateway. A sandbox attached to it can reach the
+  # proxy and nothing else — not the internet, not PostgreSQL, not MinIO, not
+  # another Run's container.
+  sandbox-egress:
+    internal: true
 
 volumes:
   postgres-data:

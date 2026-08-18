@@ -43,6 +43,7 @@ class FakeEngine:
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []
         self.import_failure: Exception | None = None
+        self.address: str | None = None
 
     async def create(self, config: Any) -> str:
         self.calls.append(("create", config))
@@ -60,6 +61,12 @@ class FakeEngine:
 
     async def pause(self, container_id: str) -> None:
         self.calls.append(("pause", container_id))
+
+    async def address_of(self, container_id: str) -> str | None:
+        """`None` unless a test says otherwise: a container on no network has
+        no address, which is what a deployment with no boundary produces."""
+        self.calls.append(("address_of", container_id))
+        return self.address
 
     async def unpause(self, container_id: str) -> None:
         self.calls.append(("unpause", container_id))
@@ -87,6 +94,9 @@ class FakeStore:
     def __init__(self) -> None:
         self.reservations: dict[UUID, SandboxReservation] = {}
         self.instances: dict[UUID, SandboxInstance] = {}
+        #: Address -> (run, sandbox). The proxy reads this to answer "who is
+        #: this" for a caller that presents nothing.
+        self.addresses: dict[str, tuple[UUID, UUID]] = {}
 
     async def reserve(
         self, *, run_id: UUID, workspace_id: UUID, instance: SandboxInstance
@@ -142,6 +152,16 @@ class FakeStore:
 
     async def read_instance(self, instance_id: UUID) -> SandboxInstance | None:
         return self.instances.get(instance_id)
+
+    async def register_egress_address(
+        self, *, address: str, run_id: UUID, sandbox_id: UUID
+    ) -> None:
+        self.addresses[address] = (run_id, sandbox_id)
+
+    async def clear_egress_address(self, sandbox_id: UUID) -> None:
+        for address, (_, owner) in list(self.addresses.items()):
+            if owner == sandbox_id:
+                del self.addresses[address]
 
     async def set_instance_status(
         self, instance_id: UUID, status: InstanceStatus
@@ -380,3 +400,56 @@ async def test_volume_remove_uses_scheduler_authority_rules(
     await controller.store.isolate(claim.id, reason="cleanup drill")
     await controller.volume_remove(run_id=RUN, sandbox_id=sandbox_id)
     assert engine.calls[-1] == ("remove_volume", f"tiny-hermes-data-{RUN}")
+
+
+# -- the identity a sandbox holds, and for exactly how long ------------------
+
+
+async def test_a_sandbox_holds_its_identity_only_while_it_may_use_it(
+    engine: FakeEngine, leases: ScriptedLeases
+) -> None:
+    """§16.4: a frozen instance may not open a new connection.
+
+    And the case that would be a hole rather than an inconvenience: a destroyed
+    container must not lend its identity to whatever Docker hands the address
+    to next, so the row goes before the container does.
+    """
+    engine.address = "172.30.0.5"
+    store = FakeStore()
+    controller = SandboxController(
+        engine=engine,  # type: ignore[arg-type] - a recording double
+        store=store,
+        approved_digests=(DIGEST,),
+        leases=leases,
+    )
+
+    sandbox_id = await _acquired(controller)
+    assert store.addresses == {"172.30.0.5": (RUN, sandbox_id)}
+
+    await controller.freeze(run_id=RUN, lease_id=LEASE, sandbox_id=sandbox_id)
+    assert store.addresses == {}
+
+    await controller.thaw(run_id=RUN, lease_id=LEASE, sandbox_id=sandbox_id)
+    assert store.addresses == {"172.30.0.5": (RUN, sandbox_id)}
+
+    await controller.destroy(run_id=RUN, lease_id=LEASE, sandbox_id=sandbox_id)
+    assert store.addresses == {}
+
+
+async def test_a_sandbox_with_no_network_is_registered_as_nobody(
+    engine: FakeEngine, leases: ScriptedLeases
+) -> None:
+    """A container on no network has no address to write down, and nothing
+    will ever ask who it is — it cannot reach the proxy to be asked."""
+    engine.address = None
+    store = FakeStore()
+    controller = SandboxController(
+        engine=engine,  # type: ignore[arg-type] - a recording double
+        store=store,
+        approved_digests=(DIGEST,),
+        leases=leases,
+    )
+
+    await _acquired(controller)
+
+    assert store.addresses == {}
