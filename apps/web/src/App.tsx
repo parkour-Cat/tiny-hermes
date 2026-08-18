@@ -46,6 +46,14 @@ const ModelEndpointsPage = lazy(() =>
 const SecretsPage = lazy(() =>
   import("./pages/SecretsPage").then((module) => ({ default: module.SecretsPage })),
 );
+const SkillsPage = lazy(() =>
+  import("./pages/SkillsPage").then((module) => ({ default: module.SkillsPage })),
+);
+const SkillProposalsPage = lazy(() =>
+  import("./pages/SkillProposalsPage").then((module) => ({
+    default: module.SkillProposalsPage,
+  })),
+);
 
 function AppRoutes() {
   const t = useT();
@@ -94,6 +102,8 @@ function AppRoutes() {
           <Route path="api-keys" element={<ApiKeysPage />} />
           <Route path="model-endpoints" element={<ModelEndpointsPage />} />
           <Route path="secrets" element={<SecretsPage />} />
+          <Route path="skills" element={<SkillsPage />} />
+          <Route path="skill-proposals" element={<SkillProposalsPage />} />
         </Route>
         <Route
           path="*"

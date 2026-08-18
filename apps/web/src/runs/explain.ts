@@ -87,6 +87,24 @@ export function eventNote(frame: Pick<RunEventFrame, "event_type" | "payload">):
     const values = filled(frame.payload, { dropped: "dropped", freed: "freed_estimate" });
     return key === undefined || values === null ? null : { key, values };
   }
+  if (frame.event_type === "skill_loaded") {
+    // Said in words rather than left as a payload, because this is the one
+    // entry that explains where text in the transcript came from — and the
+    // sentence carries the boundary the prompt itself carries: a skill is a
+    // workspace's reference material, not the platform speaking.
+    const skill = frame.payload.skill;
+    const path = frame.payload.path;
+    const values = filled(frame.payload, { bytes: "bytes" });
+    if (typeof skill !== "string" || typeof path !== "string" || values === null) {
+      return null;
+    }
+    return { key: "skillLoadedNote", values: { ...values, skill, path } };
+  }
+  if (frame.event_type === "skill_proposed") {
+    // No numbers to fill: what matters is that nothing changed, which is true
+    // of every proposal regardless of what is in it.
+    return { key: "skillProposedNote", values: {} };
+  }
   if (frame.event_type === "context_compacted") {
     const values = filled(frame.payload, {
       first: "first_sequence",

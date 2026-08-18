@@ -31,5 +31,14 @@ export default defineConfig({
       dependencies: ["setup"],
       use: { storageState: CONSOLE_STATE },
     },
+    // Its own project rather than another file in `console`: this walk runs
+    // two Runs end to end and needs the whole catalog, and keeping it separate
+    // means a failure says which of the two areas broke.
+    {
+      name: "skills",
+      testMatch: /skills\.spec\.ts$/,
+      dependencies: ["setup"],
+      use: { storageState: CONSOLE_STATE },
+    },
   ],
 });
