@@ -55,6 +55,9 @@ function loadedAgent(revision = 3): void {
     // skills is the ordinary case and every other test in this file is about
     // something else.
     http.get("/api/v1/skills", () => HttpResponse.json([])),
+    // The network picker reads what the workspace approved. Empty by default,
+    // which is what an Agent that asks for no network is measured against.
+    http.get("/api/v1/outbound-scopes/workspace", () => HttpResponse.json([])),
   );
 }
 
@@ -572,4 +575,63 @@ test("a publish refused for summary budget names what each summary costs", async
   // which description is the expensive one.
   expect(await screen.findByText("rollout：约 1200 token")).toBeInTheDocument();
   expect(screen.getByText("postmortem：约 600 token")).toBeInTheDocument();
+});
+
+
+test("the network picker offers what the workspace approved and nothing else", async () => {
+  loadedAgent(3);
+  server.use(
+    http.get("/api/v1/outbound-scopes/workspace", () =>
+      HttpResponse.json([
+        {
+          id: "s1",
+          level: "workspace",
+          workspace_id: WORKSPACE,
+          entry: "api.example.com",
+          note: null,
+          managed: false,
+          created_at: "2026-08-18T00:00:00Z",
+        },
+      ]),
+    ),
+  );
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByLabelText("网络"));
+  await userEvent.click(await screen.findByTitle("api.example.com"));
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  // Chosen, never typed: an entry outside the workspace's range is refused at
+  // publish, and a free-text field would teach an author to publish and see.
+  await waitFor(() => expect(sent).toHaveLength(1));
+  expect(sent).toEqual([
+    {
+      expected_revision: 3,
+      spec: { ...SPEC, network: { allow: ["api.example.com"] } },
+    },
+  ]);
+});
+
+test("an agent that asks for no network publishes the document it always did", async () => {
+  loadedAgent(3);
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  expect(sent).toEqual([{ expected_revision: 3, spec: SPEC }]);
 });

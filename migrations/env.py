@@ -9,6 +9,7 @@ from tiny_hermes.artifacts.infrastructure import tables as artifact_tables  # no
 from tiny_hermes.audit.infrastructure import tables as audit_tables  # noqa: F401
 from tiny_hermes.identity.infrastructure import tables as identity_tables  # noqa: F401
 from tiny_hermes.model_catalog.infrastructure import tables as endpoint_tables  # noqa: F401
+from tiny_hermes.outbound.infrastructure import tables as outbound_tables  # noqa: F401
 from tiny_hermes.runs.infrastructure import tables as run_tables  # noqa: F401
 from tiny_hermes.sandbox.infrastructure import tables as sandbox_tables  # noqa: F401
 from tiny_hermes.secrets.infrastructure import tables as secret_tables  # noqa: F401

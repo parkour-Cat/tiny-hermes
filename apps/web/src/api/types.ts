@@ -72,6 +72,14 @@ export type AgentSpecDocument = {
     sync_timeout_seconds: number;
   };
   /**
+   * What this Agent may reach on the network, fixed at publish like `tools`.
+   *
+   * Absent means nothing: an Agent that never asked for the network does not
+   * get it because its workspace has some. Every entry has to be inside what
+   * the workspace approved, and publishing says so if it is not.
+   */
+  network?: { allow: string[] };
+  /**
    * Bound skills, by version id and never by name.
    *
    * Publishing a new version of a skill therefore changes nothing about an
@@ -367,4 +375,20 @@ export type FileDiffResponse = {
 export type ProposalDetailResponse = ProposalResponse & {
   files: SkillFilePayload[];
   diff: FileDiffResponse[];
+};
+
+export type OutboundScopeEntry = {
+  id: string;
+  level: "platform" | "workspace";
+  workspace_id: string | null;
+  entry: string;
+  note: string | null;
+  /**
+   * True when a model endpoint owns this entry. It appears when the endpoint is
+   * registered and disappears when the endpoint is disabled, so the console
+   * shows no remove control for one — a button that always loses is worse than
+   * no button.
+   */
+  managed: boolean;
+  created_at: string;
 };

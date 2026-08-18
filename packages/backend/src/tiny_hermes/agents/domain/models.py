@@ -277,6 +277,52 @@ ModelPolicy = Annotated[
 ]
 
 
+#: The most entries one Agent may name. Not arithmetic like the skill ceiling,
+#: just a bound: a list nobody can read is a list nobody reviews, and an Agent
+#: that needs forty hosts is an Agent whose workspace should approve a wildcard.
+MAX_NETWORK_ENTRIES = 32
+
+
+class AgentNetwork(BaseModel):
+    """The targets this Agent asked for, checked against its workspace at publish.
+
+    A separate model rather than a bare tuple so the document has somewhere to
+    grow — §16.5's Run-level narrowing and M2E's delegation both belong beside
+    `allow` rather than in a second field on the spec.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    allow: tuple[str, ...] = ()
+
+    @field_validator("allow")
+    @classmethod
+    def reject_unreadable_entries(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Parsed here so a draft cannot be saved with a line nobody can act on.
+
+        The same parser the platform and workspace levels use, so what an
+        author may write and what a connection is measured against cannot
+        drift apart.
+        """
+        from tiny_hermes.outbound.domain.scope import (  # noqa: PLC0415 - cycle
+            ScopeEntryInvalid,
+            parse_entry,
+        )
+
+        if len(value) > MAX_NETWORK_ENTRIES:
+            raise ValueError(f"an Agent may name at most {MAX_NETWORK_ENTRIES} targets")
+        seen: list[str] = []
+        for entry in value:
+            try:
+                parsed = parse_entry(entry)
+            except ScopeEntryInvalid as refused:
+                raise ValueError(str(refused)) from refused
+            if parsed.text in seen:
+                raise ValueError(f"a target may be named once: {parsed.text}")
+            seen.append(parsed.text)
+        return tuple(seen)
+
+
 class AgentSpec(BaseModel):
     """A published Agent's whole configuration.
 
@@ -327,6 +373,12 @@ class AgentSpec(BaseModel):
     #: intersection is a set intersection and nothing here has to change shape
     #: for it. Written down rather than built: this phase does not delegate.
     skills: tuple[SkillBinding, ...] = ()
+    #: What this Agent may reach on the network, fixed at publish like `tools`
+    #: and `skills`. Absent means nothing: an Agent that never asked for the
+    #: network does not get it because its workspace has some. Omitted from the
+    #: normalized document when absent, the fifth widening to leave every
+    #: earlier content hash alone and the fifth to have a test say so.
+    network: AgentNetwork | None = None
 
     @field_validator("skills")
     @classmethod
@@ -439,6 +491,12 @@ def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
         # platform table an absent budget means. A spec that declares none
         # carries no key, and hashes as it did before this field existed.
         normalized.pop("context_budget", None)
+    if normalized.get("network") is None:
+        # Same reasoning as `completion` and `context_budget`: there is no
+        # default network *document*, only the absence of one, and a spec that
+        # declares none must carry no key so versions published before M2C
+        # hash exactly as they did.
+        normalized.pop("network", None)
     if not normalized.get("skills"):
         # `tools` could keep its empty list because the key was there from the
         # first published version. This one was not, so an empty binding set

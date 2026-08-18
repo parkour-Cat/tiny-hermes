@@ -46,6 +46,11 @@ const ModelEndpointsPage = lazy(() =>
 const SecretsPage = lazy(() =>
   import("./pages/SecretsPage").then((module) => ({ default: module.SecretsPage })),
 );
+const OutboundScopePage = lazy(() =>
+  import("./pages/OutboundScopePage").then((module) => ({
+    default: module.OutboundScopePage,
+  })),
+);
 const SkillsPage = lazy(() =>
   import("./pages/SkillsPage").then((module) => ({ default: module.SkillsPage })),
 );
@@ -102,6 +107,7 @@ function AppRoutes() {
           <Route path="api-keys" element={<ApiKeysPage />} />
           <Route path="model-endpoints" element={<ModelEndpointsPage />} />
           <Route path="secrets" element={<SecretsPage />} />
+          <Route path="outbound" element={<OutboundScopePage />} />
           <Route path="skills" element={<SkillsPage />} />
           <Route path="skill-proposals" element={<SkillProposalsPage />} />
         </Route>

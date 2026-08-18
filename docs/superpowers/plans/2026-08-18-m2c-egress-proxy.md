@@ -102,7 +102,7 @@ MCP 与 OpenAPI 工具、两类审批、费用安全阀。它们不是同一种�
 - [x] 现有三个出站用途逐个接过去：模型调用（`openai_model.py`）、技能 Git 导入
       （`skills/infrastructure/outbound_tarball.py`）、端点连通性检查。三处都已经
       在用 `SafeOutboundClient`，所以这一步改的是构造参数而不是调用点。
-- [ ] 模型端点的地址进入平台范围：管理员注册端点时，它的 host 自动成为
+- [x] 模型端点的地址进入平台范围：管理员注册端点时，它的 host 自动成为
       `PlatformScope` 的一条。理由是运维现实——否则每注册一个端点都要再去改一遍
       出站范围，而两处不同步的第一个症状是 Run 在运行时失败。
       **这一条推到 §4**：平台范围现在只是一条配置项，没有表也没有写入口，
@@ -117,17 +117,17 @@ MCP 与 OpenAPI 工具、两类审批、费用安全阀。它们不是同一种�
 
 ## 4. 范围的数据与管理面
 
-- [ ] 迁移 `0016`：`platform_outbound_scopes`、`workspace_outbound_scopes`，
+- [x] 迁移 `0016`：`platform_outbound_scopes`、`workspace_outbound_scopes`，
       以及 `agent_versions.spec` 里的 `network` 段（版本化的东西不进表，
       和 `tools`、`skills` 一样跟着 AgentSpec 走）。
-- [ ] `AgentSpec` 加 `network: {allow: [...]}`；发布时校验它是工作空间范围的子集，
+- [x] `AgentSpec` 加 `network: {allow: [...]}`；发布时校验它是工作空间范围的子集，
       不是就拒绝并**说出哪一条超出了**。和 `skill_summary_budget_exceeded` 同一个
       形状：refusal 里带足够修好它的信息。
-- [ ] 平台范围只有平台管理员能写，工作空间范围由工作空间管理员在平台范围内选，
+- [x] 平台范围只有平台管理员能写，工作空间范围由工作空间管理员在平台范围内选，
       两处都写审计。这套角色形状 `SkillCatalog` 已经有了，照抄它而不是重新发明。
-- [ ] Run 级范围：`RunSpec` 暂不开放收窄接口（M2E 的委派才需要），但交集函数
+- [x] Run 级范围：`RunSpec` 暂不开放收窄接口（M2E 的委派才需要），但交集函数
       从第一天就按四层写，并有一条测试用 Run 层收窄证明它是四层而不是三层。
-- [ ] 控制台：工作空间设置里一个出站范围列表；Agent Builder 里一个 `network` 段，
+- [x] 控制台：工作空间设置里一个出站范围列表；Agent Builder 里一个 `network` 段，
       同样是「选，不是填」——可选项来自工作空间已批准的集合。
 
 ## 5. 沙箱侧出站
