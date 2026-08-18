@@ -45,21 +45,21 @@ MCP 与 OpenAPI 工具、两类审批、费用安全阀。它们不是同一种�
 
 ## 1. 纯函数：四层出站范围与交集
 
-- [ ] `packages/backend/tests/unit/outbound/test_scope.py`：先写会失败的测试。
+- [x] `packages/backend/tests/unit/outbound/test_scope.py`：先写会失败的测试。
       四层交集、收窄、空集、通配与显式条目的关系、以及「工作空间批准了 Agent 没批准」
       被拒的那条。
-- [ ] `outbound/domain/scope.py`：`OutboundScope` 与 `intersect(*scopes)`。
+- [x] `outbound/domain/scope.py`：`OutboundScope` 与 `intersect(*scopes)`。
       一条范围是**主机模式与网段的集合**，不是一串正则：`api.example.com`、
       `*.example.com`、`10.1.0.0/16`。通配只允许出现在最左一段，因为
       `*.example.com` 是一个人能一眼判断的东西，而 `api-*.internal.*` 不是。
-- [ ] 交集的语义写成测试而不是注释：`*.example.com ∩ api.example.com = api.example.com`，
+- [x] 交集的语义写成测试而不是注释：`*.example.com ∩ api.example.com = api.example.com`，
       `10.0.0.0/8 ∩ 10.1.0.0/16 = 10.1.0.0/16`，`{} ∩ 任何 = {}`。
       空集是合法结果，含义是「这一层什么都没批准」，于是这条链上什么都出不去。
-- [ ] `PlatformScope` 的默认值：**空**。和 `SANDBOX_IMAGE_DIGEST` 的默认一样，
+- [x] `PlatformScope` 的默认值：**空**。和 `SANDBOX_IMAGE_DIGEST` 的默认一样，
       一个没有配置过的部署什么都发不出去，而不是什么都发得出去。
       唯一的例外是 M1 已经批准的模型端点地址——它们由端点自己的配置带着走，
       在 §3 里接进来。
-- [ ] 复用 `outbound/domain/address_policy.py` 的 `verdict()`：范围检查通过之后，
+- [x] 复用 `outbound/domain/address_policy.py` 的 `verdict()`：范围检查通过之后，
       地址仍然要过 M1 那一关（loopback、link-local、元数据地址、私有网段）。
       两个检查回答不同问题：范围问「这个目标被批准了吗」，地址策略问
       「这个 IP 是不是根本不该被连」。顺序是先范围后地址，因为后者更贵。
