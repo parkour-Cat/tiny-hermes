@@ -4,6 +4,8 @@ from ipaddress import IPv4Network, IPv6Network, ip_network
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from tiny_hermes.egress.domain.decision import ALLOWED_PORTS
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -73,6 +75,15 @@ class Settings(BaseSettings):
     #: nothing by itself.
     egress_proxy_token: str = ""
     egress_proxy_port: int = Field(default=3128, ge=1, le=65_535)
+    #: Ports a target may listen on, comma separated. Empty means the shipped
+    #: pair, 80 and 443.
+    #:
+    #: Widening this is a platform administrator's decision and only theirs,
+    #: which is the shape §16.5 gives every widening. It is needed more often
+    #: than the default suggests: an enterprise's own API on 8443 is ordinary,
+    #: and without this an installation could bind only tools that happen to
+    #: live on the public web's two ports.
+    egress_allowed_ports: str = ""
     #: The platform outbound scope, comma separated: hosts, one-level wildcards
     #: and networks. §4 of the M2C-1 plan moves this into the database; a
     #: single-tenant installation is served by the setting alone.
@@ -159,6 +170,30 @@ class Settings(BaseSettings):
             if entry:
                 ip_network(entry)
         return value
+
+    @field_validator("egress_allowed_ports")
+    @classmethod
+    def reject_unparseable_ports(cls, value: str) -> str:
+        for entry in (part.strip() for part in value.split(",")):
+            if not entry:
+                continue
+            port = int(entry)
+            if not 1 <= port <= 65_535:
+                raise ValueError(f"{port} is not a port")
+        return value
+
+    @property
+    def allowed_ports(self) -> frozenset[int]:
+        """What the proxy will connect to, or the shipped pair when unset.
+
+        Empty falls back rather than approving nothing: a port list is a
+        widening of a default that already works, unlike a scope, where empty
+        must mean "nothing" because the whole point is that it approves.
+        """
+        chosen = frozenset(
+            int(part.strip()) for part in self.egress_allowed_ports.split(",") if part.strip()
+        )
+        return chosen or ALLOWED_PORTS
 
     @property
     def approved_networks(self) -> tuple[IPv4Network | IPv6Network, ...]:

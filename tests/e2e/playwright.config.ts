@@ -44,5 +44,16 @@ export default defineConfig({
       dependencies: ["setup"],
       use: { storageState: CONSOLE_STATE },
     },
+    // Its own project for the same reason, and with one extra requirement it
+    // states rather than assumes: this walk calls out through the egress
+    // proxy, so it needs a stack where `EGRESS_PROXY_URL` is set and
+    // `OUTBOUND_ALLOWED_CIDRS` covers the Compose bridge. Without those every
+    // outbound call refuses — which is M2C-1 working, not this walk failing.
+    {
+      name: "tools",
+      testMatch: /tools\.spec\.ts$/,
+      dependencies: ["setup"],
+      use: { storageState: CONSOLE_STATE },
+    },
   ],
 });

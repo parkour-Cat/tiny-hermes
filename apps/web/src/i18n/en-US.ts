@@ -455,6 +455,8 @@ export const enUS: Record<MessageKey, string> = {
   agentMcpHint:
     "Name every tool this Agent may call. There is deliberately no way to bind all of them — a server that later advertises forty more would widen this Agent with nobody publishing anything.",
   agentWritePolicy: "When it writes",
+  agentHttpWritePolicy: "When an HTTP operation writes",
+  agentMcpWritePolicy: "When an MCP tool is called",
   agentWritePolicyHint:
     "Required for anything that changes data. All three answers are defensible and none is safe to assume, so publishing refuses a binding that chose nothing.",
   writeDisabled: "Refuse it",

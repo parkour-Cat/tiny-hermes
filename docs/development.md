@@ -857,6 +857,60 @@ oldest turns into one generated summary, recording the range and the ids it
 stood in for. Both leave a `context_trimmed` or `context_compacted` event on the
 Run, and the console says in words what each one did.
 
+### External tools, and why a write stops
+
+Two kinds, one shape. An **HTTP tool** is an OpenAPI document a workspace
+registers; an **MCP server** is an address this platform reads a tool list
+from. Both are registered under *HTTP 工具* and *MCP 服务* in the console, and
+both refuse a host that is not already in the workspace's outbound scope —
+approve it under *出站* first, or the registration is refused and names the
+host.
+
+An Agent binds a **version** and a **subset**, never the tool itself:
+
+- HTTP: a document version plus the operation ids it may call.
+- MCP: a server snapshot plus the tool names it may call. There is deliberately
+  no way to bind "all of them" — a server that later advertises forty more
+  would otherwise widen a published Agent with nobody publishing anything.
+
+An MCP server's tool list is **re-read before every execution slice**, and only
+the bound names are offered. If the bound schemas no longer fit the
+`tool_schemas` segment the Run pauses with `tool_budget_exceeded` before it
+spends a model call; nothing is truncated, because a schema cut down to fit
+would leave a model calling a tool with arguments the far end never agreed to.
+Resume it after binding fewer tools or raising the segment — the failed attempt
+charged nothing, so it starts from the same place.
+
+**Every binding that could change something needs a decision at publish**
+(§16.3), and publishing fails without one. The three answers are:
+
+- *直接拒绝* — the call is refused at runtime and nobody is ever asked.
+- *已经预先批准* — a workspace administrator approved this narrow scope by
+  publishing the version, so the call runs. Only a workspace administrator may
+  publish one; a developer doing it would be granting themselves the approval.
+- *每次都问管理员* — each call stops and waits.
+
+For MCP the choice is required for *every* binding rather than only for ones
+that write: a server does not say which of its tools change something, so the
+platform cannot tell, and guessing "this one only reads" is the guess that
+would be wrong quietly.
+
+A Run that stops enters `waiting_approval`. It holds no lease and no container
+while it waits, and it resumes only when somebody answers on the *审批* page —
+never on its own. That page shows the **normalized call**, exactly as it was
+hashed. Approving allows that call and no other: change any argument and the
+approval stops covering it, and the Run asks again. Rejecting requires a
+reason, because the person whose Run stopped is not the person who stopped it.
+An unanswered approval expires (24 hours by default, configurable per
+workspace between five minutes and seven days) and the Run pauses with
+`approval_expired`.
+
+Two rules the console cannot bend. Only the end user who started a Run may
+answer a `user_confirmation`; an administrator who thinks the action should
+happen opens a governance approval and writes down why, and never answers in
+the user's name. And a decided approval is never decided again — an override is
+a new record, not a rewrite of somebody else's.
+
 ### What a Run cost, and what the platform will not claim
 
 Prices live on the model endpoint, as versions rather than as a current value.

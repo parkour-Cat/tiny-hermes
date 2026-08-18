@@ -197,8 +197,8 @@ egress-proxy，没配 proxy 就一个字节也发不出去，沙箱挂在一张�
 
 ## 6. 验收与记录
 
-- [ ] 后端、ruff、pyright、vitest、tsc、eslint、e2e 全跑。
-- [ ] 路线图 §6 的六条出口检查逐条对上：
+- [x] 后端、ruff、pyright、vitest、tsc、eslint、e2e 全跑。
+- [x] 路线图 §6 的六条出口检查逐条对上：
       - 关闭 `egress-proxy` 后所有出站工具与模型调用失败，没有回退到直连
         （M2C-1 已证，这里要在**工具**上再证一次）。
       - 工作空间允许、Agent 未允许的目标被拒；Run 级范围只能收窄不能放宽。
@@ -208,16 +208,16 @@ egress-proxy，没配 proxy 就一个字节也发不出去，沙箱挂在一张�
       - 审批通过后修改工具参数，原审批失效并重新排队。
       - `usage_quality=unavailable` 的端点上货币硬上限被禁用，
         而时间、调用次数与单次最大输出仍强制；未知费用不记为 0。
-- [ ] `tests/e2e/tools.spec.ts`：注册一个 HTTP 工具 → 绑给 Agent → 发布 →
+- [x] `tests/e2e/tools.spec.ts`：注册一个 HTTP 工具 → 绑给 Agent → 发布 →
       跑一轮只读调用 → 再跑一轮写调用 → 在控制台看到待审 →
       批准 → Run 继续并完成。
-- [ ] 写 `docs/superpowers/verification/2026-08-XX-m2c-tools-approvals.md`，
+- [x] 写 `docs/superpowers/verification/2026-08-XX-m2c-tools-approvals.md`，
       结构照 M2B/M2C-1：做了什么、走了哪一遍、出口检查逐条对证据、
       **哪些东西这一遍没能证明**、以及不声称什么。
       「不声称」一节至少要写清楚：预授权不是自动批准；
       schema 预算是估算而不是计量；未知费用不是零；
       MCP server 的返回内容与技能正文一样是不可信文本。
-- [ ] `docs/development.md` 加一节：管理员怎么注册一个 HTTP 工具与 MCP server，
+- [x] `docs/development.md` 加一节：管理员怎么注册一个 HTTP 工具与 MCP server，
       怎么读一条待审批，以及为什么写操作会停下来。
 
 ## 7. 这份计划替产品做的三个决定

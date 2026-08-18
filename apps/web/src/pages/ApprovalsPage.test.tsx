@@ -93,7 +93,8 @@ test("the arguments shown are the normalized ones the platform hashed", async ()
 
   // Rendered rather than summarized: a reviewer deciding from a summary this
   // console rewrote would be approving something nobody can check.
-  await screen.findByText(/http\.orders\.createOrder/);
+  // Twice per card now: once in the summary row, once in the document.
+  await screen.findAllByText(/http\.orders\.createOrder/);
   expect(screen.getByText(/abc-123/)).toBeInTheDocument();
 });
 
@@ -111,7 +112,8 @@ test("approving asks first and says what exactly it allows", async () => {
 
   renderApprovals();
 
-  await screen.findByText(/http\.orders\.createOrder/);
+  // Twice per card now: once in the summary row, once in the document.
+  await screen.findAllByText(/http\.orders\.createOrder/);
   await userEvent.click(screen.getByRole("button", { name: "批准" }));
   expect(await screen.findByText("这只允许这一次调用。换一个调用需要一条新的批准。")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "确定" }));
@@ -133,7 +135,8 @@ test("a rejection cannot be sent without a reason", async () => {
 
   renderApprovals();
 
-  await screen.findByText(/http\.orders\.createOrder/);
+  // Twice per card now: once in the summary row, once in the document.
+  await screen.findAllByText(/http\.orders\.createOrder/);
   await userEvent.click(screen.getByRole("button", { name: "拒绝" }));
   // Submitting an empty reason: the form refuses before the server has to.
   await userEvent.click(screen.getAllByRole("button", { name: "拒绝" })[1] as HTMLElement);
@@ -156,7 +159,8 @@ test("a rejection with a reason sends it", async () => {
 
   renderApprovals();
 
-  await screen.findByText(/http\.orders\.createOrder/);
+  // Twice per card now: once in the summary row, once in the document.
+  await screen.findAllByText(/http\.orders\.createOrder/);
   await userEvent.click(screen.getByRole("button", { name: "拒绝" }));
   await userEvent.type(await screen.findByRole("textbox"), "not this quarter");
   await userEvent.click(screen.getAllByRole("button", { name: "拒绝" })[1] as HTMLElement);

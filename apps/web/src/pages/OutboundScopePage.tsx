@@ -153,6 +153,12 @@ export function OutboundScopePage() {
         {admin ? (
           <Form<EntryValues>
             form={platformForm}
+            // Named, and so is the workspace form below. Without distinct
+            // names Ant Design generates the same control id for both `entry`
+            // fields, and the second form's label then points at the first
+            // form's input — wrong for a screen reader, and the reason an
+            // acceptance walk could fill one of the two and not the other.
+            name="platform-scope"
             layout="inline"
             requiredMark={false}
             onFinish={(values) => approvePlatform.mutate(values)}
@@ -192,6 +198,7 @@ export function OutboundScopePage() {
         </Typography.Paragraph>
         <Form<EntryValues>
           form={workspaceForm}
+          name="workspace-scope"
           layout="inline"
           requiredMark={false}
           onFinish={(values) => approveWorkspace.mutate(values)}
