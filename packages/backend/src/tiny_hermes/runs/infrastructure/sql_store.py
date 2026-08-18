@@ -18,6 +18,9 @@ from tiny_hermes.http_tools.infrastructure.tables import (
     HttpToolRow,
     HttpToolVersionRow,
 )
+from tiny_hermes.memory.domain.scope import scopes_for_run
+from tiny_hermes.memory.infrastructure.sql_library import SqlMemoryLibrary
+from tiny_hermes.memory.ports.library import RememberedFact
 from tiny_hermes.model_catalog.domain.pricing import Cost, CostQuality, TokenPrices
 from tiny_hermes.model_catalog.infrastructure.pricing_tables import (
     ModelPricingVersionRow,
@@ -129,6 +132,13 @@ RETRY_ERRORS: dict[str, RunCoordinationError] = {
 WAITING_HEAD_STATES = frozenset(
     {RunState.PAUSED, RunState.WAITING_APPROVAL, RunState.WAITING_EXTERNAL}
 )
+
+
+#: How many memories one scope may contribute to a round before the planner
+#: sees them. A ceiling on the read rather than on the segment: the segment's
+#: own budget decides what fits, and this stops a subject with ten thousand
+#: memories from being loaded into a process to find out.
+MEMORY_READ_LIMIT = 200
 
 
 class SqlRunStore:
@@ -689,6 +699,7 @@ class SqlRunStore:
             loaded_skills=await self._loaded_skills(run.id),
             http_operations=await self._bound_operations(spec),
             prices=await self._pinned_prices(run.model_pricing_version_id),
+            memories=await self._remembered(run, owning),
         )
 
     async def _bound_skills(self, spec: AgentSpec) -> tuple[BoundSkill, ...]:
@@ -730,6 +741,42 @@ class SqlRunStore:
                 )
             )
         return tuple(skills)
+
+    async def _remembered(
+        self, run: RunRow, session: SessionRow | None
+    ) -> tuple[RememberedFact, ...]:
+        """This Run's own two scopes, read as two scoped queries.
+
+        The subject comes from the Session's `CallerIdentity`, which is who
+        started the conversation — not from `runs.end_user_id`, which is who
+        may confirm. They are the same person for a `caller_type=user` Run
+        today, and writing the difference down here is what will keep §4.5's
+        end-user identity from being wired to the wrong one.
+
+        A Session that is gone means no subject, and no subject means no
+        private memory rather than everybody's.
+        """
+        if session is None:  # pragma: no cover - the caller read it
+            return ()
+        agent_id = await self._session.scalar(
+            select(AgentVersionRow.agent_id).where(
+                AgentVersionRow.id == run.agent_version_id
+            )
+        )
+        if agent_id is None:  # pragma: no cover - a Run always has a version
+            return ()
+        library = SqlMemoryLibrary(self._session)
+        found: list[RememberedFact] = []
+        for scope in scopes_for_run(
+            workspace_id=run.workspace_id,
+            agent_id=agent_id,
+            subject=CallerIdentity(
+                caller_type=CallerType(session.caller_type),
+                caller_id=session.caller_id,
+            ),
+        ):
+            found.extend(await library.active_in(scope, limit=MEMORY_READ_LIMIT))
+        return tuple(found)
 
     async def _pinned_prices(self, version_id: UUID | None) -> TokenPrices | None:
         """The price this Run fixed, read back.

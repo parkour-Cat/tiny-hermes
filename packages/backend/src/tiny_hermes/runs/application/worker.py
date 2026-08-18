@@ -1913,6 +1913,7 @@ def _plan(
         tool_schemas=_tool_schemas(context, mcp),
         history=context.history,
         skill_summaries=summaries,
+        memories=[fact.body for fact in context.memories],
         segments=(context.spec.context_budget or ContextBudget()).resolve(),
     )
 
@@ -1959,6 +1960,10 @@ def _request(
         tools=_tool_schemas(context, mcp),
         cache_hint=box.hint if box is not None else None,
         skill_summaries=plan.skill_summaries,
+        # From the context rather than from the plan: nothing trims memory
+        # yet, and §5 of the M2D plan is where the planner starts deciding
+        # which of these survive.
+        memories=tuple(fact.body for fact in context.memories),
     )
 
 

@@ -61,6 +61,16 @@ class ModelRequest:
     #: table, and neither the planner nor a person reading a Run could say
     #: which of them cost what — or trim one without touching the other.
     skill_summaries: tuple[str, ...] = ()
+    #: What this Run's subject and this Agent's workspace decided is worth
+    #: remembering, oldest first within each. Its own field for the reason
+    #: `skill_summaries` is one: glued onto the persona they would be one
+    #: string on the budget table, and neither the planner nor a person
+    #: reading a Run could say which of them cost what.
+    #:
+    #: Never a raw user message. §14.2 forbids it for shared memory and this
+    #: platform extends it to private: every line here is something somebody
+    #: proposed and something a policy admitted.
+    memories: tuple[str, ...] = ()
     #: Set when this slice began on a fresh writable layer. The provider places
     #: it with the platform's own rules rather than in the conversation, so a
     #: later turn cannot talk over it.
