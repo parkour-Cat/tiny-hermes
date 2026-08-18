@@ -12,7 +12,7 @@ model made into either a command the Controller will accept or a named refusal.
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
 from tiny_hermes.runs.domain.models import ToolCallBlock
 from tiny_hermes.sandbox.domain.command import (
@@ -37,6 +37,7 @@ IMPLEMENTED_TOOLS = (
     "file.write",
     "platform.wait",
     "skill.load",
+    "skill.propose",
 )
 
 #: Tools the platform answers itself. `authorize` turns a call into a
@@ -45,7 +46,7 @@ IMPLEMENTED_TOOLS = (
 #: rather than given a no-op command, because a no-op that reached the
 #: Controller would be a live container doing nothing while the Run is meant to
 #: be holding none at all.
-PLATFORM_TOOLS = frozenset({"platform.wait", "skill.load"})
+PLATFORM_TOOLS = frozenset({"platform.wait", "skill.load", "skill.propose"})
 
 #: The longest a round may ask to sleep, a little over a day. A Run in
 #: `waiting_external` holds its Session's head, so the model does not get to
@@ -173,6 +174,81 @@ SKILL_LOAD_SCHEMA: dict[str, Any] = {
 
 SKILL_LOAD_ARGUMENTS = frozenset({"skill", "path"})
 
+#: The same ceiling the catalog's own parser enforces, checked here so a model
+#: sending eighty files is told which limit it passed rather than having the
+#: whole call fail on the parse.
+MAX_PROPOSAL_FILES = 64
+
+
+SKILL_PROPOSE_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "skill.propose",
+        "description": (
+            "Propose a change to a skill, or a new skill, for a person to "
+            "review. This does not change anything: it opens a proposal that "
+            "a human approves or rejects, and only an approval creates a new "
+            "version. Nothing you propose affects this Run, and no Agent uses "
+            "the new version until someone republishes it. Send the whole "
+            "package, not a patch — every file the skill should end up with, "
+            "including an unchanged SKILL.md."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "files": {
+                    "type": "array",
+                    "description": (
+                        "The complete file set the skill should have, "
+                        f"at most {MAX_PROPOSAL_FILES} files."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": (
+                                    "A path inside the package, such as "
+                                    "SKILL.md or reference/rollback.md."
+                                ),
+                            },
+                            "content": {"type": "string", "description": "The whole file."},
+                        },
+                        "required": ["path", "content"],
+                        "additionalProperties": False,
+                    },
+                },
+                "skill": {
+                    "type": "string",
+                    "description": (
+                        "The bound skill this changes, exactly as given to "
+                        "you. Omit it to propose a new skill, named by the "
+                        "SKILL.md you send."
+                    ),
+                },
+            },
+            "required": ["files"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+SKILL_PROPOSE_ARGUMENTS = frozenset({"files", "skill"})
+
+@dataclass(frozen=True)
+class SkillProposeRequest:
+    """A well-formed proposal, still unparsed as a package.
+
+    Whether these files *are* a skill package is the catalog's question and it
+    answers it with its own refusals. This module only checks that the model
+    sent the shape it was asked for.
+    """
+
+    #: `(path, content)` pairs, in the order they arrived.
+    files: tuple[tuple[str, str], ...]
+    #: The bound skill this patches, or `None` for a new skill.
+    skill: str | None
+
 
 @dataclass(frozen=True)
 class SkillLoadRequest:
@@ -287,6 +363,8 @@ def schemas_for(bound: tuple[str, ...]) -> list[dict[str, Any]]:
             schemas.append(PLATFORM_WAIT_SCHEMA)
         elif name == "skill.load":
             schemas.append(SKILL_LOAD_SCHEMA)
+        elif name == "skill.propose":
+            schemas.append(SKILL_PROPOSE_SCHEMA)
         elif name in FILE_SCHEMAS:
             schemas.append(FILE_SCHEMAS[name])
     return schemas
@@ -334,7 +412,7 @@ def skill_load_of(call: ToolCallBlock) -> SkillLoadRequest:
         raise ToolRefused(
             RefusalReason.INVALID_ARGUMENTS, call.call_id, ",".join(sorted(unknown))
         )
-    skill = call.arguments.get("skill")
+    skill: object = call.arguments.get("skill")
     if not isinstance(skill, str) or not skill.strip():
         raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "skill")
     path = call.arguments.get("path", DEFAULT_SKILL_PATH)
@@ -343,6 +421,49 @@ def skill_load_of(call: ToolCallBlock) -> SkillLoadRequest:
     if path.startswith("/") or ".." in path.split("/"):
         raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "path")
     return SkillLoadRequest(skill=skill.strip(), path=path.strip())
+
+
+def skill_propose_of(call: ToolCallBlock) -> SkillProposeRequest:
+    """What `skill.propose` asked for, or a refusal.
+
+    Shape only, like `skill_load_of`. Whether the files parse as a package,
+    what the scan says about them, and whether this Run has already proposed
+    something are all answered where the catalog is.
+    """
+    unknown = set(call.arguments) - SKILL_PROPOSE_ARGUMENTS
+    if unknown:
+        raise ToolRefused(
+            RefusalReason.INVALID_ARGUMENTS, call.call_id, ",".join(sorted(unknown))
+        )
+    sent: object = call.arguments.get("files")
+    if not isinstance(sent, list) or not sent:
+        raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "files")
+    files = cast(list[object], sent)
+    if len(files) > MAX_PROPOSAL_FILES:
+        raise ToolRefused(
+            RefusalReason.INVALID_ARGUMENTS, call.call_id, f"files={len(files)}"
+        )
+    collected: list[tuple[str, str]] = []
+    for entry in files:
+        if not isinstance(entry, dict):
+            raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "files")
+        item = cast(dict[str, object], entry)
+        path = item.get("path")
+        content = item.get("content")
+        if not isinstance(path, str) or not path.strip():
+            raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "files[].path")
+        if not isinstance(content, str):
+            raise ToolRefused(
+                RefusalReason.INVALID_ARGUMENTS, call.call_id, "files[].content"
+            )
+        collected.append((path.strip(), content))
+    skill = call.arguments.get("skill")
+    if skill is not None and (not isinstance(skill, str) or not skill.strip()):
+        raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "skill")
+    return SkillProposeRequest(
+        files=tuple(collected),
+        skill=None if skill is None else skill.strip(),
+    )
 
 
 def authorize(*, bound: tuple[str, ...], call: ToolCallBlock) -> AuthorizedCall:

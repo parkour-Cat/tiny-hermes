@@ -17,6 +17,7 @@ from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
 from tiny_hermes.runs.application.tool_answers import (
     answer_platform_tool,
     answer_skill_load,
+    answer_skill_propose,
 )
 from tiny_hermes.runs.domain.context_budget import (
     ContextPlan,
@@ -58,6 +59,7 @@ from tiny_hermes.runs.ports.model import (
     UsageQuality,
 )
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
+from tiny_hermes.runs.ports.proposals import SkillProposals
 from tiny_hermes.runs.ports.skills import SkillLibrary
 from tiny_hermes.runs.ports.store import (
     AppendEventsCommand,
@@ -251,6 +253,7 @@ class WorkerRuntime:
         sandbox: SandboxSession | None = None,
         workspace: WorkspaceRuntime | None = None,
         skills: SkillLibrary | None = None,
+        proposals: SkillProposals | None = None,
     ) -> None:
         self._sessions = session_factory
         self._model = model
@@ -261,6 +264,7 @@ class WorkerRuntime:
         # absent is told so in the tool result rather than reading nothing and
         # believing the skill was empty.
         self._skills = skills
+        self._proposals = proposals
         # Optional, because a deployment with no tools configured needs none.
         # A Run that binds a tool and finds this absent fails rather than
         # running the command anywhere else — product design §16 leaves no
@@ -802,6 +806,14 @@ class WorkerRuntime:
                 if event is not None:
                     events.append(event)
                     loaded.append(UUID(str(event.payload["skill_version_id"])))
+                continue
+            if call.name == "skill.propose":
+                answered, event = await answer_skill_propose(
+                    self._proposals, context, call
+                )
+                results.append(answered)
+                if event is not None:
+                    events.append(event)
                 continue
             if call.name in PLATFORM_TOOLS:
                 # Answered here, never sent down. What this asks for happens to
