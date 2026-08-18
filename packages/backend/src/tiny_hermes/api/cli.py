@@ -7,7 +7,7 @@ import uuid
 
 import uvicorn
 
-from tiny_hermes.outbound.client import SafeOutboundClient
+from tiny_hermes.outbound.client import EgressRoute, SafeOutboundClient
 from tiny_hermes.runs.application.model_router import ModelRouter
 from tiny_hermes.runs.application.scheduler import (
     SchedulerRuntime,
@@ -71,8 +71,14 @@ async def _worker() -> None:
         model=ModelRouter(
             deterministic=DeterministicModelProvider(settings.deterministic_model_delay_ms),
             session_factory=sessions,
+            # A model call belongs to the platform and names no workspace: the
+            # endpoint it reaches was approved by a platform administrator, and
+            # a Run cannot widen that by being in one workspace rather than
+            # another. Absent egress settings make this client refuse rather
+            # than connect, which is what stops a misconfigured Worker from
+            # quietly going direct.
             client_factory=lambda: SafeOutboundClient(
-                approved=settings.approved_networks,
+                egress=_egress(settings),
                 connect_timeout=settings.outbound_connect_timeout_seconds,
                 read_timeout=settings.outbound_read_timeout_seconds,
                 max_redirects=settings.outbound_max_redirects,
@@ -111,6 +117,19 @@ async def _worker() -> None:
     finally:
         await notifier.close()
     logger.info("worker stopped", extra={"worker_id": worker_id})
+
+
+def _egress(settings: Settings) -> EgressRoute | None:
+    """The route out, when this deployment has one.
+
+    `None` when either half is unset, and a client built with `None` refuses
+    every call. Failing closed here rather than falling back is the whole of
+    the stage's exit check: nothing in the code can reach the network without
+    passing the boundary, so nobody has to remember not to.
+    """
+    if not settings.egress_proxy_url or not settings.egress_proxy_token:
+        return None
+    return EgressRoute(url=settings.egress_proxy_url, token=settings.egress_proxy_token)
 
 
 def _controller(settings: Settings) -> SandboxClient | None:

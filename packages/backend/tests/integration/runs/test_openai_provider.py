@@ -11,7 +11,6 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
-from ipaddress import ip_network
 from typing import Any
 
 import pytest
@@ -21,7 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from tiny_hermes.agents.domain.models import DeterministicModelPolicy
 from tiny_hermes.model_catalog.domain.models import ModelEndpointSpec
-from tiny_hermes.outbound.client import SafeOutboundClient
+from tiny_hermes.outbound.client import EgressRoute, SafeOutboundClient
 from tiny_hermes.outbound.domain.address_policy import (
     Address,
     AddressVerdict,
@@ -43,6 +42,7 @@ from tiny_hermes.runs.infrastructure.openai_model import (
 from tiny_hermes.runs.ports.model import ModelRequest, StopReason, UsageQuality
 
 from ..conftest import VALID_SPEC
+from ..egress_support import PROXY_TOKEN, ProxyHandle, running_proxy
 
 CREDENTIAL = "TINY_HERMES_TEST_MODEL_KEY"
 
@@ -162,10 +162,16 @@ def spec(base_url: str, **overrides: Any) -> ModelEndpointSpec:
     return ModelEndpointSpec.model_validate(fields)
 
 
-def outbound_client() -> SafeOutboundClient:
+@pytest.fixture
+async def proxy() -> AsyncIterator[ProxyHandle]:
+    """A model call crosses the boundary like everything else does."""
+    async with running_proxy() as handle:
+        yield handle
+
+
+def outbound_client(proxy: ProxyHandle) -> SafeOutboundClient:
     return SafeOutboundClient(
-        approved=[ip_network("127.0.0.0/8")],
-        policy=loopback_is_reachable,
+        egress=EgressRoute(url=proxy.url, token=PROXY_TOKEN),
         connect_timeout=2.0,
         read_timeout=5.0,
     )
@@ -198,10 +204,11 @@ class Recorded:
 
 
 async def test_a_round_completes_against_the_endpoint(
-    endpoint: tuple[FakeModel, str]
+    endpoint: tuple[FakeModel, str],
+    proxy: ProxyHandle,
 ) -> None:
     app, base_url = endpoint
-    async with outbound_client() as outbound:
+    async with outbound_client(proxy) as outbound:
         response = await OpenAICompatibleProvider(spec(base_url), outbound).complete(request())
 
     assert response.stop_reason is StopReason.COMPLETED
@@ -212,11 +219,12 @@ async def test_a_round_completes_against_the_endpoint(
 
 
 async def test_the_platforms_rules_precede_the_agents_persona(
-    endpoint: tuple[FakeModel, str]
+    endpoint: tuple[FakeModel, str],
+    proxy: ProxyHandle,
 ) -> None:
     """An Agent cannot talk its way past a rule it is placed underneath."""
     app, base_url = endpoint
-    async with outbound_client() as outbound:
+    async with outbound_client(proxy) as outbound:
         await OpenAICompatibleProvider(spec(base_url), outbound).complete(
             request(("user", "hello"), ("assistant", "hi"), ("user", "again"))
         )
@@ -232,10 +240,11 @@ async def test_the_platforms_rules_precede_the_agents_persona(
 
 
 async def test_the_credential_is_sent_and_appears_nowhere_else(
-    endpoint: tuple[FakeModel, str]
+    endpoint: tuple[FakeModel, str],
+    proxy: ProxyHandle,
 ) -> None:
     app, base_url = endpoint
-    async with outbound_client() as outbound:
+    async with outbound_client(proxy) as outbound:
         response = await OpenAICompatibleProvider(spec(base_url), outbound).complete(request())
 
     assert app.authorizations == ["Bearer not-a-real-key"]
@@ -244,12 +253,13 @@ async def test_the_credential_is_sent_and_appears_nowhere_else(
 
 
 async def test_a_rate_limit_is_retried_and_then_succeeds(
-    endpoint: tuple[FakeModel, str]
+    endpoint: tuple[FakeModel, str],
+    proxy: ProxyHandle,
 ) -> None:
     app, base_url = endpoint
     app.failures = [429, 429]
     sleeper = Recorded()
-    async with outbound_client() as outbound:
+    async with outbound_client(proxy) as outbound:
         response = await OpenAICompatibleProvider(
             spec(base_url), outbound, sleep=sleeper
         ).complete(request())
@@ -263,12 +273,13 @@ async def test_a_rate_limit_is_retried_and_then_succeeds(
 
 
 async def test_a_persistent_rate_limit_gives_up_after_three_attempts(
-    endpoint: tuple[FakeModel, str]
+    endpoint: tuple[FakeModel, str],
+    proxy: ProxyHandle,
 ) -> None:
     app, base_url = endpoint
     app.failures = [429, 429, 429, 429]
     sleeper = Recorded()
-    async with outbound_client() as outbound:
+    async with outbound_client(proxy) as outbound:
         response = await OpenAICompatibleProvider(
             spec(base_url), outbound, sleep=sleeper
         ).complete(request())
@@ -279,7 +290,8 @@ async def test_a_persistent_rate_limit_gives_up_after_three_attempts(
 
 
 async def test_an_unauthorized_endpoint_is_not_retried(
-    endpoint: tuple[FakeModel, str]
+    endpoint: tuple[FakeModel, str],
+    proxy: ProxyHandle,
 ) -> None:
     """A rejection on the merits will be rejected again.
 
@@ -290,7 +302,7 @@ async def test_an_unauthorized_endpoint_is_not_retried(
     app, base_url = endpoint
     app.failures = [401, 401, 401]
     sleeper = Recorded()
-    async with outbound_client() as outbound:
+    async with outbound_client(proxy) as outbound:
         response = await OpenAICompatibleProvider(
             spec(base_url), outbound, sleep=sleeper
         ).complete(request())
@@ -302,6 +314,7 @@ async def test_an_unauthorized_endpoint_is_not_retried(
 
 async def test_a_forbidden_address_is_refused_without_a_retry(
     monkeypatch: pytest.MonkeyPatch,
+    proxy: ProxyHandle,
 ) -> None:
     """The metadata service, reached by a literal so this needs no DNS.
 
@@ -311,22 +324,30 @@ async def test_a_forbidden_address_is_refused_without_a_retry(
     """
     monkeypatch.setenv(CREDENTIAL, "not-a-real-key")
     sleeper = Recorded()
-    async with SafeOutboundClient() as outbound:
+    async with outbound_client(proxy) as outbound:
         response = await OpenAICompatibleProvider(
             spec("https://169.254.169.254/v1"), outbound, sleep=sleeper
         ).complete(request())
 
     assert response.stop_reason is StopReason.FAILED
-    assert response.failure == "outbound_refused:link_local"
+    # Refused by the boundary rather than by this process, and not retried.
+    #
+    # The reason is the general one on purpose, and it is a real limit worth
+    # knowing: a TLS target is reached through `CONNECT`, so a refusal arrives
+    # as a tunnel that was never established and the specific rule cannot come
+    # back through it. The proxy logs which rule refused; a plaintext refusal
+    # does carry its name, and `test_safe_client.py` asserts that.
+    assert response.failure == "outbound_refused:egress_unavailable"
     assert sleeper.delays == []
 
 
 async def test_an_absent_credential_fails_the_round_rather_than_the_worker(
-    endpoint: tuple[FakeModel, str], monkeypatch: pytest.MonkeyPatch
+    endpoint: tuple[FakeModel, str], monkeypatch: pytest.MonkeyPatch,
+    proxy: ProxyHandle,
 ) -> None:
     app, base_url = endpoint
     monkeypatch.delenv(CREDENTIAL, raising=False)
-    async with outbound_client() as outbound:
+    async with outbound_client(proxy) as outbound:
         response = await OpenAICompatibleProvider(spec(base_url), outbound).complete(request())
 
     assert response.failure == "credential_missing"
@@ -334,11 +355,12 @@ async def test_an_absent_credential_fails_the_round_rather_than_the_worker(
 
 
 async def test_an_endpoint_that_reports_no_usage_is_not_guessed_at(
-    endpoint: tuple[FakeModel, str]
+    endpoint: tuple[FakeModel, str],
+    proxy: ProxyHandle,
 ) -> None:
     app, base_url = endpoint
     app.usage = {}
-    async with outbound_client() as outbound:
+    async with outbound_client(proxy) as outbound:
         response = await OpenAICompatibleProvider(spec(base_url), outbound).complete(request())
 
     assert response.stop_reason is StopReason.COMPLETED
@@ -347,11 +369,12 @@ async def test_an_endpoint_that_reports_no_usage_is_not_guessed_at(
 
 
 async def test_the_retry_budget_can_be_lowered_but_the_default_is_three(
-    endpoint: tuple[FakeModel, str]
+    endpoint: tuple[FakeModel, str],
+    proxy: ProxyHandle,
 ) -> None:
     app, base_url = endpoint
     app.failures = [503, 503, 503]
-    async with outbound_client() as outbound:
+    async with outbound_client(proxy) as outbound:
         await OpenAICompatibleProvider(
             spec(base_url), outbound, policy=RetryPolicy(max_attempts=1), sleep=Recorded()
         ).complete(request())
@@ -365,6 +388,7 @@ async def test_a_run_reaches_completed_with_text_the_endpoint_produced(
     scope: dict[str, str],
     admin_csrf: str,
     engine: AsyncEngine,
+    proxy: ProxyHandle,
 ) -> None:
     """The whole slice, end to end: register, publish, submit, execute.
 
@@ -435,7 +459,9 @@ async def test_a_run_reaches_completed_with_text_the_endpoint_produced(
         model=ModelRouter(
             deterministic=DeterministicModelProvider(delay_ms=0),
             session_factory=sessions,
-            client_factory=outbound_client,
+            # The Worker builds one per round, so it is a factory that closes
+            # over the boundary rather than a client passed in.
+            client_factory=lambda: outbound_client(proxy),
         ),
         notifier=NullWakeUpNotifier(),
         settings=WorkerSettings(

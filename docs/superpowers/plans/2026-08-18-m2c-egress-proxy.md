@@ -96,20 +96,22 @@ MCP 与 OpenAPI 工具、两类审批、费用安全阀。它们不是同一种�
 
 ## 3. 平台可信进程改走 proxy
 
-- [ ] `SafeOutboundClient` 增加 `proxy_url` 与调用方身份；配置里给出
+- [x] `SafeOutboundClient` 增加 `proxy_url` 与调用方身份；配置里给出
       `EGRESS_PROXY_URL`。**没有配置时的行为是拒绝，不是直连**——这是这一步唯一
       需要吵一次的决定，写在 §6。
-- [ ] 现有三个出站用途逐个接过去：模型调用（`openai_model.py`）、技能 Git 导入
+- [x] 现有三个出站用途逐个接过去：模型调用（`openai_model.py`）、技能 Git 导入
       （`skills/infrastructure/outbound_tarball.py`）、端点连通性检查。三处都已经
       在用 `SafeOutboundClient`，所以这一步改的是构造参数而不是调用点。
 - [ ] 模型端点的地址进入平台范围：管理员注册端点时，它的 host 自动成为
       `PlatformScope` 的一条。理由是运维现实——否则每注册一个端点都要再去改一遍
       出站范围，而两处不同步的第一个症状是 Run 在运行时失败。
-- [ ] `tests/unit/outbound/test_client_ban.py` 升级：现在禁的是「在 outbound 之外
+      **这一条推到 §4**：平台范围现在只是一条配置项，没有表也没有写入口，
+      而「注册端点时自动写一条」需要先有那张表。勾上的是其余四条。
+- [x] `tests/unit/outbound/test_client_ban.py` 升级：现在禁的是「在 outbound 之外
       造 HTTP 客户端」；再加一条**禁止在 outbound 之内绕过 proxy**——
       `httpx.AsyncClient(...)` 不带 `proxy=` 的构造在 `outbound/client.py` 里也失败。
       路线图 §6 的「任何绕过 proxy 直连的代码路径使检查失败」落在这里。
-- [ ] 集成测试：把 proxy 停掉，模型调用、技能导入、端点检查三条路径全部失败，
+- [x] 集成测试：把 proxy 停掉，模型调用、技能导入、端点检查三条路径全部失败，
       并且失败原因是 `egress_unavailable` 而不是超时。**没有任何一条回退到直连**，
       这是路线图第一条出口检查。
 

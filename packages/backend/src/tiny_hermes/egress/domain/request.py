@@ -65,12 +65,21 @@ class ProxyRequest:
         `Proxy-Authorization` is removed because it authenticates the caller to
         *this* proxy and is none of the target's business — sending it on would
         leak a platform credential to every host a Run talks to.
+
+        `Connection: close` is added, and it is a security property rather than
+        a politeness. A forwarded connection becomes a byte copy once the head
+        is sent, so a second request written onto the same connection would
+        reach the first request's target **unchecked**. Closing after one
+        exchange means there is no same connection to write it onto. A tunnel
+        does not need this: it is bound to one target that was already checked,
+        and what flows through it is TLS this proxy cannot read anyway.
         """
         lines = [f"{self.method} {self.path} {self.version}"]
         for key, value in self.headers:
-            if key.lower() in _HOP_BY_HOP:
+            if key.lower() in _HOP_BY_HOP or key.lower() == "connection":
                 continue
             lines.append(f"{key}: {value}")
+        lines.append("Connection: close")
         return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
 
 

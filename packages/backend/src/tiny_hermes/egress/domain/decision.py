@@ -199,7 +199,24 @@ def decide(
     answer = policy(addresses, approved)
     if not answer.allowed:
         return ProxyVerdict(allowed=False, address_reason=answer.reason)
+    if target.scheme == "http" and not _inside(answer.address, approved):
+        # Plaintext is an operator's deliberate choice on a network they own,
+        # and an approved range is exactly that network written down. The rule
+        # lived in `SafeOutboundClient` until the proxy existed; it belongs
+        # here now, because here it also binds a sandbox that never imports it.
+        return ProxyVerdict(
+            allowed=False, address_reason=RefusalReason.PLAINTEXT_NOT_APPROVED
+        )
     return ProxyVerdict(allowed=True, address=answer.address)
+
+
+def _inside(address: Address | None, approved: Sequence[Network]) -> bool:
+    if address is None:  # pragma: no cover - an allowed verdict carries one
+        return False
+    return any(
+        address.version == network.version and address in network
+        for network in approved
+    )
 
 
 def _has_network_entry(scope: OutboundScope) -> bool:

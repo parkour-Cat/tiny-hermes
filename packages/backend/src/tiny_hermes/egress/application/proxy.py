@@ -62,6 +62,16 @@ logger = logging.getLogger(__name__)
 #: looked up rather than believed.
 SCOPE_HEADER = "X-Tiny-Hermes-Scope"
 
+#: What a refusal from *this* proxy is marked with. A target answering 403 and
+#: the boundary answering 403 are different events, and a caller that could not
+#: tell them apart would retry one of them forever.
+REFUSED_HEADER = "X-Tiny-Hermes-Egress-Refusal"
+
+#: What a failure to reach the target is marked with instead. A refusal is a
+#: decision; this is the other end not answering, and only one of the two is
+#: worth trying again.
+UPSTREAM_HEADER = "X-Tiny-Hermes-Egress-Upstream"
+
 #: How long a caller has to send a request head, and how long a target has to
 #: accept a connection. Short: both are local decisions, and a proxy that waits
 #: minutes on either is a proxy an idle client can exhaust.
@@ -145,7 +155,9 @@ class EgressProxy:
             reader.readuntil(b"\r\n\r\n"), timeout=HEAD_TIMEOUT_SECONDS
         )
         if len(head) > MAX_HEAD_BYTES:
-            await _answer(writer, 431, ProxyRefusal.UNKNOWN_CALLER, "request head too large")
+            await _answer(
+                writer, 431, ProxyRefusal.UNKNOWN_CALLER.value, "request head too large"
+            )
             return
         try:
             request = parse_head(head)
@@ -157,7 +169,7 @@ class EgressProxy:
         if claim is None:
             # Before the target is looked at, so an unauthenticated caller
             # cannot use this proxy as a DNS oracle.
-            await _answer(writer, 407, ProxyRefusal.UNKNOWN_CALLER, "unknown caller")
+            await _answer(writer, 407, ProxyRefusal.UNKNOWN_CALLER.value, "unknown caller")
             return
 
         layers = await self._directory.layers_for(claim)
@@ -226,7 +238,11 @@ class EgressProxy:
             verdict.reason_text,
             claim.run_id,
         )
-        await _answer(writer, 403, verdict.refusal, verdict.reason_text)
+        # `reason_text` rather than the refusal enum: an address the policy
+        # turned down carries its reason under `address_reason`, and a header
+        # that said only "refused" would arrive at the caller as a reason it
+        # cannot name.
+        await _answer(writer, 403, verdict.reason_text, verdict.reason_text)
 
     async def _connect(
         self,
@@ -293,25 +309,37 @@ async def _copy(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> N
 async def _answer(
     writer: asyncio.StreamWriter,
     status: int,
-    refusal: ProxyRefusal | None,
+    reason: str | None,
     detail: str,
 ) -> None:
-    """A refusal in the protocol the caller is speaking, with its reason.
+    """An answer in the protocol the caller is speaking, saying who decided.
 
-    JSON rather than prose so the client can turn it back into a typed refusal.
-    `SafeOutboundClient` reads `reason` and raises `OutboundRefused` with it, so
-    a Run's failure names the scope that stopped it instead of a status code.
+    Two kinds, and telling them apart is the point. *This* proxy refusing is a
+    decision that will not change on a retry; the *target* being unreachable is
+    a failure that might. A plaintext refusal arrives at the caller as an
+    ordinary response, so without a named header the two would be one 4xx and a
+    guess.
+
+    JSON in the body as well, so an operator reading a log or a curl gets the
+    same sentence the client turns into a typed refusal.
     """
+    refused = status in _REFUSING
     body = json.dumps(
         {
-            "error": "egress_refused" if status == 403 else "egress_failed",
-            "reason": refusal.value if refusal is not None else None,
+            "error": "egress_refused" if refused else "egress_failed",
+            "reason": reason,
             "detail": detail,
         }
     ).encode()
+    marker = (
+        f"{REFUSED_HEADER}: {reason or 'refused'}"
+        if refused
+        else f"{UPSTREAM_HEADER}: unreachable"
+    )
     head = (
         f"HTTP/1.1 {status} {_REASONS.get(status, 'Error')}\r\n"
         f"Content-Type: application/json\r\n"
+        f"{marker}\r\n"
         f"Content-Length: {len(body)}\r\n"
         f"Connection: close\r\n\r\n"
     ).encode("latin-1")
@@ -321,6 +349,9 @@ async def _answer(
     except (ConnectionError, TimeoutError):  # pragma: no cover - caller gone
         pass
 
+
+#: Statuses where the proxy itself is the one saying no.
+_REFUSING = frozenset({400, 403, 407, 431})
 
 _REASONS = {
     400: "Bad Request",
