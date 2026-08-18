@@ -47,16 +47,16 @@ SessionWorkspace、事件、沙箱与费用记录;父子之间只经 Artifact �
 
 ## 1. 委派策略与交集：纯的那一半
 
-- [ ] `packages/backend/tests/unit/agents/test_delegation.py`：先写会失败的测试。
+- [x] `packages/backend/tests/unit/agents/test_delegation.py`：先写会失败的测试。
       `DelegationScope` 覆盖六个面:工具、文件、网络、密钥、技能、记忆。
       `intersect(parent, requested)` 只会收窄。
       测试要钉住:空集是空;父没有的面子一定没有;
       **没有任何参数组合能让结果比父宽**——这条用穷举参数化写。
-- [ ] `memory.read_private` / `memory.propose_private` 是记忆面的两个权限位
+- [x] `memory.read_private` / `memory.propose_private` 是记忆面的两个权限位
       (§13 第 5 条)。子 Agent 读的是 `workspace + 子 Agent + end_user`,
       **不是父 Agent 的 scope**——M2D 的 `MemoryScope` 已经保证了这一点,
       这里只需要不把父的 agent_id 传下去,并加一条测试证明没传。
-- [ ] `AgentSpec` 加 `delegation`：可委派的子 Agent 别名清单 + 每个的
+- [x] `AgentSpec` 加 `delegation`：可委派的子 Agent 别名清单 + 每个的
       `delegation_scope`。发布时检查子 Agent 存在、在同一工作空间、
       且其 scope 不超过本 Agent 自己的权限——**发布期就拒绝**,
       而不是等到运行时才发现交集是空的。
@@ -72,8 +72,8 @@ SessionWorkspace、事件、沙箱与费用记录;父子之间只经 Artifact �
 - [ ] 子 Run 继承:`budget_root_run_id`（红线四）、`end_user_id`、
       `CallerIdentity`。**不继承**:Session、SessionWorkspace、沙箱、
       私有记忆内容。各有一条测试。
-- [ ] 并行上限:`AgentLimits` 已有的位置加 `max_parallel_children`,
-      或放工作空间——**决定写在计划的第 8 节里**,不要两处都加。
+- [x] 并行上限:`DelegationPolicy.max_parallel`,和 `children` 在一起。
+      两个候选位置都没选,理由见第 8 节的更正。
 - [ ] 集成测试：一次委派两个子 Run,两个都真的跑起来,
       各自有独立 Session 和独立 SessionWorkspace;
       根预算的 `consumed_model_calls` 是三个 Run 的和,不是各自重置。
@@ -146,14 +146,19 @@ SessionWorkspace、事件、沙箱与费用记录;父子之间只经 Artifact �
 旧交集在做事了,而一个"现在去读"的实现会让它中途换一套权限。快照的代价是
 一行 JSON 的重复,换来的是"这个子 Run 是按什么权限跑的"事后可查。
 
-**二、并行上限放在 `AgentLimits`,不放工作空间。**
+**二、并行上限跟着委派走,既不在 `AgentLimits` 也不在工作空间。**
 M2C-2 的货币上限放在了工作空间,理由是「上限是运维的决定」。这条不一样:
 并行度是**这个 Agent 的任务形状**——一个做批量核对的 Agent 天然要开五个,
-一个做审批摘要的开一个就够——而 `AgentLimits` 已经是「这个 Agent 一次任务
-能花多少」的那张表。代价是它在被哈希的 spec 里,所以加字段会改内容哈希;
-这是可以接受的,因为 `AgentLimits` 本来就是 spec 的一部分,而不是像 M2C-2
-那样要往一个已经稳定的模型里插一个运维字段。**注意:这会让所有已发布版本的
-内容哈希改变,必须在实施时确认这是可接受的,否则退回工作空间方案。**
+一个做审批摘要的开一个就够。
+
+**这条计划原本写的是放进 `AgentLimits`,并要求实施时确认改哈希可接受。
+确认的结果是不可接受,所以按计划的退路走了,但退到了第三个地方。**
+`limits` 会被序列化进每一份规范化 spec,加个字段就会给这个平台写过的
+每一个内容哈希都换一遍。工作空间方案能避开这点,但会把「任务形状」错放成
+「运维决定」。实际做的是第三种:`AgentSpec.delegation` 是一个**可选的顶层
+文档**,不写就不带这个键——`skills`、`http_tools`、`mcp_tools` 依次做过同一个
+承诺,这是第八次。`max_parallel` 跟着 `children` 一起放在里面,既没动哈希,
+也没把它交给运维。一条测试直接钉住:不委派的 Agent 哈希与从前一模一样。
 
 **三、`any` 策略默认取消其余子 Run,不是默认留着跑完。**
 §13 第 10 条写的是「默认取消」,这里承接。另一个合理答案是留着跑完并把结果

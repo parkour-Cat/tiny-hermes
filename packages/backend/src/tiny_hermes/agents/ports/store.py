@@ -50,6 +50,17 @@ class AgentStore(Protocol):
 
     async def get_agent(self, workspace_id: UUID, agent_id: UUID) -> Agent | None: ...
 
+    async def published_aliases(
+        self, workspace_id: UUID, aliases: Sequence[str]
+    ) -> frozenset[str]:
+        """Which of these aliases name an Agent with a published version here.
+
+        Published rather than merely existing: a delegation to a draft is a
+        delegation to something no Run can start, and §13's children are
+        independent Runs.
+        """
+        ...
+
     async def update_agent(
         self,
         workspace_id: UUID,

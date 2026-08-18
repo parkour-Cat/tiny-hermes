@@ -185,6 +185,20 @@ class SqlAgentStore:
         )
         return None if row is None else _agent(row)
 
+    async def published_aliases(
+        self, workspace_id: UUID, aliases: Sequence[str]
+    ) -> frozenset[str]:
+        if not aliases:
+            return frozenset()
+        rows = await self._session.scalars(
+            select(AgentRow.alias).where(
+                AgentRow.workspace_id == workspace_id,
+                AgentRow.alias.in_(list(aliases)),
+                AgentRow.current_version_id.is_not(None),
+            )
+        )
+        return frozenset(rows.all())
+
     async def update_agent(
         self,
         workspace_id: UUID,

@@ -393,6 +393,58 @@ MAX_MCP_BINDINGS = 8
 MAX_BOUND_MCP_TOOLS = 32
 
 
+class ChildBinding(BaseModel):
+    """One child Agent this Agent may delegate to, and on what terms.
+
+    The alias rather than an id, because that is what an author writes and what
+    a model names in a call. It is resolved to a Version at publish, so a child
+    that was renamed or withdrawn is caught by the person who bound it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    alias: str = Field(min_length=1, max_length=64)
+    #: The six faces, each a list of names. Empty is empty: a face nobody named
+    #: grants nothing, and there is no way to write "everything the parent has"
+    #: — a child should be given what it needs rather than what is available.
+    tools: tuple[str, ...] = ()
+    files: tuple[str, ...] = ()
+    network: tuple[str, ...] = ()
+    secrets: tuple[str, ...] = ()
+    skills: tuple[str, ...] = ()
+    memory: tuple[Literal["memory.read_private", "memory.propose_private"], ...] = ()
+
+
+class DelegationPolicy(BaseModel):
+    """Who this Agent may delegate to, and how many at once.
+
+    Its own optional document rather than a field on `AgentLimits`, and that is
+    a deliberate correction to this plan's own §8: `limits` is serialized into
+    every normalized spec, so a field there would put a new key in every
+    published version's document and change every content hash this platform
+    has written. An absent `delegation` carries no key at all, which is the
+    same promise `skills`, `http_tools` and `mcp_tools` each made in turn.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    children: tuple[ChildBinding, ...] = Field(min_length=1)
+    #: How many children may run at once. The shape of this Agent's work rather
+    #: than an operator's decision — a batch reconciler wants five, a summary
+    #: Agent wants one — which is why it lives with the binding rather than on
+    #: the workspace.
+    max_parallel: int = Field(default=2, ge=1, le=8)
+
+    @field_validator("children")
+    @classmethod
+    def reject_repeated_aliases(
+        cls, value: tuple[ChildBinding, ...]
+    ) -> tuple[ChildBinding, ...]:
+        if len({child.alias for child in value}) != len(value):
+            raise ValueError("a child Agent may be bound once")
+        return value
+
+
 #: Discriminated, so a `provider` the platform does not understand is refused
 #: rather than falling through to the stand-in. An Agent that answers from a
 #: `match` statement while its author believes it is talking to a model is the
@@ -515,6 +567,10 @@ class AgentSpec(BaseModel):
     #: decides. Omitted from the normalized document when empty, the seventh
     #: widening to leave every earlier content hash alone.
     mcp_tools: tuple[McpToolBinding, ...] = ()
+    #: §13's delegation. Absent when this Agent delegates to nobody, and then
+    #: carrying no key — the eighth widening to leave every earlier content
+    #: hash exactly as it was.
+    delegation: DelegationPolicy | None = None
 
     @field_validator("mcp_tools")
     @classmethod
@@ -673,6 +729,12 @@ def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
         # declares none must carry no key so versions published before M2C
         # hash exactly as they did.
         normalized.pop("network", None)
+    if normalized.get("delegation") is None:
+        # The same promise one more time, and the reason it matters most here:
+        # `AgentLimits` would have been the natural home for a parallel ceiling
+        # and is serialized into every spec, so putting it there would have
+        # rewritten every hash. This key is absent unless an author wrote one.
+        normalized.pop("delegation", None)
     if not normalized.get("mcp_tools"):
         # Same promise as `http_tools`, one field later.
         normalized.pop("mcp_tools", None)
