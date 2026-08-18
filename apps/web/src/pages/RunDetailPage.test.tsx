@@ -31,6 +31,10 @@ const BUDGET = {
   consumed_tokens: 480,
   max_derived_retries: 2,
   derived_retry_count: 0,
+  max_cost: null,
+  cost_currency: "USD",
+  consumed_cost: "0.004500",
+  cost_quality: "provider",
 };
 
 function run(overrides: Record<string, unknown> = {}) {
@@ -414,4 +418,36 @@ test("a timeline event keeps its payload folded", async () => {
   const payload = screen.getByText(t("eventPayload")).closest("details");
   expect(payload).not.toBeNull();
   expect(payload).not.toHaveAttribute("open");
+});
+
+test("the cost is shown with where the number came from", async () => {
+  server.use(http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run())));
+  stream();
+
+  renderRun();
+
+  // The provenance is always shown, never only when it is bad: a figure whose
+  // origin appears sometimes is one a reader stops looking for.
+  expect(await screen.findByText("0.004500 USD / 不限")).toBeInTheDocument();
+  expect(screen.getByText("来自服务商")).toBeInTheDocument();
+});
+
+test("a Run whose endpoint has no price says unknown, never zero", async () => {
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () =>
+      HttpResponse.json(
+        run({
+          budget: { ...BUDGET, consumed_cost: null, cost_quality: "unknown" },
+        }),
+      ),
+    ),
+  );
+  stream();
+
+  renderRun();
+
+  // §12.4 as a person sees it. A console that showed `0` for both an unpriced
+  // endpoint and one priced at nothing would be where the distinction died.
+  expect(await screen.findByText("未知")).toBeInTheDocument();
+  expect(screen.getByText("未配置价格")).toBeInTheDocument();
 });

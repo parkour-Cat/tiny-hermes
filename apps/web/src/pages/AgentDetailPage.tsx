@@ -24,10 +24,15 @@ import type {
   AgentSpecDocument,
   AgentVersionDetailResponse,
   AgentVersionResponse,
+  HttpToolResponse,
+  HttpToolVersionResponse,
+  McpServerResponse,
+  McpServerVersionResponse,
   ModelEndpointSummary,
   OutboundScopeEntry,
   SkillResponse,
   SkillVersionResponse,
+  WritePolicy,
 } from "../api/types";
 import { IMPLEMENTED_TOOLS, MODEL_SCENARIOS } from "../api/types";
 import { useT } from "../i18n/locale";
@@ -51,7 +56,34 @@ type DraftValues = {
   skills: string[];
   /** Targets this Agent may reach, chosen from what the workspace approved. */
   network: string[];
+  /**
+   * Bound HTTP operations as `versionId::operationId`, and MCP tools as
+   * `versionId::toolName`.
+   *
+   * One flat list rather than a nested editor because that is what a
+   * multi-select can hold, and the pair is split back apart on the way into
+   * the spec. The version id is on the left of every value, so a binding can
+   * never lose which document it was made against.
+   */
+  http_tools: string[];
+  mcp_tools: string[];
+  /** §16.3's choice, one per bound tool family. */
+  http_write_policy: WritePolicy | undefined;
+  mcp_write_policy: WritePolicy | undefined;
 };
+
+/** Splits `versionId::name` back into its two halves. */
+function pairsOf(values: string[]): Map<string, string[]> {
+  const grouped = new Map<string, string[]>();
+  for (const value of values) {
+    const [versionId = "", name = ""] = value.split("::");
+    if (versionId === "" || name === "") {
+      continue;
+    }
+    grouped.set(versionId, [...(grouped.get(versionId) ?? []), name]);
+  }
+  return grouped;
+}
 
 /** One bound summary's estimated cost, as a refused publish reports it. */
 type SummaryCost = { skill: string; estimated_tokens: number };
@@ -80,6 +112,14 @@ function summaryCostsOf(error: unknown): SummaryCost[] | null {
   return costs.length === 0 ? null : costs;
 }
 
+const WRITE_POLICIES: WritePolicy[] = ["disabled", "preauthorized", "governance"];
+
+const WRITE_POLICY_LABELS: Record<WritePolicy, MessageKey> = {
+  disabled: "writeDisabled",
+  preauthorized: "writePreauthorized",
+  governance: "writeGovernance",
+};
+
 type NameValues = {
   name: string;
   alias: string;
@@ -101,6 +141,18 @@ function valuesOf(draft: AgentDraftResponse): DraftValues {
     sync_timeout_seconds: delivery.sync_timeout_seconds,
     skills: (draft.spec.skills ?? []).map((binding) => binding.skill_version_id),
     network: [...(draft.spec.network?.allow ?? [])],
+    http_tools: (draft.spec.http_tools ?? []).flatMap((binding) =>
+      binding.operations.map((name) => `${binding.http_tool_version_id}::${name}`),
+    ),
+    mcp_tools: (draft.spec.mcp_tools ?? []).flatMap((binding) =>
+      binding.tools.map((name) => `${binding.mcp_server_version_id}::${name}`),
+    ),
+    // One policy per family rather than per binding: the form offers one
+    // choice, and every binding it writes carries it. An author who needs two
+    // different answers publishes two Agents, which is the honest shape of
+    // that requirement.
+    http_write_policy: (draft.spec.http_tools ?? [])[0]?.write_policy ?? undefined,
+    mcp_write_policy: (draft.spec.mcp_tools ?? [])[0]?.write_policy ?? undefined,
   };
 }
 
@@ -131,6 +183,24 @@ function specOf(values: DraftValues): AgentSpecDocument {
     // publishes the same document it published before skills existed.
     spec.skills = values.skills.map((id) => ({ skill_version_id: id }));
   }
+  // Same rule for both tool families, and for the same reason: an Agent that
+  // binds none must publish the document it published before they existed.
+  const http = pairsOf(values.http_tools);
+  if (http.size > 0) {
+    spec.http_tools = [...http].map(([versionId, operations]) => ({
+      http_tool_version_id: versionId,
+      operations,
+      write_policy: values.http_write_policy ?? null,
+    }));
+  }
+  const mcp = pairsOf(values.mcp_tools);
+  if (mcp.size > 0) {
+    spec.mcp_tools = [...mcp].map(([versionId, tools]) => ({
+      mcp_server_version_id: versionId,
+      tools,
+      write_policy: values.mcp_write_policy ?? null,
+    }));
+  }
   const timeout = values.sync_timeout_seconds ?? DEFAULT_DELIVERY.sync_timeout_seconds;
   if (
     values.delivery_enabled !== DEFAULT_DELIVERY.enabled ||
@@ -152,6 +222,9 @@ function summarizeSpec(spec: AgentSpecDocument): Record<string, string> {
     tools: spec.tools.join(", ") || "—",
     skills: (spec.skills ?? []).map((binding) => binding.skill_version_id).join(", ") || "—",
     network: (spec.network?.allow ?? []).join(", ") || "—",
+    http_tools:
+      (spec.http_tools ?? []).flatMap((binding) => binding.operations).join(", ") || "—",
+    mcp_tools: (spec.mcp_tools ?? []).flatMap((binding) => binding.tools).join(", ") || "—",
     max_execution_seconds: String(spec.limits.max_execution_seconds),
     max_elapsed_seconds: String(spec.limits.max_elapsed_seconds),
     max_model_calls: String(spec.limits.max_model_calls),
@@ -227,6 +300,46 @@ export function AgentDetailPage() {
       );
       return lists;
     },
+  });
+  // The two tool catalogs, read for the same reason the skills are: a binding
+  // made against a stale list is a binding to a version that may since have
+  // been withdrawn, and publishing would refuse it with a message about a
+  // version nobody remembers choosing.
+  const httpTools = useQuery({
+    queryKey: ["http-tools", workspaceId] as const,
+    queryFn: () => api<HttpToolResponse[]>("/api/v1/http-tools", scope),
+  });
+  const httpVersions = useQuery({
+    queryKey: ["http-tool-options", workspaceId, (httpTools.data ?? []).length] as const,
+    enabled: (httpTools.data ?? []).length > 0,
+    queryFn: async () =>
+      Promise.all(
+        (httpTools.data ?? []).map(async (tool) => ({
+          tool,
+          versions: await api<HttpToolVersionResponse[]>(
+            `/api/v1/http-tools/${tool.id}/versions`,
+            scope,
+          ),
+        })),
+      ),
+  });
+  const mcpServers = useQuery({
+    queryKey: ["mcp-servers", workspaceId] as const,
+    queryFn: () => api<McpServerResponse[]>("/api/v1/mcp-servers", scope),
+  });
+  const mcpVersions = useQuery({
+    queryKey: ["mcp-options", workspaceId, (mcpServers.data ?? []).length] as const,
+    enabled: (mcpServers.data ?? []).length > 0,
+    queryFn: async () =>
+      Promise.all(
+        (mcpServers.data ?? []).map(async (server) => ({
+          server,
+          versions: await api<McpServerVersionResponse[]>(
+            `/api/v1/mcp-servers/${server.id}/versions`,
+            scope,
+          ),
+        })),
+      ),
   });
   // What this workspace approved, which is exactly the list of choices an
   // author has. Offered rather than typed: an entry outside it is refused at
@@ -604,6 +717,73 @@ export function AgentDetailPage() {
                   })),
               }))}
             />
+          </Form.Item>
+          <Typography.Title level={5}>{t("agentHttpTools")}</Typography.Title>
+          <Typography.Paragraph type="secondary">{t("agentHttpToolsHint")}</Typography.Paragraph>
+          <Form.Item name="http_tools" label={t("agentHttpTools")}>
+            <Select
+              mode="multiple"
+              allowClear
+              loading={httpTools.isLoading || httpVersions.isLoading}
+              placeholder={t("emptyHttpTools")}
+              // Grouped by tool and version, and the label carries whether the
+              // operation writes: what an author needs while choosing is
+              // whether this one will stop for a person.
+              options={(httpVersions.data ?? []).flatMap((entry) =>
+                entry.versions
+                  .filter((version) => version.bindable)
+                  .map((version) => ({
+                    label: `${entry.tool.name} v${String(version.version_number)}`,
+                    options: version.operations.map((operation) => ({
+                      value: `${version.id}::${operation.operation_id}`,
+                      label: operation.read_only
+                        ? `${operation.method} ${operation.operation_id}`
+                        : `${operation.method} ${operation.operation_id} · ${t("httpToolWrites")}`,
+                    })),
+                  })),
+              )}
+            />
+          </Form.Item>
+          <Form.Item
+            name="http_write_policy"
+            label={t("agentWritePolicy")}
+            extra={t("agentWritePolicyHint")}
+          >
+            <Select allowClear options={WRITE_POLICIES.map((value) => ({
+              value,
+              label: t(WRITE_POLICY_LABELS[value]),
+            }))} />
+          </Form.Item>
+          <Typography.Title level={5}>{t("agentMcpTools")}</Typography.Title>
+          <Typography.Paragraph type="secondary">{t("agentMcpHint")}</Typography.Paragraph>
+          <Form.Item name="mcp_tools" label={t("agentMcpTools")}>
+            <Select
+              mode="multiple"
+              allowClear
+              loading={mcpServers.isLoading || mcpVersions.isLoading}
+              placeholder={t("emptyMcpServers")}
+              options={(mcpVersions.data ?? []).flatMap((entry) =>
+                entry.versions
+                  .filter((version) => version.bindable)
+                  .map((version) => ({
+                    label: `${entry.server.name} v${String(version.version_number)}`,
+                    options: version.tools.map((tool) => ({
+                      value: `${version.id}::${tool.name}`,
+                      label: tool.name,
+                    })),
+                  })),
+              )}
+            />
+          </Form.Item>
+          <Form.Item
+            name="mcp_write_policy"
+            label={t("agentWritePolicy")}
+            extra={t("agentWritePolicyHint")}
+          >
+            <Select allowClear options={WRITE_POLICIES.map((value) => ({
+              value,
+              label: t(WRITE_POLICY_LABELS[value]),
+            }))} />
           </Form.Item>
           <Typography.Title level={5}>{t("agentNetwork")}</Typography.Title>
           <Typography.Paragraph type="secondary">{t("agentNetworkHint")}</Typography.Paragraph>

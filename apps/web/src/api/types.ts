@@ -87,6 +87,31 @@ export type AgentSpecDocument = {
    * edited and the Agent being published again — deliberately two acts.
    */
   skills?: { skill_version_id: string }[];
+  /**
+   * Bound HTTP operations, by document version id and never by tool name.
+   *
+   * `write_policy` is required at publish for any bound operation that writes:
+   * §16.3 wants the choice made rather than defaulted, because all three
+   * answers are defensible and none is safe to assume.
+   */
+  http_tools?: {
+    http_tool_version_id: string;
+    operations: string[];
+    write_policy: WritePolicy | null;
+  }[];
+  /**
+   * Bound MCP tools, by server snapshot id and an explicit name subset. There
+   * is deliberately no way to say "all of them" — see `agentMcpHint`.
+   *
+   * `write_policy` is required for *every* MCP binding rather than only for
+   * ones that write, because an MCP server does not say which of its tools
+   * change something and the platform cannot tell.
+   */
+  mcp_tools?: {
+    mcp_server_version_id: string;
+    tools: string[];
+    write_policy: WritePolicy | null;
+  }[];
 };
 
 export type AgentDraftResponse = {
@@ -147,6 +172,23 @@ export type BudgetDocument = {
   consumed_tokens: number;
   max_derived_retries: number;
   derived_retry_count: number;
+  /**
+   * The most this Run may spend, as a decimal string, or null for no limit.
+   *
+   * A string rather than a number all the way to the screen: JSON numbers are
+   * floats, and money that went through one is money two people can disagree
+   * about.
+   */
+  max_cost: string | null;
+  cost_currency: string | null;
+  /**
+   * What it has spent. **Null is unknown, never zero.** A Run whose endpoint
+   * has no configured price never gets a number here, and the console says
+   * "unknown" in words rather than showing a nought.
+   */
+  consumed_cost: string | null;
+  /** How that number was arrived at: `provider`, `estimated` or `unknown`. */
+  cost_quality: string;
 };
 
 /** Which round the Run is on, and what the platform decided about it. */
@@ -390,5 +432,123 @@ export type OutboundScopeEntry = {
    * no button.
    */
   managed: boolean;
+  created_at: string;
+};
+
+/**
+ * What happens when a bound tool would change something at the far end.
+ *
+ * All three are defensible and none is a safe default, which is why publishing
+ * refuses a binding that chose nothing.
+ */
+export type WritePolicy = "disabled" | "preauthorized" | "governance";
+
+/** One HTTP tool a workspace registered. */
+export type HttpToolResponse = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  base_url: string;
+  credential_ref: string | null;
+  current_version_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type HttpOperationResponse = {
+  operation_id: string;
+  method: string;
+  path: string;
+  summary: string | null;
+  /** False for anything that changes data, which is what needs an approval. */
+  read_only: boolean;
+};
+
+export type HttpToolVersionResponse = {
+  id: string;
+  http_tool_id: string;
+  version_number: number;
+  content_hash: string;
+  title: string;
+  document_version: string;
+  operations: HttpOperationResponse[];
+  status: string;
+  bindable: boolean;
+  created_at: string;
+};
+
+/** One MCP server a workspace registered. */
+export type McpServerResponse = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  url: string;
+  credential_ref: string | null;
+  current_version_id: string | null;
+  /**
+   * When this platform last got an answer out of it. "Registered" and
+   * "reachable" are different facts and the list shows both.
+   */
+  last_validated_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type McpToolResponse = {
+  name: string;
+  description: string | null;
+  input_schema: Record<string, unknown>;
+};
+
+export type McpServerVersionResponse = {
+  id: string;
+  mcp_server_id: string;
+  version_number: number;
+  content_hash: string;
+  tools: McpToolResponse[];
+  status: string;
+  bindable: boolean;
+  created_at: string;
+};
+
+/** One request for a person's decision. */
+export type ApprovalResponse = {
+  id: string;
+  run_id: string;
+  /**
+   * `user_confirmation` may only be answered by the EndUser who started the
+   * Run; `governance_approval` only by a workspace or platform administrator.
+   * The console shows the two apart because they are two different powers.
+   */
+  approval_type: "user_confirmation" | "governance_approval";
+  status: string;
+  tool: string;
+  /** The normalized call, exactly as it was hashed. */
+  document: Record<string, unknown>;
+  required_permission: string | null;
+  requested_by: string;
+  expires_at: string;
+  decided_by: string | null;
+  decided_at: string | null;
+  decision_reason: string | null;
+};
+
+/** What an endpoint charges, as one recorded version. */
+export type PricingVersionResponse = {
+  id: string;
+  endpoint_id: string;
+  version_number: number;
+  currency: string;
+  input_per_million: string;
+  output_per_million: string;
+  cached_input_per_million: string | null;
+  /**
+   * True when an administrator declared this endpoint free. Its own field so
+   * nothing has to infer it from two zeroes — "priced at nothing" and "not
+   * priced" are different states and only this one is a price.
+   */
+  free: boolean;
+  effective_at: string;
+  created_by: string;
   created_at: string;
 };

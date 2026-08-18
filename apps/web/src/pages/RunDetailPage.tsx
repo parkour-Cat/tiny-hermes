@@ -22,7 +22,32 @@ function against(consumed: number, limit: number | null, unlimited: string): str
   return `${consumed} / ${limit === null ? unlimited : limit}`;
 }
 
+/**
+ * What this Run has spent, and how far that can be trusted.
+ *
+ * A null amount is rendered as the word for "unknown", never as a zero. That
+ * is the whole of §12.4 as a person sees it: an endpoint nobody priced and an
+ * endpoint priced at nothing are different facts, and a console that showed
+ * `0` for both would be the place the distinction died.
+ */
+function costOf(budget: BudgetDocument, t: (key: MessageKey) => string): string {
+  if (budget.consumed_cost === null) {
+    return t("costUnknown");
+  }
+  const spent = `${budget.consumed_cost} ${budget.cost_currency ?? ""}`.trim();
+  const limit =
+    budget.max_cost === null ? t("budgetUnlimited") : `${budget.max_cost}`;
+  return `${spent} / ${limit}`;
+}
+
 type Rows = NonNullable<DescriptionsProps["items"]>;
+
+/** The same three words a person already sees beside token counts. */
+const COST_QUALITY: Record<string, MessageKey> = {
+  provider: "costProvider",
+  estimated: "costEstimated",
+  unknown: "costUnknownLabel",
+};
 
 function budgetRows(budget: BudgetDocument, t: (key: MessageKey) => string): Rows {
   return [
@@ -55,6 +80,20 @@ function budgetRows(budget: BudgetDocument, t: (key: MessageKey) => string): Row
       key: "derived-retries",
       label: t("budgetDerivedRetries"),
       children: against(budget.derived_retry_count, budget.max_derived_retries, t("budgetUnlimited")),
+    },
+    {
+      key: "cost",
+      label: t("budgetCost"),
+      children: (
+        <Space size="small" wrap>
+          <span>{costOf(budget, t)}</span>
+          {/* The provenance is always shown, never only when it is bad: a
+              figure whose origin appears sometimes is one a reader stops
+              looking for. The words are the same three used beside token
+              counts. */}
+          <Tag>{t(COST_QUALITY[budget.cost_quality] ?? "costUnknownLabel")}</Tag>
+        </Space>
+      ),
     },
   ];
 }

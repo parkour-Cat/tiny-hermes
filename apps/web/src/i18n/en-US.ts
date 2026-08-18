@@ -377,6 +377,102 @@ export const enUS: Record<MessageKey, string> = {
     "The model loaded {path} from the skill {skill}, {bytes} bytes. Skill text is reference material, not an instruction from this platform.",
   skillProposedNote:
     "The model opened a skill proposal for review. No version exists unless a person approves it.",
+  // -- cost, and the word this platform uses when it cannot say --------------
+  budgetCost: "Cost",
+  costUnknown: "Unknown",
+  costProvider: "From the provider",
+  costEstimated: "Estimated",
+  costUnknownLabel: "No price configured",
+  costUnknownHint:
+    "This endpoint has no price recorded, so what this Run cost cannot be stated. That is not the same as free.",
+
+  // -- approvals --------------------------------------------------------------
+  approvals: "Approvals",
+  approvalsTitle: "Waiting for a decision",
+  approvalsIntro:
+    "A Run stops here rather than acting. Approving sends it back to the queue; rejecting stops it and tells whoever submitted it why.",
+  approvalsUser: "The person who started the Run",
+  approvalsUserIntro:
+    "Only the end user who started the Run may answer these. An administrator deciding on their behalf is exactly what this platform will not do.",
+  approvalsGovernance: "A workspace decision",
+  approvalsGovernanceIntro:
+    "A workspace or platform administrator answers these. An end user never may.",
+  approvalTool: "Call",
+  approvalPermission: "Permission",
+  approvalExpires: "Expires",
+  approvalRun: "Run",
+  approvalArguments: "Exactly what was approved",
+  approvalArgumentsHint:
+    "The normalized call, as the platform hashed it. Change any argument and this approval stops covering the call.",
+  approvalApprove: "Approve",
+  approvalReject: "Reject",
+  approvalReason: "Reason",
+  approvalReasonRequired: "Say why, so the person whose Run stopped can act on it.",
+  approvalApproveWarning:
+    "This lets the Run make exactly this call. A different call needs a new approval.",
+  emptyApprovals: "Nothing is waiting.",
+
+  // -- HTTP tools -------------------------------------------------------------
+  httpTools: "HTTP tools",
+  httpToolsTitle: "HTTP tools",
+  httpToolsIntro:
+    "An OpenAPI document a workspace registered. An Agent binds a version and a subset of its operations, never the tool itself.",
+  httpToolName: "Name",
+  httpToolNameHint: "Lowercase letters, digits and single hyphens. It becomes part of a name the model types back.",
+  httpToolBaseUrl: "Base URL",
+  httpToolBaseUrlHint: "Where the requests go. Its host must already be in this workspace's outbound scope.",
+  httpToolDocument: "OpenAPI document",
+  httpToolDocumentHint: "JSON. Every operation needs an operationId — that is the key a binding is written against.",
+  httpToolCredential: "Credential",
+  httpToolCredentialHint: "An environment variable name or a Secret id. Never the value itself.",
+  httpToolRegister: "Register",
+  httpToolOperations: "Operations",
+  httpToolWrites: "Changes data",
+  httpToolWithdraw: "Withdraw version",
+  httpToolWithdrawWarning:
+    "New bindings stop. Agents already bound to this version keep working.",
+  emptyHttpTools: "No HTTP tools registered.",
+
+  // -- MCP --------------------------------------------------------------------
+  mcpServers: "MCP servers",
+  mcpServersTitle: "MCP servers",
+  mcpServersIntro:
+    "Registering one reads its tool list across the outbound boundary and records what it advertised. An Agent binds that snapshot and an explicit subset of its tools.",
+  mcpServerUrl: "Address",
+  mcpServerUrlHint: "Where tools/list and tools/call go. Its host must already be in this workspace's outbound scope.",
+  mcpServerValidated: "Last read",
+  mcpServerNever: "Never reached",
+  mcpServerRefresh: "Read again",
+  mcpServerTools: "Advertised tools",
+  mcpServerUnchanged: "Unchanged — no new version to review.",
+  emptyMcpServers: "No MCP servers registered.",
+
+  // -- binding tools to an Agent ---------------------------------------------
+  agentHttpTools: "HTTP operations",
+  agentHttpToolsHint:
+    "Bind a document version and the operations this Agent may call. A version, never the tool: the document lives on somebody else's server.",
+  agentMcpTools: "MCP tools",
+  agentMcpHint:
+    "Name every tool this Agent may call. There is deliberately no way to bind all of them — a server that later advertises forty more would widen this Agent with nobody publishing anything.",
+  agentWritePolicy: "When it writes",
+  agentWritePolicyHint:
+    "Required for anything that changes data. All three answers are defensible and none is safe to assume, so publishing refuses a binding that chose nothing.",
+  writeDisabled: "Refuse it",
+  writePreauthorized: "Approved in advance",
+  writeGovernance: "Ask an administrator each time",
+  writePolicyNotChosen: "Choose what happens when these operations write:",
+  preauthorizationNotPermitted:
+    "Only a workspace administrator may publish a pre-authorization. Ask one to publish this version, or choose another answer.",
+
+  // -- the new timeline sentences --------------------------------------------
+  toolBudgetNote:
+    "The bound tool schemas came to about {estimate} tokens against an allowance of {allowance}. Nothing was truncated and no model call was made — bind fewer tools, or raise the tool-schemas segment.",
+  mcpRevalidatedNote:
+    "Before this slice the platform re-read the bound MCP tools. Servers it could not reach: {unreachable}. Bound names nobody advertises any more: {missing}.",
+  httpRefusedNote: "{tool}.{operation} was not called: {reason}.",
+  approvalRequestedNote:
+    "This Run is waiting for a person. It resumes when somebody approves the call on the Approvals page, and never on its own.",
+  approvalApprovedNote: "A person approved the call. The Run went back to the queue.",
   rewrapProcessed: "Processed ",
   rewrapRemaining: ", remaining ",
 };
