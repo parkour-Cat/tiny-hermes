@@ -5,6 +5,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from tiny_hermes.agents.domain.models import AgentSpec
+from tiny_hermes.model_catalog.domain.pricing import Cost, TokenPrices
 from tiny_hermes.runs.domain.context_budget import ContextWindow
 from tiny_hermes.runs.domain.models import (
     BoundSkill,
@@ -196,6 +197,11 @@ class RecordSliceCommand:
     #: predate the row that announced it.
     wait_kind: str | None = None
     wait_seconds: int | None = None
+    #: What this round cost, as `model_catalog.domain.pricing` computed it.
+    #: `None` when nothing can be said — no configured price, or an endpoint
+    #: that reported no usage — and the store then keeps the Run's total
+    #: unknown from here on rather than adding a zero to it.
+    cost: Cost | None = None
 
 
 @dataclass(frozen=True)
@@ -247,6 +253,11 @@ class ExecutionContext:
     #: operation — so a round composes a request without asking the catalog
     #: anything mid-flight.
     http_operations: tuple[BoundOperation, ...] = ()
+    #: What this Run is priced at, fixed when it was created (§12.4). `None`
+    #: for a deterministic Agent, for an endpoint nobody has priced, and for a
+    #: Run created before anybody entered one — all three mean the same thing
+    #: downstream, and none of them means free.
+    prices: TokenPrices | None = None
 
     @property
     def messages(self) -> tuple[CanonicalMessage, ...]:

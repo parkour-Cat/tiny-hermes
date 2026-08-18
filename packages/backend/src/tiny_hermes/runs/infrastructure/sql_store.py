@@ -1,6 +1,7 @@
 import hashlib
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -16,6 +17,10 @@ from tiny_hermes.http_tools.infrastructure.documents import operation_from_docum
 from tiny_hermes.http_tools.infrastructure.tables import (
     HttpToolRow,
     HttpToolVersionRow,
+)
+from tiny_hermes.model_catalog.domain.pricing import Cost, CostQuality, TokenPrices
+from tiny_hermes.model_catalog.infrastructure.pricing_tables import (
+    ModelPricingVersionRow,
 )
 from tiny_hermes.model_catalog.infrastructure.tables import ModelEndpointRow
 from tiny_hermes.runs.application.service import (
@@ -103,7 +108,7 @@ from tiny_hermes.runs.ports.store import (
 )
 from tiny_hermes.skills.infrastructure.tables import SkillRow, SkillVersionRow
 from tiny_hermes.tenancy.domain.models import Role
-from tiny_hermes.tenancy.infrastructure.tables import MembershipRow
+from tiny_hermes.tenancy.infrastructure.tables import MembershipRow, WorkspaceRow
 from tiny_hermes.tools.domain.http_calls import BoundOperation
 
 RESERVE_SEQUENCES = text(
@@ -221,6 +226,11 @@ class SqlRunStore:
 
         run_id = uuid4()
         now = datetime.now(UTC)
+        # Both read once, here, and copied onto the Run. §12.4: a price
+        # correction or a raised ceiling entered tomorrow must not change what
+        # a Run that is already running is measured at.
+        pricing_version_id = await self._current_pricing(version_id)
+        ceiling = await self._cost_ceiling(command.workspace_id)
         run = RunRow(
             id=run_id,
             workspace_id=command.workspace_id,
@@ -246,6 +256,7 @@ class SqlRunStore:
                 if command.caller.caller_type is CallerType.USER
                 else None
             ),
+            model_pricing_version_id=pricing_version_id,
             created_at=now,
             updated_at=now,
         )
@@ -267,7 +278,7 @@ class SqlRunStore:
                 created_at=now,
             )
         )
-        self._session.add(_new_budget(run_id, limits, now))
+        self._session.add(_new_budget(run_id, limits, now, ceiling))
         session.next_run_sequence += 1
         session.next_message_sequence += 1
         if session.head_run_id is None:
@@ -677,6 +688,7 @@ class SqlRunStore:
             skills=await self._bound_skills(spec),
             loaded_skills=await self._loaded_skills(run.id),
             http_operations=await self._bound_operations(spec),
+            prices=await self._pinned_prices(run.model_pricing_version_id),
         )
 
     async def _bound_skills(self, spec: AgentSpec) -> tuple[BoundSkill, ...]:
@@ -718,6 +730,25 @@ class SqlRunStore:
                 )
             )
         return tuple(skills)
+
+    async def _pinned_prices(self, version_id: UUID | None) -> TokenPrices | None:
+        """The price this Run fixed, read back.
+
+        Read from the version rather than from the endpoint's current price:
+        that is the whole of §12.4's promise, and reading the current one here
+        would quietly undo it every time an administrator corrected a rate.
+        """
+        if version_id is None:
+            return None
+        row = await self._session.get(ModelPricingVersionRow, version_id)
+        if row is None:
+            return None
+        return TokenPrices(
+            currency=row.currency,
+            input_per_million=row.input_per_million,
+            output_per_million=row.output_per_million,
+            cached_input_per_million=row.cached_input_per_million,
+        )
 
     async def _bound_operations(self, spec: AgentSpec) -> tuple[BoundOperation, ...]:
         """What the Version bound, assembled into callable operations.
@@ -907,6 +938,7 @@ class SqlRunStore:
             command.executed_ms,
             command.model_calls,
             command.tokens,
+            command.cost,
         )
 
         if command.signal is None:
@@ -953,7 +985,12 @@ class SqlRunStore:
         return await self._snapshot(run, command.capabilities)
 
     async def _consume_budget(
-        self, root_run_id: UUID, executed_ms: int, model_calls: int, tokens: int
+        self,
+        root_run_id: UUID,
+        executed_ms: int,
+        model_calls: int,
+        tokens: int,
+        cost: Cost | None = None,
     ) -> None:
         """Accumulate one slice's usage on the single root budget row."""
         consumed = await self._session.scalar(
@@ -972,6 +1009,11 @@ class SqlRunStore:
             raise UnknownRun
         budget = await self._session.get(RunBudgetScopeRow, root_run_id)
         if budget is not None:
+            _accumulate_cost(budget, cost)
+            # Written before the refresh below, which re-reads the row to pick
+            # up what the statement above set. Without this the refresh would
+            # discard the cost that was just accumulated in memory.
+            await self._session.flush()
             await self._session.refresh(budget)
 
     async def _lock_lease(self, lease_id: UUID, run_id: UUID) -> WorkerLeaseRow | None:
@@ -1651,6 +1693,10 @@ class SqlRunStore:
             # original caller's data, and an operator retrying somebody's work
             # does not become the person who may confirm it.
             end_user_id=source.end_user_id,
+            # The price the original was measured at. A retry is the same work
+            # again, and repricing it because a rate changed in between would
+            # make one Run's cost depend on when it happened to fail.
+            model_pricing_version_id=source.model_pricing_version_id,
             created_at=now,
             updated_at=now,
         )
@@ -1886,6 +1932,46 @@ class SqlRunStore:
             .with_for_update()
         )
 
+    async def _current_pricing(self, agent_version_id: UUID) -> UUID | None:
+        """The price in force for whatever endpoint this Version names.
+
+        `None` for a deterministic Agent, which reaches no endpoint, and for an
+        endpoint nobody has priced. Both mean the same thing downstream — this
+        Run's cost cannot be stated — and neither means it was free.
+        """
+        spec = await self._session.scalar(
+            select(AgentVersionRow.spec).where(AgentVersionRow.id == agent_version_id)
+        )
+        if not spec:
+            return None
+        policy: dict[str, Any] = spec.get("model_policy") or {}
+        endpoint_id = policy.get("endpoint_id")
+        if endpoint_id is None:
+            return None
+        return await self._session.scalar(
+            select(ModelPricingVersionRow.id)
+            .where(
+                ModelPricingVersionRow.endpoint_id == UUID(str(endpoint_id)),
+                ModelPricingVersionRow.effective_at <= datetime.now(UTC),
+            )
+            .order_by(
+                ModelPricingVersionRow.effective_at.desc(),
+                ModelPricingVersionRow.version_number.desc(),
+            )
+            .limit(1)
+        )
+
+    async def _cost_ceiling(
+        self, workspace_id: UUID
+    ) -> tuple[Decimal | None, str | None]:
+        found = await self._session.execute(
+            select(WorkspaceRow.max_run_cost, WorkspaceRow.cost_currency).where(
+                WorkspaceRow.id == workspace_id
+            )
+        )
+        row = found.first()
+        return (None, None) if row is None else (row[0], row[1])
+
     async def _published_version(self, session: SessionRow) -> tuple[UUID, AgentLimits]:
         agent = await self._session.scalar(
             select(AgentRow).where(
@@ -2096,7 +2182,48 @@ class SqlRunStore:
             await self._session.refresh(row, ["next_event_sequence"])
 
 
-def _new_budget(run_id: UUID, limits: AgentLimits, now: datetime) -> RunBudgetScopeRow:
+def _accumulate_cost(budget: RunBudgetScopeRow, cost: Cost | None) -> None:
+    """Add one round's cost, and let unknown stay unknown.
+
+    §12.4's rule at the only place it can be enforced. A Run that has made no
+    calls has genuinely spent nothing, so it starts at a known zero; the first
+    round that cannot be priced turns the total unknown, and nothing turns it
+    back. Skipping such a round instead would report a total smaller than what
+    was actually spent — the one wrong answer a spending figure must never
+    give.
+    """
+    if budget.cost_quality == CostQuality.UNKNOWN.value:
+        return
+    if cost is None or not cost.known:
+        budget.consumed_cost = None
+        budget.cost_quality = CostQuality.UNKNOWN.value
+        return
+    running = Cost(
+        amount=budget.consumed_cost if budget.consumed_cost is not None else Decimal(0),
+        currency=budget.cost_currency or cost.currency,
+        quality=CostQuality(budget.cost_quality),
+    )
+    total = running.plus(cost)
+    budget.consumed_cost = total.amount
+    budget.cost_quality = total.quality.value
+    if budget.cost_currency is None:
+        budget.cost_currency = total.currency
+
+
+def _new_budget(
+    run_id: UUID,
+    limits: AgentLimits,
+    now: datetime,
+    ceiling: tuple[Decimal | None, str | None] = (None, None),
+) -> RunBudgetScopeRow:
+    """The Run's own copy of every valve it will be measured against.
+
+    The money ceiling is copied like the rest rather than read from the
+    workspace each round: a limit that moved underneath a running Run would
+    mean the same Run was measured against two different numbers, and neither
+    would be the one anybody set.
+    """
+    max_cost, currency = ceiling
     return RunBudgetScopeRow(
         root_run_id=run_id,
         max_execution_seconds=limits.max_execution_seconds,
@@ -2111,6 +2238,14 @@ def _new_budget(run_id: UUID, limits: AgentLimits, now: datetime) -> RunBudgetSc
         consumed_tokens=0,
         max_derived_retries=limits.max_derived_retries,
         derived_retry_count=0,
+        max_cost=max_cost,
+        cost_currency=currency,
+        # A known zero, because a Run that has made no model call has genuinely
+        # spent nothing. The first round that cannot be priced turns this
+        # unknown, and nothing turns it back — that is where §12.4's "unknown
+        # is not zero" actually bites, rather than here.
+        consumed_cost=Decimal(0),
+        cost_quality=CostQuality.PROVIDER.value,
         version=1,
     )
 
@@ -2129,6 +2264,10 @@ def _budget_summary(row: RunBudgetScopeRow) -> BudgetSummary:
         consumed_tokens=row.consumed_tokens,
         max_derived_retries=row.max_derived_retries,
         derived_retry_count=row.derived_retry_count,
+        max_cost=row.max_cost,
+        cost_currency=row.cost_currency,
+        consumed_cost=row.consumed_cost,
+        cost_quality=row.cost_quality,
     )
 
 
