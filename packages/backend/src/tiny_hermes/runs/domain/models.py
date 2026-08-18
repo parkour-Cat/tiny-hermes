@@ -169,6 +169,15 @@ class RunEventType(StrEnum):
     TOOL_SCHEMA_BUDGET_EXCEEDED = "tool_schema_budget_exceeded"
     MCP_TOOLS_REVALIDATED = "mcp_tools_revalidated"
 
+    # §14.1's two memory facts. `memory_proposed` records that a Run offered a
+    # candidate and the workspace's policy put it in the queue; `memory_written`
+    # that the rule check found a private candidate low-risk enough to write
+    # without a person. A refused candidate leaves no event, for the same
+    # reason `off` leaves no row — a workspace that turned memory off did not
+    # ask for a trail of things it will not read.
+    MEMORY_PROPOSED = "memory_proposed"
+    MEMORY_WRITTEN = "memory_written"
+
     # Also not derived from a signal: it records that a slice began on a fresh
     # writable layer, which is a fact about the sandbox rather than a state
     # transition. Technical design §11.3 requires the Agent be told, and this

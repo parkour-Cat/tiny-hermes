@@ -29,6 +29,8 @@ from tiny_hermes.mcp.infrastructure.outbound_reader import (
     OutboundCapabilityReader,
 )
 from tiny_hermes.mcp.infrastructure.sql_store import SqlMcpStore
+from tiny_hermes.memory.application.service import MemoryService
+from tiny_hermes.memory.infrastructure.sql_service_store import SqlMemoryStore
 from tiny_hermes.model_catalog.application.pricing_service import PricingService
 from tiny_hermes.model_catalog.application.service import ModelEndpointService
 from tiny_hermes.model_catalog.infrastructure.sql_pricing_store import (
@@ -299,6 +301,21 @@ class ApplicationResources:
         async with self.session_factory()() as session:
             try:
                 yield ApprovalService(SqlApprovalStore(session))
+            except AuditedDenial:
+                await session.commit()
+                raise
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
+
+    async def memory_service(self) -> AsyncGenerator[MemoryService]:
+        """Reviewing a candidate touches the row and the audit trail together,
+        so it is one transaction like every other service here."""
+        async with self.session_factory()() as session:
+            try:
+                yield MemoryService(SqlMemoryStore(session))
             except AuditedDenial:
                 await session.commit()
                 raise

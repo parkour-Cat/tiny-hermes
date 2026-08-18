@@ -43,6 +43,7 @@ IMPLEMENTED_TOOLS = (
     "platform.wait",
     "skill.load",
     "skill.propose",
+    "memory.remember",
 )
 
 #: Tools the platform answers itself. `authorize` turns a call into a
@@ -51,7 +52,9 @@ IMPLEMENTED_TOOLS = (
 #: rather than given a no-op command, because a no-op that reached the
 #: Controller would be a live container doing nothing while the Run is meant to
 #: be holding none at all.
-PLATFORM_TOOLS = frozenset({"platform.wait", "skill.load", "skill.propose"})
+PLATFORM_TOOLS = frozenset(
+    {"platform.wait", "skill.load", "skill.propose", "memory.remember"}
+)
 
 #: The longest a round may ask to sleep, a little over a day. A Run in
 #: `waiting_external` holds its Session's head, so the model does not get to
@@ -353,6 +356,70 @@ class AuthorizedCall:
     changes_workspace: bool
 
 
+#: What one memory candidate may say. The same number the domain enforces,
+#: checked here as well so a model sending a document is told which limit it
+#: passed rather than having the whole call fail somewhere else.
+MAX_MEMORY_BODY = 500
+
+MEMORY_REMEMBER_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "memory.remember",
+        "description": (
+            "Propose one short thing worth remembering about the person you "
+            "are working with, for future conversations. This does not change "
+            "anything now and nothing you propose affects this Run: depending "
+            "on the workspace's policy it may be refused, or wait for a person "
+            "to approve it. Write a standing preference or a durable fact in "
+            "your own words — never quote the message it came from, never "
+            "record anything about somebody else, and never record credentials "
+            "or identifiers."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "string",
+                    "description": (
+                        "One sentence, in your own words, at most "
+                        f"{MAX_MEMORY_BODY} characters."
+                    ),
+                },
+            },
+            "required": ["body"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+MEMORY_REMEMBER_ARGUMENTS = frozenset({"body"})
+
+
+def memory_body_of(call: ToolCallBlock) -> str:
+    """What `memory.remember` asked to record, or a refusal.
+
+    Shape only, like `skill_load_of`. Whether the workspace allows it, whether
+    the rules call it low risk and who has to look at it are all answered where
+    the catalog is.
+    """
+    unknown = set(call.arguments) - MEMORY_REMEMBER_ARGUMENTS
+    if unknown:
+        raise ToolRefused(
+            RefusalReason.INVALID_ARGUMENTS, call.call_id, ",".join(sorted(unknown))
+        )
+    body = call.arguments.get("body")
+    if not isinstance(body, str) or not body.strip():
+        raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "body")
+    cleaned = body.strip()
+    if len(cleaned) > MAX_MEMORY_BODY:
+        # Refused with the number rather than truncated: half a remembered
+        # sentence is a claim nobody made.
+        raise ToolRefused(
+            RefusalReason.INVALID_ARGUMENTS, call.call_id, f"body={len(cleaned)}"
+        )
+    return cleaned
+
+
 def schemas_for(bound: tuple[str, ...]) -> list[dict[str, Any]]:
     """Step one: what the model is told exists.
 
@@ -370,6 +437,8 @@ def schemas_for(bound: tuple[str, ...]) -> list[dict[str, Any]]:
             schemas.append(SKILL_LOAD_SCHEMA)
         elif name == "skill.propose":
             schemas.append(SKILL_PROPOSE_SCHEMA)
+        elif name == "memory.remember":
+            schemas.append(MEMORY_REMEMBER_SCHEMA)
         elif name in FILE_SCHEMAS:
             schemas.append(FILE_SCHEMAS[name])
     return schemas

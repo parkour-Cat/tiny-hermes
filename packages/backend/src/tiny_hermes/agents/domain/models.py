@@ -71,6 +71,10 @@ class DeterministicModelPolicy(BaseModel):
         # family of them: what differs between HTTP and MCP is the boundary,
         # not the shape of "call the thing and report what came back".
         "mcp_once",
+        # Proposes one memory candidate named by the Run input and answers
+        # with what the workspace policy did with it. `memory.remember` is a
+        # platform tool, so this scenario runs on a host with no sandbox.
+        "remember_once",
     ] = "complete"
 
 

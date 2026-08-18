@@ -345,6 +345,7 @@ export const MODEL_SCENARIOS = [
   // one cannot exercise the path it exists for.
   "http_once",
   "mcp_once",
+  "remember_once",
 ] as const;
 
 export type SkillResponse = {

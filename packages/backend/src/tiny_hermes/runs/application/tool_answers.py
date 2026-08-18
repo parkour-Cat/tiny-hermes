@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from tiny_hermes.agents.domain.models import WritePolicy
+from tiny_hermes.memory.domain.policy import CandidateOutcome
 from tiny_hermes.runs.domain.approval import ApprovalType, normalize_call
 from tiny_hermes.runs.domain.models import (
     RunEventType,
@@ -29,6 +30,7 @@ from tiny_hermes.runs.domain.models import (
 from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalGate
 from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolSender
 from tiny_hermes.runs.ports.mcp import BoundMcpTool, McpGateway
+from tiny_hermes.runs.ports.memories import MemoryCandidates
 from tiny_hermes.runs.ports.proposals import SkillProposals
 from tiny_hermes.runs.ports.skills import SkillLibrary
 from tiny_hermes.runs.ports.store import ExecutionContext, ReservedEvent
@@ -44,6 +46,7 @@ from tiny_hermes.tools.domain.registry import (
     MAX_SKILL_LOADS,
     RefusalReason,
     ToolRefused,
+    memory_body_of,
     skill_load_of,
     skill_propose_of,
     wait_seconds_of,
@@ -222,6 +225,73 @@ async def answer_skill_propose(
                 "skill": asked.skill or "",
                 "files": len(asked.files),
             },
+        ),
+    )
+
+
+async def answer_memory_remember(
+    candidates: MemoryCandidates | None,
+    context: ExecutionContext,
+    call: ToolCallBlock,
+) -> tuple[ToolResultBlock, ReservedEvent | None]:
+    """Offer one candidate, and tell the model the truth about what happened.
+
+    §14.1's write path, and the same care `skill.propose` takes for the same
+    reason: what the model just did is a *proposal*, and a result that read like
+    a confirmation would leave it carrying on as though the thing were
+    remembered. The three outcomes are three different sentences — refused,
+    waiting for a person, written — because a model told only "done" cannot
+    tell them apart, and only one of them is done.
+
+    The scope is never an argument. A Run proposes a memory about the person it
+    is working with and about nobody else; the subject is the one the catalog
+    reads off this Run, so there is nothing here a model could point elsewhere.
+    """
+    if "memory.remember" not in context.spec.tools:
+        return refusal(call.call_id, RefusalReason.NOT_AUTHORIZED), None
+    try:
+        body = memory_body_of(call)
+    except ToolRefused as refused_call:
+        return refusal(call.call_id, refused_call.reason, refused_call.detail), None
+    if candidates is None:
+        return text_refusal(call.call_id, "no memory store is configured here"), None
+    result = await candidates.propose(run_id=context.run_id, body=body)
+    if result.outcome is CandidateOutcome.REFUSED:
+        # Not a failed call — the workspace decided this, and the model could
+        # not have known. A sentence it can report, not an error code.
+        return text_refusal(
+            call.call_id, result.detail or "this workspace declined to record it"
+        ), None
+    if result.outcome is CandidateOutcome.WRITTEN:
+        return (
+            ToolResultBlock(
+                call_id=call.call_id,
+                output=(
+                    "Recorded for future conversations. It does not affect this "
+                    "Run."
+                ),
+                exit_code=0,
+                failed=False,
+            ),
+            ReservedEvent(
+                event_type=RunEventType.MEMORY_WRITTEN,
+                payload={"memory_id": str(result.memory_id)},
+            ),
+        )
+    return (
+        ToolResultBlock(
+            call_id=call.call_id,
+            output=(
+                "Proposed for a person to review. Nothing has changed and this "
+                "Run will not use it; it is remembered only if someone approves "
+                "it."
+            ),
+            exit_code=0,
+            failed=False,
+        ),
+        ReservedEvent(
+            event_type=RunEventType.MEMORY_PROPOSED,
+            payload={"memory_id": str(result.memory_id)},
         ),
     )
 
