@@ -46,7 +46,13 @@ async function openWorkspace(page: Page): Promise<void> {
   await expect(page).toHaveURL(/\/workspaces\/[0-9a-f-]{36}\/agents$/);
 }
 
-/** Picks a value from an Ant Design select, by option title. */
+/**
+ * Picks a value from an Ant Design select, by option title.
+ *
+ * By the option's `title` rather than by its role: rc-select renders a second,
+ * screen-reader-only option list carrying the same role, and a role query
+ * finds that one first.
+ */
 async function choose(page: Page, label: string, value: string): Promise<void> {
   await page.getByLabel(label).click();
   await page
@@ -83,12 +89,22 @@ async function publishAgent(page: Page, scenario: string, tool: string): Promise
   await page.getByRole("button", { name: "创建", exact: true }).click();
   await expect(page).toHaveURL(/\/agents\/[0-9a-f-]{36}$/);
 
+  // Wait for the draft to land before typing into the form: its values arrive
+  // as the form's initial values, and anything typed before they do is
+  // replaced by them.
+  await expect(page.getByText("草稿修订 1")).toBeVisible();
   await page.getByLabel("人格").fill(`A ${scenario} agent for the skills acceptance walk.`);
   await choose(page, "模型场景", scenario);
   await bindTool(page, tool);
   // Bound by version: the option reads "rollout v1" and what is stored is that
   // version's id.
   await choose(page, "技能", `${SKILL_NAME} v1`);
+  // Read the form back before saving it. A select whose click was swallowed
+  // leaves its default in place and this walk publishes it — which is how a
+  // wrong scenario once travelled three steps before showing up as a missing
+  // event on a timeline.
+  await expect(page.getByText(scenario, { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(`${SKILL_NAME} v1`, { exact: true }).first()).toBeVisible();
   await page.getByRole("button", { name: "保存草稿" }).click();
   await expect(page.getByText("草稿修订 2")).toBeVisible();
   await page.getByRole("button", { name: "发布" }).click();
@@ -126,9 +142,13 @@ test("upload a skill, bind it, load it in a Run, propose a change, approve it", 
   });
   await expect(timeline(page).getByText("skill_loaded")).toBeVisible();
   // The sentence, not just the event name: it says which document entered the
-  // conversation and that the document is a workspace's material.
-  await expect(timeline(page).getByText(/SKILL\.md/)).toBeVisible();
-  await expect(timeline(page).getByText(/参考资料/)).toBeVisible();
+  // conversation and that the document is a workspace's material. Matched on
+  // the prose rather than on `SKILL.md`, which also appears in the raw payload
+  // this entry carries beside it.
+  await expect(
+    timeline(page).getByText(/模型加载了技能 rollout 的 SKILL\.md/),
+  ).toBeVisible();
+  await expect(timeline(page).getByText(/技能正文是参考资料/)).toBeVisible();
 
   // -- the Agent suggests a change ---------------------------------------
   const author = await publishAgent(page, "propose_once", "skill.propose");
