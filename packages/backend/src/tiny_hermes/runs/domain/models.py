@@ -158,6 +158,16 @@ class RunEventType(StrEnum):
     # to write and was stopped rather than that it simply did not.
     HTTP_CALL_REFUSED = "http_call_refused"
 
+    # §16.2's schema budget, and the two facts a person needs when it bites.
+    # `tool_schema_budget_exceeded` carries the numbers: what the bound
+    # subset came to and what the segment allowed. `mcp_tools_revalidated`
+    # carries the rest of the revalidation — a server that did not answer, a
+    # bound name nobody advertises any more — because a Run that quietly had
+    # fewer tools than its Version bound is one whose behaviour changed with
+    # nobody publishing anything.
+    TOOL_SCHEMA_BUDGET_EXCEEDED = "tool_schema_budget_exceeded"
+    MCP_TOOLS_REVALIDATED = "mcp_tools_revalidated"
+
     # Also not derived from a signal: it records that a slice began on a fresh
     # writable layer, which is a fact about the sandbox rather than a state
     # transition. Technical design §11.3 requires the Agent be told, and this

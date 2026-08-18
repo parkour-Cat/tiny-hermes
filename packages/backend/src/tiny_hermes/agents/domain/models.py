@@ -67,6 +67,10 @@ class DeterministicModelPolicy(BaseModel):
         # came back. The Run input may name a different one, which is how the
         # same scenario drills a refusal as well as an answer.
         "http_once",
+        # The same drill against a bound MCP tool. One scenario rather than a
+        # family of them: what differs between HTTP and MCP is the boundary,
+        # not the shape of "call the thing and report what came back".
+        "mcp_once",
     ] = "complete"
 
 
@@ -341,6 +345,47 @@ class HttpToolBinding(BaseModel):
         return value
 
 
+class McpToolBinding(BaseModel):
+    """One MCP server version an Agent may call, and which of its tools.
+
+    §16.2 forbids handing a model everything a server discovered, so `tools` is
+    a subset that has to be written down and an empty one is refused. There is
+    deliberately no field that could say "all": a field like that gets written
+    as "all" on the first day, and a server that later advertises forty more
+    tools would widen a published Agent with nobody publishing anything.
+
+    The binding names a **version**, which here is a reviewed snapshot of what
+    the server advertised. The snapshot fixes which names may be offered; the
+    server still decides what each one takes, and §16.2's revalidation reads
+    that fresh before every Run.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mcp_server_version_id: UUID
+    tools: tuple[str, ...] = Field(min_length=1)
+    #: What happens when one of these tools writes. An MCP server does not say
+    #: which of its tools change something — there is no `GET` to read — so the
+    #: platform cannot tell, and the safe reading is that any of them might.
+    #: Absent is therefore `disabled` at runtime, and publishing refuses a
+    #: binding that chose nothing: §16.3 wants the choice made.
+    write_policy: WritePolicy | None = None
+
+    @field_validator("tools")
+    @classmethod
+    def reject_repeated_tools(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("a tool may be bound once")
+        return value
+
+
+#: The most MCP servers one Agent may bind, and the most tools across them. The
+#: second number is the one that matters, for the reason `MAX_BOUND_OPERATIONS`
+#: gives: an advertised tool is a tool in the model's list.
+MAX_MCP_BINDINGS = 8
+MAX_BOUND_MCP_TOOLS = 32
+
+
 #: Discriminated, so a `provider` the platform does not understand is refused
 #: rather than falling through to the stand-in. An Agent that answers from a
 #: `match` statement while its author believes it is talking to a model is the
@@ -458,6 +503,26 @@ class AgentSpec(BaseModel):
     #: normalized document when empty, the sixth widening to leave every earlier
     #: content hash alone and the sixth to have a test say so.
     http_tools: tuple[HttpToolBinding, ...] = ()
+    #: The MCP server versions this Agent may call, and which tools of each.
+    #: §16.2's first step again, for tools whose shape somebody else's process
+    #: decides. Omitted from the normalized document when empty, the seventh
+    #: widening to leave every earlier content hash alone.
+    mcp_tools: tuple[McpToolBinding, ...] = ()
+
+    @field_validator("mcp_tools")
+    @classmethod
+    def reject_repeated_mcp_versions(
+        cls, value: tuple[McpToolBinding, ...]
+    ) -> tuple[McpToolBinding, ...]:
+        if len(value) > MAX_MCP_BINDINGS:
+            raise ValueError(f"an Agent may bind at most {MAX_MCP_BINDINGS} MCP servers")
+        named = {binding.mcp_server_version_id for binding in value}
+        if len(named) != len(value):
+            raise ValueError("an MCP server version may be bound only once")
+        total = sum(len(binding.tools) for binding in value)
+        if total > MAX_BOUND_MCP_TOOLS:
+            raise ValueError(f"an Agent may bind at most {MAX_BOUND_MCP_TOOLS} MCP tools")
+        return value
 
     @field_validator("http_tools")
     @classmethod
@@ -601,6 +666,9 @@ def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
         # declares none must carry no key so versions published before M2C
         # hash exactly as they did.
         normalized.pop("network", None)
+    if not normalized.get("mcp_tools"):
+        # Same promise as `http_tools`, one field later.
+        normalized.pop("mcp_tools", None)
     if not normalized.get("http_tools"):
         # Same promise as `skills`, one field later: the key was not there
         # before M2C, so an Agent that binds no HTTP tool must carry no key.

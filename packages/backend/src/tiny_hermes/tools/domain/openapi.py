@@ -26,6 +26,7 @@ itself, which is the method, the path and the parameter list.
 import hashlib
 import json
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -162,36 +163,46 @@ def parse_document(body: str) -> OpenApiDocument:
     )
 
 
-def estimated_schema_tokens(operations: list[Operation]) -> int:
-    """What telling a model about these operations costs, as an upper bound.
+def estimated_tokens_of(described: Sequence[Mapping[str, Any]]) -> int:
+    """What telling a model about these tools costs, as an upper bound.
 
-    One function, used by the publish-time budget check and by the console, so
-    the two can never disagree about how big a binding is. An estimate and not
-    a measurement, the same admission `estimate_tokens` makes: it decides what
-    to send and never what to bill.
+    The one estimator. HTTP operations and MCP tools both come through here, so
+    "how big is this binding" has a single answer no matter which kind of tool
+    is asking — a second implementation would be a second answer, and the
+    schema budget would depend on which module measured it.
+
+    An estimate and not a measurement, the same admission `estimate_tokens`
+    makes: it decides what to send and never what to bill.
     """
-    if not operations:
-        return 0
     total = 0
-    for operation in operations:
-        described = {
-            "name": operation.operation_id,
-            "summary": operation.summary,
-            "parameters": [
-                {
-                    "name": parameter.name,
-                    "in": parameter.location,
-                    "required": parameter.required,
-                    "schema": parameter.schema,
-                    "description": parameter.description,
-                }
-                for parameter in operation.parameters
-            ],
-            "body": operation.body_schema,
-        }
-        text = json.dumps(described, ensure_ascii=False, sort_keys=True)
+    for entry in described:
+        text = json.dumps(entry, ensure_ascii=False, sort_keys=True)
         total += -(-len(text) // _CHARS_PER_TOKEN)
     return total
+
+
+def estimated_schema_tokens(operations: list[Operation]) -> int:
+    """`estimated_tokens_of`, for the shape an OpenAPI binding has."""
+    return estimated_tokens_of(
+        [
+            {
+                "name": operation.operation_id,
+                "summary": operation.summary,
+                "parameters": [
+                    {
+                        "name": parameter.name,
+                        "in": parameter.location,
+                        "required": parameter.required,
+                        "schema": parameter.schema,
+                        "description": parameter.description,
+                    }
+                    for parameter in operation.parameters
+                ],
+                "body": operation.body_schema,
+            }
+            for operation in operations
+        ]
+    )
 
 
 def _operations(paths: dict[str, Any]) -> list[Operation]:
