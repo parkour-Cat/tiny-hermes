@@ -1910,7 +1910,8 @@ def _plan(
     plan that fits by construction and changes nothing. That is not a bypass:
     there is no window to plan against, so there is no number this could
     honestly compare the conversation to. The summaries still go out: a
-    stand-in with no window is still an Agent whose skills it was bound to.
+    stand-in with no window is still an Agent whose skills it was bound to —
+    and, for the same reason, still a Run whose subject has memories.
     """
     summaries = _summaries(context)
     if context.window is None:
@@ -1920,6 +1921,7 @@ def _plan(
             input_estimate=0,
             allowance=0,
             skill_summaries=tuple(item.text for item in summaries),
+            memories=tuple(fact.body for fact in context.memories),
         )
     return plan_context(
         window=context.window,
@@ -1975,10 +1977,10 @@ def _request(
         tools=_tool_schemas(context, mcp),
         cache_hint=box.hint if box is not None else None,
         skill_summaries=plan.skill_summaries,
-        # From the context rather than from the plan: nothing trims memory
-        # yet, and §5 of the M2D plan is where the planner starts deciding
-        # which of these survive.
-        memories=tuple(fact.body for fact in context.memories),
+        # From the plan, not the context: the planner budgets the memory
+        # segment and trims lowest-relevance first, so what the model is told
+        # is what survived rather than everything that was read.
+        memories=plan.memories,
     )
 
 

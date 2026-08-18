@@ -354,6 +354,11 @@ class ContextPlan:
     #: sends ``messages`` rather than the transcript: the planner is the only
     #: thing that decides what one round costs.
     skill_summaries: tuple[str, ...] = ()
+    #: The memories that survived, highest-relevance first. Sent by the
+    #: caller for the reason the summaries are: the planner is the one
+    #: thing that decides what a round costs, and memory is in the budget
+    #: now rather than handed straight to the model.
+    memories: tuple[str, ...] = ()
 
     @property
     def changed(self) -> bool:
@@ -465,6 +470,39 @@ def _drop_unhit_summaries(
     )
 
 
+def _memory_estimate(memories: Sequence[str], tokenizer: str | None) -> int:
+    """What the memory segment costs, as one system message or nothing."""
+    if not memories:
+        return 0
+    return MESSAGE_OVERHEAD_TOKENS + sum(
+        estimate_tokens(item, tokenizer) for item in memories
+    )
+
+
+def _trim_memories(
+    kept: list[str], tokenizer: str | None, *, ceiling: int
+) -> TrimRecord | None:
+    """Drop memories from the tail until the segment fits the ceiling.
+
+    From the tail because they arrive highest-relevance first, so the last one
+    is the least relevant — §7.4.2's "低相关记忆" named exactly. Whole memories
+    only: half a remembered sentence is a claim nobody made, the same rule the
+    summary trim keeps. Nothing here can reach 不可裁剪内容; memory is its own
+    trimmable segment and the caller measures the floor without it.
+    """
+    dropped = 0
+    freed = 0
+    while kept and _memory_estimate(kept, tokenizer) > ceiling:
+        freed += estimate_tokens(kept[-1], tokenizer)
+        kept.pop()
+        dropped += 1
+    if dropped == 0:
+        return None
+    return TrimRecord(
+        SegmentName.MEMORY, dropped=dropped, freed_estimate=freed
+    )
+
+
 def _summarize(covered: Sequence[StoredMessage]) -> str:
     """A structured summary, generated rather than written.
 
@@ -556,11 +594,24 @@ def plan_context(
         capped = _drop_unhit_summaries(kept, tokenizer, ceiling=ceiling)
         if capped is not None:
             trimmed.append(capped)
+    # The same "this segment was never allowed to be this big" pass, one
+    # segment down. Memories arrive highest-relevance first, so capping keeps
+    # the ones that matter and drops the tail — before the window is looked at
+    # once, because it is true of a round with all the room in the world.
+    kept_memories = list(memories)
+    memory_ceiling = segments[SegmentName.MEMORY].max_tokens
+    if memory_ceiling is not None:
+        capped_memory = _trim_memories(
+            kept_memories, tokenizer, ceiling=memory_ceiling
+        )
+        if capped_memory is not None:
+            trimmed.append(capped_memory)
     fixed = (
         estimate_tokens(safety_rules, tokenizer)
         + estimate_tokens(personality, tokenizer)
         + _schema_estimate(tool_schemas, tokenizer)
         + _summary_estimate(kept, tokenizer)
+        + _memory_estimate(kept_memories, tokenizer)
         + MESSAGE_OVERHEAD_TOKENS * 2
     )
     surviving = tuple(item.text for item in kept)
@@ -579,6 +630,11 @@ def plan_context(
     droppable = _summary_estimate(kept, tokenizer) - _summary_estimate(
         [item for item in kept if item.loaded], tokenizer
     )
+    # Every memory is trimmable (§7.4.2 gives the whole segment priority 3),
+    # so the floor is measured with it already gone: a subject with a large
+    # memory should lose memories, not send the Run to context_overflow
+    # while holding a segment the platform is allowed to drop.
+    droppable += _memory_estimate(kept_memories, tokenizer)
     floor = (
         fixed
         - droppable
@@ -594,6 +650,7 @@ def plan_context(
             allowance=allowance,
             trimmed=tuple(trimmed),
             skill_summaries=surviving,
+            memories=tuple(kept_memories),
         )
 
     working = list(originals)
@@ -606,6 +663,7 @@ def plan_context(
             allowance=allowance,
             trimmed=tuple(trimmed),
             skill_summaries=surviving,
+            memories=tuple(kept_memories),
         )
 
     record = _trim_old_tool_results(working, tokenizer, fixed=fixed, allowance=allowance)
@@ -620,6 +678,7 @@ def plan_context(
             allowance=allowance,
             trimmed=tuple(trimmed),
             skill_summaries=surviving,
+            memories=tuple(kept_memories),
         )
 
     # Step two: give back as much of the summary segment as this round is over
@@ -645,19 +704,35 @@ def plan_context(
                 allowance=allowance,
                 trimmed=tuple(trimmed),
                 skill_summaries=surviving,
+                memories=tuple(kept_memories),
             )
 
-    # Step three, empty until M2D fills it. Written out rather than skipped,
-    # because the order is the product rule and a reader should be able to see
-    # all four of its steps in one place.
-    if memories:
-        trimmed.append(
-            TrimRecord(
-                SegmentName.MEMORY,
-                dropped=len(memories),
-                freed_estimate=sum(estimate_tokens(item, tokenizer) for item in memories),
-            )
+    # Step three: give back as much of the memory segment as this round is
+    # over by, and no more — the same shape step two takes for summaries, one
+    # priority down. Lowest-relevance memories go first because they are at the
+    # tail, and a round 40 tokens over loses one memory rather than the segment.
+    if kept_memories:
+        over = spent - allowance
+        mem_estimate = _memory_estimate(kept_memories, tokenizer)
+        squeezed_memory = _trim_memories(
+            kept_memories, tokenizer, ceiling=max(mem_estimate - over, 0)
         )
+        if squeezed_memory is not None:
+            trimmed.append(squeezed_memory)
+            fixed -= mem_estimate - _memory_estimate(kept_memories, tokenizer)
+            spent = fixed + sum(
+                _message_estimate(message, tokenizer) for message in working
+            )
+            if spent <= allowance:
+                return ContextPlan(
+                    messages=tuple(working),
+                    fits=True,
+                    input_estimate=spent,
+                    allowance=allowance,
+                    trimmed=tuple(trimmed),
+                    skill_summaries=surviving,
+                    memories=tuple(kept_memories),
+                )
 
     # Step four: structural compaction of the oldest turns. The boundary walks
     # forward one message at a time and stops at the first one that fits, so a
@@ -686,6 +761,7 @@ def plan_context(
                 trimmed=tuple(trimmed),
                 compacted=compaction,
                 skill_summaries=surviving,
+                memories=tuple(kept_memories),
             )
 
     # Compaction did not make it fit. §7.4.2: 压缩失败后保留原文；若保留原文又
@@ -699,4 +775,5 @@ def plan_context(
         allowance=allowance,
         trimmed=tuple(trimmed),
         skill_summaries=surviving,
+        memories=tuple(kept_memories),
     )

@@ -41,8 +41,21 @@ class MemoryLibrary(Protocol):
     ) -> Sequence[RememberedFact]:
         """This scope's memories, newest first, at most `limit` of them.
 
-        Ordered here and ranked later: relevance needs the Run's own input,
-        which this port does not have and should not learn. What it guarantees
-        is that nothing outside the scope and nothing unapproved comes back.
+        The recency read, used where there is no query to rank against. It
+        guarantees only that nothing outside the scope and nothing unapproved
+        comes back.
+        """
+        ...
+
+    async def relevant_in(
+        self, scope: MemoryScope, query: str, *, limit: int
+    ) -> Sequence[RememberedFact]:
+        """This scope's memories, most relevant to `query` first.
+
+        Relevance is **keyword matching, not meaning** — a PostgreSQL full-text
+        rank, broken by recency. §14.3 excludes vector memory on purpose, and
+        the name says `query` rather than anything that implies understanding.
+        A blank query falls back to recency, so a Run whose input is empty
+        still gets its most recent memories rather than none.
         """
         ...
