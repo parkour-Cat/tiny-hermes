@@ -8,6 +8,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     CheckConstraint,
+    Computed,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -18,6 +19,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from tiny_hermes.model_catalog.domain.pricing import CostQuality
@@ -92,6 +94,7 @@ class SessionMessageRow(IdMixin, CreatedAtMixin, Base):
             name="fk_session_messages_session",
             ondelete="CASCADE",
         ),
+        Index("ix_session_messages_search", "search", postgresql_using="gin"),
     )
 
     session_id: Mapped[UUID] = mapped_column(index=True)
@@ -99,6 +102,19 @@ class SessionMessageRow(IdMixin, CreatedAtMixin, Base):
     sequence: Mapped[int] = mapped_column(Integer)
     role: Mapped[str] = mapped_column(String(32))
     content: Mapped[dict[str, Any]] = mapped_column(JSON)
+    #: §14.3's index. Generated from the message's text parts rather than from
+    #: the whole document, so a search matches what was said and not the shape
+    #: it was stored in. `simple` for the reason the memory index uses it: this
+    #: platform serves Chinese and English side by side, and a stemmer for one
+    #: mangles the other.
+    search: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "to_tsvector('simple', "
+            "jsonb_path_query_array(content::jsonb, '$.parts[*].text')::text)",
+            persisted=True,
+        ),
+    )
     source_run_id: Mapped[UUID | None] = mapped_column(nullable=True)
     redacted: Mapped[bool] = mapped_column(default=False)
 

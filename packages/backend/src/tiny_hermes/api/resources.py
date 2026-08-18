@@ -30,6 +30,7 @@ from tiny_hermes.mcp.infrastructure.outbound_reader import (
 )
 from tiny_hermes.mcp.infrastructure.sql_store import SqlMcpStore
 from tiny_hermes.memory.application.service import MemoryService
+from tiny_hermes.memory.infrastructure.sql_search import SqlSessionSearch
 from tiny_hermes.memory.infrastructure.sql_service_store import SqlMemoryStore
 from tiny_hermes.model_catalog.application.pricing_service import PricingService
 from tiny_hermes.model_catalog.application.service import ModelEndpointService
@@ -324,6 +325,12 @@ class ApplicationResources:
                 raise
             else:
                 await session.commit()
+
+    async def session_search(self) -> AsyncGenerator[SqlSessionSearch]:
+        """§14.3's console side. Read-only, so no commit and no audit line —
+        looking at what a workspace already holds is not an event."""
+        async with self.session_factory()() as session:
+            yield SqlSessionSearch(session)
 
     async def http_tool_catalog(self) -> AsyncGenerator[HttpToolCatalog]:
         async with self.session_factory()() as session:

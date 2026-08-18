@@ -30,6 +30,7 @@ from tiny_hermes.runs.application.tool_answers import (
     answer_mcp_call,
     answer_memory_remember,
     answer_platform_tool,
+    answer_session_search,
     answer_skill_load,
     answer_skill_propose,
 )
@@ -79,6 +80,7 @@ from tiny_hermes.runs.ports.model import (
 )
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
 from tiny_hermes.runs.ports.proposals import SkillProposals
+from tiny_hermes.runs.ports.searches import SessionSearches
 from tiny_hermes.runs.ports.skills import SkillLibrary
 from tiny_hermes.runs.ports.store import (
     AppendEventsCommand,
@@ -289,6 +291,7 @@ class WorkerRuntime:
         approvals: ApprovalGate | None = None,
         mcp: McpGateway | None = None,
         memories: MemoryCandidates | None = None,
+        searches: SessionSearches | None = None,
     ) -> None:
         self._sessions = session_factory
         self._model = model
@@ -311,6 +314,10 @@ class WorkerRuntime:
         # dropped: a model told nothing would propose the same thing every
         # round, and a deployment with no memory store should say so.
         self._memories = memories
+        # Absent, `session.search` is refused rather than answered with
+        # nothing: "no past message matched" and "nobody wired the search"
+        # are different facts and a model cannot tell them apart.
+        self._searches = searches
         # Optional, because a deployment with no tools configured needs none.
         # A Run that binds a tool and finds this absent fails rather than
         # running the command anywhere else — product design §16 leaves no
@@ -945,6 +952,11 @@ class WorkerRuntime:
                 results.append(answered)
                 if event is not None:
                     events.append(event)
+                continue
+            if call.name == "session.search":
+                results.append(
+                    await answer_session_search(self._searches, context, call)
+                )
                 continue
             if call.name == "memory.remember":
                 answered, event = await answer_memory_remember(
