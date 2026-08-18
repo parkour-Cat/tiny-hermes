@@ -66,27 +66,31 @@ MCP 与 OpenAPI 工具、两类审批、费用安全阀。它们不是同一种�
 
 ## 2. `egress-proxy` 进程
 
-- [ ] `packages/backend/src/tiny_hermes/egress/`：`domain/`、`application/`、
+- [x] `packages/backend/src/tiny_hermes/egress/`：`domain/`、`application/`、
       `presentation/`。它是一个 HTTP forward proxy（`CONNECT` 加绝对 URI 两种形式），
       不是一个业务 API。
-- [ ] `pyproject.toml` 加 `tiny-hermes-egress = "tiny_hermes.egress.cli:main"`；
+- [x] `pyproject.toml` 加 `tiny-hermes-egress = "tiny_hermes.egress.cli:main"`；
       `deploy/compose/compose.yaml` 加 `egress-proxy` 服务。它**不挂 Docker socket，
       不拿对象存储凭据，不拿模型密钥**——和 controller 一样，一个进程持有什么就是
       它能被利用成什么，这条在 §14.6 已经是断言了。
-- [ ] 身份：调用方在 `Proxy-Authorization` 里带一个**进程令牌**，proxy 用它区分
+- [x] 身份：调用方在 `Proxy-Authorization` 里带一个**进程令牌**，proxy 用它区分
       API / Worker / Scheduler / sandbox 四类调用方。令牌不是密钥管理，它只回答
       「谁在问」；范围仍然来自请求里声明的 `X-Tiny-Hermes-Scope`（workspace、agent、
       run 三个 id），由 proxy 自己去查，不信任调用方声明的范围内容。
-- [ ] 沙箱是唯一没有令牌的调用方：它的身份由**网络**决定——proxy 为每个 Run 的
+- [x] 沙箱是唯一没有令牌的调用方：它的身份由**网络**决定——proxy 为每个 Run 的
       沙箱网络分配一个入口，谁从那个入口来就是那个 Run。容器内的进程不持有任何
       可以冒充别人的东西，这是 §16.4「密钥短期注入」的同一条道理。
-- [ ] 每一跳重新解析、校验、钉定 IP；跨 origin 重定向剥掉 `Authorization`、
-      `Proxy-Authorization` 和 `Cookie`。这段逻辑和 `outbound/client.py` 里的是
-      同一份，抽到 `outbound/domain/` 共用，而不是抄一遍——抄一遍的那份会先腐烂。
-- [ ] 拒绝要带原因：proxy 用 `403` 加一个结构化 body 回答被范围拒绝的请求，
+- [x] 每一跳重新解析、校验、钉定 IP。**重定向不由 proxy 跟随**：3xx 回给客户端，
+      客户端发出的下一跳作为一条新请求再次到达 proxy，从头再查一遍。于是「每一跳
+      都被检查」不需要 proxy 记住任何状态，而跨 origin 剥凭据留在凭据所在的那一侧
+      （`outbound/client.py`，M1 已有测试）。计划最初写的是 proxy 也剥一遍，
+      那是在设计定下来之前——一个从不跟随重定向的进程没有东西可剥。
+      proxy 只剥 `Proxy-Authorization`：它是给 proxy 自己的凭据，转发出去就是
+      把平台令牌泄给 Run 访问的每一台主机。
+- [x] 拒绝要带原因：proxy 用 `403` 加一个结构化 body 回答被范围拒绝的请求，
       调用方把它翻译成 `OutboundRefused`。一个只回 `403 Forbidden` 的 proxy 会让
       每一次误配都变成一次抓包。
-- [ ] `tests/unit/egress/`：范围拒绝、地址拒绝、重定向剥凭据、未知调用方拒绝。
+- [x] `tests/unit/egress/`：范围拒绝、地址拒绝、重定向剥凭据、未知调用方拒绝。
       `tests/integration/egress/`：真起一个 proxy 进程与一个本地目标服务器，
       走完整条链路。
 

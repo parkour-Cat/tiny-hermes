@@ -33,6 +33,13 @@ x-base-env: &base-env
   # deployment that has not chosen an image fails: no tool can run at all.
   SANDBOX_IMAGE_DIGEST: ${SANDBOX_IMAGE_DIGEST:-}
   SANDBOX_CONTROLLER_SOCKET: /run/tiny-hermes/controller.sock
+  # The outbound boundary (§16.5). Empty by default in every field, which is
+  # what makes an unconfigured deployment send nothing rather than everything:
+  # no proxy URL means every outbound call refuses instead of connecting
+  # directly, and no allowed hosts means the platform layer approves nothing.
+  EGRESS_PROXY_URL: ${EGRESS_PROXY_URL:-}
+  EGRESS_PROXY_TOKEN: ${EGRESS_PROXY_TOKEN:-}
+  EGRESS_ALLOWED_HOSTS: ${EGRESS_ALLOWED_HOSTS:-}
   SANDBOX_IDLE_TTL_SECONDS: ${SANDBOX_IDLE_TTL_SECONDS:-300}
   # Present-but-empty for the controller: Settings requires the fields so a
   # credentialless API deployment fails at startup, and empty is exactly what
@@ -223,6 +230,20 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck: *process-alive
+
+  # The outbound boundary, and the only process whose job is to say no to a
+  # packet. §16.5 requires it to be separate: a boundary enforced inside the
+  # process it bounds is not one. Like the controller it holds nothing else —
+  # no Docker socket, no object-store credentials, no model keys — because a
+  # process that decides where traffic may go must not also be worth attacking
+  # for what it is carrying.
+  egress-proxy:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    command: ["/app/.venv/bin/tiny-hermes-egress"]
+    environment: *base-env
     healthcheck: *process-alive
 
   web:
