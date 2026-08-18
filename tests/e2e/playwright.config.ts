@@ -55,5 +55,13 @@ export default defineConfig({
       dependencies: ["setup"],
       use: { storageState: CONSOLE_STATE },
     },
+    // §14.1's walk. Needs no egress and no sandbox — memory is answered by the
+    // platform itself — so it runs on any stack the console runs on.
+    {
+      name: "memory",
+      testMatch: /memory\.spec\.ts$/,
+      dependencies: ["setup"],
+      use: { storageState: CONSOLE_STATE },
+    },
   ],
 });

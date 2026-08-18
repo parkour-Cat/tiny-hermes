@@ -322,6 +322,11 @@ export const IMPLEMENTED_TOOLS = [
   "shell.exec",
   "skill.load",
   "skill.propose",
+  // §14.1 and §14.3. Listed here as well as in the backend's registry for the
+  // reason the scenarios are: an author who cannot tick the box cannot bind
+  // the tool, and the feature is unreachable from the console it shipped with.
+  "memory.remember",
+  "session.search",
 ] as const;
 
 /**

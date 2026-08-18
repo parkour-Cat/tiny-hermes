@@ -857,6 +857,73 @@ oldest turns into one generated summary, recording the range and the ids it
 stood in for. Both leave a `context_trimmed` or `context_compacted` event on the
 Run, and the console says in words what each one did.
 
+### What an Agent remembers, and who decided it should
+
+Memory is **private by default and per subject**. A memory belongs to one
+workspace, one Agent and one caller, and there is no way to ask for "this
+Agent's memories" — the read takes a scope and a scope cannot be built without
+a subject. A's preference never appears in B's conversation, and that is a
+property of the type rather than of a filter somebody remembered to add.
+
+A Run does not write memory; it **proposes** one, with `memory.remember`. What
+happens to the candidate is the workspace's policy, set on the workspace row:
+
+- `off` — refused, and **nothing is stored**. A workspace that turned memory off
+  did not ask for a queue of things it will not read.
+- `all_pending` — the default. The candidate is written `pending` and waits for
+  a person. A pending memory never reaches a model: that is the whole difference
+  between proposing and remembering.
+- `low_risk_auto` — a **widening** of `all_pending`, never a bypass. A candidate
+  the rule check calls low risk is written straight away; everything else still
+  waits.
+
+The rule check's default answer is "not low risk". A candidate waits if it
+carries anything that looks like a secret, mentions permissions or identity,
+looks like it is about another person, is long, or does not read as a
+first-person preference. It is a heuristic and it decides only what may skip the
+queue — never what is true.
+
+Review the queue and decide:
+
+    GET  /api/v1/memories/pending
+    POST /api/v1/memories/{id}/approve
+    POST /api/v1/memories/{id}/reject
+
+**Shared memory has exactly two doors** (§14.2), and a running Agent is neither.
+An administrator writes one directly with `POST /api/v1/memories/shared`, or a
+proposal is approved. No Run can produce a `kind=shared` row by any path.
+
+Memories enter the model's context through the `memory` segment, ranked by
+keyword relevance to what the person just asked and trimmed from the
+lowest-relevance end when the segment is over budget. Relevance is PostgreSQL
+full-text ranking, not meaning — §14.3 excludes vector memory on purpose, and
+nothing here understands what a memory is about.
+
+Past conversations are searched on demand rather than loaded whole:
+
+    GET /api/v1/memories/search?q=...          (the console, workspace-wide)
+
+and inside a Run with the `session.search` tool, which searches **this
+subject's own** history and never anybody else's. Results are bounded snippets,
+and a snippet that had to be cut says so. A Run does not find what it just
+said: its own turns are already in its context.
+
+Every subject can see, correct, withdraw and export what is held about them,
+and ask for all of it to be erased:
+
+    GET  /api/v1/subjects/{id}/export?agent_id=...
+    POST /api/v1/subjects/memories/{id}/correct
+    POST /api/v1/subjects/memories/{id}/forget
+    POST /api/v1/subjects/{id}/erase
+
+A correction keeps the old text as a rejected row, so "this was changed" and
+"this was always so" stay apart. An erasure **deletes** — memories, sessions,
+messages and the files those sessions produced — and writes an audit record
+saying how many of each went, with none of what they said. That record is the
+only way, afterwards, to tell an erasure from an erasure that never ran. A
+workspace or platform administrator may do any of this on somebody's behalf, and
+the trail says whose behalf it was on.
+
 ### External tools, and why a write stops
 
 Two kinds, one shape. An **HTTP tool** is an OpenAPI document a workspace
