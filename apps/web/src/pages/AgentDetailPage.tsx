@@ -25,6 +25,8 @@ import type {
   AgentVersionDetailResponse,
   AgentVersionResponse,
   ModelEndpointSummary,
+  SkillResponse,
+  SkillVersionResponse,
 } from "../api/types";
 import { IMPLEMENTED_TOOLS, MODEL_SCENARIOS } from "../api/types";
 import { useT } from "../i18n/locale";
@@ -44,7 +46,36 @@ type DraftValues = {
   tools: string[];
   delivery_enabled: boolean;
   sync_timeout_seconds: number;
+  /** Bound skill *version* ids. Never names — see `agentSkillsHint`. */
+  skills: string[];
 };
+
+/** One bound summary's estimated cost, as a refused publish reports it. */
+type SummaryCost = { skill: string; estimated_tokens: number };
+
+/**
+ * The per-summary estimates out of a refusal, or null for any other failure.
+ *
+ * Read defensively: this is server context, and a console that assumed its
+ * shape would render `undefined tokens` on a payload it half understood.
+ */
+function summaryCostsOf(error: unknown): SummaryCost[] | null {
+  if (!(error instanceof ApiError) || error.code !== "skill_summary_budget_exceeded") {
+    return null;
+  }
+  const summaries = error.context.summaries;
+  if (!Array.isArray(summaries)) {
+    return null;
+  }
+  const costs: SummaryCost[] = [];
+  for (const entry of summaries) {
+    const item = entry as { skill?: unknown; estimated_tokens?: unknown };
+    if (typeof item.skill === "string" && typeof item.estimated_tokens === "number") {
+      costs.push({ skill: item.skill, estimated_tokens: item.estimated_tokens });
+    }
+  }
+  return costs.length === 0 ? null : costs;
+}
 
 type NameValues = {
   name: string;
@@ -65,6 +96,7 @@ function valuesOf(draft: AgentDraftResponse): DraftValues {
     tools: [...draft.spec.tools],
     delivery_enabled: delivery.enabled,
     sync_timeout_seconds: delivery.sync_timeout_seconds,
+    skills: (draft.spec.skills ?? []).map((binding) => binding.skill_version_id),
   };
 }
 
@@ -85,6 +117,11 @@ function specOf(values: DraftValues): AgentSpecDocument {
       max_derived_retries: values.max_derived_retries,
     },
   };
+  if (values.skills.length > 0) {
+    // Left out entirely when nothing is bound, so an Agent with no skills
+    // publishes the same document it published before skills existed.
+    spec.skills = values.skills.map((id) => ({ skill_version_id: id }));
+  }
   const timeout = values.sync_timeout_seconds ?? DEFAULT_DELIVERY.sync_timeout_seconds;
   if (
     values.delivery_enabled !== DEFAULT_DELIVERY.enabled ||
@@ -104,6 +141,7 @@ function summarizeSpec(spec: AgentSpecDocument): Record<string, string> {
     personality: spec.personality,
     model: JSON.stringify(spec.model_policy),
     tools: spec.tools.join(", ") || "—",
+    skills: (spec.skills ?? []).map((binding) => binding.skill_version_id).join(", ") || "—",
     max_execution_seconds: String(spec.limits.max_execution_seconds),
     max_elapsed_seconds: String(spec.limits.max_elapsed_seconds),
     max_model_calls: String(spec.limits.max_model_calls),
@@ -125,6 +163,11 @@ export function AgentDetailPage() {
   const [modal, contextHolder] = Modal.useModal();
   const [saveError, setSaveError] = useState<string | null>(null);
   const [publishNote, setPublishNote] = useState<string | null>(null);
+  // Per-summary estimates from a refused publish. Shown as themselves rather
+  // than summed, so an author can see which description is the expensive one
+  // instead of shortening all of them — the shape `context_budget_unsatisfied`
+  // already uses for its per-segment advice.
+  const [summaryCosts, setSummaryCosts] = useState<SummaryCost[] | null>(null);
   const scope = { workspace: workspaceId ?? "" };
   const enabled = workspaceId !== null && agentId !== "";
   const limits: { name: keyof DraftValues; label: MessageKey; min: number; max: number }[] = [
@@ -149,6 +192,31 @@ export function AgentDetailPage() {
   const endpoints = useQuery({
     queryKey: ["model-endpoints"] as const,
     queryFn: () => api<ModelEndpointSummary[]>("/api/v1/model-endpoints", scope),
+  });
+  // Every skill this workspace can see, with its versions, so the picker can
+  // offer "name v2" rather than a bare uuid. Read here rather than on the
+  // Skills page's cache: a binding made against a stale list is a binding to a
+  // version that may since have been withdrawn, and publishing would refuse it
+  // with a message about a version nobody remembers choosing.
+  const skills = useQuery({
+    queryKey: ["skills", workspaceId] as const,
+    queryFn: () => api<SkillResponse[]>("/api/v1/skills", scope),
+  });
+  const skillVersions = useQuery({
+    queryKey: ["skill-version-options", workspaceId, (skills.data ?? []).length] as const,
+    enabled: (skills.data ?? []).length > 0,
+    queryFn: async () => {
+      const lists = await Promise.all(
+        (skills.data ?? []).map(async (skill) => ({
+          skill,
+          versions: await api<SkillVersionResponse[]>(
+            `/api/v1/skills/${skill.id}/versions`,
+            scope,
+          ),
+        })),
+      );
+      return lists;
+    },
   });
   const provider = Form.useWatch("provider", form);
   const deliveryEnabled = Form.useWatch("delivery_enabled", form);
@@ -220,8 +288,12 @@ export function AgentDetailPage() {
       );
       setPublishNote(status === 200 ? t("publishUnchanged") : null);
       setSaveError(null);
+      setSummaryCosts(null);
     },
-    onError: (caught) => setSaveError(problemMessage(caught)),
+    onError: (caught) => {
+      setSaveError(problemMessage(caught));
+      setSummaryCosts(summaryCostsOf(caught));
+    },
   });
 
   const rollback = useMutation({
@@ -408,6 +480,22 @@ export function AgentDetailPage() {
           className="page-alert"
           type={conflicted ? "warning" : "error"}
           title={saveError}
+          description={
+            summaryCosts === null ? undefined : (
+              <>
+                <Typography.Paragraph>{t("skillSummaryBudgetExceeded")}</Typography.Paragraph>
+                <ul>
+                  {summaryCosts.map((cost) => (
+                    <li key={cost.skill}>
+                      {t("skillSummaryEstimate")
+                        .replace("{name}", cost.skill)
+                        .replace("{tokens}", String(cost.estimated_tokens))}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )
+          }
           showIcon
         />
       )}
@@ -476,6 +564,27 @@ export function AgentDetailPage() {
           <Form.Item name="tools">
             <Checkbox.Group
               options={IMPLEMENTED_TOOLS.map((name) => ({ value: name, label: name }))}
+            />
+          </Form.Item>
+          <Typography.Title level={5}>{t("agentSkills")}</Typography.Title>
+          <Typography.Paragraph type="secondary">{t("agentSkillsHint")}</Typography.Paragraph>
+          <Form.Item name="skills" label={t("agentSkillPick")}>
+            <Select
+              mode="multiple"
+              allowClear
+              loading={skills.isLoading || skillVersions.isLoading}
+              placeholder={t("agentSkillsEmpty")}
+              // Grouped by skill, so choosing is "which skill, then which
+              // version of it" even though what is stored is one version id.
+              options={(skillVersions.data ?? []).map((entry) => ({
+                label: entry.skill.name,
+                options: entry.versions
+                  .filter((version) => version.bindable)
+                  .map((version) => ({
+                    value: version.id,
+                    label: `${entry.skill.name} v${String(version.version_number)}`,
+                  })),
+              }))}
             />
           </Form.Item>
           <Typography.Title level={5}>{t("deliverySection")}</Typography.Title>

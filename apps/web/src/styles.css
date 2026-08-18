@@ -199,6 +199,30 @@ html[data-theme="dark"] .workspace-row {
   border-bottom-color: #262f36;
 }
 
+/* A proposal's difference, read the way a diff is read: one line per line,
+   monospaced, and scrolling sideways rather than wrapping — a wrapped diff
+   line looks like a change that is not there. */
+.skill-diff section {
+  margin-top: 0.75rem;
+}
+
+.skill-diff-body {
+  border: 1px solid rgba(127, 127, 127, 0.25);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  margin: 0.25rem 0 0;
+  max-height: 24rem;
+  overflow: auto;
+  padding: 0.5rem 0.75rem;
+  white-space: pre;
+}
+
+.skill-version-row {
+  display: flex;
+  margin-bottom: 0.35rem;
+}
+
 @media (max-width: 760px) {
   .public-shell {
     grid-template-columns: 1fr;

@@ -112,3 +112,29 @@ test("an ordinary event is left to speak for itself", () => {
   expect(eventNote(frame("run_started", {}))).toBeNull();
   expect(eventNote(frame("model_call_completed", { round_index: 1 }))).toBeNull();
 });
+
+const LOADED = { skill: "rollout", path: "SKILL.md", skill_version_id: "v1", bytes: 812 };
+
+test("a loaded skill says which document entered the conversation", () => {
+  const said = eventNote(frame("skill_loaded", LOADED));
+  const sentence = fill(t(said?.key ?? "appName"), said?.values ?? {});
+  expect(sentence).toContain("rollout");
+  expect(sentence).toContain("SKILL.md");
+  expect(sentence).toContain("812");
+  // The boundary the prompt itself carries, repeated for the person reading
+  // the timeline: this text is a workspace's, not the platform's.
+  expect(sentence).toContain("参考资料");
+  expect(sentence).not.toContain("{");
+});
+
+test("a skill load missing its fields gets no sentence", () => {
+  expect(eventNote(frame("skill_loaded", { skill: "rollout" }))).toBeNull();
+  expect(eventNote(frame("skill_loaded", { ...LOADED, path: 7 }))).toBeNull();
+});
+
+test("a proposal says that nothing changed yet", () => {
+  const said = eventNote(frame("skill_proposed", { proposal_id: "p1", skill: "rollout" }));
+  const sentence = fill(enUS[said?.key ?? "appName"], said?.values ?? {});
+  expect(sentence).toContain("approves");
+  expect(sentence).not.toContain("{");
+});

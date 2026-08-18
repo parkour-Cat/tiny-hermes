@@ -51,6 +51,51 @@ function loadedAgent(revision = 3): void {
     http.get(`/api/v1/agents/${AGENT}/draft`, () => HttpResponse.json(draftBody(revision))),
     http.get(`/api/v1/agents/${AGENT}/versions`, () => HttpResponse.json([])),
     http.get("/api/v1/model-endpoints", () => HttpResponse.json([])),
+    // The skill picker reads the catalog. Empty by default: an Agent with no
+    // skills is the ordinary case and every other test in this file is about
+    // something else.
+    http.get("/api/v1/skills", () => HttpResponse.json([])),
+  );
+}
+
+const SKILL = "33333333-4444-4555-8666-777777777777";
+const SKILL_VERSION = "44444444-5555-4666-8777-888888888888";
+
+/** A catalog with one skill in it, and one bindable version of that skill. */
+function loadedCatalog(): void {
+  server.use(
+    http.get("/api/v1/skills", () =>
+      HttpResponse.json([
+        {
+          id: SKILL,
+          scope: "workspace",
+          workspace_id: WORKSPACE,
+          name: "rollout",
+          current_version_id: SKILL_VERSION,
+          created_at: "2026-08-18T00:00:00Z",
+          updated_at: "2026-08-18T00:00:00Z",
+        },
+      ]),
+    ),
+    http.get(`/api/v1/skills/${SKILL}/versions`, () =>
+      HttpResponse.json([
+        {
+          id: SKILL_VERSION,
+          skill_id: SKILL,
+          version_number: 1,
+          content_hash: "c".repeat(64),
+          name: "rollout",
+          description: "How to drain a machine.",
+          findings: [],
+          source: "upload",
+          source_url: null,
+          source_ref: null,
+          status: "active",
+          bindable: true,
+          created_at: "2026-08-18T00:00:00Z",
+        },
+      ]),
+    ),
   );
 }
 
@@ -467,4 +512,64 @@ test("rollback asks first, then names the version it restored", async () => {
   await userEvent.click(screen.getByRole("button", { name: "确定" }));
   await waitFor(() => expect(body).toEqual({ version_id: first.id }));
   expect(await screen.findByText("当前版本 v1")).toBeInTheDocument();
+});
+
+
+test("binding a skill puts its version id on the draft, never its name", async () => {
+  loadedAgent(3);
+  loadedCatalog();
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByLabelText("技能"));
+  await userEvent.click(await screen.findByTitle("rollout v1"));
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  // A version id, so publishing a new version of this skill changes nothing
+  // about this Agent. Switching is another edit and another publish.
+  expect(sent).toEqual([
+    {
+      expected_revision: 3,
+      spec: { ...SPEC, skills: [{ skill_version_id: SKILL_VERSION }] },
+    },
+  ]);
+});
+
+test("a publish refused for summary budget names what each summary costs", async () => {
+  loadedAgent(3);
+  loadedCatalog();
+  server.use(
+    http.post(`/api/v1/agents/${AGENT}/publish`, () =>
+      HttpResponse.json(
+        {
+          code: "skill_summary_budget_exceeded",
+          title: "Skill summaries do not fit",
+          detail: "The bound summaries estimate 1800 tokens and the segment holds 1536.",
+          context: {
+            summaries: [
+              { skill: "rollout", estimated_tokens: 1200 },
+              { skill: "postmortem", estimated_tokens: 600 },
+            ],
+          },
+        },
+        { status: 422 },
+      ),
+    ),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByRole("button", { name: "发布" }));
+  await userEvent.click(await screen.findByRole("button", { name: "确定" }));
+
+  // Per summary rather than as one total: the author has to be able to see
+  // which description is the expensive one.
+  expect(await screen.findByText("rollout：约 1200 token")).toBeInTheDocument();
+  expect(screen.getByText("postmortem：约 600 token")).toBeInTheDocument();
 });

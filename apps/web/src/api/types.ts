@@ -71,6 +71,14 @@ export type AgentSpecDocument = {
     enabled: boolean;
     sync_timeout_seconds: number;
   };
+  /**
+   * Bound skills, by version id and never by name.
+   *
+   * Publishing a new version of a skill therefore changes nothing about an
+   * Agent already published against an older one. Switching is this list being
+   * edited and the Agent being published again — deliberately two acts.
+   */
+  skills?: { skill_version_id: string }[];
 };
 
 export type AgentDraftResponse = {
@@ -283,3 +291,80 @@ export const MODEL_SCENARIOS = [
   "skill_once",
   "wait_once",
 ] as const;
+
+export type SkillResponse = {
+  id: string;
+  scope: "platform" | "workspace";
+  workspace_id: string | null;
+  name: string;
+  current_version_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type FindingResponse = {
+  code: string;
+  severity: "blocking" | "advisory";
+  path: string;
+  detail: string;
+};
+
+export type SkillVersionResponse = {
+  id: string;
+  skill_id: string;
+  version_number: number;
+  content_hash: string;
+  name: string;
+  description: string;
+  findings: FindingResponse[];
+  source: "upload" | "git" | "proposal";
+  source_url: string | null;
+  source_ref: string | null;
+  status: "active" | "withdrawn";
+  /** Whether a draft may name this version. The console asks rather than
+   * recomputing "active and unblocked", so the button and the publish check
+   * cannot disagree. */
+  bindable: boolean;
+  created_at: string;
+};
+
+export type SkillFilePayload = {
+  path: string;
+  content: string;
+};
+
+export type ProposalResponse = {
+  id: string;
+  skill_id: string | null;
+  base_version_id: string | null;
+  name: string;
+  description: string;
+  findings: FindingResponse[];
+  origin: "agent" | "human";
+  origin_run_id: string | null;
+  status: "pending" | "approved" | "rejected";
+  approvable: boolean;
+  created_by: string;
+  created_at: string;
+  decided_by: string | null;
+  decided_at: string | null;
+};
+
+export type DiffLineResponse = {
+  kind: "context" | "added" | "removed" | "skipped";
+  text: string;
+};
+
+export type FileDiffResponse = {
+  path: string;
+  change: "added" | "removed" | "changed";
+  lines: DiffLineResponse[];
+  added_lines: number;
+  removed_lines: number;
+  truncated: boolean;
+};
+
+export type ProposalDetailResponse = ProposalResponse & {
+  files: SkillFilePayload[];
+  diff: FileDiffResponse[];
+};
