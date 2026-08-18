@@ -44,6 +44,7 @@ IMPLEMENTED_TOOLS = (
     "skill.load",
     "skill.propose",
     "memory.remember",
+    "session.search",
 )
 
 #: Tools the platform answers itself. `authorize` turns a call into a
@@ -53,7 +54,13 @@ IMPLEMENTED_TOOLS = (
 #: Controller would be a live container doing nothing while the Run is meant to
 #: be holding none at all.
 PLATFORM_TOOLS = frozenset(
-    {"platform.wait", "skill.load", "skill.propose", "memory.remember"}
+    {
+        "platform.wait",
+        "skill.load",
+        "skill.propose",
+        "memory.remember",
+        "session.search",
+    }
 )
 
 #: The longest a round may ask to sleep, a little over a day. A Run in
@@ -361,6 +368,10 @@ class AuthorizedCall:
 #: passed rather than having the whole call fail somewhere else.
 MAX_MEMORY_BODY = 500
 
+#: Echoed from `memory/domain/search.py` so the schema can state the bound
+#: in the description a model reads. The domain still clamps.
+MAX_SEARCH_RESULTS = 10
+
 MEMORY_REMEMBER_SCHEMA: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -420,6 +431,63 @@ def memory_body_of(call: ToolCallBlock) -> str:
     return cleaned
 
 
+SESSION_SEARCH_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "session.search",
+        "description": (
+            "Search this person's past conversations with you for something "
+            "they said before. Returns short snippets, not whole "
+            "conversations — read a snippet to decide whether it matters, and "
+            "ask the person if you need more than it carries. Matching is by "
+            "keyword, so search for words they would have used."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The words to look for.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": (
+                        f"How many snippets to return, at most {MAX_SEARCH_RESULTS}."
+                    ),
+                },
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+SESSION_SEARCH_ARGUMENTS = frozenset({"query", "limit"})
+
+
+def session_search_of(call: ToolCallBlock) -> tuple[str, int | None]:
+    """What `session.search` asked for, or a refusal.
+
+    Shape only, like every other reader here. The bounds on a query and the
+    clamp on a page are `memory/domain/search.py`'s, and whose sessions may be
+    searched is answered where the search runs.
+    """
+    unknown = set(call.arguments) - SESSION_SEARCH_ARGUMENTS
+    if unknown:
+        raise ToolRefused(
+            RefusalReason.INVALID_ARGUMENTS, call.call_id, ",".join(sorted(unknown))
+        )
+    query = call.arguments.get("query")
+    if not isinstance(query, str) or not query.strip():
+        raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "query")
+    asked = call.arguments.get("limit")
+    if asked is None:
+        return query.strip(), None
+    if not isinstance(asked, int) or isinstance(asked, bool):
+        raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "limit")
+    return query.strip(), asked
+
+
 def schemas_for(bound: tuple[str, ...]) -> list[dict[str, Any]]:
     """Step one: what the model is told exists.
 
@@ -439,6 +507,8 @@ def schemas_for(bound: tuple[str, ...]) -> list[dict[str, Any]]:
             schemas.append(SKILL_PROPOSE_SCHEMA)
         elif name == "memory.remember":
             schemas.append(MEMORY_REMEMBER_SCHEMA)
+        elif name == "session.search":
+            schemas.append(SESSION_SEARCH_SCHEMA)
         elif name in FILE_SCHEMAS:
             schemas.append(FILE_SCHEMAS[name])
     return schemas

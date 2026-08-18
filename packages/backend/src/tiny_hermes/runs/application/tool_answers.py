@@ -21,6 +21,7 @@ from uuid import UUID
 
 from tiny_hermes.agents.domain.models import WritePolicy
 from tiny_hermes.memory.domain.policy import CandidateOutcome
+from tiny_hermes.memory.domain.search import SearchRefused, request_for
 from tiny_hermes.runs.domain.approval import ApprovalType, normalize_call
 from tiny_hermes.runs.domain.models import (
     RunEventType,
@@ -32,6 +33,7 @@ from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolSender
 from tiny_hermes.runs.ports.mcp import BoundMcpTool, McpGateway
 from tiny_hermes.runs.ports.memories import MemoryCandidates
 from tiny_hermes.runs.ports.proposals import SkillProposals
+from tiny_hermes.runs.ports.searches import SessionSearches
 from tiny_hermes.runs.ports.skills import SkillLibrary
 from tiny_hermes.runs.ports.store import ExecutionContext, ReservedEvent
 from tiny_hermes.tools.domain.http_calls import (
@@ -47,6 +49,7 @@ from tiny_hermes.tools.domain.registry import (
     RefusalReason,
     ToolRefused,
     memory_body_of,
+    session_search_of,
     skill_load_of,
     skill_propose_of,
     wait_seconds_of,
@@ -293,6 +296,55 @@ async def answer_memory_remember(
             event_type=RunEventType.MEMORY_PROPOSED,
             payload={"memory_id": str(result.memory_id)},
         ),
+    )
+
+
+async def answer_session_search(
+    searches: SessionSearches | None,
+    context: ExecutionContext,
+    call: ToolCallBlock,
+) -> ToolResultBlock:
+    """Look through this subject's past conversations, and return snippets.
+
+    §14.3's whole point is that this is **on demand and partial**: a search
+    that returned conversations would put the history back in the context by
+    another name. So each hit is a bounded snippet, a shortened one says so,
+    and the page is small.
+
+    Whose sessions are searched is never an argument. It is this Run's own
+    subject, read where the search runs, so there is nothing here a model could
+    point at somebody else.
+    """
+    if "session.search" not in context.spec.tools:
+        return refusal(call.call_id, RefusalReason.NOT_AUTHORIZED)
+    try:
+        query, limit = session_search_of(call)
+    except ToolRefused as refused_call:
+        return refusal(call.call_id, refused_call.reason, refused_call.detail)
+    if searches is None:
+        return text_refusal(call.call_id, "no session search is configured here")
+    try:
+        asked = request_for(query, limit)
+    except SearchRefused as refused_search:
+        return text_refusal(call.call_id, str(refused_search))
+    hits = await searches.for_run(run_id=context.run_id, request=asked)
+    if not hits:
+        return ToolResultBlock(
+            call_id=call.call_id,
+            output="No past message matched that.",
+            exit_code=0,
+            failed=False,
+        )
+    lines = [
+        f"[{hit.sequence}] {hit.role}: {hit.snippet}"
+        + (" …(shortened)" if hit.shortened else "")
+        for hit in hits
+    ]
+    return ToolResultBlock(
+        call_id=call.call_id,
+        output="\n".join(lines),
+        exit_code=0,
+        failed=False,
     )
 
 

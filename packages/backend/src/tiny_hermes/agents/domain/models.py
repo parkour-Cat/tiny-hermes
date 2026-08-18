@@ -75,6 +75,9 @@ class DeterministicModelPolicy(BaseModel):
         # with what the workspace policy did with it. `memory.remember` is a
         # platform tool, so this scenario runs on a host with no sandbox.
         "remember_once",
+        # Searches the subject's own past conversations for the Run input
+        # and answers with the snippets. §14.3 without a sandbox.
+        "search_once",
     ] = "complete"
 
 

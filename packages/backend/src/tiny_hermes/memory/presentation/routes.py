@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Cookie, Depends, Header, Request, status
+from fastapi import APIRouter, Cookie, Depends, Header, Query, Request, status
 from pydantic import BaseModel, Field
 
 from tiny_hermes.api.resources import ApplicationResources
@@ -37,12 +37,42 @@ from tiny_hermes.memory.application.service import (
     UnknownMemory,
 )
 from tiny_hermes.memory.domain.policy import MAX_BODY_LENGTH
+from tiny_hermes.memory.domain.search import (
+    MAX_QUERY_CHARS,
+    SearchHit,
+    SearchRefused,
+    request_for,
+)
+from tiny_hermes.memory.infrastructure.sql_search import SqlSessionSearch
 from tiny_hermes.shared.errors import AppError
 from tiny_hermes.tenancy.domain.models import Actor
 
 WorkspaceHeader = Annotated[str | None, Header(alias="X-Workspace-Id")]
 CsrfHeader = Annotated[str | None, Header(alias="X-CSRF-Token")]
 SessionCookie = Annotated[str | None, Cookie(alias=SESSION_COOKIE)]
+
+
+class SearchHitResponse(BaseModel):
+    session_id: str
+    run_id: str | None
+    sequence: int
+    role: str
+    snippet: str
+    #: True when the message was longer than one snippet. Shown rather than
+    #: hidden: a reader who does not know they are holding part of a message
+    #: reads it as the whole of one.
+    shortened: bool
+
+    @classmethod
+    def from_domain(cls, hit: SearchHit) -> "SearchHitResponse":
+        return cls(
+            session_id=hit.session_id,
+            run_id=hit.run_id,
+            sequence=hit.sequence,
+            role=hit.role,
+            snippet=hit.snippet,
+            shortened=hit.shortened,
+        )
 
 
 class CreateSharedRequest(BaseModel):
@@ -80,6 +110,7 @@ def memory_router(resources: ApplicationResources) -> APIRouter:
     router = APIRouter(prefix="/api/v1/memories", tags=["memories"])
     auth_dependency = resources.auth_service
     service_dependency = resources.memory_service
+    search_dependency = resources.session_search
 
     @router.get("/pending", response_model=list[MemoryResponse])
     async def list_pending(  # pyright: ignore[reportUnusedFunction]
@@ -152,6 +183,51 @@ def memory_router(resources: ApplicationResources) -> APIRouter:
         except MemoryAlreadyDecided as error:
             raise _already_decided(error) from error
         return MemoryResponse.from_domain(decided)
+
+    @router.get("/search", response_model=list[SearchHitResponse])
+    async def search_sessions(  # pyright: ignore[reportUnusedFunction]
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        searches: Annotated[
+            SqlSessionSearch, Depends(search_dependency, scope="function")
+        ],
+        service: Annotated[
+            MemoryService, Depends(service_dependency, scope="function")
+        ],
+        request: Request,
+        q: str = Query(min_length=1, max_length=MAX_QUERY_CHARS),
+        limit: int | None = None,
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+    ) -> list[SearchHitResponse]:
+        """Search this workspace's sessions, for somebody who may read them.
+
+        §4.6 decides that, and it is the same "steward" test reviewing a memory
+        needs: a workspace or platform administrator. A subject's own search of
+        their own history goes through `session.search` inside a Run, and the
+        self-service route lands with the plan's §6.
+        """
+        user = await authenticate_browser_user(auth, session_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            # Borrowed rather than duplicated: one definition of who may look
+            # at somebody else's conversations, and it lives with the rest of
+            # §4.6's answers.
+            await service.list_pending(
+                _actor(user), workspace_id, request.state.request_id
+            )
+        except ForbiddenMemoryAction as error:
+            raise forbidden() from error
+        try:
+            asked = request_for(q, limit)
+        except SearchRefused as error:
+            raise AppError(
+                code="invalid_search",
+                title="Invalid search",
+                status=422,
+                detail=str(error),
+            ) from error
+        hits = await searches.for_workspace(workspace_id, asked)
+        return [SearchHitResponse.from_domain(hit) for hit in hits]
 
     @router.post(
         "/shared",

@@ -231,6 +231,44 @@ class DeterministicModelProvider:
                 input_tokens=TOKENS_PER_ROUND // 2,
                 output_tokens=TOKENS_PER_ROUND // 2,
             )
+        if scenario == "search_once":
+            # The retrieval drill: the Run input is the query, the model
+            # searches its own past conversations once, and answers with what
+            # came back. Nothing here touches a sandbox.
+            results = tuple(
+                block
+                for message in request.messages[_last_user_index(request) + 1 :]
+                for block in message.blocks
+                if isinstance(block, ToolResultBlock) and block.call_id == "search-1"
+            )
+            if not results:
+                query = _last_user_text(request)
+                if not query:
+                    return ModelResponse(
+                        stop_reason=StopReason.FAILED,
+                        text="",
+                        failure="deterministic_nothing_to_search",
+                    )
+                return ModelResponse(
+                    stop_reason=StopReason.TOOL_CALL,
+                    text="Looking back through what was said before.",
+                    tool_calls=(
+                        ToolCallBlock(
+                            call_id="search-1",
+                            name="session.search",
+                            arguments={"query": query},
+                        ),
+                    ),
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                )
+            answered = results[-1]
+            return ModelResponse(
+                stop_reason=StopReason.COMPLETED,
+                text="search results\n" + answered.output[:2000],
+                input_tokens=TOKENS_PER_ROUND // 2,
+                output_tokens=TOKENS_PER_ROUND // 2,
+            )
         if scenario == "remember_once":
             # The memory drill: the Run input is the body to remember, the model
             # proposes it once, and its answer is what came back — refused,

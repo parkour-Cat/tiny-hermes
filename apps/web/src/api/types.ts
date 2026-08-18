@@ -346,6 +346,7 @@ export const MODEL_SCENARIOS = [
   "http_once",
   "mcp_once",
   "remember_once",
+  "search_once",
 ] as const;
 
 export type SkillResponse = {
