@@ -61,6 +61,23 @@ class Settings(BaseSettings):
     #: link-local stay refused however wide the range is.
     outbound_allowed_cidrs: str = ""
 
+    #: The egress proxy (product design §16.5). Empty by default in both
+    #: fields, which means a deployment that has not stood one up sends
+    #: nothing: `EGRESS_PROXY_URL` unset makes every outbound call refuse
+    #: rather than connect directly, and `EGRESS_ALLOWED_HOSTS` unset makes the
+    #: platform layer approve nothing. Both are the same shape as an empty
+    #: `SANDBOX_IMAGE_DIGEST` — unconfigured fails closed and says so.
+    egress_proxy_url: str = ""
+    #: What a platform process presents to the proxy. It answers "is this one of
+    #: ours"; the scope still comes from the directory, so a leaked token widens
+    #: nothing by itself.
+    egress_proxy_token: str = ""
+    egress_proxy_port: int = Field(default=3128, ge=1, le=65_535)
+    #: The platform outbound scope, comma separated: hosts, one-level wildcards
+    #: and networks. §4 of the M2C-1 plan moves this into the database; a
+    #: single-tenant installation is served by the setting alone.
+    egress_allowed_hosts: str = ""
+
     #: The most model rounds an Agent author may ask for (product design §12.3,
     #: M2A design §4.7). 20 was a literal on `AgentLimits.max_model_calls`
     #: chosen when a Run could not run long; a Goal loop that must finish inside
