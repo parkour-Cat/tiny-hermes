@@ -5,6 +5,10 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
+from tiny_hermes.agents.domain.delegation import (
+    DelegationScope,
+    MemoryPermission,
+)
 from tiny_hermes.agents.domain.models import (
     Agent,
     AgentDraft,
@@ -170,6 +174,31 @@ class McpBindingUnavailable(AgentCatalogError):
     def __init__(self, reasons: Mapping[UUID, str]) -> None:
         super().__init__("; ".join(f"{key}: {value}" for key, value in reasons.items()))
         self.reasons = dict(reasons)
+
+
+class DelegationTooWide(AgentCatalogError):
+    """A child was offered a permission this Agent does not itself hold.
+
+    §13's sixth clause is that a child's scope is an intersection, so an author
+    who writes a wider one has made a mistake rather than a request — and
+    finding it at publish is finding it while they are still holding it. The
+    faces are named, because a refusal that only said "too wide" would send
+    them guessing across six.
+    """
+
+    def __init__(self, offending: Mapping[str, Mapping[str, tuple[str, ...]]]) -> None:
+        super().__init__(
+            "; ".join(f"{alias}: {sorted(faces)}" for alias, faces in offending.items())
+        )
+        self.offending = {alias: dict(faces) for alias, faces in offending.items()}
+
+
+class UnknownChildAgent(AgentCatalogError):
+    """A delegation names an alias this workspace has no published Agent for."""
+
+    def __init__(self, aliases: tuple[str, ...]) -> None:
+        super().__init__(", ".join(aliases))
+        self.aliases = aliases
 
 
 class WritePolicyNotChosen(AgentCatalogError):
@@ -474,6 +503,7 @@ class AgentCatalog:
             # inside the workspace's.
             await self._check_http_tools(workspace_id, actor, draft.spec)
             await self._check_mcp_tools(workspace_id, actor, draft.spec)
+            await self._check_delegation(workspace_id, draft.spec)
             # Again here, and not only on save: this draft was measured against
             # whatever the ceiling was the day it was written.
             self._check_ceilings(draft.spec)
@@ -593,6 +623,41 @@ class AgentCatalog:
         if reasons:
             raise HttpToolBindingUnavailable(reasons)
         self._check_write_policies(spec, found, await self._publisher_role(workspace_id, actor))
+
+    async def _check_delegation(self, workspace_id: UUID, spec: AgentSpec) -> None:
+        """Refuse a delegation that names nobody, or offers what this Agent
+        does not hold.
+
+        Both at publish rather than at runtime. A child whose scope is empty
+        because the intersection removed everything would start, do nothing and
+        report a refusal — and the author would learn about it from a Run
+        instead of from the moment they wrote it.
+        """
+        policy = spec.delegation
+        if policy is None:
+            return
+        aliases = tuple(child.alias for child in policy.children)
+        published = await self._store.published_aliases(workspace_id, aliases)
+        unknown = tuple(alias for alias in aliases if alias not in published)
+        if unknown:
+            raise UnknownChildAgent(unknown)
+        mine = _scope_of_spec(spec)
+        offending: dict[str, Mapping[str, tuple[str, ...]]] = {}
+        for child in policy.children:
+            # The four publish-knowable faces. `files` and `secrets` are
+            # runtime references — see `_scope_of_spec` — so comparing them
+            # here would refuse the ordinary case rather than a mistake.
+            asked = DelegationScope.of(
+                tools=child.tools,
+                network=child.network,
+                skills=child.skills,
+                memory=child.memory,
+            )
+            missing = mine.missing_from(asked)
+            if missing:
+                offending[child.alias] = missing
+        if offending:
+            raise DelegationTooWide(offending)
 
     async def _check_mcp_tools(
         self, workspace_id: UUID, actor: Actor, spec: AgentSpec
@@ -842,3 +907,29 @@ def _valid_spec(values: Mapping[str, object]) -> AgentSpec:
         return AgentSpec.model_validate(dict(values))
     except ValidationError as error:
         raise InvalidAgentSpec from error
+
+
+def _scope_of_spec(spec: AgentSpec) -> DelegationScope:
+    """What this Agent itself holds, in the faces a publish can actually check.
+
+    Four of the six, and the two that are missing are missing on purpose.
+    `files` are Artifact ids and `secrets` are references a tool resolves at
+    call time — neither is bound on a spec, so publish has nothing to compare a
+    delegation's against. They are narrowed here and **checked where they are
+    used**: the runtime intersection is what decides, and a child naming an
+    artifact its parent cannot read is refused when it reads.
+
+    Saying that here rather than silently comparing against an empty set: doing
+    the latter would refuse every delegation that passed a file, which is the
+    ordinary case §13's eighth clause exists for.
+    """
+    return DelegationScope.of(
+        tools=spec.tools,
+        network=spec.network.allow if spec.network is not None else (),
+        skills=tuple(str(binding.skill_version_id) for binding in spec.skills),
+        memory=(
+            (MemoryPermission.READ_PRIVATE, MemoryPermission.PROPOSE_PRIVATE)
+            if "memory.remember" in spec.tools
+            else (MemoryPermission.READ_PRIVATE,)
+        ),
+    )

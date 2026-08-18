@@ -121,6 +121,18 @@ class MemoryAgentStore:
             return None
         return agent
 
+    async def published_aliases(
+        self, workspace_id: UUID, aliases: Sequence[str]
+    ) -> frozenset[str]:
+        wanted = set(aliases)
+        return frozenset(
+            agent.alias
+            for agent in self.agents.values()
+            if agent.workspace_id == workspace_id
+            and agent.alias in wanted
+            and agent.current_version_id is not None
+        )
+
     async def update_agent(
         self,
         workspace_id: UUID,
