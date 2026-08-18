@@ -679,6 +679,10 @@ class SqlRunStore:
             scoped = scoped.where(SessionMessageRow.source_run_id == run.id)
         found = await self._session.scalars(scoped.order_by(SessionMessageRow.sequence))
         spec = AgentSpec.model_validate(version.spec)
+        history = tuple(
+            StoredMessage(id=row.id, sequence=row.sequence, message=_to_message(row))
+            for row in found
+        )
         deadline = None
         if run.delivery_mode == DeliveryMode.CHAT_COMPLETIONS.value:
             deadline = run.created_at + timedelta(seconds=spec.delivery.sync_timeout_seconds)
@@ -686,10 +690,7 @@ class SqlRunStore:
             run_id=run.id,
             state_version=run.state_version,
             spec=spec,
-            history=tuple(
-                StoredMessage(id=row.id, sequence=row.sequence, message=_to_message(row))
-                for row in found
-            ),
+            history=history,
             cancel_requested=run.cancel_requested_at is not None,
             pause_requested=run.pause_requested_at is not None,
             budget=_budget_summary(budget),
@@ -699,7 +700,7 @@ class SqlRunStore:
             loaded_skills=await self._loaded_skills(run.id),
             http_operations=await self._bound_operations(spec),
             prices=await self._pinned_prices(run.model_pricing_version_id),
-            memories=await self._remembered(run, owning),
+            memories=await self._remembered(run, owning, _latest_request(history)),
         )
 
     async def _bound_skills(self, spec: AgentSpec) -> tuple[BoundSkill, ...]:
@@ -743,7 +744,7 @@ class SqlRunStore:
         return tuple(skills)
 
     async def _remembered(
-        self, run: RunRow, session: SessionRow | None
+        self, run: RunRow, session: SessionRow | None, query: str
     ) -> tuple[RememberedFact, ...]:
         """This Run's own two scopes, read as two scoped queries.
 
@@ -752,6 +753,11 @@ class SqlRunStore:
         may confirm. They are the same person for a `caller_type=user` Run
         today, and writing the difference down here is what will keep §4.5's
         end-user identity from being wired to the wrong one.
+
+        `query` is this Run's latest request, and the ordering it produces is
+        **keyword relevance, not meaning** (§14.3 excludes vector memory). It
+        decides which memories the planner sees first, and therefore which ones
+        survive when the segment is over budget.
 
         A Session that is gone means no subject, and no subject means no
         private memory rather than everybody's.
@@ -775,7 +781,9 @@ class SqlRunStore:
                 caller_id=session.caller_id,
             ),
         ):
-            found.extend(await library.active_in(scope, limit=MEMORY_READ_LIMIT))
+            found.extend(
+                await library.relevant_in(scope, query, limit=MEMORY_READ_LIMIT)
+            )
         return tuple(found)
 
     async def _pinned_prices(self, version_id: UUID | None) -> TokenPrices | None:
@@ -2295,6 +2303,19 @@ def _new_budget(
         cost_quality=CostQuality.PROVIDER.value,
         version=1,
     )
+
+
+def _latest_request(history: Sequence[StoredMessage]) -> str:
+    """What this Run was last asked, as the query memories are ranked against.
+
+    The last user turn rather than the whole conversation: what the person just
+    said is what this round is about, and ranking against the transcript would
+    let an early digression outweigh the current question forever.
+    """
+    for item in reversed(history):
+        if item.message.role == "user":
+            return item.message.text
+    return ""
 
 
 def _budget_summary(row: RunBudgetScopeRow) -> BudgetSummary:

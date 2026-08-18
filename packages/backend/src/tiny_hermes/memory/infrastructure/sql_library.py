@@ -13,11 +13,11 @@ shared read into a read of everybody's.
 from collections.abc import Sequence
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.memory.domain.scope import MemoryKind, MemoryScope, MemoryStatus
-from tiny_hermes.memory.infrastructure.tables import MemoryRow
+from tiny_hermes.memory.infrastructure.tables import SEARCH_CONFIG, MemoryRow
 from tiny_hermes.memory.ports.library import RememberedFact
 from tiny_hermes.runs.domain.models import CallerIdentity, CallerType
 
@@ -34,6 +34,34 @@ class SqlMemoryLibrary:
                 _scoped(scope)
                 .where(MemoryRow.status == MemoryStatus.ACTIVE.value)
                 .order_by(MemoryRow.created_at.desc())
+                .limit(limit)
+            )
+        ).all()
+        return [_fact(row, scope) for row in rows]
+
+    async def relevant_in(
+        self, scope: MemoryScope, query: str, *, limit: int
+    ) -> Sequence[RememberedFact]:
+        """The same scoped read, ordered by keyword relevance to `query`.
+
+        `plainto_tsquery('simple', ...)` turns the Run's input into a query the
+        same way the stored `search` column was built — `simple`, so a stemmer
+        for one language does not mangle the other. Rank first, recency to break
+        ties, and a blank or match-less query still returns the scope's rows by
+        recency rather than nothing: a memory that does not match this turn is
+        still this subject's, and the segment budget decides what fits.
+        """
+        cleaned = query.strip()
+        if not cleaned:
+            return await self.active_in(scope, limit=limit)
+        rank = func.ts_rank(
+            MemoryRow.search, func.plainto_tsquery(SEARCH_CONFIG, cleaned)
+        )
+        rows = (
+            await self._session.scalars(
+                _scoped(scope)
+                .where(MemoryRow.status == MemoryStatus.ACTIVE.value)
+                .order_by(rank.desc(), MemoryRow.created_at.desc())
                 .limit(limit)
             )
         ).all()
