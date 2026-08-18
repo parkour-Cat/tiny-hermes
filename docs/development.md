@@ -576,6 +576,89 @@ An API Key's plaintext appears once in a dismissible panel; later listings show
 only the prefix. A Secret's plaintext is typed on create and is never returned
 by GET; the list shows a mask.
 
+## Skills
+
+A skill is reference material an administrator uploads. Binding one gives an
+Agent **no** new capability: no tool, no network, no credential. It changes
+what the Agent is told, not what it may do.
+
+Upload one from 技能 in the workspace nav. The picker takes a **directory of
+files**, never an archive — the browser reads them and posts a list, so no
+server here unpacks anything. The directory needs a `SKILL.md` at its root with
+two frontmatter fields:
+
+```markdown
+---
+name: rollout
+description: How this company takes a machine out of rotation before a deploy.
+---
+
+# Rollout
+
+Take the machine out of the pool first, then drain it.
+```
+
+The name is read from the file rather than typed into a form, so the catalog
+and the package cannot disagree about what a skill is. A version whose files
+carry credential material is refused outright, with the offending path named.
+「从 Git 导入」 takes a public HTTPS `tar.gz` URL instead; it goes through the
+platform's outbound policy like any other external request, is read as a stream,
+and is never written to disk. Re-importing unchanged content answers 200 and
+creates no second version.
+
+### What a bound Agent actually sees
+
+Bind a skill in the Agent builder's 技能 section. What is stored is a **skill
+version id**, never a name. Every round then carries one line per bound skill —
+its name and its description — inside boundary markers, as a system message of
+its own after the personality:
+
+```
+--- begin skills available to you (workspace material) ---
+- rollout: How this company takes a machine out of rotation before a deploy.
+--- end skills available to you ---
+```
+
+The document itself costs nothing until the model asks for it. An Agent that
+also binds `skill.load` may call it with a skill name (and optionally a path
+inside the package, `SKILL.md` by default); the file comes back as a tool
+result and the Run's timeline gains a `skill_loaded` entry saying which
+document entered the conversation. One load may bring in at most 64 KiB — a
+larger file is refused *with its size*, never truncated — and one Run may load
+at most eight times.
+
+When the bound summaries no longer fit their segment of the context budget, the
+platform drops whole summaries, newest binding first, and never a partial one.
+A skill this Run has already loaded is never dropped. Publishing refuses
+outright if the summaries cannot fit at all, and the refusal says what each one
+costs so the expensive description can be found.
+
+### Why publishing a new skill version changes nothing
+
+Because an Agent binds a version id. Uploading version 2 of `rollout` leaves
+every published Agent running version 1, including the ones that were running
+when you uploaded it. Moving 「设为新绑定起点」 changes where the *next* binding
+starts and nothing else; 停用 stops new bindings and leaves running ones alone.
+Switching an Agent over is a deliberate act: edit its draft to name the new
+version, and publish again.
+
+### Proposals
+
+An Agent that binds `skill.propose` may suggest a change to a skill it was
+given, or a new skill. What it writes is a **pending proposal** and never a
+version — there is no path from a proposal to a version that does not pass
+through a person. One proposal per Run.
+
+Review them under 技能提案: the queue shows where each came from, with a link
+to the Run that opened it, and 「差异」 shows the change line by line against
+the version the Agent actually read. Approving publishes a new immutable
+version whose source is recorded as the proposal; rejecting ends it and creates
+nothing. Both are audited. A proposal the static scan blocked can be read and
+cannot be approved, and the console says which file stopped it.
+
+Approving does **not** repoint anything. The skill's default for new bindings
+stays where it was, and so does every published Agent's binding.
+
 ## Model endpoints
 
 Phase 3A adds a second model provider: a real OpenAI-compatible endpoint. The

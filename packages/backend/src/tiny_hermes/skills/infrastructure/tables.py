@@ -30,6 +30,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
+from tiny_hermes.identity.infrastructure import tables as identity_tables
+from tiny_hermes.runs.infrastructure import tables as run_tables
 from tiny_hermes.shared.database import Base, CreatedAtMixin, IdMixin
 from tiny_hermes.skills.domain.models import (
     ProposalOrigin,
@@ -39,6 +41,19 @@ from tiny_hermes.skills.domain.models import (
     SkillVersionStatus,
 )
 from tiny_hermes.skills.domain.package import NAME_MAX_LENGTH
+from tiny_hermes.tenancy.infrastructure import tables as tenancy_tables
+
+#: The other modules whose tables this one's foreign keys name.
+#:
+#: Imported for their side effect — defining those tables on the shared
+#: metadata — and named here so neither linter reads them as dead. SQLAlchemy
+#: resolves a foreign key by table *name*, at flush time, against whatever has
+#: been registered; a name it cannot find raises `NoReferencedTableError`. The
+#: API never saw one because its routers import every module anyway, and the
+#: Worker met it the first time an Agent proposed a skill change. This file is
+#: what knows where its keys point, so this is where they are pulled in.
+REFERENCED_TABLE_MODULES = (identity_tables, run_tables, tenancy_tables)
+
 
 
 def _in_enum(column: str, values: type[StrEnum]) -> str:

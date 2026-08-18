@@ -13,7 +13,11 @@ export default defineConfig({
   expect: { timeout: 60_000 },
   reporter: [["list"], ["html", { open: "never" }]],
   use: {
-    baseURL: "http://127.0.0.1:3000",
+    // The demo stack's address by default. An isolated stack brought up beside
+    // it — the procedure in `docs/development.md` for a platform that was
+    // bootstrapped with some other account — publishes different host ports,
+    // and this is how the walk is pointed at it.
+    baseURL: process.env.TINY_HERMES_E2E_BASE_URL ?? "http://127.0.0.1:3000",
     trace: "retain-on-failure",
   },
   projects: [
