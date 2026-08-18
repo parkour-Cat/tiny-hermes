@@ -8,6 +8,11 @@ Worker、sandbox-controller 和沙箱的动态出站目标经过网络级强制�
 What this process deliberately does not hold: the Docker socket, object-store
 credentials, model keys. It decides where packets may go, and a process that
 decides that must not also be worth attacking for something else.
+
+It does hold a database connection, and reads only. Scopes come from the same
+tables an administrator edits, so a change takes effect on the next connection
+rather than on the next restart — and a sandbox's identity comes from the
+address the Controller wrote down, because a container presents nothing.
 """
 
 import asyncio
@@ -17,10 +22,10 @@ import signal
 from ipaddress import ip_network
 
 from tiny_hermes.egress.application.proxy import EgressProxy, ProxySettings
-from tiny_hermes.egress.infrastructure.memory_directory import MemoryScopeDirectory
+from tiny_hermes.egress.infrastructure.sql_directory import SqlScopeDirectory
 from tiny_hermes.outbound.domain.address_policy import Network
-from tiny_hermes.outbound.domain.scope import OutboundScope
 from tiny_hermes.shared.config import Settings, get_settings
+from tiny_hermes.shared.database import build_session_factory
 from tiny_hermes.shared.logging import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -38,7 +43,7 @@ async def _serve() -> None:
         # process on the network can borrow. Refusing to start is louder than
         # accepting everything, and it fails where an operator is looking.
         raise SystemExit("EGRESS_PROXY_TOKEN is required to run the egress proxy")
-    directory = MemoryScopeDirectory(platform=_platform_scope(settings))
+    directory = SqlScopeDirectory(build_session_factory(settings))
     proxy = EgressProxy(
         directory,
         ProxySettings(
@@ -49,24 +54,11 @@ async def _serve() -> None:
     )
     stop = _stop_on_termination()
     logger.info(
-        "egress proxy started: platform_entries=%s approved_networks=%s",
-        len(directory.platform.entries),
+        "egress proxy started: approved_networks=%s",
         len(_approved(settings)),
     )
     await proxy.serve(stop)
     logger.info("egress proxy stopped")
-
-
-def _platform_scope(settings: Settings) -> OutboundScope:
-    """What this deployment approved, and nothing by default.
-
-    An unconfigured proxy sends nothing, the same way a deployment with no
-    approved sandbox image runs no tool. §4 of the plan moves this into the
-    database; until then it is one setting, which is also all a single-tenant
-    installation needs.
-    """
-    entries = [entry.strip() for entry in settings.egress_allowed_hosts.split(",")]
-    return OutboundScope.of([entry for entry in entries if entry])
 
 
 def _approved(settings: Settings) -> list[Network]:

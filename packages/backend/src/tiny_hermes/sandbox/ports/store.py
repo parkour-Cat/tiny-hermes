@@ -39,6 +39,27 @@ class SandboxStore(Protocol):
 
     async def read_instance(self, instance_id: UUID) -> SandboxInstance | None: ...
 
+    async def register_egress_address(
+        self, *, address: str, run_id: UUID, sandbox_id: UUID
+    ) -> None:
+        """Record which Run a sandbox address belongs to, while it holds one.
+
+        The proxy answers "who is this" from this row, because a sandbox
+        presents nothing. Writing it is the Controller's job: it is the only
+        thing that knows the address Docker handed out.
+        """
+        ...
+
+    async def clear_egress_address(self, sandbox_id: UUID) -> None:
+        """Take the identity away — on freeze, and on destroy.
+
+        §16.4: a frozen instance may not open a new connection. And a destroyed
+        one must not lend its identity to whatever Docker gives the address to
+        next, which is the case that would be a real hole rather than an
+        inconvenience.
+        """
+        ...
+
     async def set_instance_status(
         self, instance_id: UUID, status: InstanceStatus
     ) -> SandboxInstance: ...

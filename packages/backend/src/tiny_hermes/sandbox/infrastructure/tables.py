@@ -1,15 +1,22 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, DateTime, Index, String, text
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
+from tiny_hermes.runs.infrastructure import tables as run_tables  # noqa: F401
 from tiny_hermes.sandbox.domain.models import (
     LIVE_RESERVATIONS,
     InstanceStatus,
     ReservationStatus,
 )
 from tiny_hermes.shared.database import Base, CreatedAtMixin, IdMixin
+
+#: The `runs` table this module's one foreign key points at, imported for the
+#: reason `skills/infrastructure/tables.py` names its own neighbours: a key
+#: resolves by table name at flush time, and the Controller does not import
+#: the rest of the platform.
+REFERENCED_TABLE_MODULES = (run_tables,)
 
 RESERVATION_STATUSES = tuple(entry.value for entry in ReservationStatus)
 INSTANCE_STATUSES = tuple(entry.value for entry in InstanceStatus)
@@ -94,3 +101,23 @@ class SandboxReservationRow(IdMixin, CreatedAtMixin, Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
+
+
+class SandboxEgressAddressRow(CreatedAtMixin, Base):
+    """Which Run a sandbox address belongs to, while it holds one.
+
+    The proxy reads this to answer "who is this" for a caller that presents
+    nothing — which is the whole of a sandbox's identity, because a process
+    inside a container that holds a credential is one that can lend it.
+
+    Keyed by address rather than by sandbox: two containers cannot have the
+    same address at one time, and that is the uniqueness the answer depends on.
+    """
+
+    __tablename__ = "sandbox_egress_addresses"
+
+    address: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), nullable=False
+    )
+    sandbox_id: Mapped[UUID] = mapped_column(index=True)

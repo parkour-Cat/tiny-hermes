@@ -77,6 +77,12 @@ class Settings(BaseSettings):
     #: and networks. §4 of the M2C-1 plan moves this into the database; a
     #: single-tenant installation is served by the setting alone.
     egress_allowed_hosts: str = ""
+    #: The Docker network a sandbox is attached to. Empty means a sandbox has
+    #: no network at all — §16.4's default — rather than one nobody guards.
+    #: The network itself must reach the proxy and nothing else; Compose
+    #: declares it `internal` so that is a property of the deployment rather
+    #: than of anybody's discipline.
+    sandbox_egress_network: str = ""
 
     #: The most model rounds an Agent author may ask for (product design §12.3,
     #: M2A design §4.7). 20 was a literal on `AgentLimits.max_model_calls`

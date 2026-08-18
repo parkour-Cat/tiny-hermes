@@ -14,7 +14,7 @@ and therefore no code path that could be talked into pointing it at `/`.
 that could read them would make every other control here decorative.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 from uuid import UUID
 
@@ -106,6 +106,28 @@ class VolumeMount:
 
 
 @dataclass(frozen=True)
+class EgressNetwork:
+    """The one network a sandbox may be attached to, and where it leads.
+
+    Product design §16.4 says a sandbox has no outbound access by default, and
+    §16.5 says its dynamic targets must pass a network-level boundary. Both are
+    true of this: the network reaches the proxy and nothing else — no internet,
+    no other platform service — so a container has exactly one place to send a
+    packet, and that place decides.
+
+    Absent means `network_mode="none"`, which is what a deployment with no
+    proxy gets: a sandbox with no network at all rather than one with an
+    unguarded network.
+    """
+
+    name: str
+    #: What to put in the container's proxy variables. Not a control — the
+    #: network already makes everything else unreachable — but a runtime that
+    #: finds them produces a useful error instead of a hung connect.
+    proxy_url: str
+
+
+@dataclass(frozen=True)
 class ContainerConfig:
     """The container, as Docker will be asked for it.
 
@@ -134,6 +156,8 @@ class ContainerConfig:
     init: bool
     labels: dict[str, str]
     volume_labels: dict[str, str]
+    #: `HOME`, plus the proxy variables when this deployment has a boundary.
+    environment: dict[str, str] = field(default_factory=lambda: {"HOME": "/workspace/data"})
 
     def as_docker_kwargs(self) -> dict[str, Any]:
         """The exact argument set, and no more.
@@ -159,7 +183,7 @@ class ContainerConfig:
                 for mount in self.mounts
             ],
             "init": self.init,
-            "environment": {"HOME": "/workspace/data"},
+            "environment": dict(self.environment),
             "working_dir": "/workspace/data",
             "labels": dict(self.labels),
             "detach": True,
@@ -180,6 +204,7 @@ def container_config(
     session_id: UUID | None = None,
     approved_digests: tuple[str, ...],
     ceiling: ResourceProfile = DEFAULT_PROFILE,
+    egress: EgressNetwork | None = None,
 ) -> ContainerConfig:
     """Describe the one container this Run is allowed.
 
@@ -208,7 +233,10 @@ def container_config(
         image=digest,
         user=f"{SANDBOX_UID}:{SANDBOX_UID}",
         read_only=True,
-        network_mode="none",
+        # No network at all when this deployment has no boundary. The two
+        # states a sandbox may be in are "nowhere" and "the proxy"; there is no
+        # third one where it can reach the internet directly.
+        network_mode="none" if egress is None else egress.name,
         cap_drop=("ALL",),
         security_opt=("no-new-privileges:true",),
         nano_cpus=int(profile.cpus * 1_000_000_000),
@@ -245,6 +273,7 @@ def container_config(
             "tiny-hermes.instance": str(instance_id),
         },
         volume_labels=volume_labels,
+        environment=_environment(egress),
     )
 
 
@@ -277,3 +306,23 @@ def profile_named(
     if name != DEFAULT_PROFILE.name:
         raise ProfileTooLarge(f"unknown resource profile: {name}")
     return replace(ceiling, name=DEFAULT_PROFILE.name)
+
+
+def _environment(egress: EgressNetwork | None) -> dict[str, str]:
+    """`HOME`, and the proxy variables when there is a proxy.
+
+    Set for the runtimes that read them, and relied on by nothing: the network
+    itself is what makes every other destination unreachable. A container that
+    ignored these would find the same one place to send a packet.
+
+    `NO_PROXY` keeps loopback direct so a tool talking to something it started
+    inside its own container does not hairpin through the boundary.
+    """
+    environment = {"HOME": "/workspace/data"}
+    if egress is None:
+        return environment
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        environment[name] = egress.proxy_url
+    environment["NO_PROXY"] = "localhost,127.0.0.1"
+    environment["no_proxy"] = environment["NO_PROXY"]
+    return environment

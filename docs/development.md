@@ -576,6 +576,86 @@ An API Key's plaintext appears once in a dismissible panel; later listings show
 only the prefix. A Secret's plaintext is typed on create and is never returned
 by GET; the list shows a mask.
 
+## Outbound and the egress proxy
+
+Nothing in this platform reaches the network on its own. Every outbound
+request — model calls, skill imports from Git, endpoint connectivity checks,
+and anything a sandbox does — goes through a separate process whose only job is
+to decide whether a packet may leave. A deployment that has not stood one up
+sends **nothing**; there is no code path that falls back to a direct
+connection, which is what makes that sentence true rather than a rule people
+follow.
+
+Bring it up with the rest of the stack and give the platform processes its
+address and a token:
+
+```powershell
+$env:EGRESS_PROXY_URL = "http://egress-proxy:3128"
+$env:EGRESS_PROXY_TOKEN = (python -c "import secrets; print(secrets.token_urlsafe(32))")
+$env:SANDBOX_EGRESS_NETWORK = "tiny-hermes_sandbox-egress"
+docker compose --env-file .env -f deploy/compose/compose.yaml up -d --build
+```
+
+The token answers "is this one of ours" and nothing more: what a caller may
+reach still comes from the scope tables, so a leaked token widens nothing by
+itself. A sandbox presents no token at all — it is identified by the address
+its packets come from, because a process inside a container that holds a
+credential is a process that can lend one.
+
+### Four layers, and none of them may widen
+
+The effective scope of any request is the intersection of four:
+
+| Layer | Who sets it | Where |
+|---|---|---|
+| Platform | Platform administrator | 出站范围 → 平台批准 |
+| Workspace | Workspace administrator, inside the platform's | 出站范围 → 本工作空间 |
+| Agent | Agent author, inside the workspace's | Agent builder → 网络 |
+| Run | Delegation (M2E) | not yet |
+
+An entry is a host (`api.example.com`), one leftmost wildcard
+(`*.example.com`), or a network (`10.1.0.0/16`). Never a URL, never a port: a
+scope approves a target, and the port belongs to the request. `*` and `*.com`
+are refused — an entry nobody can review at a glance is an entry nobody
+reviews.
+
+Everything starts empty. A workspace naming something the platform never
+approved is refused when it is written, and an Agent naming something its
+workspace did not approve is refused at publish with every offending entry
+listed. A layer can only ever narrow the one above it.
+
+Registering a model endpoint approves the host it names, and disabling the
+endpoint takes the approval away. That entry is marked as the endpoint's and
+cannot be removed by hand: choosing an endpoint *is* the approval, and a second
+step would be one that gets forgotten rather than a judgement that gets made.
+
+### What a sandbox can reach
+
+With `SANDBOX_EGRESS_NETWORK` set, a sandbox is attached to a Docker network
+declared `internal` — a bridge with no gateway. The only thing on it besides
+sandboxes is the proxy, so a container has exactly one place to send a packet
+and that place decides. Without the setting a sandbox has **no network at
+all**, which is the default and what §16.4 asks for.
+
+The container also gets `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`, for the
+runtimes that read them. Nothing relies on that: a tool that ignored them would
+still find only one reachable address.
+
+A sandbox holds its identity only while it may use it. Freezing an instance
+removes it, thawing restores it, and destroying removes it before the container
+goes — otherwise Docker could hand the address to the next container and make
+it this Run.
+
+### Reading a refusal
+
+A refusal from the boundary is not the target saying no, and the two are told
+apart on purpose: one will never change on a retry. A refused plaintext request
+carries its reason back (`target_not_in_scope`, `scope_empty`,
+`plaintext_not_approved`, and the address classes such as `link_local`). A
+refused TLS target is reached through `CONNECT`, so there is no response for a
+reason to ride on and the caller sees `egress_unavailable` — the specific rule
+is in the proxy's log.
+
 ## Skills
 
 A skill is reference material an administrator uploads. Binding one gives an

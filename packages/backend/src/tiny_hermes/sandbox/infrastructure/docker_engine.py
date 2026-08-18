@@ -103,6 +103,26 @@ class DockerEngine:
 
     # -- volumes -------------------------------------------------------------
 
+    async def address_of(self, container_id: str) -> str | None:
+        """Where this container's packets will come from, or None.
+
+        `None` for a container on no network, which has no address and needs no
+        identity: it cannot reach the proxy, so nobody will ever ask who it is.
+
+        Read back from Docker rather than assumed, because the address is
+        Docker's to hand out and the proxy compares against the one that
+        actually arrives.
+        """
+        container = await self._call(self.client.containers.get, container_id)
+        settings: Any = container.attrs.get("NetworkSettings", {})
+        networks: Any = settings.get("Networks", {})
+        for attached in networks.values():
+            address = attached.get("IPAddress")
+            if address:
+                return str(address)
+        direct = settings.get("IPAddress")
+        return str(direct) if direct else None
+
     async def create_volume(self, name: str, labels: dict[str, str]) -> str:
         volume = await self._call(self.client.volumes.create, name=name, labels=labels)
         return str(volume.name)
