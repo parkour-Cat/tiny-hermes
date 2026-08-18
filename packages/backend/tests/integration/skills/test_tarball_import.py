@@ -21,18 +21,11 @@ import os
 import tarfile
 from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
-from ipaddress import ip_network
 from typing import Any
 
 import pytest
 import uvicorn
-from tiny_hermes.outbound.client import SafeOutboundClient
-from tiny_hermes.outbound.domain.address_policy import (
-    Address,
-    AddressVerdict,
-    Network,
-    verdict,
-)
+from tiny_hermes.outbound.client import EgressRoute, SafeOutboundClient
 from tiny_hermes.skills.infrastructure.outbound_tarball import OutboundTarballSource
 from tiny_hermes.skills.infrastructure.tarball import (
     MAX_MEMBER_BYTES,
@@ -40,6 +33,8 @@ from tiny_hermes.skills.infrastructure.tarball import (
     MAX_TOTAL_BYTES,
 )
 from tiny_hermes.skills.ports.tarball_source import TarballUnavailable
+
+from ..egress_support import PROXY_TOKEN, ProxyHandle, running_proxy
 
 SKILL_MD = """---
 name: release-notes
@@ -133,20 +128,19 @@ async def host() -> AsyncIterator[tuple[Host, str]]:
         yield app, url
 
 
-def loopback_is_reachable(
-    addresses: list[Address] | Any, approved: list[Network] | Any
-) -> AddressVerdict:
-    """The real policy, with loopback permitted so a stand-in is usable."""
-    if addresses and all(entry.is_loopback for entry in addresses):
-        return AddressVerdict(allowed=True, address=addresses[0])
-    return verdict(addresses, approved)
+@pytest.fixture
+async def proxy() -> AsyncIterator[ProxyHandle]:
+    """The boundary this import has to cross, like every other outbound call."""
+    async with running_proxy() as handle:
+        yield handle
 
 
-def source(*, max_response_bytes: int = 16 * 1024 * 1024) -> OutboundTarballSource:
+def source(
+    proxy: ProxyHandle, *, max_response_bytes: int = 16 * 1024 * 1024
+) -> OutboundTarballSource:
     def client() -> SafeOutboundClient:
         return SafeOutboundClient(
-            approved=[ip_network("127.0.0.0/8")],
-            policy=loopback_is_reachable,
+            egress=EgressRoute(url=proxy.url, token=PROXY_TOKEN),
             connect_timeout=2.0,
             read_timeout=10.0,
             max_redirects=3,
@@ -157,33 +151,35 @@ def source(*, max_response_bytes: int = 16 * 1024 * 1024) -> OutboundTarballSour
 
 
 async def test_a_tarball_on_a_socket_becomes_skill_files(
-    host: tuple[Host, str],
+    host: tuple[Host, str], proxy: ProxyHandle
 ) -> None:
     app, url = host
     app.body = tarball({"SKILL.md": SKILL_MD.encode(), "style.md": b"Short sentences."})
     app.disposition = 'attachment; filename=house-style-9f1c2ab0e7d4.tar.gz'
 
-    fetched = await source().fetch(f"{url}/archive/main.tar.gz")
+    fetched = await source(proxy).fetch(f"{url}/archive/main.tar.gz")
 
     assert {entry.path for entry in fetched.files} == {"SKILL.md", "style.md"}
     assert fetched.ref == "9f1c2ab0e7d4"
     assert app.paths == ["/archive/main.tar.gz"]
 
 
-async def test_the_reference_falls_back_to_the_etag(host: tuple[Host, str]) -> None:
+async def test_the_reference_falls_back_to_the_etag(
+    host: tuple[Host, str], proxy: ProxyHandle
+) -> None:
     """`source_ref` is a courtesy, not a guarantee — `content_hash` already
     pins the bytes. So the weaker reference is used when it is all there is."""
     app, url = host
     app.body = tarball()
     app.etag = 'W/"e5f6a7b8"'
 
-    fetched = await source().fetch(f"{url}/archive.tar.gz")
+    fetched = await source(proxy).fetch(f"{url}/archive.tar.gz")
 
     assert fetched.ref == "e5f6a7b8"
 
 
 async def test_a_redirect_to_link_local_space_is_refused_by_the_outbound_face(
-    host: tuple[Host, str],
+    host: tuple[Host, str], proxy: ProxyHandle
 ) -> None:
     """The reason imports go through the outbound client at all.
 
@@ -195,13 +191,13 @@ async def test_a_redirect_to_link_local_space_is_refused_by_the_outbound_face(
     app.body = tarball()
 
     with pytest.raises(TarballUnavailable, match="not one this platform will call"):
-        await source().fetch(f"{url}/redirect?to={METADATA}")
+        await source(proxy).fetch(f"{url}/redirect?to={METADATA}")
 
     assert app.paths == ["/redirect"], "the second hop was made anyway"
 
 
 async def test_a_symlink_member_arriving_over_the_wire_is_refused(
-    host: tuple[Host, str],
+    host: tuple[Host, str], proxy: ProxyHandle
 ) -> None:
     app, url = host
     link = tarfile.TarInfo(name="house-style-9f1c2ab/passwd")
@@ -210,27 +206,31 @@ async def test_a_symlink_member_arriving_over_the_wire_is_refused(
     app.body = tarball(extra=[link])
 
     with pytest.raises(TarballUnavailable, match="not a regular file"):
-        await source().fetch(f"{url}/archive.tar.gz")
+        await source(proxy).fetch(f"{url}/archive.tar.gz")
 
 
-async def test_too_many_members_are_refused(host: tuple[Host, str]) -> None:
+async def test_too_many_members_are_refused(
+    host: tuple[Host, str], proxy: ProxyHandle
+) -> None:
     app, url = host
     app.body = tarball({f"file-{index}.md": b"x" for index in range(MAX_MEMBERS + 1)})
 
     with pytest.raises(TarballUnavailable, match=f"more than {MAX_MEMBERS} members"):
-        await source().fetch(f"{url}/archive.tar.gz")
+        await source(proxy).fetch(f"{url}/archive.tar.gz")
 
 
-async def test_one_member_over_its_ceiling_is_refused(host: tuple[Host, str]) -> None:
+async def test_one_member_over_its_ceiling_is_refused(
+    host: tuple[Host, str], proxy: ProxyHandle
+) -> None:
     app, url = host
     app.body = tarball({"big.md": os.urandom(MAX_MEMBER_BYTES).hex().encode()})
 
     with pytest.raises(TarballUnavailable, match="is larger than"):
-        await source().fetch(f"{url}/archive.tar.gz")
+        await source(proxy).fetch(f"{url}/archive.tar.gz")
 
 
 async def test_members_adding_up_past_the_ceiling_are_refused(
-    host: tuple[Host, str],
+    host: tuple[Host, str], proxy: ProxyHandle
 ) -> None:
     app, url = host
     body = os.urandom(MAX_MEMBER_BYTES // 2 - 1).hex().encode()
@@ -238,11 +238,11 @@ async def test_members_adding_up_past_the_ceiling_are_refused(
     app.body = tarball({f"file-{index}.md": body for index in range(count)})
 
     with pytest.raises(TarballUnavailable, match="unpacks to more than"):
-        await source().fetch(f"{url}/archive.tar.gz")
+        await source(proxy).fetch(f"{url}/archive.tar.gz")
 
 
 async def test_an_archive_that_expands_too_far_is_refused(
-    host: tuple[Host, str],
+    host: tuple[Host, str], proxy: ProxyHandle
 ) -> None:
     """Small on the wire, large in memory. The response ceiling cannot see
     this one coming, which is why the reader has a ratio of its own."""
@@ -252,38 +252,40 @@ async def test_an_archive_that_expands_too_far_is_refused(
     assert len(app.body) < 64 * 1024, "the bomb should be cheap to serve"
 
     with pytest.raises(TarballUnavailable, match="expands more than"):
-        await source().fetch(f"{url}/archive.tar.gz")
+        await source(proxy).fetch(f"{url}/archive.tar.gz")
 
 
 async def test_an_archive_past_the_response_ceiling_never_reaches_the_reader(
-    host: tuple[Host, str],
+    host: tuple[Host, str], proxy: ProxyHandle
 ) -> None:
     """The outbound face stops first, and says so in the import's words."""
     app, url = host
     app.body = tarball({"notes.md": os.urandom(60_000).hex().encode()})
 
     with pytest.raises(TarballUnavailable, match="too large to import"):
-        await source(max_response_bytes=4096).fetch(f"{url}/archive.tar.gz")
+        await source(proxy, max_response_bytes=4096).fetch(f"{url}/archive.tar.gz")
 
 
-async def test_a_page_that_is_not_a_tarball_is_refused(host: tuple[Host, str]) -> None:
+async def test_a_page_that_is_not_a_tarball_is_refused(
+    host: tuple[Host, str], proxy: ProxyHandle
+) -> None:
     """A private repository answers a login page with `200`, not `404`."""
     app, url = host
     app.body = b"<!doctype html><title>Sign in</title>"
 
     with pytest.raises(TarballUnavailable, match="could not be read"):
-        await source().fetch(f"{url}/archive.tar.gz")
+        await source(proxy).fetch(f"{url}/archive.tar.gz")
 
 
 async def test_a_status_that_is_not_two_hundred_is_refused(
-    host: tuple[Host, str],
+    host: tuple[Host, str], proxy: ProxyHandle
 ) -> None:
     app, url = host
     app.status = 404
     app.body = b"nope"
 
     with pytest.raises(TarballUnavailable, match="answered 404"):
-        await source().fetch(f"{url}/archive.tar.gz")
+        await source(proxy).fetch(f"{url}/archive.tar.gz")
 
 
 async def test_the_wired_source_imports_over_https_only() -> None:

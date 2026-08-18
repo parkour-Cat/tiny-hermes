@@ -1,8 +1,12 @@
-"""A server the outbound tests can steer, on a real socket.
+"""A server the outbound tests can steer, and a boundary they have to cross.
 
 Real HTTP rather than a mock transport, for the same reason phase 2B ran the SSE
 tests against uvicorn: a transport that short-circuits proves nothing about a
 client whose whole job is what it does with a connection.
+
+Since M2C-1 there is a second real thing here — an egress proxy. The client
+cannot reach anything without one, so every test runs through it, which is what
+makes these assertions about the path production actually takes.
 """
 
 import asyncio
@@ -14,6 +18,9 @@ from typing import Any
 
 import pytest
 import uvicorn
+from tiny_hermes.outbound.domain.address_policy import verdict
+
+from ..egress_support import ProxyHandle, running_proxy
 
 
 @dataclass
@@ -133,3 +140,36 @@ async def second_stand_in() -> AsyncIterator[tuple[StandIn, str]]:
     app = StandIn()
     async with _serving(app) as url:
         yield app, url
+
+
+
+
+@pytest.fixture
+async def proxy() -> AsyncIterator[ProxyHandle]:
+    async with running_proxy() as handle:
+        yield handle
+
+
+@pytest.fixture
+async def plaintext_proxy() -> AsyncIterator[ProxyHandle]:
+    """Loopback reachable, but no range approved.
+
+    The pair that isolates the plaintext rule: `http` is an operator's
+    deliberate choice on a network they own, and an approved range is that
+    network written down. With none, plaintext is refused even to somewhere
+    this platform would otherwise be allowed to reach.
+    """
+    async with running_proxy(approved=()) as handle:
+        yield handle
+
+
+@pytest.fixture
+async def strict_proxy() -> AsyncIterator[ProxyHandle]:
+    """The same boundary with the shipped address policy and nothing approved.
+
+    What every relaxed test is measured against: with this one in the way, a
+    request to a stand-in fails because loopback is refused — which can only
+    happen if the question is genuinely asked on the path.
+    """
+    async with running_proxy(approved=(), policy=verdict) as handle:
+        yield handle

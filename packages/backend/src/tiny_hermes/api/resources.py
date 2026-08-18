@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from uuid import UUID
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -19,7 +20,7 @@ from tiny_hermes.identity.infrastructure.sql_machine_store import SqlMachineIden
 from tiny_hermes.identity.infrastructure.sql_store import SqlAuthStore
 from tiny_hermes.model_catalog.application.service import ModelEndpointService
 from tiny_hermes.model_catalog.infrastructure.sql_store import SqlModelEndpointStore
-from tiny_hermes.outbound.client import SafeOutboundClient
+from tiny_hermes.outbound.client import EgressRoute, SafeOutboundClient
 from tiny_hermes.runs.application.event_stream import EventStreamHub, Poll
 from tiny_hermes.runs.application.service import RunCoordination
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
@@ -132,16 +133,32 @@ class ApplicationResources:
             else:
                 await session.commit()
 
-    def outbound_client(self) -> SafeOutboundClient:
+    def outbound_client(self, workspace_id: UUID | None = None) -> SafeOutboundClient:
         """A fresh client per call, not a shared one.
 
         Nothing here is hot enough to need pooling, and a client that outlives a
-        request is a client whose approved ranges were read at a different time
+        request is a client whose route and scope were read at a different time
         than they are being used.
+
+        `workspace_id` is the layer this call asks to be measured against, and
+        nothing passes one yet. A skill imported into a workspace *is* that
+        workspace's outbound and will name it — once workspace scopes exist
+        (§4 of the M2C-1 plan). Naming one today would close every chain,
+        because an unknown id is an empty layer by design, so the parameter is
+        here and unused rather than wired to a table nobody has filled.
         """
         settings = self.settings
+        egress = (
+            None
+            if not settings.egress_proxy_url or not settings.egress_proxy_token
+            else EgressRoute(
+                url=settings.egress_proxy_url,
+                token=settings.egress_proxy_token,
+                workspace_id=workspace_id,
+            )
+        )
         return SafeOutboundClient(
-            approved=settings.approved_networks,
+            egress=egress,
             connect_timeout=settings.outbound_connect_timeout_seconds,
             read_timeout=settings.outbound_read_timeout_seconds,
             max_redirects=settings.outbound_max_redirects,
