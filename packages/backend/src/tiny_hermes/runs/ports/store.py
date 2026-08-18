@@ -5,6 +5,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from tiny_hermes.agents.domain.models import AgentSpec
+from tiny_hermes.memory.ports.library import RememberedFact
 from tiny_hermes.model_catalog.domain.pricing import Cost, TokenPrices
 from tiny_hermes.runs.domain.context_budget import ContextWindow
 from tiny_hermes.runs.domain.models import (
@@ -258,6 +259,11 @@ class ExecutionContext:
     #: Run created before anybody entered one — all three mean the same thing
     #: downstream, and none of them means free.
     prices: TokenPrices | None = None
+    #: What this Run may be told it remembers: its subject's own private
+    #: memories and its Agent's shared ones, read at the same moment as the
+    #: conversation. Never anything `pending` — a candidate that reached a
+    #: model's context would have been remembered without anybody agreeing.
+    memories: tuple[RememberedFact, ...] = ()
 
     @property
     def messages(self) -> tuple[CanonicalMessage, ...]:

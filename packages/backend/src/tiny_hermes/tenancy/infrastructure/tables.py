@@ -33,6 +33,10 @@ class WorkspaceRow(IdMixin, CreatedAtMixin, Base):
             "max_run_cost IS NULL OR max_run_cost >= 0",
             name="ck_workspaces_cost_ceiling_non_negative",
         ),
+        CheckConstraint(
+            "memory_policy IN ('off', 'all_pending', 'low_risk_auto')",
+            name="ck_workspaces_memory_policy",
+        ),
     )
 
     name: Mapped[str] = mapped_column(String(120))
@@ -55,6 +59,18 @@ class WorkspaceRow(IdMixin, CreatedAtMixin, Base):
     #: rather than an Agent author's, so the two reasons point the same way.
     max_run_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
     cost_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    #: §14.1's three choices, defaulting to the middle one.
+    #:
+    #: Not `off`, because a feature that is off by default is one nobody has
+    #: seen work, and memory only shows its value once it has remembered
+    #: something. Not `low_risk_auto`, because the rule check has to be read by
+    #: a person before it is allowed to admit anything, and the deployment
+    #: nobody configured is exactly the one where nobody read it. `all_pending`
+    #: is the only default under which something is written down *and* somebody
+    #: looks at it.
+    memory_policy: Mapped[str] = mapped_column(
+        String(16), default="all_pending", server_default="all_pending"
+    )
 
 
 class MembershipRow(IdMixin, CreatedAtMixin, Base):
