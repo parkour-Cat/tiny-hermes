@@ -23,6 +23,7 @@ from tiny_hermes.runs.domain.models import (
     ToolCallBlock,
     ToolResultBlock,
 )
+from tiny_hermes.runs.ports.proposals import SkillProposals
 from tiny_hermes.runs.ports.skills import SkillLibrary
 from tiny_hermes.runs.ports.store import ExecutionContext, ReservedEvent
 from tiny_hermes.tools.domain.registry import (
@@ -31,6 +32,7 @@ from tiny_hermes.tools.domain.registry import (
     RefusalReason,
     ToolRefused,
     skill_load_of,
+    skill_propose_of,
     wait_seconds_of,
 )
 
@@ -145,6 +147,67 @@ async def answer_skill_load(
                 "path": asked.path,
                 "skill_version_id": str(bound.skill_version_id),
                 "bytes": size,
+            },
+        ),
+    )
+
+
+async def answer_skill_propose(
+    proposals: SkillProposals | None,
+    context: ExecutionContext,
+    call: ToolCallBlock,
+) -> tuple[ToolResultBlock, ReservedEvent | None]:
+    """Open a proposal, and tell the model plainly that nothing changed yet.
+
+    §15.3's first step, and the roadmap's "the model's judgment is only a
+    suggestion" in the one place where a model could mistake it for more. The
+    result says what was written — a pending proposal — so a model cannot
+    reasonably continue as though the skill it proposed is now in force.
+
+    Patching is scoped the way loading is: the skill named must be one this
+    Run's Version bound, and the base of the diff is the exact version this Run
+    was given. A skill the Agent never read is not one it is in a position to
+    rewrite. Naming nothing proposes a new skill, which needs no binding
+    because there is nothing yet to be bound to.
+    """
+    if "skill.propose" not in context.spec.tools:
+        return refusal(call.call_id, RefusalReason.NOT_AUTHORIZED), None
+    try:
+        asked = skill_propose_of(call)
+    except ToolRefused as refused:
+        return refusal(call.call_id, refused.reason, refused.detail), None
+    base: UUID | None = None
+    if asked.skill is not None:
+        bound = next(
+            (skill for skill in context.skills if skill.name == asked.skill), None
+        )
+        if bound is None:
+            return refusal(call.call_id, RefusalReason.NOT_AUTHORIZED, asked.skill), None
+        base = bound.skill_version_id
+    if proposals is None:
+        return text_refusal(call.call_id, "no skill catalog is configured here"), None
+    outcome = await proposals.propose(
+        run_id=context.run_id, skill_version_id=base, files=asked.files
+    )
+    if outcome.proposal_id is None:
+        return text_refusal(call.call_id, outcome.refusal or "the proposal was refused"), None
+    return (
+        ToolResultBlock(
+            call_id=call.call_id,
+            output=(
+                f"Opened proposal {outcome.proposal_id} for a person to review. "
+                f"Nothing has changed: no version exists until someone approves "
+                f"it, and no Agent uses a new version until it is republished."
+            ),
+            exit_code=0,
+            failed=False,
+        ),
+        ReservedEvent(
+            event_type=RunEventType.SKILL_PROPOSED,
+            payload={
+                "proposal_id": str(outcome.proposal_id),
+                "skill": asked.skill or "",
+                "files": len(asked.files),
             },
         ),
     )

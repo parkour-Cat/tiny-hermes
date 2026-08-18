@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Cookie, Depends, Header, Request, Response, status
+from fastapi import APIRouter, Cookie, Depends, Header, Query, Request, Response, status
 from pydantic import BaseModel, Field
 
 from tiny_hermes.api.resources import ApplicationResources
@@ -32,16 +32,25 @@ from tiny_hermes.shared.errors import AppError
 from tiny_hermes.skills.application.service import (
     ForbiddenSkillAction,
     InvalidSkillPackage,
+    ProposalNotApprovable,
     SkillCatalog,
     SkillImportFailed,
     SkillNameMismatch,
     SkillNameTaken,
     SkillScanRefused,
+    UnknownProposal,
     UnknownSkill,
     UnknownSkillVersion,
     VersionNotBindable,
 )
-from tiny_hermes.skills.domain.models import Skill, SkillScope, SkillVersion
+from tiny_hermes.skills.domain.diff import FileDiff
+from tiny_hermes.skills.domain.models import (
+    ProposalStatus,
+    Skill,
+    SkillProposal,
+    SkillScope,
+    SkillVersion,
+)
 from tiny_hermes.skills.domain.package import (
     MAX_FILE_BYTES,
     MAX_FILES,
@@ -162,6 +171,98 @@ class SkillVersionResponse(BaseModel):
 
 class SkillVersionDetailResponse(SkillVersionResponse):
     files: list[SkillFilePayload]
+
+
+class CreateProposalRequest(BaseModel):
+    """A person's suggestion. An Agent's arrives through `skill.propose`.
+
+    `skill_id` absent means "a skill that does not exist yet", named by the
+    SKILL.md inside. There is no field for the name for the same reason upload
+    has none: the catalog and the package must never disagree about what this
+    is.
+    """
+
+    files: list[SkillFilePayload] = Field(min_length=1, max_length=MAX_FILES)
+    skill_id: UUID | None = None
+
+
+class ProposalResponse(BaseModel):
+    id: UUID
+    skill_id: UUID | None
+    base_version_id: UUID | None
+    name: str
+    description: str
+    findings: list[FindingResponse]
+    origin: str
+    origin_run_id: UUID | None
+    status: str
+    #: False for a decided proposal and for one the scan blocked. The console
+    #: reads this rather than recomputing the rule, so the button and the
+    #: server cannot disagree about what may be approved.
+    approvable: bool
+    created_by: UUID
+    created_at: datetime
+    decided_by: UUID | None
+    decided_at: datetime | None
+
+    @classmethod
+    def from_domain(cls, proposal: SkillProposal) -> "ProposalResponse":
+        return cls(
+            id=proposal.id,
+            skill_id=proposal.skill_id,
+            base_version_id=proposal.base_version_id,
+            name=proposal.manifest.name,
+            description=proposal.manifest.description,
+            findings=[FindingResponse.from_domain(item) for item in proposal.findings],
+            origin=proposal.origin.value,
+            origin_run_id=proposal.origin_run_id,
+            status=proposal.status.value,
+            approvable=proposal.approvable,
+            created_by=proposal.created_by,
+            created_at=proposal.created_at,
+            decided_by=proposal.decided_by,
+            decided_at=proposal.decided_at,
+        )
+
+
+class DiffLineResponse(BaseModel):
+    kind: str
+    text: str
+
+
+class FileDiffResponse(BaseModel):
+    path: str
+    change: str
+    lines: list[DiffLineResponse]
+    added_lines: int
+    removed_lines: int
+    truncated: bool
+
+    @classmethod
+    def from_domain(cls, file: FileDiff) -> "FileDiffResponse":
+        return cls(
+            path=file.path,
+            change=file.change.value,
+            lines=[
+                DiffLineResponse(kind=line.kind.value, text=line.text)
+                for line in file.lines
+            ],
+            added_lines=file.added_lines,
+            removed_lines=file.removed_lines,
+            truncated=file.truncated,
+        )
+
+
+class ProposalDetailResponse(ProposalResponse):
+    """The proposal and what it would change, in one document.
+
+    One response because they are one thing to the person deciding: a reviewer
+    who has to fetch the diff separately can approve without ever having asked
+    for it.
+    """
+
+    files: list[SkillFilePayload]
+    diff: list[FileDiffResponse]
 
 
 def skill_router(resources: ApplicationResources) -> APIRouter:
@@ -490,6 +591,171 @@ def skill_router(resources: ApplicationResources) -> APIRouter:
     return router
 
 
+def skill_proposal_router(resources: ApplicationResources) -> APIRouter:
+    """§15.3's face. A separate prefix, not a path under a skill.
+
+    A proposal for a skill that does not exist yet has no skill to hang under,
+    and the review queue is read across skills rather than one at a time.
+    """
+    router = APIRouter(prefix="/api/v1/skill-proposals", tags=["skills"])
+    auth_dependency = resources.auth_service
+    catalog_dependency = resources.skill_catalog
+
+    @router.get("", response_model=list[ProposalResponse])
+    async def list_proposals(  # pyright: ignore[reportUnusedFunction]
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[SkillCatalog, Depends(catalog_dependency, scope="function")],
+        proposal_status: Annotated[
+            Literal["pending", "approved", "rejected"] | None, Query(alias="status")
+        ] = None,
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+    ) -> list[ProposalResponse]:
+        user = await authenticate_browser_user(auth, session_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            listed = await catalog.list_proposals(
+                _actor(user),
+                workspace_id,
+                request.state.request_id,
+                None if proposal_status is None else ProposalStatus(proposal_status),
+            )
+        except ForbiddenSkillAction as error:
+            raise forbidden() from error
+        return [ProposalResponse.from_domain(item) for item in listed]
+
+    @router.post("", response_model=ProposalResponse, status_code=status.HTTP_201_CREATED)
+    async def create_proposal(  # pyright: ignore[reportUnusedFunction]
+        payload: CreateProposalRequest,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[SkillCatalog, Depends(catalog_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> ProposalResponse:
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            proposal = await catalog.propose(
+                _actor(user),
+                workspace_id,
+                _files(payload.files),
+                request.state.request_id,
+                skill_id=payload.skill_id,
+            )
+        except ForbiddenSkillAction as error:
+            raise forbidden() from error
+        except UnknownSkill as error:
+            raise _skill_not_found() from error
+        except SkillNameMismatch as error:
+            raise _name_mismatch(error) from error
+        except InvalidSkillPackage as error:
+            raise _invalid_package(error) from error
+        # No `SkillScanRefused` here, and that is §15.3 step 3 rather than an
+        # oversight: a blocking finding stores the proposal so its author can
+        # read what the scan said, and stops it at approval instead.
+        return ProposalResponse.from_domain(proposal)
+
+    @router.get("/{proposal_id}", response_model=ProposalDetailResponse)
+    async def read_proposal(  # pyright: ignore[reportUnusedFunction]
+        proposal_id: UUID,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[SkillCatalog, Depends(catalog_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+    ) -> ProposalDetailResponse:
+        user = await authenticate_browser_user(auth, session_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            proposal, difference = await catalog.read_proposal(
+                _actor(user), workspace_id, proposal_id, request.state.request_id
+            )
+        except ForbiddenSkillAction as error:
+            raise forbidden() from error
+        except UnknownProposal as error:
+            raise _proposal_not_found() from error
+        base = ProposalResponse.from_domain(proposal)
+        return ProposalDetailResponse(
+            **base.model_dump(),
+            files=[
+                SkillFilePayload(path=item.path, content=item.text)
+                for item in proposal.files
+            ],
+            diff=[FileDiffResponse.from_domain(item) for item in difference.files],
+        )
+
+    @router.post(
+        "/{proposal_id}/approve",
+        response_model=SkillVersionResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def approve_proposal(  # pyright: ignore[reportUnusedFunction]
+        proposal_id: UUID,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[SkillCatalog, Depends(catalog_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> SkillVersionResponse:
+        """201: the one request in this module that publishes a version."""
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            _, version = await catalog.approve_proposal(
+                _actor(user), workspace_id, proposal_id, request.state.request_id
+            )
+        except ForbiddenSkillAction as error:
+            raise forbidden() from error
+        except UnknownProposal as error:
+            raise _proposal_not_found() from error
+        except UnknownSkill as error:
+            raise _skill_not_found() from error
+        except SkillNameTaken as error:
+            raise AppError(
+                code="skill_name_taken",
+                title="Skill name taken",
+                status=409,
+                detail="A skill by that name already exists at this level.",
+            ) from error
+        except InvalidSkillPackage as error:
+            raise _invalid_package(error) from error
+        except ProposalNotApprovable as error:
+            raise _not_approvable(error) from error
+        return SkillVersionResponse.from_domain(version)
+
+    @router.post("/{proposal_id}/reject", response_model=ProposalResponse)
+    async def reject_proposal(  # pyright: ignore[reportUnusedFunction]
+        proposal_id: UUID,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[SkillCatalog, Depends(catalog_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> ProposalResponse:
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            rejected = await catalog.reject_proposal(
+                _actor(user), workspace_id, proposal_id, request.state.request_id
+            )
+        except ForbiddenSkillAction as error:
+            raise forbidden() from error
+        except UnknownProposal as error:
+            raise _proposal_not_found() from error
+        except UnknownSkill as error:
+            raise _skill_not_found() from error
+        except ProposalNotApprovable as error:
+            raise _not_approvable(error) from error
+        return ProposalResponse.from_domain(rejected)
+
+    return router
+
+
 def _actor(user: AuthenticatedUser) -> Actor:
     return Actor(user.id, user.is_platform_admin)
 
@@ -513,6 +779,41 @@ def _version_not_found() -> AppError:
         title="Skill version not found",
         status=404,
         detail="That skill has no version by that identifier.",
+    )
+
+
+def _proposal_not_found() -> AppError:
+    return AppError(
+        code="skill_proposal_not_found",
+        title="Proposal not found",
+        status=404,
+        detail="No proposal by that identifier is available from this workspace.",
+    )
+
+
+def _not_approvable(error: ProposalNotApprovable) -> AppError:
+    """409, with the findings when findings are the reason.
+
+    A reviewer who is told only "cannot approve" goes looking for a permission
+    problem. The blocking findings travel back for the same reason they travel
+    back from an upload: whoever has to fix it is holding forty files.
+    """
+    return AppError(
+        code="skill_proposal_not_approvable",
+        title="Proposal not approvable",
+        status=409,
+        detail=error.reason,
+        context={
+            "findings": [
+                {
+                    "code": finding.code,
+                    "severity": finding.severity.value,
+                    "path": finding.path,
+                    "detail": finding.detail,
+                }
+                for finding in error.findings
+            ]
+        },
     )
 
 

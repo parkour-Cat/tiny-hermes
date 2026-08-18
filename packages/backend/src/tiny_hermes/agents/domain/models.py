@@ -58,6 +58,10 @@ class DeterministicModelPolicy(BaseModel):
         # the document said. `skill.load` is a platform tool, so this scenario
         # proves the whole progressive-loading path on a host with no sandbox.
         "skill_once",
+        # The governance drill: propose one change to a bound skill and stop.
+        # It ends with a `pending` row and no version, which is the whole of
+        # §15.3 seen from the Run's side.
+        "propose_once",
     ] = "complete"
 
 

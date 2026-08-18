@@ -144,6 +144,12 @@ class RunEventType(StrEnum):
     # thing the context planner is allowed to trim.
     SKILL_LOADED = "skill_loaded"
 
+    # And its governance half, not derived from a signal either: §15.3 lets an
+    # Agent suggest a change to the material it was given, and a suggestion
+    # that left no mark on the Run that made it would be a proposal a reviewer
+    # cannot trace back to anything.
+    SKILL_PROPOSED = "skill_proposed"
+
     # Also not derived from a signal: it records that a slice began on a fresh
     # writable layer, which is a fact about the sandbox rather than a state
     # transition. Technical design §11.3 requires the Agent be told, and this

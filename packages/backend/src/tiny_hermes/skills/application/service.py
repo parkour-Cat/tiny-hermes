@@ -13,10 +13,15 @@ a face that unpacks anything (red line three, on the manual path).
 """
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from uuid import UUID
 
+from tiny_hermes.skills.domain.diff import PackageDiff, diff_packages
 from tiny_hermes.skills.domain.models import (
+    ProposalOrigin,
+    ProposalStatus,
     Skill,
+    SkillProposal,
     SkillScope,
     SkillSource,
     SkillVersion,
@@ -43,6 +48,15 @@ from tiny_hermes.tenancy.domain.models import Actor, Role
 
 WRITERS = frozenset({Role.WORKSPACE_ADMIN, Role.DEVELOPER})
 READERS = frozenset({Role.WORKSPACE_ADMIN, Role.DEVELOPER, Role.VIEWER})
+
+#: One. A Run that proposed forty patches would be a review queue nobody
+#: empties, and the second proposal from one Run has never been a different
+#: idea — it is the same idea with the model's next thought about it.
+MAX_PROPOSALS_PER_RUN = 1
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
 
 
 class SkillCatalogError(Exception):
@@ -101,6 +115,33 @@ class SkillScanRefused(SkillCatalogError):
 
 class VersionNotBindable(SkillCatalogError):
     """Asked to make a withdrawn or blocked version the default for new bindings."""
+
+
+class UnknownProposal(SkillCatalogError):
+    pass
+
+
+class ProposalNotApprovable(SkillCatalogError):
+    """Approval refused, with the reason it was refused.
+
+    Two reasons reach here and they are told apart on purpose: a proposal that
+    was already decided, and one the scan blocked (§15.3 step 3). The second is
+    the one the roadmap names as an exit check, and a reviewer who is only told
+    "cannot approve" would go looking for a permission problem.
+    """
+
+    def __init__(self, reason: str, findings: Sequence[Finding] = ()) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.findings = tuple(findings)
+
+
+class ProposalLimitReached(SkillCatalogError):
+    """One Run has already proposed as much as a Run may propose."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"a Run may open {limit} proposals")
+        self.limit = limit
 
 
 class SkillImportFailed(SkillCatalogError):
@@ -395,6 +436,260 @@ class SkillCatalog:
             context={"version": str(version.version_number)},
         )
         return moved
+
+    # -- §15.3, self improvement ------------------------------------------
+    #
+    # The whole of it is here, and the shape says what the roadmap forbids:
+    # `propose` writes a proposal and never a version, `approve_proposal` is
+    # the only method in this class that turns one into the other, and nothing
+    # calls it but a person's request. There is no automatic approval to
+    # disable because there is no code that would perform one.
+
+    async def propose(
+        self,
+        actor: Actor,
+        workspace_id: UUID,
+        files: Sequence[SkillFile],
+        request_id: str,
+        skill_id: UUID | None = None,
+    ) -> SkillProposal:
+        """A person's suggestion, for a skill that exists or one that does not."""
+        skill = None
+        if skill_id is not None:
+            skill = await self._writable(actor, workspace_id, skill_id, request_id)
+        else:
+            await self._require_writer(actor, workspace_id, SkillScope.WORKSPACE, request_id)
+        return await self._propose(
+            workspace_id=workspace_id,
+            skill=skill,
+            base_version_id=None if skill is None else skill.current_version_id,
+            files=files,
+            origin=ProposalOrigin.HUMAN,
+            origin_run_id=None,
+            created_by=actor.id,
+            request_id=request_id,
+        )
+
+    async def propose_from_run(
+        self,
+        *,
+        workspace_id: UUID,
+        run_id: UUID,
+        created_by: UUID,
+        files: Sequence[SkillFile],
+        request_id: str,
+        skill_id: UUID | None = None,
+        base_version_id: UUID | None = None,
+    ) -> SkillProposal:
+        """An Agent's suggestion, made from inside a Run.
+
+        No role check, and that is not an omission. A Run is executing an Agent
+        Version somebody published; the authority it acts with was granted
+        then, and there is no interactive actor here to check anything about.
+        What keeps this safe is the other end: the result is a `pending` row
+        that no Run can approve.
+
+        `created_by` is the person who published the Agent Version. Attributing
+        it to nobody was not available — the column is a real user — and
+        attributing it to the person who happened to start the Run would point
+        a reviewer at someone who never wrote a word of it.
+        """
+        opened = await self._store.count_proposals_for_run(run_id)
+        if opened >= MAX_PROPOSALS_PER_RUN:
+            raise ProposalLimitReached(MAX_PROPOSALS_PER_RUN)
+        skill = None
+        if skill_id is not None:
+            skill = await self._store.get_skill(skill_id)
+            if skill is None:
+                raise UnknownSkill
+        return await self._propose(
+            workspace_id=workspace_id,
+            skill=skill,
+            base_version_id=base_version_id,
+            files=files,
+            origin=ProposalOrigin.AGENT,
+            origin_run_id=run_id,
+            created_by=created_by,
+            request_id=request_id,
+        )
+
+    async def _propose(
+        self,
+        *,
+        workspace_id: UUID,
+        skill: Skill | None,
+        base_version_id: UUID | None,
+        files: Sequence[SkillFile],
+        origin: ProposalOrigin,
+        origin_run_id: UUID | None,
+        created_by: UUID,
+        request_id: str,
+    ) -> SkillProposal:
+        """Parse, scan, store — and store even when the scan blocks.
+
+        This is the one place that differs from every other write in this
+        class. `_accept` refuses blocking content because a version is served
+        into prompts; a proposal is not served anywhere, and the author needs
+        to see which of their forty files holds the key they pasted into it.
+        §15.3 step 3 takes it from here: it can be read and never approved.
+        """
+        try:
+            package = parse_package(tuple(files))
+        except SkillPackageRefused as error:
+            raise InvalidSkillPackage(str(error)) from error
+        if skill is not None and package.manifest.name != skill.name:
+            raise SkillNameMismatch(skill.name, package.manifest.name)
+        proposal = await self._store.create_proposal(
+            workspace_id=workspace_id,
+            skill_id=None if skill is None else skill.id,
+            base_version_id=base_version_id,
+            package=package,
+            findings=scan(package.files),
+            origin=origin,
+            origin_run_id=origin_run_id,
+            created_by=created_by,
+        )
+        await self._store.append_audit(
+            workspace_id=workspace_id,
+            actor_id=created_by,
+            action="skill.proposal_opened",
+            resource_id=proposal.id,
+            request_id=request_id,
+            context={"origin": origin.value, "name": package.manifest.name},
+        )
+        return proposal
+
+    async def list_proposals(
+        self,
+        actor: Actor,
+        workspace_id: UUID,
+        request_id: str,
+        status: ProposalStatus | None = None,
+    ) -> Sequence[SkillProposal]:
+        await self._require_reader(actor, workspace_id, request_id)
+        return await self._store.list_proposals(workspace_id, status)
+
+    async def read_proposal(
+        self, actor: Actor, workspace_id: UUID, proposal_id: UUID, request_id: str
+    ) -> tuple[SkillProposal, PackageDiff]:
+        """The proposal and the difference it would make, read together.
+
+        Together because they are one document to the person deciding, and
+        because computing the diff needs the base version's files — a read the
+        console would otherwise have to make separately and could get wrong.
+        """
+        await self._require_reader(actor, workspace_id, request_id)
+        proposal = await self._proposal(workspace_id, proposal_id)
+        base: tuple[SkillFile, ...] = ()
+        if proposal.base_version_id is not None:
+            base = await self._store.read_files(proposal.base_version_id)
+        return proposal, diff_packages(base, proposal.files)
+
+    async def approve_proposal(
+        self, actor: Actor, workspace_id: UUID, proposal_id: UUID, request_id: str
+    ) -> tuple[Skill, SkillVersion]:
+        """§15.3 steps 4 and 5: a person decides, and a version is published.
+
+        What this deliberately does not do is move `current_version_id` for a
+        skill that already had one. Step 6 says the Agent switches to the new
+        version explicitly, and moving the default here would make approval and
+        switching one action that nobody chose separately. A brand new skill is
+        different only because it has nowhere else its default could point.
+        """
+        proposal = await self._proposal(workspace_id, proposal_id)
+        skill: Skill | None = None
+        if proposal.skill_id is not None:
+            skill = await self._writable(actor, workspace_id, proposal.skill_id, request_id)
+        else:
+            await self._require_writer(actor, workspace_id, SkillScope.WORKSPACE, request_id)
+        if proposal.status is not ProposalStatus.PENDING:
+            raise ProposalNotApprovable(f"this proposal is already {proposal.status.value}")
+        refusing = blocking(proposal.findings)
+        if refusing:
+            # The roadmap's exit check, and the reason a blocking proposal is
+            # allowed to exist at all: it is readable, and it stops here.
+            raise ProposalNotApprovable("the static scan blocked this content", refusing)
+        package = parse_package(proposal.files)
+        # Decided before the version is written. `decide_proposal` only moves a
+        # row that is still `pending`, so two approvals racing produce one
+        # version rather than two — and the loser is told the proposal was
+        # already decided instead of publishing a duplicate.
+        decided = await self._store.decide_proposal(
+            proposal.id, ProposalStatus.APPROVED, actor.id, _now()
+        )
+        if decided is None:
+            raise ProposalNotApprovable("this proposal is already decided")
+        fresh = skill is None
+        if skill is None:
+            try:
+                skill = await self._store.create_skill(
+                    scope=SkillScope.WORKSPACE,
+                    workspace_id=workspace_id,
+                    name=package.manifest.name,
+                    created_by=actor.id,
+                )
+            except DuplicateSkillName as error:
+                # Somebody created the skill between the proposal and this
+                # approval. Refused rather than merged into theirs: which of
+                # the two contents wins is not a decision this method may make.
+                raise SkillNameTaken from error
+        result = await self._store.add_version(
+            skill_id=skill.id,
+            package=package,
+            findings=proposal.findings,
+            source=SkillSource.PROPOSAL,
+            source_url=None,
+            source_ref=str(proposal.id),
+            created_by=actor.id,
+        )
+        if fresh:
+            moved = await self._store.set_current_version(skill.id, result.version.id)
+            if moved is None:
+                raise UnknownSkill
+            skill = moved
+        await self._store.append_audit(
+            workspace_id=workspace_id,
+            actor_id=actor.id,
+            action="skill.proposal_approved",
+            resource_id=proposal.id,
+            request_id=request_id,
+            context={
+                "skill_version_id": str(result.version.id),
+                "version": str(result.version.version_number),
+            },
+        )
+        return skill, result.version
+
+    async def reject_proposal(
+        self, actor: Actor, workspace_id: UUID, proposal_id: UUID, request_id: str
+    ) -> SkillProposal:
+        """A decision that produces nothing. That is the whole of it."""
+        proposal = await self._proposal(workspace_id, proposal_id)
+        if proposal.skill_id is not None:
+            await self._writable(actor, workspace_id, proposal.skill_id, request_id)
+        else:
+            await self._require_writer(actor, workspace_id, SkillScope.WORKSPACE, request_id)
+        rejected = await self._store.decide_proposal(
+            proposal.id, ProposalStatus.REJECTED, actor.id, _now()
+        )
+        if rejected is None:
+            raise ProposalNotApprovable(f"this proposal is already {proposal.status.value}")
+        await self._store.append_audit(
+            workspace_id=workspace_id,
+            actor_id=actor.id,
+            action="skill.proposal_rejected",
+            resource_id=proposal.id,
+            request_id=request_id,
+        )
+        return rejected
+
+    async def _proposal(self, workspace_id: UUID, proposal_id: UUID) -> SkillProposal:
+        proposal = await self._store.get_proposal(proposal_id)
+        if proposal is None or proposal.workspace_id != workspace_id:
+            # Another workspace's proposal is not found here, for the reason
+            # `_visible` gives about skills.
+            raise UnknownProposal
+        return proposal
 
     async def _visible(self, workspace_id: UUID, skill_id: UUID) -> Skill:
         """§9.3's scope check, with §15.1's one exception written out.

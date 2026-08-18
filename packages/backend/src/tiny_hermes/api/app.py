@@ -25,7 +25,7 @@ from tiny_hermes.runs.presentation.routes import run_router, session_router
 from tiny_hermes.secrets.presentation.routes import secret_router
 from tiny_hermes.shared.config import Settings
 from tiny_hermes.shared.errors import AppError
-from tiny_hermes.skills.presentation.routes import skill_router
+from tiny_hermes.skills.presentation.routes import skill_proposal_router, skill_router
 from tiny_hermes.tenancy.presentation.routes import workspace_router
 
 
@@ -79,6 +79,7 @@ def create_app(
     app.include_router(artifact_router(resources))
     app.include_router(secret_router(resources))
     app.include_router(skill_router(resources))
+    app.include_router(skill_proposal_router(resources))
     return app
 
 

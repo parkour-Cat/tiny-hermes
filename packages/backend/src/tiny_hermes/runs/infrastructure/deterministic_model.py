@@ -228,6 +228,61 @@ class DeterministicModelProvider:
                 input_tokens=TOKENS_PER_ROUND // 2,
                 output_tokens=TOKENS_PER_ROUND // 2,
             )
+        if scenario == "propose_once":
+            # §15.3 end to end without a sandbox and without a real model: the
+            # Run loads the skill it was given, proposes one line added to it,
+            # and stops. What it proposes is deliberately dull — the drill is
+            # about the governance path, not about the content.
+            proposed = tuple(
+                block
+                for message in request.messages[_last_user_index(request) + 1 :]
+                for block in message.blocks
+                if isinstance(block, ToolResultBlock) and block.call_id == "propose-1"
+            )
+            if not proposed:
+                name = _last_user_text(request) or _first_skill_name(request)
+                if not name:
+                    return ModelResponse(
+                        stop_reason=StopReason.FAILED,
+                        text="",
+                        failure="deterministic_no_skill_named",
+                    )
+                return ModelResponse(
+                    stop_reason=StopReason.TOOL_CALL,
+                    text="Suggesting one line for a person to review.",
+                    tool_calls=(
+                        ToolCallBlock(
+                            call_id="propose-1",
+                            name="skill.propose",
+                            arguments={
+                                "skill": name,
+                                "files": [
+                                    {
+                                        "path": "SKILL.md",
+                                        "content": _proposed_manifest(name),
+                                    }
+                                ],
+                            },
+                        ),
+                    ),
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                )
+            outcome = proposed[-1]
+            if outcome.failed:
+                return ModelResponse(
+                    stop_reason=StopReason.FAILED,
+                    text="",
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                    failure="deterministic_proposal_refused",
+                )
+            return ModelResponse(
+                stop_reason=StopReason.COMPLETED,
+                text=f"proposal opened\n{outcome.output[:2000]}",
+                input_tokens=TOKENS_PER_ROUND // 2,
+                output_tokens=TOKENS_PER_ROUND // 2,
+            )
         if scenario == "fail_replay_safe":
             return ModelResponse(
                 stop_reason=StopReason.FAILED,
@@ -257,6 +312,27 @@ def _last_user_index(request: ModelRequest) -> int:
         if request.messages[index].role == "user":
             return index
     return -1
+
+
+#: What `propose_once` suggests. A whole package, because a proposal is the
+#: files the skill should end up with rather than a patch — the drill would not
+#: prove much if it sent something the catalog could not store.
+PROPOSED_LINE = "Check the dashboard before you start."
+
+
+def _proposed_manifest(name: str) -> str:
+    """A whole package, because a proposal is files rather than a patch."""
+    lines = (
+        "---",
+        f"name: {name}",
+        "description: How this company takes a machine out of rotation before a deploy.",
+        "---",
+        "",
+        f"# {name}",
+        "",
+        PROPOSED_LINE,
+    )
+    return "\n".join(lines) + "\n"
 
 
 def _first_skill_name(request: ModelRequest) -> str:
