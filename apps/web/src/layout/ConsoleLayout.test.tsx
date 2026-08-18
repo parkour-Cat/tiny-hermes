@@ -91,8 +91,20 @@ test("both sections stay inside the workspace the address names", async () => {
     "href",
     `/workspaces/${WORKSPACE}/secrets`,
   );
-  expect(screen.queryByRole("link", { name: "Approvals" })).not.toBeInTheDocument();
-  expect(screen.queryByText("审批")).not.toBeInTheDocument();
+  // The three M2C-2 pages, each addressable on its own so a link to a waiting
+  // approval or a registered tool survives being shared.
+  expect(screen.getByRole("link", { name: "审批" })).toHaveAttribute(
+    "href",
+    `/workspaces/${WORKSPACE}/approvals`,
+  );
+  expect(screen.getByRole("link", { name: "HTTP 工具" })).toHaveAttribute(
+    "href",
+    `/workspaces/${WORKSPACE}/http-tools`,
+  );
+  expect(screen.getByRole("link", { name: "MCP 服务" })).toHaveAttribute(
+    "href",
+    `/workspaces/${WORKSPACE}/mcp-servers`,
+  );
   expect(await screen.findByText("Acme")).toBeInTheDocument();
   expect(screen.getByText("agent list")).toBeInTheDocument();
 });

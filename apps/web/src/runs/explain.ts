@@ -105,6 +105,55 @@ export function eventNote(frame: Pick<RunEventFrame, "event_type" | "payload">):
     // of every proposal regardless of what is in it.
     return { key: "skillProposedNote", values: {} };
   }
+  if (frame.event_type === "tool_schema_budget_exceeded") {
+    // Both numbers, because a refusal an author can act on is one with the
+    // numbers in it — and because the fix is either fewer tools or a larger
+    // segment, and neither is obvious without them.
+    const values = filled(frame.payload, { estimate: "estimate", allowance: "allowance" });
+    return values === null ? null : { key: "toolBudgetNote", values };
+  }
+  if (frame.event_type === "mcp_tools_revalidated") {
+    // What came back short. A Run that quietly had fewer tools than its
+    // Version bound is one whose behaviour changed with nobody publishing
+    // anything, so this is said rather than left in a payload.
+    const unreachable = frame.payload.unreachable;
+    const missing = frame.payload.missing;
+    if (!Array.isArray(unreachable) || !Array.isArray(missing)) {
+      return null;
+    }
+    return {
+      key: "mcpRevalidatedNote",
+      values: {
+        unreachable: unreachable.join(", ") || "—",
+        missing: missing.join(", ") || "—",
+      },
+    };
+  }
+  if (frame.event_type === "http_call_refused") {
+    const reason = frame.payload.reason;
+    const tool = frame.payload.tool;
+    const operation = frame.payload.operation;
+    if (typeof reason !== "string" || typeof tool !== "string") {
+      return null;
+    }
+    return {
+      key: "httpRefusedNote",
+      values: {
+        tool,
+        operation: typeof operation === "string" ? operation : "—",
+        reason,
+      },
+    };
+  }
+  if (frame.event_type === "run_approval_requested") {
+    // The one event where "who is waiting" matters more than what happened:
+    // a Run in `waiting_approval` resumes when a person acts and never on its
+    // own, so the sentence has to send the reader to a person.
+    return { key: "approvalRequestedNote", values: {} };
+  }
+  if (frame.event_type === "run_approval_approved") {
+    return { key: "approvalApprovedNote", values: {} };
+  }
   if (frame.event_type === "context_compacted") {
     const values = filled(frame.payload, {
       first: "first_sequence",

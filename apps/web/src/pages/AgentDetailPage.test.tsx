@@ -58,6 +58,95 @@ function loadedAgent(revision = 3): void {
     // The network picker reads what the workspace approved. Empty by default,
     // which is what an Agent that asks for no network is measured against.
     http.get("/api/v1/outbound-scopes/workspace", () => HttpResponse.json([])),
+    // The two tool catalogs, empty for the same reason the skills are.
+    http.get("/api/v1/http-tools", () => HttpResponse.json([])),
+    http.get("/api/v1/mcp-servers", () => HttpResponse.json([])),
+  );
+}
+
+const HTTP_VERSION = "55555555-6666-4777-8888-999999999999";
+const MCP_VERSION = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+
+/** One registered HTTP tool with a read and a write, and one MCP server. */
+function loadedToolCatalogs(): void {
+  server.use(
+    http.get("/api/v1/http-tools", () =>
+      HttpResponse.json([
+        {
+          id: "t1",
+          workspace_id: WORKSPACE,
+          name: "orders",
+          base_url: "https://api.example.com/v2",
+          credential_ref: null,
+          current_version_id: HTTP_VERSION,
+          created_at: "2026-08-18T00:00:00Z",
+          updated_at: "2026-08-18T00:00:00Z",
+        },
+      ]),
+    ),
+    http.get("/api/v1/http-tools/t1/versions", () =>
+      HttpResponse.json([
+        {
+          id: HTTP_VERSION,
+          http_tool_id: "t1",
+          version_number: 1,
+          content_hash: "abc",
+          title: "Orders",
+          document_version: "1",
+          operations: [
+            {
+              operation_id: "listOrders",
+              method: "GET",
+              path: "/orders",
+              summary: null,
+              read_only: true,
+            },
+            {
+              operation_id: "createOrder",
+              method: "POST",
+              path: "/orders",
+              summary: null,
+              read_only: false,
+            },
+          ],
+          status: "active",
+          bindable: true,
+          created_at: "2026-08-18T00:00:00Z",
+        },
+      ]),
+    ),
+    http.get("/api/v1/mcp-servers", () =>
+      HttpResponse.json([
+        {
+          id: "s1",
+          workspace_id: WORKSPACE,
+          name: "docs",
+          url: "https://mcp.example.com",
+          credential_ref: null,
+          current_version_id: MCP_VERSION,
+          last_validated_at: "2026-08-18T00:00:00Z",
+          created_at: "2026-08-18T00:00:00Z",
+          updated_at: "2026-08-18T00:00:00Z",
+        },
+      ]),
+    ),
+    http.get("/api/v1/mcp-servers/s1/versions", () =>
+      HttpResponse.json([
+        {
+          id: MCP_VERSION,
+          mcp_server_id: "s1",
+          version_number: 1,
+          content_hash: "abc",
+          tools: [
+            { name: "search", description: null, input_schema: {} },
+            { name: "purge", description: null, input_schema: {} },
+          ],
+          status: "active",
+          bindable: true,
+          created_at: "2026-08-18T00:00:00Z",
+        },
+      ]),
+    ),
   );
 }
 
@@ -621,6 +710,93 @@ test("the network picker offers what the workspace approved and nothing else", a
 
 test("an agent that asks for no network publishes the document it always did", async () => {
   loadedAgent(3);
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  expect(sent).toEqual([{ expected_revision: 3, spec: SPEC }]);
+});
+
+test("binding an HTTP operation stores the version id and the operation, and the write policy", async () => {
+  loadedAgent(3);
+  loadedToolCatalogs();
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByLabelText("HTTP 操作"));
+  await userEvent.click(await screen.findByTitle("POST createOrder · 会改数据"));
+  // §16.3's choice, made in the builder rather than discovered at publish.
+  await userEvent.click(screen.getAllByLabelText("写操作怎么办")[0] as HTMLElement);
+  await userEvent.click(await screen.findByTitle("每次都问管理员"));
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  expect(sent).toEqual([
+    {
+      expected_revision: 3,
+      spec: {
+        ...SPEC,
+        http_tools: [
+          {
+            http_tool_version_id: HTTP_VERSION,
+            operations: ["createOrder"],
+            write_policy: "governance",
+          },
+        ],
+      },
+    },
+  ]);
+});
+
+test("an MCP binding names every tool, because there is no way to say all", async () => {
+  loadedAgent(3);
+  loadedToolCatalogs();
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByLabelText("MCP 工具"));
+  await userEvent.click(await screen.findByTitle("search"));
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  // `purge` was advertised and is not in the binding: a server's discovery is
+  // not a permission.
+  expect(sent).toEqual([
+    {
+      expected_revision: 3,
+      spec: {
+        ...SPEC,
+        mcp_tools: [
+          { mcp_server_version_id: MCP_VERSION, tools: ["search"], write_policy: null },
+        ],
+      },
+    },
+  ]);
+});
+
+test("an agent that binds no tool publishes the document it always did", async () => {
+  loadedAgent(3);
+  loadedToolCatalogs();
   const sent: unknown[] = [];
   server.use(
     http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {

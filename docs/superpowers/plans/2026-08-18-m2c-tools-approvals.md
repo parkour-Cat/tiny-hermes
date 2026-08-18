@@ -174,27 +174,26 @@ egress-proxy，没配 proxy 就一个字节也发不出去，沙箱挂在一张�
 - [x] `usage_quality=unavailable` 的端点：禁用 Token 与货币硬上限，
       仍然强制时间、调用次数与单次最大输出。
       一条测试断言这四件事同时成立——只验前一半会让人以为那种端点不受任何限制。
-- [ ] 控制台：Run 详情显示费用与它的口径（`provider` / `estimated` / `unknown`），
+- [x] 控制台：Run 详情显示费用与它的口径（`provider` / `estimated` / `unknown`），
       估算值明确标注。已有的 `usage_quality` 展示照抄，不新发明一套词。
-      **后端已就位**（`budget.consumed_cost` / `cost_quality` / `max_cost`
-      随 Run 详情返回），页面本身和 §5 的其他页面一起做。
+      随 §5 一起做完了。
 
 ## 5. 控制台
 
-- [ ] `apps/web/src/pages/ApprovalsPage.tsx` + 测试：待办审批列表、
+- [x] `apps/web/src/pages/ApprovalsPage.tsx` + 测试：待办审批列表、
       两类分开、显示规范化后的参数、批准与拒绝各带原因。
       **完整的治理审批队列是 M3**，这里只做够用的一页：
       看得见、批得了、拒得掉、知道为什么。
-- [ ] `apps/web/src/pages/HttpToolsPage.tsx` 与 MCP 的注册页面 + 测试：
+- [x] `apps/web/src/pages/HttpToolsPage.tsx` 与 MCP 的注册页面 + 测试：
       注册、看可绑定操作、停用。地址不在出站范围内时的拒绝，
       要把缺的那一条显示出来，形状照 `outbound_entry_outside_platform`。
-- [ ] Agent Builder 加工具绑定区：选 HTTP 工具版本与操作子集、选 MCP 工具子集、
+- [x] Agent Builder 加工具绑定区：选 HTTP 工具版本与操作子集、选 MCP 工具子集、
       为每个需要用户确认的工具选那三个选项之一。**发布失败时**要说清是哪个工具
       没选。
-- [ ] `runs/explain.ts` 加 `approval_requested` / `approval_approved` /
+- [x] `runs/explain.ts` 加 `approval_requested` / `approval_approved` /
       `tool_schema_budget_exceeded` 的人话；Run 详情在 `waiting_approval` 时
       给出「等谁批」而不只是一个状态词。
-- [ ] i18n 两个 locale 补齐。
+- [x] i18n 两个 locale 补齐。
 
 ## 6. 验收与记录
 
