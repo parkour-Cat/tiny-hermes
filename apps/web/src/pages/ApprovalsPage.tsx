@@ -79,7 +79,6 @@ export function ApprovalsPage() {
   const governance = waiting.filter((item) => item.approval_type === "governance_approval");
 
   function card(approval: ApprovalResponse) {
-    const argumentsOf = approval.document.arguments;
     return (
       <Card key={approval.id} variant="borderless" className="page-alert">
         <Descriptions
@@ -107,12 +106,12 @@ export function ApprovalsPage() {
         <Typography.Paragraph type="secondary">
           {t("approvalArgumentsHint")}
         </Typography.Paragraph>
-        {/* The document verbatim. Rendered rather than summarized, because the
-            hash covers this exact shape and a summary could not be checked
-            against anything. */}
-        <pre className="skill-file-body">
-          {JSON.stringify(argumentsOf ?? approval.document, null, 2)}
-        </pre>
+        {/* The whole normalized document, not just its arguments. What is
+            hashed includes the target and the permission, and a call with no
+            arguments — which is most of them — would otherwise be reviewed as
+            an empty object. A reviewer who cannot see the request cannot
+            approve it. */}
+        <pre className="skill-file-body">{JSON.stringify(approval.document, null, 2)}</pre>
         <Space wrap>
           <Button
             type="primary"

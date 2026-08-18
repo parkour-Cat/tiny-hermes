@@ -746,7 +746,7 @@ export function AgentDetailPage() {
           </Form.Item>
           <Form.Item
             name="http_write_policy"
-            label={t("agentWritePolicy")}
+            label={t("agentHttpWritePolicy")}
             extra={t("agentWritePolicyHint")}
           >
             <Select allowClear options={WRITE_POLICIES.map((value) => ({
@@ -777,7 +777,7 @@ export function AgentDetailPage() {
           </Form.Item>
           <Form.Item
             name="mcp_write_policy"
-            label={t("agentWritePolicy")}
+            label={t("agentMcpWritePolicy")}
             extra={t("agentWritePolicyHint")}
           >
             <Select allowClear options={WRITE_POLICIES.map((value) => ({

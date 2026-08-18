@@ -427,6 +427,8 @@ export const zhCN = {
   agentMcpTools: "MCP 工具",
   agentMcpHint: "把这个 Agent 可以调用的工具逐个列出来。这里故意没有「全部」这个选项——远端以后多出四十个工具，会在没人发布任何东西的情况下把这个 Agent 放宽。",
   agentWritePolicy: "写操作怎么办",
+  agentHttpWritePolicy: "HTTP 写操作怎么办",
+  agentMcpWritePolicy: "MCP 调用怎么办",
   agentWritePolicyHint: "只要有会改数据的操作就必须选。三个答案都站得住，没有一个能默认，所以不选就发布不了。",
   writeDisabled: "直接拒绝",
   writePreauthorized: "已经预先批准",

@@ -340,6 +340,11 @@ export const MODEL_SCENARIOS = [
   "propose_once",
   "skill_once",
   "wait_once",
+  // The two external-tool drills. Listed here as well as declared in the
+  // backend's `DeterministicModelPolicy`, because an author who cannot select
+  // one cannot exercise the path it exists for.
+  "http_once",
+  "mcp_once",
 ] as const;
 
 export type SkillResponse = {

@@ -740,7 +740,7 @@ test("binding an HTTP operation stores the version id and the operation, and the
   await userEvent.click(await screen.findByLabelText("HTTP 操作"));
   await userEvent.click(await screen.findByTitle("POST createOrder · 会改数据"));
   // §16.3's choice, made in the builder rather than discovered at publish.
-  await userEvent.click(screen.getAllByLabelText("写操作怎么办")[0] as HTMLElement);
+  await userEvent.click(screen.getByLabelText("HTTP 写操作怎么办"));
   await userEvent.click(await screen.findByTitle("每次都问管理员"));
   await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
 

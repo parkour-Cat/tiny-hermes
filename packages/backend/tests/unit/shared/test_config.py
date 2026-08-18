@@ -152,3 +152,29 @@ def test_object_store_credentials_are_required(
     values["_env_file"] = None
     with pytest.raises(ValidationError):
         Settings(**values)
+
+
+def test_a_deployment_that_says_nothing_gets_the_web_s_two_ports() -> None:
+    """Empty falls back rather than approving nothing.
+
+    Unlike a scope — where empty must mean "nothing", because approving is the
+    whole point — a port list is a widening of a default that already works.
+    """
+    assert _settings().allowed_ports == frozenset({80, 443})
+
+
+def test_a_platform_administrator_may_widen_the_ports() -> None:
+    """§16.5's shape for every widening: explicit, and only at the platform
+    level. Needed more often than the default suggests — an enterprise's own
+    API on 8443 is ordinary, and without this an installation could bind only
+    tools that happen to live on the public web's two ports."""
+    widened = _settings(egress_allowed_ports="80, 443, 8443")
+
+    assert widened.allowed_ports == frozenset({80, 443, 8443})
+
+
+@pytest.mark.parametrize("value", ["0", "65536", "http", "-1"])
+def test_a_port_that_is_not_one_stops_the_process_starting(value: str) -> None:
+    """Refused where an operator is looking, rather than at the first call."""
+    with pytest.raises(ValidationError):
+        _settings(egress_allowed_ports=value)

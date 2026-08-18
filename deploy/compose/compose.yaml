@@ -40,6 +40,7 @@ x-base-env: &base-env
   EGRESS_PROXY_URL: ${EGRESS_PROXY_URL:-}
   EGRESS_PROXY_TOKEN: ${EGRESS_PROXY_TOKEN:-}
   EGRESS_ALLOWED_HOSTS: ${EGRESS_ALLOWED_HOSTS:-}
+  EGRESS_ALLOWED_PORTS: ${EGRESS_ALLOWED_PORTS:-}
   # The network a sandbox is attached to. Empty leaves a sandbox with no
   # network at all, which is §16.4's default and what a deployment running no
   # proxy gets.

@@ -50,12 +50,14 @@ async def _serve() -> None:
             token=settings.egress_proxy_token,
             approved_networks=_approved(settings),
             port=settings.egress_proxy_port,
+            allowed_ports=settings.allowed_ports,
         ),
     )
     stop = _stop_on_termination()
     logger.info(
-        "egress proxy started: approved_networks=%s",
+        "egress proxy started: approved_networks=%s ports=%s",
         len(_approved(settings)),
+        sorted(settings.allowed_ports),
     )
     await proxy.serve(stop)
     logger.info("egress proxy stopped")
