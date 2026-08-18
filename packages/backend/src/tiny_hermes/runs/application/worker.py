@@ -28,6 +28,7 @@ from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
 from tiny_hermes.runs.application.tool_answers import (
     answer_http_call,
     answer_mcp_call,
+    answer_memory_remember,
     answer_platform_tool,
     answer_skill_load,
     answer_skill_propose,
@@ -68,6 +69,7 @@ from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalGate
 from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolSender
 from tiny_hermes.runs.ports.mcp import BoundMcpTool, McpGateway
+from tiny_hermes.runs.ports.memories import MemoryCandidates
 from tiny_hermes.runs.ports.model import (
     ModelProvider,
     ModelRequest,
@@ -286,6 +288,7 @@ class WorkerRuntime:
         http_sender: HttpToolSender | None = None,
         approvals: ApprovalGate | None = None,
         mcp: McpGateway | None = None,
+        memories: MemoryCandidates | None = None,
     ) -> None:
         self._sessions = session_factory
         self._model = model
@@ -304,6 +307,10 @@ class WorkerRuntime:
         # Absent, a Version that bound MCP tools runs without them and says
         # so, rather than pretending it was never bound any.
         self._mcp = mcp
+        # Absent, `memory.remember` is refused rather than silently
+        # dropped: a model told nothing would propose the same thing every
+        # round, and a deployment with no memory store should say so.
+        self._memories = memories
         # Optional, because a deployment with no tools configured needs none.
         # A Run that binds a tool and finds this absent fails rather than
         # running the command anywhere else — product design §16 leaves no
@@ -934,6 +941,14 @@ class WorkerRuntime:
             if call.name == "skill.propose":
                 answered, event = await answer_skill_propose(
                     self._proposals, context, call
+                )
+                results.append(answered)
+                if event is not None:
+                    events.append(event)
+                continue
+            if call.name == "memory.remember":
+                answered, event = await answer_memory_remember(
+                    self._memories, context, call
                 )
                 results.append(answered)
                 if event is not None:

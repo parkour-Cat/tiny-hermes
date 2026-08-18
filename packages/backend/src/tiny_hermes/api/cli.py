@@ -7,6 +7,7 @@ import uuid
 
 import uvicorn
 
+from tiny_hermes.memory.infrastructure.sql_candidates import SqlMemoryCandidates
 from tiny_hermes.outbound.client import EgressRoute, SafeOutboundClient
 from tiny_hermes.runs.application.model_router import ModelRouter
 from tiny_hermes.runs.application.scheduler import (
@@ -140,6 +141,9 @@ async def _worker() -> None:
             ),
             kek=optional_kek(settings.tiny_hermes_kek),
         ),
+        # §14.1's write path. Absent, `memory.remember` is refused rather
+        # than silently dropped; the same database holds the memories.
+        memories=SqlMemoryCandidates(sessions),
         settings=WorkerSettings(
             worker_id=worker_id,
             lease_seconds=settings.worker_lease_seconds,
