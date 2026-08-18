@@ -20,7 +20,9 @@ from tiny_hermes.identity.infrastructure.sql_machine_store import SqlMachineIden
 from tiny_hermes.identity.infrastructure.sql_store import SqlAuthStore
 from tiny_hermes.model_catalog.application.service import ModelEndpointService
 from tiny_hermes.model_catalog.infrastructure.sql_store import SqlModelEndpointStore
+from tiny_hermes.outbound.application.service import OutboundScopes
 from tiny_hermes.outbound.client import EgressRoute, SafeOutboundClient
+from tiny_hermes.outbound.infrastructure.sql_store import SqlScopeStore
 from tiny_hermes.runs.application.event_stream import EventStreamHub, Poll
 from tiny_hermes.runs.application.service import RunCoordination
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
@@ -165,6 +167,19 @@ class ApplicationResources:
             max_response_bytes=settings.outbound_max_response_bytes,
         )
 
+    async def outbound_scopes(self) -> AsyncGenerator[OutboundScopes]:
+        async with self.session_factory()() as session:
+            try:
+                yield OutboundScopes(SqlScopeStore(session))
+            except AuditedDenial:
+                await session.commit()
+                raise
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
+
     async def model_endpoints(self) -> AsyncGenerator[ModelEndpointService]:
         async with self.session_factory()() as session:
             try:
@@ -172,6 +187,10 @@ class ApplicationResources:
                     SqlModelEndpointStore(session),
                     SqlSecretStore(session),
                     optional_kek(self.settings.tiny_hermes_kek),
+                    # Registering an endpoint approves the host it names, and
+                    # disabling one takes the approval away. One session, so
+                    # the endpoint row and its scope entry move together.
+                    OutboundScopes(SqlScopeStore(session)),
                 )
             except BaseException:
                 await session.rollback()
@@ -189,6 +208,9 @@ class ApplicationResources:
                         max_model_calls=self.settings.agent_max_model_calls
                     ),
                     CatalogSkillBindings(SqlSkillStore(session)),
+                    # What this workspace approved, so a published version can
+                    # never name a target its workspace has not.
+                    OutboundScopes(SqlScopeStore(session)),
                 )
             except AuditedDenial:
                 await session.commit()

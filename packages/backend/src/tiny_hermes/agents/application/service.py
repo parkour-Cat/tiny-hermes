@@ -1,5 +1,6 @@
 import re
 from collections.abc import Mapping, Sequence
+from typing import Protocol
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -19,6 +20,7 @@ from tiny_hermes.agents.ports.skills import SkillBindingReader, SkillBindingView
 from tiny_hermes.agents.ports.store import AgentStore, PublishResult
 from tiny_hermes.model_catalog.domain.models import ModelEndpoint
 from tiny_hermes.model_catalog.ports.store import ModelEndpointStore
+from tiny_hermes.outbound.domain.scope import OutboundScope, parse_entry
 from tiny_hermes.runs.domain.context_budget import (
     Accounting,
     BudgetFit,
@@ -104,6 +106,36 @@ class ContextWindowTooSmall(AgentCatalogError):
         self.allowance = allowance
 
 
+class WorkspaceScopeReader(Protocol):
+    """What this module needs from the outbound scopes, and nothing more.
+
+    A reader, never a writer: publishing an Agent measures against what a
+    workspace approved and can never change it.
+    """
+
+    async def workspace(self, workspace_id: UUID) -> OutboundScope: ...
+
+
+class AgentNetworkOutsideWorkspace(AgentCatalogError):
+    """Targets this Agent named that its workspace has not approved.
+
+    All of them, because publishing four times to find four problems is how an
+    author learns to stop reading the message.
+    """
+
+    def __init__(self, entries: tuple[str, ...]) -> None:
+        super().__init__(f"{len(entries)} targets outside the workspace scope")
+        self.entries = entries
+
+
+class AgentNetworkUnavailable(AgentCatalogError):
+    """An Agent asked for the network on a platform with no scopes wired in."""
+
+    def __init__(self, entries: tuple[str, ...]) -> None:
+        super().__init__("outbound scopes are not configured here")
+        self.entries = entries
+
+
 class SkillBindingUnavailable(AgentCatalogError):
     """A bound skill version this Agent may not run with, and why not.
 
@@ -176,6 +208,7 @@ class AgentCatalog:
         endpoints: ModelEndpointStore | None = None,
         ceilings: PlatformCeilings | None = None,
         skills: SkillBindingReader | None = None,
+        scopes: WorkspaceScopeReader | None = None,
     ) -> None:
         self._store = store
         # Defaulted rather than required so the domain tests, which are about
@@ -187,6 +220,10 @@ class AgentCatalog:
         # never reaches the check, and an endpoint-backed one cannot be
         # published without a catalog to check against.
         self._endpoints = endpoints
+        # Optional for the same reason, and with the same consequence: a draft
+        # that asks for no network never reaches the check, and one that does
+        # cannot be published without a scope reader to check against.
+        self._scopes = scopes
         # Optional for the same reason, with the same consequence: a draft that
         # binds no skill never asks, and one that binds a skill without a
         # reader to check it against cannot be published.
@@ -358,6 +395,7 @@ class AgentCatalog:
         if draft is not None:
             await self._check_endpoint(draft.spec)
             await self._check_skills(workspace_id, draft.spec)
+            await self._check_network(workspace_id, draft.spec)
             # Again here, and not only on save: this draft was measured against
             # whatever the ceiling was the day it was written.
             self._check_ceilings(draft.spec)
@@ -409,6 +447,30 @@ class AgentCatalog:
             # nothing anywhere would say so.
             raise ModelOutputLimitTooHigh
         self._check_context_budget(spec, endpoint, wanted)
+
+    async def _check_network(self, workspace_id: UUID, spec: AgentSpec) -> None:
+        """Refuse a version naming a target its workspace never approved.
+
+        §16.5: a layer may narrow and never widen. Caught here rather than at
+        the connection, because an entry that can never match is a line in a
+        published version that reads like a permission and is not one — and the
+        Run that discovers it fails on whatever it was actually doing.
+
+        Every offending entry travels back, not the first: an author naming
+        four targets should not have to publish four times.
+        """
+        if spec.network is None or not spec.network.allow:
+            return
+        if self._scopes is None:
+            raise AgentNetworkUnavailable(tuple(spec.network.allow))
+        approved = await self._scopes.workspace(workspace_id)
+        outside = tuple(
+            entry
+            for entry in spec.network.allow
+            if not any(allowed.contains(parse_entry(entry)) for allowed in approved.entries)
+        )
+        if outside:
+            raise AgentNetworkOutsideWorkspace(outside)
 
     async def _check_skills(self, workspace_id: UUID, spec: AgentSpec) -> None:
         """Refuse a version that binds a skill it cannot actually load.

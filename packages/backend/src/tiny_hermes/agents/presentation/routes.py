@@ -9,6 +9,8 @@ from tiny_hermes.agents.application.service import (
     AgentAliasAlreadyUsed,
     AgentCatalog,
     AgentCatalogError,
+    AgentNetworkOutsideWorkspace,
+    AgentNetworkUnavailable,
     ContextBudgetUnsatisfied,
     ContextWindowTooSmall,
     DraftRevisionConflict,
@@ -475,6 +477,31 @@ def _as_app_error(error: AgentCatalogError) -> AppError:
                     for advice in error.fit.advice
                 )
                 + ". Nothing is changed until you publish these."
+            ),
+        )
+    if isinstance(error, AgentNetworkOutsideWorkspace):
+        return AppError(
+            code="agent_network_outside_workspace",
+            title="Targets outside the workspace scope",
+            status=422,
+            detail=(
+                "This agent names targets its workspace has not approved: "
+                + ", ".join(error.entries)
+                + ". A workspace administrator can approve them, or the agent "
+                "can name something already inside."
+            ),
+            # Every one of them, so an author fixes the list once rather than
+            # publishing until the messages run out.
+            context={"entries": list(error.entries)},
+        )
+    if isinstance(error, AgentNetworkUnavailable):
+        return AppError(
+            code="agent_network_unavailable",
+            title="Outbound scopes are not configured",
+            status=422,
+            detail=(
+                "This deployment cannot check what an agent may reach, so it "
+                "will not publish one that asks for the network."
             ),
         )
     if isinstance(error, SkillBindingUnavailable):

@@ -284,6 +284,29 @@ export const enUS: Record<MessageKey, string> = {
   rewrapWarning:
     "Re-encrypts every secret under the new KEK. It can be interrupted and re-run; an \"unrecoverable\" count above zero means that ciphertext cannot be opened again and those secrets must be entered afresh.",
   rewrapSecrets: "Rewrap",
+  outboundScopes: "Outbound",
+  outboundTitle: "Outbound scope",
+  outboundIntro:
+    "An Agent may reach only what is listed here. Every layer narrows the one above it and none may widen it — a workspace chooses inside what the platform approved, and an Agent inside what its workspace did.",
+  outboundPlatform: "Approved by the platform",
+  outboundPlatformIntro: "What a platform administrator approved. A workspace chooses inside this.",
+  outboundWorkspace: "This workspace",
+  outboundWorkspaceIntro: "What this workspace chose. An Agent chooses inside this.",
+  outboundEntry: "Target",
+  outboundEntryHint: "A host, one leftmost wildcard (*.example.com), or a network (10.1.0.0/16). No scheme, no path, no port.",
+  outboundNote: "Note",
+  outboundApprove: "Approve",
+  outboundRevoke: "Remove",
+  outboundRevokeWarning:
+    "After this, an Agent relying on the target is refused at its next connection. Published Agents are not rewritten, but their requests will fail.",
+  outboundManaged: "Approved with a model endpoint",
+  outboundManagedHint: "This entry came with a registered model endpoint. Disabling that endpoint takes it away.",
+  emptyOutboundPlatform: "The platform has approved nothing, so nothing can be sent at all.",
+  emptyOutboundWorkspace: "This workspace has chosen no targets yet",
+  agentNetwork: "Network",
+  agentNetworkHint:
+    "What this Agent may reach. Chosen from what the workspace approved, and checked again at publish.",
+  agentNetworkEmpty: "No network access",
   skills: "Skills",
   skillsTitle: "Skill catalog",
   skillsIntro:

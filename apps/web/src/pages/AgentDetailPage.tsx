@@ -25,6 +25,7 @@ import type {
   AgentVersionDetailResponse,
   AgentVersionResponse,
   ModelEndpointSummary,
+  OutboundScopeEntry,
   SkillResponse,
   SkillVersionResponse,
 } from "../api/types";
@@ -48,6 +49,8 @@ type DraftValues = {
   sync_timeout_seconds: number;
   /** Bound skill *version* ids. Never names — see `agentSkillsHint`. */
   skills: string[];
+  /** Targets this Agent may reach, chosen from what the workspace approved. */
+  network: string[];
 };
 
 /** One bound summary's estimated cost, as a refused publish reports it. */
@@ -97,6 +100,7 @@ function valuesOf(draft: AgentDraftResponse): DraftValues {
     delivery_enabled: delivery.enabled,
     sync_timeout_seconds: delivery.sync_timeout_seconds,
     skills: (draft.spec.skills ?? []).map((binding) => binding.skill_version_id),
+    network: [...(draft.spec.network?.allow ?? [])],
   };
 }
 
@@ -117,6 +121,11 @@ function specOf(values: DraftValues): AgentSpecDocument {
       max_derived_retries: values.max_derived_retries,
     },
   };
+  if (values.network.length > 0) {
+    // Left out entirely when nothing is chosen, so an Agent that never asked
+    // for the network publishes the document it published before it could.
+    spec.network = { allow: values.network };
+  }
   if (values.skills.length > 0) {
     // Left out entirely when nothing is bound, so an Agent with no skills
     // publishes the same document it published before skills existed.
@@ -142,6 +151,7 @@ function summarizeSpec(spec: AgentSpecDocument): Record<string, string> {
     model: JSON.stringify(spec.model_policy),
     tools: spec.tools.join(", ") || "—",
     skills: (spec.skills ?? []).map((binding) => binding.skill_version_id).join(", ") || "—",
+    network: (spec.network?.allow ?? []).join(", ") || "—",
     max_execution_seconds: String(spec.limits.max_execution_seconds),
     max_elapsed_seconds: String(spec.limits.max_elapsed_seconds),
     max_model_calls: String(spec.limits.max_model_calls),
@@ -217,6 +227,14 @@ export function AgentDetailPage() {
       );
       return lists;
     },
+  });
+  // What this workspace approved, which is exactly the list of choices an
+  // author has. Offered rather than typed: an entry outside it is refused at
+  // publish, and a field that lets somebody write one is a field that teaches
+  // them to publish and see.
+  const outbound = useQuery({
+    queryKey: ["outbound-scopes", "workspace", workspaceId] as const,
+    queryFn: () => api<OutboundScopeEntry[]>("/api/v1/outbound-scopes/workspace", scope),
   });
   const provider = Form.useWatch("provider", form);
   const deliveryEnabled = Form.useWatch("delivery_enabled", form);
@@ -584,6 +602,20 @@ export function AgentDetailPage() {
                     value: version.id,
                     label: `${entry.skill.name} v${String(version.version_number)}`,
                   })),
+              }))}
+            />
+          </Form.Item>
+          <Typography.Title level={5}>{t("agentNetwork")}</Typography.Title>
+          <Typography.Paragraph type="secondary">{t("agentNetworkHint")}</Typography.Paragraph>
+          <Form.Item name="network" label={t("agentNetwork")}>
+            <Select
+              mode="multiple"
+              allowClear
+              loading={outbound.isLoading}
+              placeholder={t("agentNetworkEmpty")}
+              options={(outbound.data ?? []).map((item) => ({
+                value: item.entry,
+                label: item.entry,
               }))}
             />
           </Form.Item>
