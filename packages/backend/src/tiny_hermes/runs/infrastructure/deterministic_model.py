@@ -1,4 +1,5 @@
 import asyncio
+from typing import Any, cast
 
 from tiny_hermes.agents.domain.models import DeterministicModelPolicy
 from tiny_hermes.runs.domain.models import TextBlock, ToolCallBlock, ToolResultBlock
@@ -8,6 +9,7 @@ from tiny_hermes.runs.ports.model import (
     StopReason,
     UsageQuality,
 )
+from tiny_hermes.tools.domain.http_calls import HTTP_PREFIX
 
 MAX_DELAY_MS = 5_000
 TOKENS_PER_ROUND = 32
@@ -228,6 +230,44 @@ class DeterministicModelProvider:
                 input_tokens=TOKENS_PER_ROUND // 2,
                 output_tokens=TOKENS_PER_ROUND // 2,
             )
+        if scenario == "http_once":
+            # §16.2 end to end without a real model: call the first HTTP
+            # operation this Version bound, and answer with what came back. The
+            # Run input may name a different one, which is how the same
+            # scenario drills a refusal — an unbound name, or a write.
+            called = tuple(
+                block
+                for message in request.messages[_last_user_index(request) + 1 :]
+                for block in message.blocks
+                if isinstance(block, ToolResultBlock) and block.call_id == "http-1"
+            )
+            if not called:
+                name = _http_call_name(request)
+                if not name:
+                    return ModelResponse(
+                        stop_reason=StopReason.FAILED,
+                        text="",
+                        failure="deterministic_no_http_tool_bound",
+                    )
+                return ModelResponse(
+                    stop_reason=StopReason.TOOL_CALL,
+                    text="Calling the operation the drill named.",
+                    tool_calls=(
+                        ToolCallBlock(call_id="http-1", name=name, arguments={}),
+                    ),
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                )
+            answer = called[-1]
+            # A refused call still completes the Run here. The drill is about
+            # what the tool result says, and a failed Run would hide it behind
+            # a state transition.
+            return ModelResponse(
+                stop_reason=StopReason.COMPLETED,
+                text=f"http answered\n{answer.output[:2000]}",
+                input_tokens=TOKENS_PER_ROUND // 2,
+                output_tokens=TOKENS_PER_ROUND // 2,
+            )
         if scenario == "propose_once":
             # §15.3 end to end without a sandbox and without a real model: the
             # Run loads the skill it was given, proposes one line added to it,
@@ -333,6 +373,26 @@ def _proposed_manifest(name: str) -> str:
         PROPOSED_LINE,
     )
     return "\n".join(lines) + "\n"
+
+
+def _http_call_name(request: ModelRequest) -> str:
+    """Which HTTP operation the drill should call.
+
+    The Run input wins when it names one, so a single scenario can drill the
+    answer, an unbound name and a refused write. With no input it falls back to
+    the first HTTP tool the Version bound.
+    """
+    asked = _last_user_text(request).strip()
+    if asked.startswith(f"{HTTP_PREFIX}."):
+        return asked
+    for schema in request.tools:
+        function = schema.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = str(cast(dict[str, Any], function).get("name", ""))
+        if name.startswith(f"{HTTP_PREFIX}."):
+            return name
+    return ""
 
 
 def _first_skill_name(request: ModelRequest) -> str:

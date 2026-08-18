@@ -62,6 +62,10 @@ class DeterministicModelPolicy(BaseModel):
         # It ends with a `pending` row and no version, which is the whole of
         # §15.3 seen from the Run's side.
         "propose_once",
+        # Calls one HTTP operation this Version bound and answers with what
+        # came back. The Run input may name a different one, which is how the
+        # same scenario drills a refusal as well as an answer.
+        "http_once",
     ] = "complete"
 
 
@@ -268,6 +272,44 @@ class SkillBinding(BaseModel):
     skill_version_id: UUID
 
 
+#: A spec may bind at most this many HTTP tool versions, and at most this many
+#: operations across all of them. The second number is the one that matters: an
+#: operation is a tool in the model's list, and a model handed two hundred tools
+#: chooses worse than one handed twelve.
+MAX_HTTP_TOOL_BINDINGS = 8
+MAX_BOUND_OPERATIONS = 32
+
+
+class HttpToolBinding(BaseModel):
+    """One HTTP tool version an Agent may call, and which of its operations.
+
+    Two decisions worth stating.
+
+    A binding names a **version**, the same red line as `SkillBinding`. The
+    document lives on somebody else's server; if a binding named the tool then
+    their next export — a parameter becoming required, an operation quietly
+    turning into a write — would change what a published Agent does with nobody
+    here publishing anything.
+
+    `operations` is a **subset that must be written down**. Empty is refused
+    rather than read as "all of them": a document with forty operations bound
+    by an author who wanted two is thirty-eight capabilities nobody chose, and
+    every other default on this boundary already fails closed.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    http_tool_version_id: UUID
+    operations: tuple[str, ...] = Field(min_length=1)
+
+    @field_validator("operations")
+    @classmethod
+    def reject_repeated_operations(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("an operation may be bound once")
+        return value
+
+
 #: Discriminated, so a `provider` the platform does not understand is refused
 #: rather than falling through to the stand-in. An Agent that answers from a
 #: `match` statement while its author believes it is talking to a model is the
@@ -379,6 +421,37 @@ class AgentSpec(BaseModel):
     #: normalized document when absent, the fifth widening to leave every
     #: earlier content hash alone and the fifth to have a test say so.
     network: AgentNetwork | None = None
+    #: The HTTP tool versions this Agent may call, and which operations of each
+    #: — §16.2's first step for tools that did not exist when the platform was
+    #: built. Fixed at publish like `tools` and `skills`. Omitted from the
+    #: normalized document when empty, the sixth widening to leave every earlier
+    #: content hash alone and the sixth to have a test say so.
+    http_tools: tuple[HttpToolBinding, ...] = ()
+
+    @field_validator("http_tools")
+    @classmethod
+    def reject_repeated_http_versions(
+        cls, value: tuple[HttpToolBinding, ...]
+    ) -> tuple[HttpToolBinding, ...]:
+        """What a draft can settle without asking the catalog anything.
+
+        Whether an operation exists, whether the version is still bindable and
+        whether its host is inside this Agent's network is checked at publish,
+        where there is a store to ask.
+        """
+        if len(value) > MAX_HTTP_TOOL_BINDINGS:
+            raise ValueError(
+                f"an Agent may bind at most {MAX_HTTP_TOOL_BINDINGS} HTTP tools"
+            )
+        named = {binding.http_tool_version_id for binding in value}
+        if len(named) != len(value):
+            raise ValueError("an HTTP tool version may be bound only once")
+        total = sum(len(binding.operations) for binding in value)
+        if total > MAX_BOUND_OPERATIONS:
+            raise ValueError(
+                f"an Agent may bind at most {MAX_BOUND_OPERATIONS} operations"
+            )
+        return value
 
     @field_validator("skills")
     @classmethod
@@ -497,6 +570,10 @@ def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
         # declares none must carry no key so versions published before M2C
         # hash exactly as they did.
         normalized.pop("network", None)
+    if not normalized.get("http_tools"):
+        # Same promise as `skills`, one field later: the key was not there
+        # before M2C, so an Agent that binds no HTTP tool must carry no key.
+        normalized.pop("http_tools", None)
     if not normalized.get("skills"):
         # `tools` could keep its empty list because the key was there from the
         # first published version. This one was not, so an empty binding set

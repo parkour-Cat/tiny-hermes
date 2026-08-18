@@ -25,6 +25,7 @@ from tiny_hermes.runs.domain.models import (
     WorkspaceCleanupTarget,
 )
 from tiny_hermes.tenancy.domain.models import Role
+from tiny_hermes.tools.domain.http_calls import BoundOperation
 
 
 @dataclass(frozen=True)
@@ -240,6 +241,12 @@ class ExecutionContext:
     #: `skill.load` calls in the transcript keeps it a fact about *this Run*
     #: even when a persistent Session hands over another Run's turns.
     loaded_skills: tuple[UUID, ...] = ()
+    #: The HTTP operations this Run's Version bound, assembled from the catalog
+    #: at the same moment as the skills and for the same reason. Each carries
+    #: everything the call needs — base URL, credential reference, the parsed
+    #: operation — so a round composes a request without asking the catalog
+    #: anything mid-flight.
+    http_operations: tuple[BoundOperation, ...] = ()
 
     @property
     def messages(self) -> tuple[CanonicalMessage, ...]:

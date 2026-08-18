@@ -15,6 +15,7 @@ from tiny_hermes.agents.domain.models import ContextBudget
 from tiny_hermes.artifacts.application.service import ArtifactLimits, ArtifactRecorder
 from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
 from tiny_hermes.runs.application.tool_answers import (
+    answer_http_call,
     answer_platform_tool,
     answer_skill_load,
     answer_skill_propose,
@@ -51,6 +52,7 @@ from tiny_hermes.runs.domain.slice_policy import (
     decide_after_round,
 )
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
+from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolSender
 from tiny_hermes.runs.ports.model import (
     ModelProvider,
     ModelRequest,
@@ -99,10 +101,11 @@ from tiny_hermes.tools.application.execute import (
     run_tool_call,
 )
 from tiny_hermes.tools.domain.files import DATA_ROOT, FILE_HELPER, changes_workspace
+from tiny_hermes.tools.domain.http_calls import HTTP_PREFIX
 from tiny_hermes.tools.domain.registry import (
     DEFAULT_OUTPUT_BYTES,
     PLATFORM_TOOLS,
-    schemas_for,
+    schemas_for_agent,
 )
 
 logger = logging.getLogger(__name__)
@@ -254,6 +257,7 @@ class WorkerRuntime:
         workspace: WorkspaceRuntime | None = None,
         skills: SkillLibrary | None = None,
         proposals: SkillProposals | None = None,
+        http_sender: HttpToolSender | None = None,
     ) -> None:
         self._sessions = session_factory
         self._model = model
@@ -265,6 +269,7 @@ class WorkerRuntime:
         # believing the skill was empty.
         self._skills = skills
         self._proposals = proposals
+        self._http_sender = http_sender
         # Optional, because a deployment with no tools configured needs none.
         # A Run that binds a tool and finds this absent fails rather than
         # running the command anywhere else — product design §16 leaves no
@@ -810,6 +815,25 @@ class WorkerRuntime:
             if call.name == "skill.propose":
                 answered, event = await answer_skill_propose(
                     self._proposals, context, call
+                )
+                results.append(answered)
+                if event is not None:
+                    events.append(event)
+                continue
+            if call.name.startswith(f"{HTTP_PREFIX}."):
+                # Sent by the platform rather than by the sandbox: the
+                # credential belongs on this side of the boundary, and the
+                # request has to leave through the egress proxy like every
+                # other outbound call this process makes.
+                answered, event = await answer_http_call(
+                    self._http_sender,
+                    context,
+                    call,
+                    EgressClaim(
+                        workspace_id=claimed.run.workspace_id,
+                        agent_version_id=claimed.run.agent_version_id,
+                        run_id=claimed.run.id,
+                    ),
                 )
                 results.append(answered)
                 if event is not None:
@@ -1591,11 +1615,15 @@ def _plan(context: ExecutionContext) -> ContextPlan:
         window=context.window,
         safety_rules=SAFETY_PREAMBLE,
         personality=context.spec.personality,
-        tool_schemas=tuple(schemas_for(context.spec.tools)),
+        tool_schemas=_tool_schemas(context),
         history=context.history,
         skill_summaries=summaries,
         segments=(context.spec.context_budget or ContextBudget()).resolve(),
     )
+
+
+def _tool_schemas(context: ExecutionContext) -> tuple[dict[str, Any], ...]:
+    return tuple(schemas_for_agent(context.spec.tools, context.http_operations))
 
 
 def _request(
@@ -1612,7 +1640,7 @@ def _request(
         personality=context.spec.personality,
         messages=plan.messages,
         round_index=_round_index(context),
-        tools=tuple(schemas_for(context.spec.tools)),
+        tools=_tool_schemas(context),
         cache_hint=box.hint if box is not None else None,
         skill_summaries=plan.skill_summaries,
     )

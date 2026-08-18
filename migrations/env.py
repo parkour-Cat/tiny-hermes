@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from tiny_hermes.agents.infrastructure import tables as agent_tables  # noqa: F401
 from tiny_hermes.artifacts.infrastructure import tables as artifact_tables  # noqa: F401
 from tiny_hermes.audit.infrastructure import tables as audit_tables  # noqa: F401
+from tiny_hermes.http_tools.infrastructure import tables as http_tool_tables  # noqa: F401
 from tiny_hermes.identity.infrastructure import tables as identity_tables  # noqa: F401
 from tiny_hermes.model_catalog.infrastructure import tables as endpoint_tables  # noqa: F401
 from tiny_hermes.outbound.infrastructure import tables as outbound_tables  # noqa: F401

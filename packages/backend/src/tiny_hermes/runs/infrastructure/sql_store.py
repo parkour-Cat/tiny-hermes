@@ -12,6 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tiny_hermes.agents.domain.models import AgentLimits, AgentSpec, EndpointModelPolicy
 from tiny_hermes.agents.infrastructure.tables import AgentRow, AgentVersionRow
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
+from tiny_hermes.http_tools.infrastructure.documents import operation_from_document
+from tiny_hermes.http_tools.infrastructure.tables import (
+    HttpToolRow,
+    HttpToolVersionRow,
+)
 from tiny_hermes.model_catalog.infrastructure.tables import ModelEndpointRow
 from tiny_hermes.runs.application.service import (
     AgentNotPublished,
@@ -97,6 +102,7 @@ from tiny_hermes.runs.ports.store import (
 from tiny_hermes.skills.infrastructure.tables import SkillRow, SkillVersionRow
 from tiny_hermes.tenancy.domain.models import Role
 from tiny_hermes.tenancy.infrastructure.tables import MembershipRow
+from tiny_hermes.tools.domain.http_calls import BoundOperation
 
 RESERVE_SEQUENCES = text(
     "UPDATE runs SET next_event_sequence = next_event_sequence + :count "
@@ -658,6 +664,7 @@ class SqlRunStore:
             compat_deadline_at=deadline,
             skills=await self._bound_skills(spec),
             loaded_skills=await self._loaded_skills(run.id),
+            http_operations=await self._bound_operations(spec),
         )
 
     async def _bound_skills(self, spec: AgentSpec) -> tuple[BoundSkill, ...]:
@@ -699,6 +706,59 @@ class SqlRunStore:
                 )
             )
         return tuple(skills)
+
+    async def _bound_operations(self, spec: AgentSpec) -> tuple[BoundOperation, ...]:
+        """What the Version bound, assembled into callable operations.
+
+        Read by version id, like the skills. The tool row answers where the
+        requests go and which credential to resolve; the version row answers
+        what the operation is. Both are read here rather than at the call so a
+        round composes its request from one consistent read.
+
+        An operation the version no longer declares is skipped rather than
+        failing the round — publishing checked every one, so this can only
+        follow a deletion, and a Run that loses one of four tools is better off
+        than one that cannot start.
+        """
+        if not spec.http_tools:
+            return ()
+        wanted = [binding.http_tool_version_id for binding in spec.http_tools]
+        found = await self._session.execute(
+            select(
+                HttpToolVersionRow.id,
+                HttpToolVersionRow.operations,
+                HttpToolRow.name,
+                HttpToolRow.base_url,
+                HttpToolRow.credential_ref,
+            )
+            .join(HttpToolRow, HttpToolRow.id == HttpToolVersionRow.http_tool_id)
+            .where(HttpToolVersionRow.id.in_(wanted))
+        )
+        rows = {row[0]: row for row in found.all()}
+        operations: list[BoundOperation] = []
+        for binding in spec.http_tools:
+            row = rows.get(binding.http_tool_version_id)
+            if row is None:
+                continue
+            _, documents, name, base_url, credential_ref = row
+            declared = {
+                str(entry["operation_id"]): entry
+                for entry in cast(list[dict[str, Any]], documents)
+            }
+            for operation_id in binding.operations:
+                document = declared.get(operation_id)
+                if document is None:
+                    continue
+                operations.append(
+                    BoundOperation(
+                        tool_name=name,
+                        version_id=binding.http_tool_version_id,
+                        base_url=base_url,
+                        credential_ref=credential_ref,
+                        operation=operation_from_document(document),
+                    )
+                )
+        return tuple(operations)
 
     async def _loaded_skills(self, run_id: UUID) -> tuple[UUID, ...]:
         """Which versions this Run has already read text from, oldest first."""

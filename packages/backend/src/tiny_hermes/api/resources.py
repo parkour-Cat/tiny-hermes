@@ -10,10 +10,15 @@ from sqlalchemy.ext.asyncio import (
 
 from tiny_hermes.agents.application.service import AgentCatalog
 from tiny_hermes.agents.domain.models import PlatformCeilings
+from tiny_hermes.agents.infrastructure.http_tool_bindings import (
+    CatalogHttpToolBindings,
+)
 from tiny_hermes.agents.infrastructure.skill_bindings import CatalogSkillBindings
 from tiny_hermes.agents.infrastructure.sql_store import SqlAgentStore
 from tiny_hermes.artifacts.application.service import ArtifactService
 from tiny_hermes.artifacts.infrastructure.sql_store import SqlArtifactStore
+from tiny_hermes.http_tools.application.service import HttpToolCatalog
+from tiny_hermes.http_tools.infrastructure.sql_store import SqlHttpToolStore
 from tiny_hermes.identity.application.auth_service import AuthService
 from tiny_hermes.identity.application.machine_service import MachineIdentityService
 from tiny_hermes.identity.infrastructure.sql_machine_store import SqlMachineIdentityStore
@@ -211,6 +216,7 @@ class ApplicationResources:
                     # What this workspace approved, so a published version can
                     # never name a target its workspace has not.
                     OutboundScopes(SqlScopeStore(session)),
+                    CatalogHttpToolBindings(SqlHttpToolStore(session)),
                 )
             except AuditedDenial:
                 await session.commit()
@@ -261,6 +267,24 @@ class ApplicationResources:
                 yield SkillCatalog(
                     SqlSkillStore(session),
                     OutboundTarballSource(self.outbound_client),
+                )
+            except AuditedDenial:
+                await session.commit()
+                raise
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
+
+    async def http_tool_catalog(self) -> AsyncGenerator[HttpToolCatalog]:
+        async with self.session_factory()() as session:
+            try:
+                yield HttpToolCatalog(
+                    SqlHttpToolStore(session),
+                    # Registration is refused unless the host is already inside
+                    # what this workspace approved — M2C-1's first consumer.
+                    OutboundScopes(SqlScopeStore(session)),
                 )
             except AuditedDenial:
                 await session.commit()
