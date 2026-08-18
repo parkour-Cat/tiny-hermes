@@ -47,11 +47,11 @@ class SqlMemoryStore:
                 .order_by(MemoryRow.created_at)
             )
         ).all()
-        return [_record(row) for row in rows]
+        return [record_of(row) for row in rows]
 
     async def get(self, memory_id: UUID) -> MemoryRecord | None:
         row = await self._session.get(MemoryRow, memory_id)
-        return None if row is None else _record(row)
+        return None if row is None else record_of(row)
 
     async def set_status(
         self, memory_id: UUID, status: MemoryStatus, now: datetime
@@ -62,7 +62,7 @@ class SqlMemoryStore:
         row.status = status.value
         row.updated_at = now
         await self._session.flush()
-        return _record(row)
+        return record_of(row)
 
     async def create_shared(
         self, *, workspace_id: UUID, agent_id: UUID, body: str, created_by: UUID
@@ -85,7 +85,7 @@ class SqlMemoryStore:
         )
         self._session.add(row)
         await self._session.flush()
-        return _record(row)
+        return record_of(row)
 
     async def agent_in_workspace(self, workspace_id: UUID, agent_id: UUID) -> bool:
         found = await self._session.scalar(
@@ -122,7 +122,9 @@ class SqlMemoryStore:
         await self._session.flush()
 
 
-def _record(row: MemoryRow) -> MemoryRecord:
+def record_of(row: MemoryRow) -> MemoryRecord:
+    """One row as the services see it. Shared with the subject store so a
+    memory reads the same whoever asked for it."""
     return MemoryRecord(
         id=row.id,
         workspace_id=row.workspace_id,

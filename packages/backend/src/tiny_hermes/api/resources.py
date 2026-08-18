@@ -30,8 +30,10 @@ from tiny_hermes.mcp.infrastructure.outbound_reader import (
 )
 from tiny_hermes.mcp.infrastructure.sql_store import SqlMcpStore
 from tiny_hermes.memory.application.service import MemoryService
+from tiny_hermes.memory.application.subject_service import SubjectService
 from tiny_hermes.memory.infrastructure.sql_search import SqlSessionSearch
 from tiny_hermes.memory.infrastructure.sql_service_store import SqlMemoryStore
+from tiny_hermes.memory.infrastructure.sql_subject_store import SqlSubjectStore
 from tiny_hermes.model_catalog.application.pricing_service import PricingService
 from tiny_hermes.model_catalog.application.service import ModelEndpointService
 from tiny_hermes.model_catalog.infrastructure.sql_pricing_store import (
@@ -317,6 +319,22 @@ class ApplicationResources:
         async with self.session_factory()() as session:
             try:
                 yield MemoryService(SqlMemoryStore(session))
+            except AuditedDenial:
+                await session.commit()
+                raise
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
+
+    async def subject_service(self) -> AsyncGenerator[SubjectService]:
+        """One transaction: an erasure and the audit line that says it happened
+        have to land together, or the platform cannot tell a deletion from a
+        deletion that never ran."""
+        async with self.session_factory()() as session:
+            try:
+                yield SubjectService(SqlSubjectStore(session))
             except AuditedDenial:
                 await session.commit()
                 raise

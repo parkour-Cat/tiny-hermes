@@ -143,7 +143,7 @@ class MemoryService:
         administrator's own edit is the review — there is nobody else it is
         waiting on."""
         await self._require_steward(actor, workspace_id)
-        cleaned = _cleaned(body)
+        cleaned = cleaned_body(body)
         if not await self.store.agent_in_workspace(workspace_id, agent_id):
             raise UnknownAgent
         record = await self.store.create_shared(
@@ -206,7 +206,9 @@ class MemoryService:
             raise ForbiddenMemoryAction
 
 
-def _cleaned(body: str) -> str:
+def cleaned_body(body: str) -> str:
+    """One memory's text, bounded. Shared with the subject's own corrections:
+    a memory a person writes is measured the same as one an Agent proposed."""
     text = body.strip()
     if not text:
         raise InvalidMemoryBody("a memory has a body")
