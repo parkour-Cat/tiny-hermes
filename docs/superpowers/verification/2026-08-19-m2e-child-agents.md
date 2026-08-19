@@ -50,7 +50,7 @@ branch, with `SANDBOX_IMAGE_DIGEST` set to a locally built sandbox image.
 | `ruff check packages/backend migrations` | clean |
 | `pyright` (backend and tests) | 0 errors |
 | `pytest packages/backend/tests/unit` | 1768 passed |
-| `pytest packages/backend/tests/integration` (less `sandbox/`) | 526 passed |
+| `pytest packages/backend/tests/integration` (less `sandbox/`) | 527 passed |
 | `alembic upgrade head` / `check` | clean for 0027–0029 |
 | `alembic downgrade` each of 0029→0026, and `downgrade base`, then `upgrade head` | clean |
 | `tsc --noEmit` (console) | clean |
@@ -103,9 +103,23 @@ the moment it becomes a Run and stores it as a **snapshot** on
 `runs.delegation_scope`, so a parent republished or rolled back mid-flight
 cannot change a running child's permissions.
 
-The honest limit is in §5: the stored scope is computed and recorded, and the
-`files` face is enforced, but tools, network, secrets and skills are not yet
-consulted by the execution layer at call time.
+**Enforced at call time**, and that was a gap this record originally carried.
+`ExecutionContext` computes the narrowed set once and every check reads it —
+the tools a call is authorized against, the schema list the model is shown, the
+skills `skill.load` may reach, and the operations a request may compose. The
+network face fills the `run` layer of the four-layer outbound scope, which was
+written with that slot empty and a comment saying it arrives with M2E. The
+secrets face is applied to an operation's `credential_ref`, so a child granted
+a call but not its credential is refused rather than sent out unauthenticated.
+
+`test_a_child_loses_a_tool_its_own_version_bound_and_the_delegation_did_not`
+is the one that would have caught the gap: the same child Agent and the same
+scenario, delegated twice — given `platform.wait` it waits, denied it the call
+is refused. A scope column would have said the intersection was recorded; only
+behaviour says it was obeyed.
+
+One face is still not delegatable and it fails closed: see §5 for HTTP and MCP
+tools.
 
 **4. A child cannot read the parent's unauthorized private memory (§27.2.3).**
 
@@ -169,16 +183,17 @@ still running.
 
 ## 5. What this run does not prove
 
-**The intersection is stored and only partly enforced.** `runs.delegation_scope`
-records what a child was granted across all six faces, publishing refuses a
-delegation wider than its parent, and the `files` face is checked on every read.
-The other four are **not** consulted at call time: a child's tool authorization
-still comes from its own published Version, which the parent could not widen but
-also does not narrow. So a child bound to `shell.exec` in its own spec can run
-it even where the delegation named no tools. That is a real gap against §13's
-sixth clause read strictly, it is not what the plan's §2 asked for, and the
-place it belongs is the execution layer's second permission check. Written down
-here rather than left to be discovered.
+**HTTP and MCP tools cannot be delegated, and the failure is closed rather than
+open.** The `tools` face is matched against the name a model types, and
+`scope_of_spec` builds a parent's face from `spec.tools` — which carries
+platform and sandbox tool names but not the generated `http.<tool>.<operation>`
+and `mcp.<server>.<tool>` names, because those come from the catalog rather than
+from the spec. The consequence is that a delegated child's `granted_operations`
+is always empty: it calls no HTTP or MCP tool at all, whatever its own Version
+bound. That is the safe direction and it is not the finished thing. Completing
+it means resolving a Version's tool names in the catalog at publish so a
+delegation can name one and be checked against the parent's, which is a change
+to `AgentCatalog._check_delegation` this pass did not make.
 
 **The sandbox transport suite fails on this host and does not on CI.**
 `tests/integration/sandbox/test_transport.py` and `test_transport_streaming.py`

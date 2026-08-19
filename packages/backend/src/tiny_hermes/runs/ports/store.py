@@ -285,6 +285,74 @@ class ExecutionContext:
     def messages(self) -> tuple[CanonicalMessage, ...]:
         return tuple(item.message for item in self.history)
 
+    @property
+    def tools(self) -> tuple[str, ...]:
+        """What this Run may actually call, after the delegation narrowed it.
+
+        **Read this, never `spec.tools`.** §13's sixth clause makes a child's
+        permission the intersection of its parent's and the delegation's, and
+        an intersection computed at one call site is an intersection some other
+        call site forgot. Every check the Worker makes goes through here, and
+        so does the schema list the model is shown — §10.2's two steps agreeing
+        because they read one thing.
+
+        A face nobody named grants nothing: a delegation that lists no tools
+        gives a child no tools, even where the child's own Version bound them.
+        That is the documented rule rather than a strict reading of it — a
+        child should be given what it needs, and a spec that binds `shell.exec`
+        for one kind of work does not thereby authorize it for somebody else's.
+
+        An undelegated Run is unnarrowed, which is every Run created before
+        this existed and every Run somebody asks for directly.
+        """
+        if self.delegated_scope is None:
+            return self.spec.tools
+        return tuple(
+            name for name in self.spec.tools if name in self.delegated_scope.tools
+        )
+
+    @property
+    def granted_skills(self) -> tuple[BoundSkill, ...]:
+        """The skills this Run may load, after the same narrowing.
+
+        By version id, which is what the `skills` face carries and what a
+        binding is — a name would let a delegation grant a document its author
+        never read.
+        """
+        if self.delegated_scope is None:
+            return self.skills
+        return tuple(
+            skill
+            for skill in self.skills
+            if str(skill.skill_version_id) in self.delegated_scope.skills
+        )
+
+    @property
+    def granted_operations(self) -> tuple[BoundOperation, ...]:
+        """The HTTP operations this Run may call, narrowed on two faces at once.
+
+        `tools` decides whether the operation may be called at all, by the name
+        the model would type. `secrets` decides whether the credential behind
+        it may be used, so a child granted the call and not the credential is
+        refused rather than sent out unauthenticated — the second is the whole
+        reason the two are separate faces.
+
+        An operation needing no credential passes the secrets face, because
+        there is no secret being lent.
+        """
+        if self.delegated_scope is None:
+            return self.http_operations
+        scope = self.delegated_scope
+        return tuple(
+            operation
+            for operation in self.http_operations
+            if operation.call_name in scope.tools
+            and (
+                operation.credential_ref is None
+                or operation.credential_ref in scope.secrets
+            )
+        )
+
 
 @dataclass(frozen=True)
 class RenewedLease:

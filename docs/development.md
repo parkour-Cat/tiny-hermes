@@ -1086,9 +1086,21 @@ a Run:
 
 **What a child gets is an intersection, and only ever a narrowing.** A face you
 do not name grants nothing: `{ "alias": "checker" }` is a child with no tools,
-no network, no skills. There is no way to write "everything the parent has", on
-purpose — a child should be given what it needs rather than what happens to be
-available.
+no network and no skills — **even where the child's own published Version binds
+them**. This is enforced while the child runs, not only when you publish: an
+unnamed tool is refused when called, an unnamed skill cannot be loaded, and an
+unnamed network face empties the outbound chain so the child reaches nothing.
+There is no way to write "everything the parent has", on purpose — a child
+should be given what it needs rather than what happens to be available.
+
+Two consequences worth knowing before you write one:
+
+- A child that needs `platform.wait`, `shell.exec` or any other tool has to be
+  handed it explicitly, and the **parent must hold it too** — publishing
+  refuses a delegation offering what the parent does not have.
+- HTTP and MCP tools cannot be delegated yet. The runtime narrowing is
+  fail-closed, so a delegated child calls none of them regardless of what its
+  own Version bound. Do the call in the parent and pass the result down.
 
 `max_parallel` lives here rather than in `limits` because it is the shape of
 this Agent's work: a batch reconciler wants five, a summary Agent wants one.

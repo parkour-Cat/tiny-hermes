@@ -130,7 +130,7 @@ async def answer_skill_load(
     refusal loaded nothing, so counting it against the Run's eight would spend
     the ceiling on the model's typing mistakes.
     """
-    if "skill.load" not in context.spec.tools:
+    if "skill.load" not in context.tools:
         return refusal(call.call_id, RefusalReason.NOT_AUTHORIZED), None
     try:
         asked = skill_load_of(call)
@@ -145,7 +145,9 @@ async def answer_skill_load(
             ),
             None,
         )
-    bound = next((skill for skill in context.skills if skill.name == asked.skill), None)
+    bound = next(
+        (skill for skill in context.granted_skills if skill.name == asked.skill), None
+    )
     if bound is None:
         # The same refusal an unbound tool gets, and for the same reason: what
         # the model may reach is what the Version bound.
@@ -200,7 +202,7 @@ async def answer_skill_propose(
     rewrite. Naming nothing proposes a new skill, which needs no binding
     because there is nothing yet to be bound to.
     """
-    if "skill.propose" not in context.spec.tools:
+    if "skill.propose" not in context.tools:
         return refusal(call.call_id, RefusalReason.NOT_AUTHORIZED), None
     try:
         asked = skill_propose_of(call)
@@ -209,7 +211,8 @@ async def answer_skill_propose(
     base: UUID | None = None
     if asked.skill is not None:
         bound = next(
-            (skill for skill in context.skills if skill.name == asked.skill), None
+            (skill for skill in context.granted_skills if skill.name == asked.skill),
+            None,
         )
         if bound is None:
             return refusal(call.call_id, RefusalReason.NOT_AUTHORIZED, asked.skill), None
@@ -261,7 +264,7 @@ async def answer_memory_remember(
     is working with and about nobody else; the subject is the one the catalog
     reads off this Run, so there is nothing here a model could point elsewhere.
     """
-    if "memory.remember" not in context.spec.tools:
+    if "memory.remember" not in context.tools:
         return refusal(call.call_id, RefusalReason.NOT_AUTHORIZED), None
     try:
         body = memory_body_of(call)
@@ -347,7 +350,7 @@ async def answer_agent_delegate(
     the moment the parent itself runs out is waiting for an answer it could not
     act on, and a `seconds` argument would be a way to ask for exactly that.
     """
-    if "agent.delegate" not in context.spec.tools:
+    if "agent.delegate" not in context.tools:
         return DelegationOutcome(refusal(call.call_id, RefusalReason.NOT_AUTHORIZED))
     try:
         asked, wait = delegation_of(call)
@@ -445,7 +448,7 @@ async def answer_artifact_read(
     because telling them apart would let an Agent map which ids are real by
     reading the refusals it gets.
     """
-    if "artifact.read" not in context.spec.tools:
+    if "artifact.read" not in context.tools:
         return refusal(call.call_id, RefusalReason.NOT_AUTHORIZED)
     try:
         wanted = artifact_read_of(call)
@@ -480,7 +483,7 @@ async def answer_session_search(
     subject, read where the search runs, so there is nothing here a model could
     point at somebody else.
     """
-    if "session.search" not in context.spec.tools:
+    if "session.search" not in context.tools:
         return refusal(call.call_id, RefusalReason.NOT_AUTHORIZED)
     try:
         query, limit = session_search_of(call)
@@ -559,7 +562,7 @@ async def answer_http_call(
     the operation never declared would describe a request this platform would
     refuse to make anyway.
     """
-    bound = list(context.http_operations)
+    bound = list(context.granted_operations)
     entry = next((item for item in bound if item.call_name == call.name), None)
     if entry is None:
         # The same refusal `http_call_of` would give, made here because the

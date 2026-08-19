@@ -44,10 +44,15 @@ class SqlScopeDirectory:
                     if claim.agent_version_id is None
                     else await _agent(session, claim.agent_version_id)
                 ),
-                # The Run layer arrives with delegation in M2E. The intersection
-                # has been four layers since it was written, so nothing here
-                # changes when it does.
-                run=None,
+                # §13's network face, and the slot this was written for. A
+                # delegated Run is measured against what its delegation
+                # granted; an undelegated one has no such layer at all, which
+                # is the difference between `None` and an empty scope.
+                run=(
+                    None
+                    if claim.run_id is None
+                    else await _run(session, claim.run_id)
+                ),
             )
 
     async def sandbox_claim(self, address: Address) -> CallerClaim | None:
@@ -120,4 +125,27 @@ async def _agent(session: AsyncSession, version_id: UUID) -> OutboundScope:
     if not isinstance(allow, list):
         return OutboundScope.nothing()
     entries = cast(list[object], allow)
+    return OutboundScope.of(str(entry) for entry in entries)
+
+
+async def _run(session: AsyncSession, run_id: UUID) -> OutboundScope | None:
+    """What a delegation granted this Run on the network, or no layer at all.
+
+    `None` for a Run nobody delegated — most of them — because an absent layer
+    is different from one that approved nothing. An empty `network` face on a
+    delegated Run is `nothing()` and **empties the chain**, which is the
+    documented rule read straight: a face nobody named grants nothing, so a
+    child that was given no network reaches nothing, whatever its own Version
+    or its workspace allows.
+    """
+    scope = await session.scalar(
+        select(RunRow.delegation_scope).where(RunRow.id == run_id)
+    )
+    if not isinstance(scope, dict):
+        return None
+    document: dict[str, Any] = scope
+    network = document.get("network")
+    if not isinstance(network, list):
+        return OutboundScope.nothing()
+    entries = cast(list[object], network)
     return OutboundScope.of(str(entry) for entry in entries)

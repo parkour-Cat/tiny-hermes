@@ -25,7 +25,7 @@ its own would take that decision away from it.
 import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -111,8 +111,21 @@ def _child(
 
 
 def _parent(
-    client: TestClient, scope: dict[str, str], aliases: tuple[str, ...]
+    client: TestClient,
+    scope: dict[str, str],
+    aliases: tuple[str, ...],
+    grants: dict[str, list[str]] | None = None,
 ) -> str:
+    """A coordinator bound to these children, granting each the tools named.
+
+    `grants` is not a convenience. §13's sixth clause makes a child's
+    permission the intersection of its parent's and the delegation's, so a face
+    nobody named grants nothing — a child that needs `platform.wait` has to be
+    given it here even though its own Version bound it. The parent must hold
+    the tool too, which is why it appears in the coordinator's own `tools`.
+    """
+    granted = grants or {}
+    every = sorted({tool for tools in granted.values() for tool in tools})
     return _publish(
         client,
         scope,
@@ -120,10 +133,15 @@ def _parent(
         {
             **VALID_SPEC,
             "model_policy": {"provider": "deterministic", "scenario": "delegate_once"},
-            "tools": ["agent.delegate"],
+            # Publishing refuses a delegation offering what the parent does not
+            # itself hold, so the coordinator carries every tool it hands down.
+            "tools": ["agent.delegate", *every],
             "delegation": {
                 "max_parallel": 4,
-                "children": [{"alias": alias} for alias in aliases],
+                "children": [
+                    {"alias": alias, "tools": granted.get(alias, [])}
+                    for alias in aliases
+                ],
             },
         },
     )
@@ -359,7 +377,7 @@ async def test_any_wakes_on_the_first_success_and_cancels_the_rest(
     # This one waits rather than finishing, so at the moment `quick` succeeds it
     # is genuinely still going — the situation `any` is about.
     _child(client, scope, "slow", "wait_once", tools=["platform.wait"])
-    parent = _parent(client, scope, ("quick", "slow"))
+    parent = _parent(client, scope, ("quick", "slow"), {"slow": ["platform.wait"]})
     # The policy comes from the delegating call, so it has to be asked for
     # there. Setting the column beforehand would be overwritten by the round
     # that starts the wait — which is the correct behaviour and was worth
@@ -442,7 +460,7 @@ async def test_a_wait_nobody_answers_becomes_paused_external_timeout(
     """
     workspace_id = scope["X-Workspace-Id"]
     _child(client, scope, "slow", "wait_once", tools=["platform.wait"])
-    parent = _parent(client, scope, ("slow",))
+    parent = _parent(client, scope, ("slow",), {"slow": ["platform.wait"]})
     parent_run = _start(client, scope, session_for(parent), "wait-expiry", "slow")
 
     await _work(engine, workspace_id)
@@ -477,7 +495,7 @@ async def test_cancelling_a_parent_cancels_the_children_it_is_waiting_on(
     """
     workspace_id = scope["X-Workspace-Id"]
     _child(client, scope, "slow", "wait_once", tools=["platform.wait"])
-    parent = _parent(client, scope, ("slow",))
+    parent = _parent(client, scope, ("slow",), {"slow": ["platform.wait"]})
     parent_run = _start(client, scope, session_for(parent), "wait-cascade", "slow")
 
     await _work(engine, workspace_id)
@@ -497,3 +515,62 @@ async def test_cancelling_a_parent_cancels_the_children_it_is_waiting_on(
     )
     assert children, "the parent should have had a child to cancel"
     assert all(row.status == "cancelled" for row in children)
+
+
+async def test_a_child_loses_a_tool_its_own_version_bound_and_the_delegation_did_not(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+) -> None:
+    """§13's sixth clause where it actually bites: the intersection **narrows**.
+
+    That a child cannot be given more than its parent holds was already true —
+    publishing refuses it. This is the other half, and it was the gap: a child
+    whose own Version binds `platform.wait` must not be able to use it when the
+    delegation named no tools, because its permission is the intersection and
+    not its own Version.
+
+    Asserted through behaviour rather than through a scope column. The same
+    Agent, the same scenario, two delegations: given the tool it waits, denied
+    it the call is refused and it finishes. A column would have said the scope
+    was recorded; only this says it was obeyed.
+    """
+    workspace_id = scope["X-Workspace-Id"]
+    _child(client, scope, "slow", "wait_once", tools=["platform.wait"])
+
+    # Named: the child keeps what its Version bound and genuinely waits.
+    allowed = _parent(client, scope, ("slow",), {"slow": ["platform.wait"]})
+    waiting_run = _start(client, scope, session_for(allowed), "narrow-yes", "slow")
+    await _work(engine, workspace_id)
+    waited = await _rows(
+        engine, "SELECT status FROM runs WHERE parent_run_id = :p", p=UUID(waiting_run)
+    )
+    assert [row.status for row in waited] == ["waiting_external"]
+
+    # Not named: the same Version, the same call, refused.
+    client.delete(f"/api/v1/agents/{allowed}", headers=scope)
+    denied = _publish(
+        client,
+        scope,
+        "coordinator2",
+        {
+            **VALID_SPEC,
+            "model_policy": {"provider": "deterministic", "scenario": "delegate_once"},
+            "tools": ["agent.delegate", "platform.wait"],
+            "delegation": {"max_parallel": 2, "children": [{"alias": "slow"}]},
+        },
+    )
+    quiet_run = _start(client, scope, session_for(denied), "narrow-no", "slow")
+    await _work(engine, workspace_id)
+    finished = await _rows(
+        engine,
+        "SELECT status, delegation_scope FROM runs WHERE parent_run_id = :p",
+        p=UUID(quiet_run),
+    )
+    assert len(finished) == 1
+    # It ran to a terminal state instead of waiting: the wait it asked for was
+    # refused, so there was nothing to hold it.
+    assert finished[0].status != "waiting_external"
+    scope_document = cast(dict[str, Any], finished[0].delegation_scope or {})
+    assert cast(list[str], scope_document.get("tools", [])) == []

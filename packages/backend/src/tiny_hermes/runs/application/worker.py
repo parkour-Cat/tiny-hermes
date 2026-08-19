@@ -395,7 +395,7 @@ class WorkerRuntime:
                 # §16.2: measured, never truncated, so the Run stops before it
                 # spends a model call on a tool list it cannot send.
                 return
-            if any(tool not in PLATFORM_TOOLS for tool in first.spec.tools):
+            if any(tool not in PLATFORM_TOOLS for tool in first.tools):
                 # Platform tools do not run anywhere. An Agent that binds only
                 # those has nothing to put in a container, and starting one for
                 # it would mean a Run about to wait held an instance while it
@@ -655,7 +655,7 @@ class WorkerRuntime:
 
         if self._workspace is None:
             return box
-        if any(name.startswith("file.") for name in context.spec.tools):
+        if any(name.startswith("file.") for name in context.tools):
             if not await self._file_safety_holds(claimed, handle, box):
                 await self._discard_sandbox(claimed, handle, box)
                 await self._fail(claimed, handle, context, "file_safety_unavailable")
@@ -1046,7 +1046,7 @@ class WorkerRuntime:
             if call.name in PLATFORM_TOOLS:
                 # Answered here, never sent down. What this asks for happens to
                 # the Run; the Controller has nothing to do with it.
-                answered, seconds = answer_platform_tool(call, context.spec.tools)
+                answered, seconds = answer_platform_tool(call, context.tools)
                 results.append(answered)
                 if seconds is not None:
                     # Last one wins, and one is all a round can act on: the Run
@@ -1073,7 +1073,7 @@ class WorkerRuntime:
                 run_id=claimed.run.id,
                 lease_id=handle.lease_id,
                 sandbox_id=box.sandbox_id,
-                bound=context.spec.tools,
+                bound=context.tools,
                 call=call,
                 streamer=_streamer_of(self._sandbox),
                 open_artifact=self._open_artifact(claimed),
@@ -1840,7 +1840,7 @@ def _summaries(context: ExecutionContext) -> tuple[SkillSummary, ...]:
             text=f"- {skill.name}: {skill.description}",
             loaded=skill.skill_version_id in loaded,
         )
-        for skill in context.skills
+        for skill in context.granted_skills
     )
 
 
@@ -1932,7 +1932,7 @@ def _schema_estimate(
         [
             schema["function"]
             for schema in schemas_for_agent(
-                context.spec.tools, context.http_operations
+                context.tools, context.granted_operations
             )
         ]
     )
@@ -1990,7 +1990,7 @@ def _tool_schemas(
     context: ExecutionContext, mcp: tuple[BoundMcpTool, ...] = ()
 ) -> tuple[dict[str, Any], ...]:
     return tuple(
-        schemas_for_agent(context.spec.tools, context.http_operations)
+        schemas_for_agent(context.tools, context.granted_operations)
         + _mcp_schemas(mcp)
     )
 
