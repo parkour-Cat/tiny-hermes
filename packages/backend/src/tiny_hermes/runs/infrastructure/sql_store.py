@@ -1,5 +1,6 @@
 import hashlib
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
@@ -18,6 +19,10 @@ from tiny_hermes.agents.domain.delegation import (
 )
 from tiny_hermes.agents.domain.models import AgentLimits, AgentSpec, EndpointModelPolicy
 from tiny_hermes.agents.infrastructure.tables import AgentRow, AgentVersionRow
+from tiny_hermes.artifacts.infrastructure.tables import (
+    ArtifactGrantRow,
+    ArtifactRow,
+)
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
 from tiny_hermes.http_tools.infrastructure.documents import operation_from_document
 from tiny_hermes.http_tools.infrastructure.tables import (
@@ -1136,6 +1141,13 @@ class SqlRunStore:
             .limit(1)
         )
         summary = "" if said is None else _to_message(said).text
+        produced = (
+            await self._session.scalars(
+                select(ArtifactRow.id)
+                .where(ArtifactRow.run_id == run.id)
+                .order_by(ArtifactRow.created_at, ArtifactRow.id)
+            )
+        ).all()
         return {
             "status": run.status,
             # Truncated with a number rather than silently: a parent reading a
@@ -1143,10 +1155,11 @@ class SqlRunStore:
             "summary": summary[:MAX_CHILD_SUMMARY],
             "summary_truncated": len(summary) > MAX_CHILD_SUMMARY,
             "failure_reason": _failure_reason(run.checkpoint),
-            # §5 of this phase fills this in. Empty rather than absent, so a
-            # parent reading the document never has to branch on whether the
-            # key exists.
-            "artifacts": [],
+            # What the child produced, by id. The parent is granted each of
+            # them at delivery — §13's eighth clause going upward — so this
+            # list is a set of things it can actually open rather than a
+            # catalogue of things it may not.
+            "artifacts": [str(item) for item in produced],
         }
 
     async def _terminalize(self, run: RunRow, session: SessionRow, now: datetime) -> None:
@@ -1736,6 +1749,13 @@ class SqlRunStore:
             said = summary or "It reported nothing."
             if status != RunState.COMPLETED.value:
                 said = f"{said} (reason: {reason})" if reason else said
+            handed = [str(item) for item in report.get("artifacts", [])]
+            for artifact_id in handed:
+                await self._grant_artifact(
+                    parent.workspace_id, UUID(artifact_id), parent.id, "delivered_up"
+                )
+            if handed:
+                said = f"{said} Files: {', '.join(handed)}."
             lines.append(f"- {child.id} [{status}]: {said}")
             child.result_delivered_at = now
         body = (
@@ -2191,10 +2211,31 @@ class SqlRunStore:
                 refusal=f"{', '.join(missing)} is not published in this workspace"
             )
 
+        wanted = {name for item in requests for name in item.artifacts}
+        readable = await self._readable_artifacts(parent, wanted)
+        unreadable = sorted(wanted - set(readable))
+        if unreadable:
+            # §13's eighth clause from the other side: a parent may pass on
+            # what it can read and nothing else. Refused before any child
+            # exists, so a delegation is never half granted.
+            return DelegationResult(
+                refusal=(
+                    f"you cannot read {', '.join(unreadable)}, so you cannot "
+                    f"pass it on"
+                )
+            )
+
         now = datetime.now(UTC)
         created: list[DelegatedChild] = []
         for item in requests:
-            scope = granted(spec, bindings[item.alias])
+            # The files face is filled in here rather than by `granted`: these
+            # are runtime references the spec never bound, which is exactly
+            # what `scope_of_spec` says it leaves to be decided where it is
+            # used. This is that place.
+            scope = replace(
+                granted(spec, bindings[item.alias]),
+                files=frozenset(str(readable[name]) for name in item.artifacts),
+            )
             child_version_id = agents[item.alias]
             child_session = SessionRow(
                 id=uuid4(),
@@ -2257,6 +2298,11 @@ class SqlRunStore:
             self._session.add(child)
             await self._session.flush()
 
+            for name in item.artifacts:
+                await self._grant_artifact(
+                    parent.workspace_id, readable[name], child_id, "delegated_down"
+                )
+
             self._session.add(
                 SessionMessageRow(
                     id=uuid4(),
@@ -2314,6 +2360,68 @@ class SqlRunStore:
                 )
             )
         return DelegationResult(children=tuple(created))
+
+    async def _readable_artifacts(
+        self, run: RunRow, named: set[str]
+    ) -> dict[str, UUID]:
+        """Which of these ids this Run may actually read, keyed by what it typed.
+
+        Two ways in, and no third: an Artifact this Run produced itself, or one
+        somebody granted it. That is the whole reachability rule, and it is
+        asked here rather than trusted from the caller because this is the only
+        place that knows which Run is asking.
+
+        An id that is not a UUID is simply absent from the answer, so a model
+        that invented one is told it cannot read it — which is true — rather
+        than crashing the round on a parse.
+        """
+        if not named:
+            return {}
+        wanted: dict[UUID, str] = {}
+        for name in named:
+            try:
+                wanted[UUID(name)] = name
+            except ValueError:
+                continue
+        if not wanted:
+            return {}
+        rows = await self._session.execute(
+            select(ArtifactRow.id)
+            .outerjoin(
+                ArtifactGrantRow,
+                (ArtifactGrantRow.artifact_id == ArtifactRow.id)
+                & (ArtifactGrantRow.run_id == run.id),
+            )
+            .where(
+                ArtifactRow.id.in_(list(wanted)),
+                ArtifactRow.workspace_id == run.workspace_id,
+                (ArtifactRow.run_id == run.id) | (ArtifactGrantRow.id.is_not(None)),
+            )
+        )
+        return {wanted[found]: found for (found,) in rows.all()}
+
+    async def _grant_artifact(
+        self, workspace_id: UUID, artifact_id: UUID, run_id: UUID, reason: str
+    ) -> None:
+        """Let one Run read one Artifact, once.
+
+        `ON CONFLICT DO NOTHING` rather than a check first: granting twice is
+        ordinary — the same file to two children, a redelivered result — and a
+        read-then-write here would be a race between two Workers doing exactly
+        that.
+        """
+        await self._session.execute(
+            pg_insert(ArtifactGrantRow)
+            .values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                artifact_id=artifact_id,
+                run_id=run_id,
+                reason=reason,
+                created_at=datetime.now(UTC),
+            )
+            .on_conflict_do_nothing(constraint="uq_artifact_grants_pair")
+        )
 
     async def _child_agents(
         self, workspace_id: UUID, aliases: tuple[str, ...]

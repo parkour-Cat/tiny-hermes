@@ -46,6 +46,7 @@ IMPLEMENTED_TOOLS = (
     "memory.remember",
     "session.search",
     "agent.delegate",
+    "artifact.read",
 )
 
 #: Tools the platform answers itself. `authorize` turns a call into a
@@ -62,6 +63,7 @@ PLATFORM_TOOLS = frozenset(
         "memory.remember",
         "session.search",
         "agent.delegate",
+        "artifact.read",
     }
 )
 
@@ -501,6 +503,11 @@ MAX_DELEGATED_CHILDREN = 8
 #: impossible would push the parent into passing files it should not.
 MAX_DELEGATION_INSTRUCTION = 2_000
 
+#: The most files one child may be handed. A ceiling rather than
+#: arithmetic: a child given thirty files is a child being handed a
+#: directory, which is the shape §13's eighth clause exists to prevent.
+MAX_DELEGATED_ARTIFACTS = 8
+
 #: What `wait` may say. `all` is the default because it is the one that cannot
 #: silently lose work: a parent that meant to collect three answers and wrote
 #: nothing gets three, where an accidental `any` would throw two away.
@@ -546,6 +553,18 @@ AGENT_DELEGATE_SCHEMA: dict[str, Any] = {
                                     "It is all this Agent will be told."
                                 ),
                             },
+                            "artifacts": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": (
+                                    "Ids of files to let this Agent read, at "
+                                    f"most {MAX_DELEGATED_ARTIFACTS}. It "
+                                    "cannot see your working directory, so "
+                                    "anything it needs has to be named here. "
+                                    "You may only pass on files you can read "
+                                    "yourself."
+                                ),
+                            },
                         },
                         "required": ["alias", "instruction"],
                         "additionalProperties": False,
@@ -571,10 +590,13 @@ AGENT_DELEGATE_SCHEMA: dict[str, Any] = {
 
 AGENT_DELEGATE_ARGUMENTS = frozenset({"children", "wait"})
 
-CHILD_ARGUMENTS = frozenset({"alias", "instruction"})
+CHILD_ARGUMENTS = frozenset({"alias", "instruction", "artifacts"})
 
 
-def delegation_of(call: ToolCallBlock) -> tuple[tuple[tuple[str, str], ...], str]:
+
+def delegation_of(
+    call: ToolCallBlock,
+) -> tuple[tuple[tuple[str, str, tuple[str, ...]], ...], str]:
     """Which children `agent.delegate` asked for, as (alias, instruction) pairs.
 
     Comes back with the wait policy, which defaults to `all`. Shape only, like
@@ -597,7 +619,7 @@ def delegation_of(call: ToolCallBlock) -> tuple[tuple[tuple[str, str], ...], str
         raise ToolRefused(
             RefusalReason.INVALID_ARGUMENTS, call.call_id, f"children={len(asked)}"
         )
-    children: list[tuple[str, str]] = []
+    children: list[tuple[str, str, tuple[str, ...]]] = []
     for item in asked:
         if not isinstance(item, dict):
             raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "children")
@@ -625,11 +647,85 @@ def delegation_of(call: ToolCallBlock) -> tuple[tuple[tuple[str, str], ...], str
                 call.call_id,
                 f"instruction={len(cleaned)}",
             )
-        children.append((alias.strip(), cleaned))
+        children.append((alias.strip(), cleaned, _artifacts_of(call, entry)))
     wait = call.arguments.get("wait", "all")
     if wait not in WAIT_POLICIES:
         raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "wait")
     return tuple(children), str(wait)
+
+
+def _artifacts_of(call: ToolCallBlock, entry: dict[str, Any]) -> tuple[str, ...]:
+    """The files one child was named, as written.
+
+    Shape only: whether the parent may actually read any of them is decided
+    where the grants are written, because that is the only place that knows
+    what this Run can reach.
+    """
+    named = entry.get("artifacts", [])
+    if not isinstance(named, list):
+        raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "artifacts")
+    listed = cast(list[Any], named)
+    if len(listed) > MAX_DELEGATED_ARTIFACTS:
+        raise ToolRefused(
+            RefusalReason.INVALID_ARGUMENTS, call.call_id, f"artifacts={len(listed)}"
+        )
+    for item in listed:
+        if not isinstance(item, str) or not item.strip():
+            raise ToolRefused(
+                RefusalReason.INVALID_ARGUMENTS, call.call_id, "artifacts"
+            )
+    return tuple(str(item).strip() for item in listed)
+
+
+#: The most of one file a single read may bring into the conversation. The
+#: same rule `skill.load` follows and for the same reason: refused with its
+#: size rather than truncated, because a model handed half a file has no way to
+#: know it is reading half and will act on the half it got.
+MAX_ARTIFACT_READ_BYTES = 65_536
+
+ARTIFACT_READ_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "artifact.read",
+        "description": (
+            "Read a file that was passed to you — by the Agent that delegated "
+            "this work, or by an Agent you delegated to. You can only read "
+            "files somebody handed you by id; there is no shared directory and "
+            "nothing to browse. If a read is refused, the file was not passed "
+            "to this piece of work."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "artifact_id": {
+                    "type": "string",
+                    "description": "The id you were given.",
+                },
+            },
+            "required": ["artifact_id"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+ARTIFACT_READ_ARGUMENTS = frozenset({"artifact_id"})
+
+
+def artifact_read_of(call: ToolCallBlock) -> str:
+    """Which file `artifact.read` asked for, or a refusal.
+
+    Shape only. Whether this Run may read it is decided against the grants,
+    which is the one place that knows what was passed to this piece of work.
+    """
+    unknown = set(call.arguments) - ARTIFACT_READ_ARGUMENTS
+    if unknown:
+        raise ToolRefused(
+            RefusalReason.INVALID_ARGUMENTS, call.call_id, ",".join(sorted(unknown))
+        )
+    asked = call.arguments.get("artifact_id")
+    if not isinstance(asked, str) or not asked.strip():
+        raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "artifact_id")
+    return asked.strip()
 
 
 def schemas_for(bound: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -655,6 +751,8 @@ def schemas_for(bound: tuple[str, ...]) -> list[dict[str, Any]]:
             schemas.append(SESSION_SEARCH_SCHEMA)
         elif name == "agent.delegate":
             schemas.append(AGENT_DELEGATE_SCHEMA)
+        elif name == "artifact.read":
+            schemas.append(ARTIFACT_READ_SCHEMA)
         elif name in FILE_SCHEMAS:
             schemas.append(FILE_SCHEMAS[name])
     return schemas

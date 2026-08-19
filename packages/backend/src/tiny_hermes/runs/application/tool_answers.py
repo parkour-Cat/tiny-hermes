@@ -31,6 +31,7 @@ from tiny_hermes.runs.domain.models import (
     WaitPolicy,
 )
 from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalGate
+from tiny_hermes.runs.ports.artifacts import ArtifactReads
 from tiny_hermes.runs.ports.children import (
     ChildRuns,
     DelegationRequest,
@@ -56,6 +57,7 @@ from tiny_hermes.tools.domain.registry import (
     MAX_WAIT_SECONDS,
     RefusalReason,
     ToolRefused,
+    artifact_read_of,
     delegation_of,
     memory_body_of,
     session_search_of,
@@ -360,8 +362,10 @@ async def answer_agent_delegate(
     result = await children.delegate(
         parent_run_id=context.run_id,
         requests=tuple(
-            DelegationRequest(alias=alias, instruction=instruction)
-            for alias, instruction in asked
+            DelegationRequest(
+                alias=alias, instruction=instruction, artifacts=artifacts
+            )
+            for alias, instruction, artifacts in asked
         ),
     )
     if result.refused:
@@ -422,6 +426,42 @@ def _child_wait_seconds(context: ExecutionContext, now: datetime | None) -> int:
     at = now or datetime.now(UTC)
     remaining = int((context.budget.elapsed_deadline_at - at).total_seconds())
     return max(60, min(MAX_WAIT_SECONDS, remaining))
+
+
+async def answer_artifact_read(
+    reads: ArtifactReads | None,
+    context: ExecutionContext,
+    call: ToolCallBlock,
+) -> ToolResultBlock:
+    """Open a file this Run was passed, or say why it cannot be.
+
+    §13's eighth clause from the reading end. What makes a file reachable is a
+    grant, and the grant is checked against **this Run** — not its Agent and
+    not its Session — so a later Run of the same Agent cannot open what nobody
+    passed to this piece of work.
+
+    The refusals are sentences a model can act on, and one of them is
+    deliberately vague: "does not exist" and "not yours" come back identically,
+    because telling them apart would let an Agent map which ids are real by
+    reading the refusals it gets.
+    """
+    if "artifact.read" not in context.spec.tools:
+        return refusal(call.call_id, RefusalReason.NOT_AUTHORIZED)
+    try:
+        wanted = artifact_read_of(call)
+    except ToolRefused as refused_call:
+        return refusal(call.call_id, refused_call.reason, refused_call.detail)
+    if reads is None:
+        return text_refusal(call.call_id, "no file store is configured here")
+    found = await reads.read(run_id=context.run_id, artifact_id=wanted)
+    if found.text is None:
+        return text_refusal(call.call_id, found.detail or "it could not be read")
+    return ToolResultBlock(
+        call_id=call.call_id,
+        output=found.text,
+        exit_code=0,
+        failed=False,
+    )
 
 
 async def answer_session_search(

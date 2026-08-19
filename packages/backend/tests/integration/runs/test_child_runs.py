@@ -27,7 +27,7 @@ Session FIFO would silently take away if a child were ever put in it.
 
 import asyncio
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -570,3 +570,218 @@ async def test_a_child_cannot_share_a_live_sandbox_with_its_parent(
     # However many there are, no instance is claimed by two of these Runs.
     instances = [row.sandbox_instance_id for row in reservations]
     assert len(instances) == len(set(instances))
+
+
+def _files(scope: object) -> list[str]:
+    """The `files` face of a stored delegation scope, as a list of ids."""
+    return cast(list[str], cast(dict[str, Any], scope or {}).get("files", []))
+
+
+async def _artifact(
+    engine: AsyncEngine,
+    workspace_id: str,
+    run_id: UUID,
+    artifact_id: UUID | None = None,
+) -> UUID:
+    """One Artifact belonging to a Run, written straight to the table.
+
+    Inserted rather than produced by a command: what these tests are about is
+    who may *read* it, and driving a container to overflow its output would put
+    a sandbox between the assertion and the thing being asserted.
+    """
+    artifact_id = artifact_id or uuid4()
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO artifacts (id, workspace_id, session_id, run_id, "
+                "object_key, filename, media_type, size_bytes, sha256, truncated, "
+                "expires_at, created_at) "
+                "SELECT :id, :workspace, r.session_id, r.id, :key, 'notes.txt', "
+                "'text/plain', 6, :digest, false, now() + interval '1 day', now() "
+                "FROM runs r WHERE r.id = :run"
+            ),
+            {
+                "id": artifact_id,
+                "workspace": UUID(workspace_id),
+                "key": f"artifacts/{artifact_id}",
+                "digest": "a" * 64,
+                "run": run_id,
+            },
+        )
+    return artifact_id
+
+
+async def test_a_file_reaches_a_child_as_a_grant_and_never_as_a_directory(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    coordinator: str,
+) -> None:
+    """§13's eighth clause, on the rows that make it true.
+
+    The parent hands one file to one of its two children. What the child gets
+    is a grant row and an id in its own recorded scope — not a path, not a
+    mount, and nothing the other child can see. The sibling is the control: it
+    was delegated in the same call and has no grant at all, so the test is
+    about the authorization rather than about the delegation.
+    """
+    workspace_id = scope["X-Workspace-Id"]
+    # The id is chosen before the Run so the input can name it. Rewriting the
+    # first message afterwards would work too, and would mean the Run's own
+    # transcript no longer said what it was asked to do.
+    passed = uuid4()
+    parent_run = str(
+        client.post(
+            "/api/v1/runs",
+            headers={**scope, "Idempotency-Key": "delegate-files"},
+            json={
+                "session_id": session_for(coordinator),
+                "input": f"reader#{passed},checker",
+            },
+        ).json()["id"]
+    )
+    # Owned by the parent Run, which is one of the two ways a Run may read a
+    # file at all — the other being a grant like the one this creates.
+    await _artifact(engine, workspace_id, UUID(parent_run), passed)
+
+    await _drain(engine, workspace_id)
+
+    children = await _rows(
+        engine,
+        "SELECT r.id, a.alias, r.delegation_scope FROM runs r "
+        "JOIN agent_versions av ON av.id = r.agent_version_id "
+        "JOIN agents a ON a.id = av.agent_id WHERE r.parent_run_id = :p",
+        p=UUID(parent_run),
+    )
+    by_alias = {row.alias: row for row in children}
+    assert set(by_alias) == {"reader", "checker"}
+
+    # The scope records what this child was actually given, as ids.
+    assert str(passed) in _files(by_alias["reader"].delegation_scope)
+    assert _files(by_alias["checker"].delegation_scope) == []
+
+    grants = await _rows(
+        engine,
+        "SELECT run_id, reason FROM artifact_grants WHERE artifact_id = :a",
+        a=passed,
+    )
+    granted_to = {row.run_id for row in grants}
+    assert by_alias["reader"].id in granted_to
+    assert by_alias["checker"].id not in granted_to, (
+        "a sibling delegated in the same call must not be able to read it"
+    )
+    assert {row.reason for row in grants} == {"delegated_down"}
+
+
+async def test_a_parent_cannot_pass_on_a_file_it_cannot_read_itself(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    coordinator: str,
+) -> None:
+    """The same clause from the other end, and refused before any child exists.
+
+    A parent naming somebody else's file is refused outright rather than having
+    that one file dropped: a delegation that half happened would be a child
+    working on a task whose inputs it was never given, and it would have no way
+    to tell.
+    """
+    workspace_id = scope["X-Workspace-Id"]
+    other_session = session_for(coordinator)
+    other_run = str(
+        client.post(
+            "/api/v1/runs",
+            headers={**scope, "Idempotency-Key": "delegate-files-other"},
+            json={"session_id": other_session, "input": "reader"},
+        ).json()["id"]
+    )
+    # Belongs to a different Run and is granted to nobody.
+    stranger = await _artifact(engine, workspace_id, UUID(other_run))
+
+    parent_session = session_for(coordinator)
+    parent_run = str(
+        client.post(
+            "/api/v1/runs",
+            headers={**scope, "Idempotency-Key": "delegate-files-refused"},
+            json={"session_id": parent_session, "input": "reader"},
+        ).json()["id"]
+    )
+
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    from tiny_hermes.runs.ports.children import DelegationRequest
+
+    result = await SqlChildRuns(sessions).delegate(
+        parent_run_id=UUID(parent_run),
+        requests=(
+            DelegationRequest(
+                alias="reader", instruction="Read it.", artifacts=(str(stranger),)
+            ),
+        ),
+    )
+
+    assert result.refused
+    assert "cannot read" in result.refusal
+    made = await _rows(
+        engine, "SELECT id FROM runs WHERE parent_run_id = :p", p=UUID(parent_run)
+    )
+    assert made == [], "nothing may be created when the files were refused"
+
+
+async def test_a_childs_own_files_are_granted_up_when_its_result_is_delivered(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    coordinator: str,
+) -> None:
+    """The upward half of §13's eighth clause.
+
+    A child produces a file. When its result reaches the parent, the parent is
+    granted it — so the ids the report names are things it can actually open,
+    rather than a list of files it may not have.
+    """
+    workspace_id = scope["X-Workspace-Id"]
+    parent_run = str(
+        client.post(
+            "/api/v1/runs",
+            headers={**scope, "Idempotency-Key": "delegate-files-up"},
+            json={"session_id": session_for(coordinator), "input": "reader,checker"},
+        ).json()["id"]
+    )
+
+    # Let the parent delegate and the children run, but do not settle the wait
+    # yet: the file has to exist before the child's result is written.
+    workers = (
+        _worker(engine, workspace_id, "worker-a"),
+        _worker(engine, workspace_id, "worker-b"),
+    )
+    await asyncio.gather(*(worker.run_once() for worker in workers))
+    child = (
+        await _rows(
+            engine,
+            "SELECT id FROM runs WHERE parent_run_id = :p ORDER BY created_at LIMIT 1",
+            p=UUID(parent_run),
+        )
+    )[0]
+    produced = await _artifact(engine, workspace_id, child.id)
+
+    await _drain(engine, workspace_id)
+
+    grants = await _rows(
+        engine,
+        "SELECT run_id, reason FROM artifact_grants WHERE artifact_id = :a",
+        a=produced,
+    )
+    assert [(row.run_id, row.reason) for row in grants] == [
+        (UUID(parent_run), "delivered_up")
+    ]
+
+    result = (
+        await _rows(
+            engine, "SELECT delegation_result FROM runs WHERE id = :c", c=child.id
+        )
+    )[0]
+    reported = cast(dict[str, Any], result.delegation_result or {})
+    assert str(produced) in cast(list[str], reported.get("artifacts", []))

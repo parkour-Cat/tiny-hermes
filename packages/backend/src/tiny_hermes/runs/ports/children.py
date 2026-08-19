@@ -28,6 +28,11 @@ class DelegationRequest:
     #: clause keeps the parent's transcript out of it — so this is not a
     #: summary of the work, it is the work.
     instruction: str
+    #: Artifact ids the parent is passing down. Never paths: §13's eighth
+    #: clause moves files as authorizations, and a path would be the shape of
+    #: a shared directory. Whether the parent may pass any of these on is
+    #: decided where the grants are written.
+    artifacts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

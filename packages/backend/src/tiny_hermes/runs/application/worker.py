@@ -27,6 +27,7 @@ from tiny_hermes.model_catalog.domain.pricing import unknown as unknown_cost
 from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
 from tiny_hermes.runs.application.tool_answers import (
     answer_agent_delegate,
+    answer_artifact_read,
     answer_http_call,
     answer_mcp_call,
     answer_memory_remember,
@@ -69,6 +70,7 @@ from tiny_hermes.runs.domain.slice_policy import (
 )
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalGate
+from tiny_hermes.runs.ports.artifacts import ArtifactReads
 from tiny_hermes.runs.ports.children import ChildRuns, DelegationWait
 from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolSender
 from tiny_hermes.runs.ports.mcp import BoundMcpTool, McpGateway
@@ -300,6 +302,7 @@ class WorkerRuntime:
         memories: MemoryCandidates | None = None,
         searches: SessionSearches | None = None,
         children: ChildRuns | None = None,
+        artifacts: ArtifactReads | None = None,
     ) -> None:
         self._sessions = session_factory
         self._model = model
@@ -331,6 +334,9 @@ class WorkerRuntime:
         # parent told nobody wired delegation are different situations, and
         # only one of them is worth trying again.
         self._children = children
+        # Absent, `artifact.read` is refused rather than answered with
+        # nothing: an empty answer reads to a model like an empty file.
+        self._artifacts = artifacts
         # Optional, because a deployment with no tools configured needs none.
         # A Run that binds a tool and finds this absent fails rather than
         # running the command anywhere else — product design §16 leaves no
@@ -980,6 +986,11 @@ class WorkerRuntime:
                 results.append(answered)
                 if event is not None:
                     events.append(event)
+                continue
+            if call.name == "artifact.read":
+                results.append(
+                    await answer_artifact_read(self._artifacts, context, call)
+                )
                 continue
             if call.name == "agent.delegate":
                 outcome = await answer_agent_delegate(self._children, context, call)

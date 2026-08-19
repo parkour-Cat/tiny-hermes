@@ -31,6 +31,7 @@ from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
 from tiny_hermes.runs.infrastructure.skill_library import SqlSkillLibrary
 from tiny_hermes.runs.infrastructure.skill_proposals import SqlSkillProposals
 from tiny_hermes.runs.infrastructure.sql_approvals import SqlApprovalGate
+from tiny_hermes.runs.infrastructure.sql_artifact_reads import SqlArtifactReads
 from tiny_hermes.runs.infrastructure.sql_children import SqlChildRuns
 from tiny_hermes.runs.ports.http_calls import EgressClaim
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
@@ -152,6 +153,11 @@ async def _worker() -> None:
         # silently answered with nothing; the children live in the same
         # database and share the parent's root budget.
         children=SqlChildRuns(sessions),
+        # §13's eighth clause: files reach a Run as authorizations, and
+        # this is the only way one opens what it was passed.
+        artifacts=SqlArtifactReads(
+            sessions, None if workspace is None else workspace.objects
+        ),
         settings=WorkerSettings(
             worker_id=worker_id,
             lease_seconds=settings.worker_lease_seconds,

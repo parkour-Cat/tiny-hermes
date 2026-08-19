@@ -23,8 +23,12 @@ from uuid import UUID, uuid4
 
 import pytest
 from tiny_hermes.agents.domain.models import AgentSpec, DeterministicModelPolicy
-from tiny_hermes.runs.application.tool_answers import answer_agent_delegate
+from tiny_hermes.runs.application.tool_answers import (
+    answer_agent_delegate,
+    answer_artifact_read,
+)
 from tiny_hermes.runs.domain.models import RunEventType, ToolCallBlock, WaitPolicy
+from tiny_hermes.runs.ports.artifacts import ArtifactContent
 from tiny_hermes.runs.ports.children import (
     DelegatedChild,
     DelegationRequest,
@@ -313,3 +317,108 @@ async def test_a_call_that_is_not_a_delegation_never_reaches_the_creation_path(
     assert outcome.event is None
     assert outcome.wait is None
     assert children.asked == []
+
+
+@dataclass
+class Reads:
+    """A stand-in artifact reader, answering as told and recording the ask."""
+
+    answer: ArtifactContent = field(
+        default_factory=lambda: ArtifactContent(
+            filename="notes.txt", media_type="text/plain", size_bytes=6, text="hello!"
+        )
+    )
+    asked: list[tuple[UUID, str]] = field(default_factory=list[tuple[UUID, str]])
+
+    async def read(self, *, run_id: UUID, artifact_id: str) -> ArtifactContent:
+        self.asked.append((run_id, artifact_id))
+        return self.answer
+
+
+async def test_a_file_is_read_for_the_run_that_asked_and_not_for_its_agent() -> None:
+    """§13's eighth clause: a grant belongs to one piece of work.
+
+    The id the port is handed is **this Run's**. A reader asked on behalf of an
+    Agent or a Session would let a later, unrelated Run open what nobody passed
+    to this one, and that is a difference no refusal downstream could recover.
+    """
+    reads = Reads()
+    context = _context("artifact.read")
+    answered = await answer_artifact_read(
+        reads,
+        context,
+        ToolCallBlock(
+            call_id="a-1", name="artifact.read", arguments={"artifact_id": "f-1"}
+        ),
+    )
+
+    assert not answered.failed
+    assert answered.output == "hello!"
+    assert reads.asked == [(context.run_id, "f-1")]
+
+
+async def test_a_file_nobody_passed_is_refused_in_words_that_reveal_nothing() -> None:
+    """The refusal for "does not exist" and for "not yours" is the same one.
+
+    Deliberately. Telling them apart would let an Agent discover which ids are
+    real by reading the refusals it gets back, which is a map of somebody
+    else's work drawn one guess at a time.
+    """
+    reads = Reads(
+        answer=ArtifactContent(detail="f-9 was not passed to this piece of work")
+    )
+    answered = await answer_artifact_read(
+        reads,
+        _context("artifact.read"),
+        ToolCallBlock(
+            call_id="a-1", name="artifact.read", arguments={"artifact_id": "f-9"}
+        ),
+    )
+
+    assert answered.failed
+    assert "not passed to this piece of work" in answered.output
+
+
+async def test_reading_a_file_needs_the_tool_bound_like_everything_else() -> None:
+    """§10.2's second step again. Being granted a file is not being given a way
+    to open one: an Agent whose Version did not bind `artifact.read` is refused
+    here whether or not anybody handed it an id."""
+    reads = Reads()
+    answered = await answer_artifact_read(
+        reads,
+        _context("agent.delegate"),
+        ToolCallBlock(
+            call_id="a-1", name="artifact.read", arguments={"artifact_id": "f-1"}
+        ),
+    )
+
+    assert answered.failed
+    assert "not_authorized" in answered.output
+    assert reads.asked == []
+
+
+async def test_the_files_a_child_is_given_reach_the_creation_path() -> None:
+    """A delegation may carry files, and they travel as ids.
+
+    Never paths: §13's eighth clause is that there is no shared directory to
+    name into. The ids arrive at the creation path untouched, which is where
+    the parent's own right to pass them on is checked.
+    """
+    children = Children()
+    outcome = await answer_agent_delegate(
+        children,
+        _context("agent.delegate"),
+        _call(
+            children=[
+                {
+                    "alias": "reader",
+                    "instruction": "Read it.",
+                    "artifacts": ["f-1", "f-2"],
+                }
+            ]
+        ),
+    )
+
+    assert not outcome.result.failed
+    _, requests = children.asked[0]
+    assert requests[0].artifacts == ("f-1", "f-2")

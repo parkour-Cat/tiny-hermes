@@ -261,6 +261,9 @@ class DeterministicModelProvider:
                 if ":" in asked and asked.split(":", 1)[0].strip() in ("all", "any"):
                     prefix, asked = asked.split(":", 1)
                     wait = prefix.strip()
+                # `alias#file-id` hands that child one file. Written into the
+                # input like everything else this scenario takes, so one
+                # scenario drills a delegation with files and one without.
                 named = [
                     part.strip() for part in asked.split(",") if part.strip()
                 ]
@@ -279,11 +282,7 @@ class DeterministicModelProvider:
                             name="agent.delegate",
                             arguments={
                                 "children": [
-                                    {
-                                        "alias": alias,
-                                        "instruction": f"Do the {alias} part.",
-                                    }
-                                    for alias in named
+                                    _delegation_entry(entry) for entry in named
                                 ],
                                 "wait": wait,
                             },
@@ -570,3 +569,20 @@ def _last_user_text(request: ModelRequest) -> str:
         if isinstance(block, TextBlock):
             return block.text.strip()
     return ""
+
+
+def _delegation_entry(named: str) -> dict[str, Any]:
+    """One child of the `delegate_once` scenario, as `alias` or `alias#file-id`.
+
+    The separator is `#` rather than `:` because the input already uses `:` for
+    the wait policy, and a scenario whose grammar is ambiguous is a scenario
+    that will eventually drill something other than what its test says.
+    """
+    alias, _, artifact = named.partition("#")
+    entry: dict[str, Any] = {
+        "alias": alias,
+        "instruction": f"Do the {alias} part.",
+    }
+    if artifact:
+        entry["artifacts"] = [artifact]
+    return entry
