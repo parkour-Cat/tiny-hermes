@@ -103,7 +103,17 @@ class SqlSandboxStore:
         return _reservation(row)
 
     async def isolate(self, reservation_id: UUID, *, reason: str) -> SandboxReservation:
-        row = await self._require(reservation_id)
+        found = await self._session.execute(
+            select(SandboxReservationRow)
+            .where(SandboxReservationRow.id == reservation_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        row = found.scalar_one_or_none()
+        if row is None:
+            raise UnknownReservation
+        if ReservationStatus(row.status) not in LIVE_RESERVATIONS:
+            return _reservation(row)
         row.status = ReservationStatus.ISOLATED.value
         row.isolation_reason = reason
         # A deadline on an isolated claim would put it in the Scheduler's expiry
