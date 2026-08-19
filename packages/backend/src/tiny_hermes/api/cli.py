@@ -31,6 +31,7 @@ from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
 from tiny_hermes.runs.infrastructure.skill_library import SqlSkillLibrary
 from tiny_hermes.runs.infrastructure.skill_proposals import SqlSkillProposals
 from tiny_hermes.runs.infrastructure.sql_approvals import SqlApprovalGate
+from tiny_hermes.runs.infrastructure.sql_children import SqlChildRuns
 from tiny_hermes.runs.ports.http_calls import EgressClaim
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
 from tiny_hermes.sandbox.transport.adapter import SandboxClient
@@ -147,6 +148,10 @@ async def _worker() -> None:
         memories=SqlMemoryCandidates(sessions),
         # §14.3's retrieval, scoped to the Run's own subject.
         searches=SqlRunSessionSearches(sessions),
+        # §13's delegation. Absent, `agent.delegate` is refused rather than
+        # silently answered with nothing; the children live in the same
+        # database and share the parent's root budget.
+        children=SqlChildRuns(sessions),
         settings=WorkerSettings(
             worker_id=worker_id,
             lease_seconds=settings.worker_lease_seconds,

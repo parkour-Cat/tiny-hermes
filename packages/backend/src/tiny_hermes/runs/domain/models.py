@@ -178,6 +178,14 @@ class RunEventType(StrEnum):
     MEMORY_PROPOSED = "memory_proposed"
     MEMORY_WRITTEN = "memory_written"
 
+    # §13's delegation, and not derived from a signal either: creating
+    # children changes nothing about the parent's state this round, but it is
+    # the fact that explains every later one. Without a name of its own the
+    # only trace is a tool result inside a transcript, which is the first thing
+    # the context planner is allowed to trim — and a parent that later waits on
+    # a set of Run ids would have nothing saying where that set came from.
+    RUN_DELEGATED = "run_delegated"
+
     # Also not derived from a signal: it records that a slice began on a fresh
     # writable layer, which is a fact about the sandbox rather than a state
     # transition. Technical design §11.3 requires the Agent be told, and this
@@ -627,6 +635,14 @@ class RunSnapshot:
     wait_deadline_at: datetime | None
     retry_of_run_id: UUID | None
     budget_root_run_id: UUID
+    #: The Run that delegated this one (§13), or `None` for one a caller asked
+    #: for directly. Reported rather than left to be inferred from the Session:
+    #: a child holds a Session of its own, so nothing else in this document
+    #: says it did not come from a person.
+    parent_run_id: UUID | None
+    #: `0` for a Run somebody created, `1` for a child. Never more — §13's third
+    #: clause, and the schema will not hold a row that says otherwise.
+    depth: int
     last_event_sequence: int
     queue_position: int
     queue_status: QueueStatus
@@ -682,6 +698,8 @@ class RunSnapshot:
             "wait_deadline_at": _optional_time(self.wait_deadline_at),
             "retry_of_run_id": _optional_id(self.retry_of_run_id),
             "budget_root_run_id": str(self.budget_root_run_id),
+            "parent_run_id": _optional_id(self.parent_run_id),
+            "depth": self.depth,
             "last_event_sequence": self.last_event_sequence,
             "queue": self._queue_document(),
             "budget": self.budget.document(),

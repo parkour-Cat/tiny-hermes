@@ -10,6 +10,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tiny_hermes.agents.domain.delegation import (
+    MAX_DELEGATION_DEPTH,
+    DelegationScope,
+    granted,
+)
 from tiny_hermes.agents.domain.models import AgentLimits, AgentSpec, EndpointModelPolicy
 from tiny_hermes.agents.infrastructure.tables import AgentRow, AgentVersionRow
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
@@ -68,6 +73,7 @@ from tiny_hermes.runs.domain.models import (
     SessionSnapshot,
     StateDecision,
     StoredMessage,
+    TextBlock,
     WorkspaceCleanupTarget,
     event_type_for,
     message_from_document,
@@ -88,6 +94,11 @@ from tiny_hermes.runs.infrastructure.tables import (
     SessionMessageRow,
     SessionRow,
     WorkerLeaseRow,
+)
+from tiny_hermes.runs.ports.children import (
+    DelegatedChild,
+    DelegationRequest,
+    DelegationResult,
 )
 from tiny_hermes.runs.ports.store import (
     AcceptedRun,
@@ -701,6 +712,12 @@ class SqlRunStore:
             http_operations=await self._bound_operations(spec),
             prices=await self._pinned_prices(run.model_pricing_version_id),
             memories=await self._remembered(run, owning, _latest_request(history)),
+            depth=run.depth,
+            delegated_scope=(
+                None
+                if run.delegation_scope is None
+                else DelegationScope.from_document(run.delegation_scope)
+            ),
         )
 
     async def _bound_skills(self, spec: AgentSpec) -> tuple[BoundSkill, ...]:
@@ -1808,6 +1825,238 @@ class SqlRunStore:
         )
         return AcceptedRun(run_id=run_id, document=document, replayed=False)
 
+    async def delegate_children(
+        self, *, parent_run_id: UUID, requests: tuple[DelegationRequest, ...]
+    ) -> DelegationResult:
+        """Create one child Run per request, or none of them (§13).
+
+        Every refusal is decided before the first row is written, so the "all
+        or none" this returns is a property of the order rather than of a
+        rollback. A parent told it delegated three pieces of work and given two
+        would sit waiting for a piece nobody is doing.
+
+        Three of §13's clauses are settled here and each is settled from a row
+        rather than from an argument:
+
+        **Depth.** The caller's own `depth` decides whether it may delegate at
+        all. A child Agent asking is refused here even if its published spec
+        somehow carries a delegation policy — §13's third clause is about the
+        creation path, not about what a spec happens to bind. The CHECK
+        constraint behind it is the second answer to the same question.
+
+        **Scope.** `granted` recomputes the intersection of the parent's own
+        scope and the binding, and the result is written onto the child as a
+        snapshot. Publishing already refused a binding wider than its parent;
+        this is that answer computed again at the moment it becomes a Run,
+        because between publishing and running is where a scope could drift.
+
+        **Budget.** The child gets the parent's `budget_root_run_id` and **no
+        budget row of its own**. One tree is one set of counters, and there is
+        no way to spell "reset" here because there is nothing to reset.
+
+        Its own Session, and therefore its own SessionWorkspace, because those
+        are keyed by Session — §13's eighth clause is a shape rather than a
+        check, and this is where the shape is chosen.
+        """
+        parent = await self._session.get(RunRow, parent_run_id)
+        if parent is None:  # pragma: no cover - the Worker holds this Run
+            return DelegationResult(refusal="this Run is not on record")
+        if parent.depth >= MAX_DELEGATION_DEPTH:
+            # §13's third clause. Refused on the caller's depth rather than on
+            # anything about the children, because that is the fact that makes
+            # it a grandchild.
+            return DelegationResult(
+                refusal=(
+                    "you were delegated this work yourself, and an Agent working "
+                    "on somebody else's behalf cannot delegate further"
+                )
+            )
+        version = await self._session.get(AgentVersionRow, parent.agent_version_id)
+        owning = await self._session.get(SessionRow, parent.session_id)
+        if version is None or owning is None:  # pragma: no cover - held by the Worker
+            return DelegationResult(refusal="this Run is not on record")
+        spec = AgentSpec.model_validate(version.spec)
+        policy = spec.delegation
+        if policy is None:
+            return DelegationResult(refusal="you are not configured to delegate to anybody")
+        bindings = {child.alias: child for child in policy.children}
+        unbound = sorted({item.alias for item in requests} - set(bindings))
+        if unbound:
+            return DelegationResult(
+                refusal=(
+                    f"you may not delegate to {', '.join(unbound)}. "
+                    f"You may delegate to {', '.join(sorted(bindings))}"
+                )
+            )
+        if len(requests) > policy.max_parallel:
+            return DelegationResult(
+                refusal=(
+                    f"you asked for {len(requests)} at once and may run "
+                    f"{policy.max_parallel}"
+                )
+            )
+        agents = await self._child_agents(
+            parent.workspace_id, tuple(bindings[item.alias].alias for item in requests)
+        )
+        missing = sorted({item.alias for item in requests} - set(agents))
+        if missing:
+            # Bound at publish and unpublished since. The parent is told which
+            # one rather than that something went wrong, because it may be able
+            # to do the work itself.
+            return DelegationResult(
+                refusal=f"{', '.join(missing)} is not published in this workspace"
+            )
+
+        now = datetime.now(UTC)
+        created: list[DelegatedChild] = []
+        for item in requests:
+            scope = granted(spec, bindings[item.alias])
+            child_version_id = agents[item.alias]
+            child_session = SessionRow(
+                id=uuid4(),
+                workspace_id=parent.workspace_id,
+                agent_id=await self._agent_of_version(child_version_id),
+                # Ephemeral: a child Session holds one Run and nobody continues
+                # it. A persistent one would suggest there is a conversation
+                # here to come back to, and there is not — the parent reads a
+                # result, not a thread.
+                session_mode=SessionMode.EPHEMERAL.value,
+                # §13's fourth clause: the child inherits the calling subject
+                # for identity, audit and data ownership. It does **not**
+                # inherit the parent Agent's private memories, and this is why
+                # it cannot — the memory scope is workspace + agent + subject,
+                # and the agent here is the child's own.
+                caller_type=owning.caller_type,
+                caller_id=owning.caller_id,
+                head_run_id=None,
+                next_run_sequence=1,
+                next_message_sequence=1,
+                workspace_revision_id=None,
+                created_at=now,
+            )
+            self._session.add(child_session)
+            await self._session.flush()
+
+            child_id = uuid4()
+            child = RunRow(
+                id=child_id,
+                workspace_id=parent.workspace_id,
+                session_id=child_session.id,
+                agent_version_id=child_version_id,
+                status=RunState.QUEUED.value,
+                state_version=1,
+                next_event_sequence=1,
+                session_sequence=1,
+                blocked_by_run_id=None,
+                parent_run_id=parent.id,
+                depth=parent.depth + 1,
+                delegation_scope=scope.document(),
+                # Red line four: the root, never a new one. Creating a child
+                # spends the same Token, cost, time, tool-call and retry
+                # counters the parent has already been spending.
+                budget_root_run_id=parent.budget_root_run_id,
+                checkpoint_replay_safe=True,
+                checkpoint_effect_status=CheckpointEffectStatus.NONE.value,
+                checkpoint_workspace_revision_id=None,
+                # Carried from the parent: a confirmation a child needs is
+                # about the same person's data, and a child with no EndUser
+                # would be unable to ask anybody.
+                end_user_id=parent.end_user_id,
+                # The child's own endpoint at today's price. Not the parent's:
+                # they may be different models, and measuring one at the
+                # other's rate would put a number on this Run that is about
+                # somebody else's.
+                model_pricing_version_id=await self._current_pricing(child_version_id),
+                created_at=now,
+                updated_at=now,
+            )
+            self._session.add(child)
+            await self._session.flush()
+
+            self._session.add(
+                SessionMessageRow(
+                    id=uuid4(),
+                    session_id=child_session.id,
+                    workspace_id=parent.workspace_id,
+                    sequence=1,
+                    role="user",
+                    # `platform` rather than unattributed: §13's seventh clause
+                    # keeps the parent's transcript out of the child, so this
+                    # turn is the platform relaying a delegation and not
+                    # something a person typed.
+                    content=CanonicalMessage(
+                        role="user",
+                        blocks=(TextBlock(text=item.instruction),),
+                        author="platform",
+                    ).document(),
+                    source_run_id=child_id,
+                    redacted=False,
+                    created_at=now,
+                )
+            )
+            child_session.head_run_id = child_id
+            child_session.next_run_sequence = 2
+            child_session.next_message_sequence = 2
+            await self._session.flush()
+
+            await self.append_events(
+                AppendEventsCommand(
+                    workspace_id=parent.workspace_id,
+                    run_id=child_id,
+                    events=(
+                        ReservedEvent(
+                            RunEventType.RUN_CREATED,
+                            {
+                                "parent_run_id": str(parent.id),
+                                "depth": child.depth,
+                                "delegation_scope": scope.document(),
+                            },
+                        ),
+                    ),
+                )
+            )
+            self._audit(
+                parent.workspace_id,
+                owning.caller_id,
+                "run.delegated",
+                "run",
+                child_id,
+                f"delegate-{parent.id}",
+                actor_type=owning.caller_type,
+            )
+            created.append(
+                DelegatedChild(
+                    run_id=child_id, session_id=child_session.id, alias=item.alias
+                )
+            )
+        return DelegationResult(children=tuple(created))
+
+    async def _child_agents(
+        self, workspace_id: UUID, aliases: tuple[str, ...]
+    ) -> dict[str, UUID]:
+        """The published Version behind each alias, in this workspace only.
+
+        Missing aliases are simply absent from the answer. Whoever asked names
+        them in the refusal, which is more use to a parent than an exception it
+        cannot read.
+        """
+        if not aliases:
+            return {}
+        rows = await self._session.execute(
+            select(AgentRow.alias, AgentRow.current_version_id).where(
+                AgentRow.workspace_id == workspace_id,
+                AgentRow.alias.in_(list(set(aliases))),
+                AgentRow.current_version_id.is_not(None),
+            )
+        )
+        return {alias: version_id for alias, version_id in rows.all()}
+
+    async def _agent_of_version(self, agent_version_id: UUID) -> UUID:
+        version = await self._session.get(AgentVersionRow, agent_version_id)
+        if version is None:  # pragma: no cover - just read from the same row
+            raise UnknownRun
+        return version.agent_id
+
     async def list_session_messages(
         self, workspace_id: UUID, session_id: UUID
     ) -> Sequence[CanonicalMessage]:
@@ -2096,6 +2345,8 @@ class SqlRunStore:
             wait_deadline_at=run.wait_deadline_at,
             retry_of_run_id=run.retry_of_run_id,
             budget_root_run_id=run.budget_root_run_id,
+            parent_run_id=run.parent_run_id,
+            depth=run.depth,
             last_event_sequence=run.next_event_sequence - 1,
             queue_position=position,
             queue_status=queue_status,

@@ -44,6 +44,8 @@ def _snapshot(**overrides: object) -> RunSnapshot:
         "wait_deadline_at": None,
         "retry_of_run_id": None,
         "budget_root_run_id": uuid4(),
+        "parent_run_id": None,
+        "depth": 0,
         "last_event_sequence": 1,
         "queue_position": 1,
         "queue_status": QueueStatus.HEAD,

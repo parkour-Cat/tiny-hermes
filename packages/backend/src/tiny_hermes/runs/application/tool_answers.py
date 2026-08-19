@@ -29,6 +29,7 @@ from tiny_hermes.runs.domain.models import (
     ToolResultBlock,
 )
 from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalGate
+from tiny_hermes.runs.ports.children import ChildRuns, DelegationRequest
 from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolSender
 from tiny_hermes.runs.ports.mcp import BoundMcpTool, McpGateway
 from tiny_hermes.runs.ports.memories import MemoryCandidates
@@ -48,6 +49,7 @@ from tiny_hermes.tools.domain.registry import (
     MAX_SKILL_LOADS,
     RefusalReason,
     ToolRefused,
+    delegation_of,
     memory_body_of,
     session_search_of,
     skill_load_of,
@@ -295,6 +297,78 @@ async def answer_memory_remember(
         ReservedEvent(
             event_type=RunEventType.MEMORY_PROPOSED,
             payload={"memory_id": str(result.memory_id)},
+        ),
+    )
+
+
+async def answer_agent_delegate(
+    children: ChildRuns | None,
+    context: ExecutionContext,
+    call: ToolCallBlock,
+) -> tuple[ToolResultBlock, ReservedEvent | None]:
+    """Hand work to other Agents, or say plainly why nothing was handed over.
+
+    §13. The result is written for a model that has to decide what to do next,
+    which is why a refusal is a sentence rather than a code: an Agent told
+    "not_authorized" will try a different alias, and one told it may not
+    delegate at all can get on with the work itself.
+
+    Almost nothing is decided here. Whether this Run may delegate, whether the
+    aliases are bound, how many may run at once and what each child ends up
+    permitted to do are all settled where the children are created — including
+    §13's third clause, which is decided from the parent's own `depth` row.
+    The check this function does make is the binding check §10.2 requires of
+    every platform tool: a model that asks for a tool its Version did not bind
+    is refused whether or not it was shown the schema.
+
+    **The parent does not wait yet.** This step creates children and returns;
+    making the parent hang on them is the next one. Said in the result too, so
+    a model is not left believing it has been handed answers.
+    """
+    if "agent.delegate" not in context.spec.tools:
+        return refusal(call.call_id, RefusalReason.NOT_AUTHORIZED), None
+    try:
+        asked = delegation_of(call)
+    except ToolRefused as refused_call:
+        return refusal(call.call_id, refused_call.reason, refused_call.detail), None
+    if children is None:
+        return text_refusal(call.call_id, "no delegation is configured here"), None
+    result = await children.delegate(
+        parent_run_id=context.run_id,
+        requests=tuple(
+            DelegationRequest(alias=alias, instruction=instruction)
+            for alias, instruction in asked
+        ),
+    )
+    if result.refused:
+        # Not a failed call. Every one of these is something the platform
+        # decided and the model could not have known, so it comes back as
+        # something it can read and act on.
+        return text_refusal(call.call_id, result.refusal or "nothing was delegated"), None
+    listed = ", ".join(f"{child.alias} ({child.run_id})" for child in result.children)
+    return (
+        ToolResultBlock(
+            call_id=call.call_id,
+            output=(
+                f"Started {len(result.children)}: {listed}. They are running now "
+                f"and spend the same budget you do. You do not have their results "
+                f"yet."
+            ),
+            exit_code=0,
+            failed=False,
+        ),
+        ReservedEvent(
+            event_type=RunEventType.RUN_DELEGATED,
+            payload={
+                "children": [
+                    {
+                        "run_id": str(child.run_id),
+                        "session_id": str(child.session_id),
+                        "alias": child.alias,
+                    }
+                    for child in result.children
+                ]
+            },
         ),
     )
 

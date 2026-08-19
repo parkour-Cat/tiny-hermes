@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
+from tiny_hermes.agents.domain.delegation import DelegationScope
 from tiny_hermes.agents.domain.models import AgentSpec
 from tiny_hermes.memory.ports.library import RememberedFact
 from tiny_hermes.model_catalog.domain.pricing import Cost, TokenPrices
@@ -264,6 +265,16 @@ class ExecutionContext:
     #: conversation. Never anything `pending` — a candidate that reached a
     #: model's context would have been remembered without anybody agreeing.
     memories: tuple[RememberedFact, ...] = ()
+    #: How far down the delegation tree this Run sits. `0` unless it was
+    #: delegated. Read here rather than looked up when `agent.delegate` is
+    #: answered, because §13's third clause has to be decidable from what the
+    #: round already holds — a depth fetched separately is a depth that can be
+    #: fetched from the wrong Run.
+    depth: int = 0
+    #: The six faces this Run holds, as they were computed when it was created.
+    #: `None` for a Run nobody delegated, which is not the same as one granted
+    #: nothing: an empty scope is a child that may do nothing at all.
+    delegated_scope: DelegationScope | None = None
 
     @property
     def messages(self) -> tuple[CanonicalMessage, ...]:

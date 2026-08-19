@@ -63,20 +63,31 @@ SessionWorkspace、事件、沙箱与费用记录;父子之间只经 Artifact �
 
 ## 2. 子 Run 的创建：depth、根预算与主体继承
 
-- [ ] 数据模型与迁移 `0027`：`runs` 加 `parent_run_id`、`depth`、
+- [x] 数据模型与迁移 `0027`：`runs` 加 `parent_run_id`、`depth`、
       `delegation_scope`（快照,不是引用——父 Version 事后改了不该影响
       已经在跑的子 Run,和 §16.3 的审批哈希同一个道理）。
-      `depth` 上 CHECK `depth <= 1`。
-- [ ] `agent.delegate` 平台工具：父 Run 提出委派,平台创建子 Run。
-      创建路径上拒绝 `depth >= 1` 的调用者——红线二,一条测试直接调。
-- [ ] 子 Run 继承:`budget_root_run_id`（红线四）、`end_user_id`、
+      `depth` 上 CHECK `depth <= 1`。同一份迁移里放宽了事件 CHECK：
+      `run_delegated` 和它的生产者一起到,和前四次放宽同一个规矩。
+      另加 `ck_runs_delegation_complete`：三个字段一起有或一起无,
+      一个「有父无 scope」的行是没人能说出权限的子 Run。
+- [x] `agent.delegate` 平台工具：父 Run 提出委派,平台创建子 Run。
+      创建路径上拒绝 `depth >= 1` 的调用者——红线二,一条测试直接调
+      `SqlChildRuns.delegate`,而且那个子 Agent 的 spec 是**故意绑错的**
+      （它自己也带委派策略和工具）,证明拒绝只看 `depth`。
+      把代码里那道判断拿掉重跑,`ck_runs_depth` 在数据库层拦住——
+      两层都验过。
+- [x] 子 Run 继承:`budget_root_run_id`（红线四）、`end_user_id`、
       `CallerIdentity`。**不继承**:Session、SessionWorkspace、沙箱、
-      私有记忆内容。各有一条测试。
+      私有记忆内容。各有一条测试。后三条断言的是「没有这条路」:
+      SessionWorkspace 按 Session 建,沙箱预留按 `run_id` 唯一,
+      私有记忆按 workspace+agent+subject 隔离而子 Run 是另一个 agent。
 - [x] 并行上限:`DelegationPolicy.max_parallel`,和 `children` 在一起。
       两个候选位置都没选,理由见第 8 节的更正。
-- [ ] 集成测试：一次委派两个子 Run,两个都真的跑起来,
+- [x] 集成测试：一次委派两个子 Run,两个都真的跑起来,
       各自有独立 Session 和独立 SessionWorkspace;
       根预算的 `consumed_model_calls` 是三个 Run 的和,不是各自重置。
+      用两个 Worker 并发跑,而不是一个 Worker 跑两遍——后者只能证明
+      两个 Run 都执行了,前者才证明谁也没在等谁。
 
 ## 3. 父 Run 的等待：wait_kind=child_runs
 

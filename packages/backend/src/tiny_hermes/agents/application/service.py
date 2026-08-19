@@ -1,14 +1,12 @@
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Protocol
 from uuid import UUID
 
 from pydantic import ValidationError
 
-from tiny_hermes.agents.domain.delegation import (
-    DelegationScope,
-    MemoryPermission,
-)
+from tiny_hermes.agents.domain.delegation import asked_by, scope_of_spec
 from tiny_hermes.agents.domain.models import (
     Agent,
     AgentDraft,
@@ -641,18 +639,15 @@ class AgentCatalog:
         unknown = tuple(alias for alias in aliases if alias not in published)
         if unknown:
             raise UnknownChildAgent(unknown)
-        mine = _scope_of_spec(spec)
+        mine = scope_of_spec(spec)
         offending: dict[str, Mapping[str, tuple[str, ...]]] = {}
         for child in policy.children:
-            # The four publish-knowable faces. `files` and `secrets` are
-            # runtime references — see `_scope_of_spec` — so comparing them
-            # here would refuse the ordinary case rather than a mistake.
-            asked = DelegationScope.of(
-                tools=child.tools,
-                network=child.network,
-                skills=child.skills,
-                memory=child.memory,
-            )
+            # Only the four publish-knowable faces are compared. `files` and
+            # `secrets` are runtime references — see `scope_of_spec` — so a
+            # comparison here would refuse the ordinary case rather than a
+            # mistake, which is why `mine` leaves both empty and
+            # `missing_from` is handed a scope with both cleared.
+            asked = replace(asked_by(child), files=frozenset(), secrets=frozenset())
             missing = mine.missing_from(asked)
             if missing:
                 offending[child.alias] = missing
@@ -908,28 +903,3 @@ def _valid_spec(values: Mapping[str, object]) -> AgentSpec:
     except ValidationError as error:
         raise InvalidAgentSpec from error
 
-
-def _scope_of_spec(spec: AgentSpec) -> DelegationScope:
-    """What this Agent itself holds, in the faces a publish can actually check.
-
-    Four of the six, and the two that are missing are missing on purpose.
-    `files` are Artifact ids and `secrets` are references a tool resolves at
-    call time — neither is bound on a spec, so publish has nothing to compare a
-    delegation's against. They are narrowed here and **checked where they are
-    used**: the runtime intersection is what decides, and a child naming an
-    artifact its parent cannot read is refused when it reads.
-
-    Saying that here rather than silently comparing against an empty set: doing
-    the latter would refuse every delegation that passed a file, which is the
-    ordinary case §13's eighth clause exists for.
-    """
-    return DelegationScope.of(
-        tools=spec.tools,
-        network=spec.network.allow if spec.network is not None else (),
-        skills=tuple(str(binding.skill_version_id) for binding in spec.skills),
-        memory=(
-            (MemoryPermission.READ_PRIVATE, MemoryPermission.PROPOSE_PRIVATE)
-            if "memory.remember" in spec.tools
-            else (MemoryPermission.READ_PRIVATE,)
-        ),
-    )

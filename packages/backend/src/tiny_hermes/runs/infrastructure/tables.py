@@ -167,6 +167,20 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
         ForeignKeyConstraint(
             ["budget_root_run_id"], ["runs.id"], name="fk_runs_budget_root"
         ),
+        ForeignKeyConstraint(["parent_run_id"], ["runs.id"], name="fk_runs_parent"),
+        # §13's third clause, in the schema rather than in a code path. A child
+        # Agent may not create a grandchild, and the creation path refuses one
+        # — but a refusal somebody can forget to write is a different guarantee
+        # from a row the database will not hold.
+        CheckConstraint("depth >= 0 AND depth <= 1", name="ck_runs_depth"),
+        # A delegated Run is one with a parent, at depth 1, holding the scope
+        # it was granted. All three or none of them: a Run with a parent and no
+        # scope would be a child nobody can say the permissions of.
+        CheckConstraint(
+            "(parent_run_id IS NULL) = (depth = 0) AND "
+            "(parent_run_id IS NULL) = (delegation_scope IS NULL)",
+            name="ck_runs_delegation_complete",
+        ),
     )
 
     workspace_id: Mapped[UUID] = mapped_column(
@@ -231,6 +245,22 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
     #: this Run cost, and a Run started before anybody entered one carries
     #: null — which reads as "unknown", never as "free".
     model_pricing_version_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    #: The Run that delegated this one, or null for a Run somebody asked for
+    #: directly (§13). Null is the ordinary case and carries no meaning beyond
+    #: "nobody delegated this".
+    parent_run_id: Mapped[UUID | None] = mapped_column(nullable=True, index=True)
+    #: How far down the delegation tree this Run sits. `0` for a Run a caller
+    #: created, `1` for a child. The CHECK above is what makes §13's third
+    #: clause a property of the schema rather than a rule the creation path
+    #: has to remember: a grandchild cannot be written down.
+    depth: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    #: The six faces this child actually holds, as they were computed when it
+    #: was created. **A snapshot, never a reference to the parent's Version.**
+    #: A parent republished or rolled back while its child is mid-flight would
+    #: otherwise swap that child's permissions underneath it, and §16.3's
+    #: approval hash is stored this way for the same reason. Null on a Run
+    #: nobody delegated.
+    delegation_scope: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
 
 class ApprovalRow(IdMixin, CreatedAtMixin, Base):

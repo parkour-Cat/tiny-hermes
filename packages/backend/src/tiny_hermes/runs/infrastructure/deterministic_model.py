@@ -231,6 +231,59 @@ class DeterministicModelProvider:
                 input_tokens=TOKENS_PER_ROUND // 2,
                 output_tokens=TOKENS_PER_ROUND // 2,
             )
+        if scenario == "delegate_once":
+            # The delegation drill: the Run input names the aliases to hand
+            # work to, comma separated, and the model gives each one a
+            # sentence. Taking them from the input rather than from the
+            # Version's policy is what lets one scenario drill both halves —
+            # a bound alias creates a child, an unbound one comes back
+            # refused, and the model reports whichever it got.
+            results = tuple(
+                block
+                for message in request.messages[_last_user_index(request) + 1 :]
+                for block in message.blocks
+                if isinstance(block, ToolResultBlock) and block.call_id == "delegate-1"
+            )
+            if not results:
+                named = [
+                    part.strip()
+                    for part in _last_user_text(request).split(",")
+                    if part.strip()
+                ]
+                if not named:
+                    return ModelResponse(
+                        stop_reason=StopReason.FAILED,
+                        text="",
+                        failure="deterministic_nobody_to_delegate_to",
+                    )
+                return ModelResponse(
+                    stop_reason=StopReason.TOOL_CALL,
+                    text="Splitting this up.",
+                    tool_calls=(
+                        ToolCallBlock(
+                            call_id="delegate-1",
+                            name="agent.delegate",
+                            arguments={
+                                "children": [
+                                    {
+                                        "alias": alias,
+                                        "instruction": f"Do the {alias} part.",
+                                    }
+                                    for alias in named
+                                ]
+                            },
+                        ),
+                    ),
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                )
+            answered = results[-1]
+            return ModelResponse(
+                stop_reason=StopReason.COMPLETED,
+                text="delegation outcome\n" + answered.output[:2000],
+                input_tokens=TOKENS_PER_ROUND // 2,
+                output_tokens=TOKENS_PER_ROUND // 2,
+            )
         if scenario == "search_once":
             # The retrieval drill: the Run input is the query, the model
             # searches its own past conversations once, and answers with what

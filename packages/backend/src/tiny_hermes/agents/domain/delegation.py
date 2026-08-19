@@ -22,9 +22,18 @@ which is a property of `MemoryScope` rather than of anything here; this module
 only decides whether it may read at all.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
+
+from tiny_hermes.agents.domain.models import AgentSpec, ChildBinding
+
+#: §13's third clause as a number: an Agent at this depth may not delegate.
+#: One level, and that is the design rather than a starting point — a tree of
+#: arbitrary depth is a different product with different budget, cancellation
+#: and permission questions, and none of them are answered here.
+MAX_DELEGATION_DEPTH = 1
 
 
 class MemoryPermission(StrEnum):
@@ -136,6 +145,45 @@ class DelegationScope:
         return found
 
 
+    def document(self) -> dict[str, Any]:
+        """The scope as it is written onto a child Run.
+
+        Sorted lists rather than sets, because this is stored and read back:
+        two equal scopes must serialize identically or a snapshot comparison
+        turns into a set comparison somebody forgot to write.
+        """
+        return {
+            "tools": sorted(self.tools),
+            "files": sorted(self.files),
+            "network": sorted(self.network),
+            "secrets": sorted(self.secrets),
+            "skills": sorted(self.skills),
+            "memory": sorted(item.value for item in self.memory),
+        }
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, Any]) -> "DelegationScope":
+        """Read back a stored scope.
+
+        A face this version does not recognize is dropped and a face that is
+        missing is **empty**, which is the same answer `intersect` gives for no
+        arguments and for the same reason: a scope read by a newer version of
+        this platform must not come back wider than it was written.
+        """
+        memory: list[MemoryPermission] = []
+        for name in document.get("memory", ()):
+            try:
+                memory.append(MemoryPermission(name))
+            except ValueError:
+                continue
+        return cls.of(
+            tools=document.get("tools", ()),
+            files=document.get("files", ()),
+            network=document.get("network", ()),
+            secrets=document.get("secrets", ()),
+            skills=document.get("skills", ()),
+            memory=memory,
+        )
 def intersect(*scopes: DelegationScope) -> DelegationScope:
     """What survives every scope in the chain.
 
@@ -168,3 +216,53 @@ def intersect(*scopes: DelegationScope) -> DelegationScope:
         skills=skills,
         memory=memory,
     )
+
+
+def scope_of_spec(spec: AgentSpec) -> DelegationScope:
+    """What an Agent itself holds, in the faces a spec actually binds.
+
+    Four of the six, and the two that are missing are missing on purpose.
+    `files` are Artifact ids and `secrets` are references a tool resolves at
+    call time — neither is bound on a spec, so there is nothing here to compare
+    a delegation's against. They are narrowed by the delegation and **checked
+    where they are used**: a child naming an artifact its parent cannot read is
+    refused when it reads.
+
+    Saying that rather than silently comparing against an empty set: the latter
+    would refuse every delegation that passes a file, which is the ordinary case
+    §13's eighth clause exists for.
+    """
+    return DelegationScope.of(
+        tools=spec.tools,
+        network=spec.network.allow if spec.network is not None else (),
+        skills=tuple(str(binding.skill_version_id) for binding in spec.skills),
+        memory=(
+            (MemoryPermission.READ_PRIVATE, MemoryPermission.PROPOSE_PRIVATE)
+            if "memory.remember" in spec.tools
+            else (MemoryPermission.READ_PRIVATE,)
+        ),
+    )
+
+
+def asked_by(binding: ChildBinding) -> DelegationScope:
+    """What a binding wrote down, before any intersection."""
+    return DelegationScope.of(
+        tools=binding.tools,
+        files=binding.files,
+        network=binding.network,
+        secrets=binding.secrets,
+        skills=binding.skills,
+        memory=binding.memory,
+    )
+
+
+def granted(parent: AgentSpec, binding: ChildBinding) -> DelegationScope:
+    """What a child actually gets: the parent's own scope met with the binding.
+
+    The one function a creation path calls, so there is no second place where
+    somebody could assemble a scope out of a binding alone. Publishing already
+    refused a binding wider than its parent — this is the same answer computed
+    again at the moment it is written onto a Run, because between publishing and
+    running is exactly where a scope could otherwise drift.
+    """
+    return intersect(scope_of_spec(parent), asked_by(binding))

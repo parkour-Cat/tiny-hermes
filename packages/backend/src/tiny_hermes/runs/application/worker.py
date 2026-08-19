@@ -26,6 +26,7 @@ from tiny_hermes.model_catalog.domain.pricing import (
 from tiny_hermes.model_catalog.domain.pricing import unknown as unknown_cost
 from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
 from tiny_hermes.runs.application.tool_answers import (
+    answer_agent_delegate,
     answer_http_call,
     answer_mcp_call,
     answer_memory_remember,
@@ -68,6 +69,7 @@ from tiny_hermes.runs.domain.slice_policy import (
 )
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalGate
+from tiny_hermes.runs.ports.children import ChildRuns
 from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolSender
 from tiny_hermes.runs.ports.mcp import BoundMcpTool, McpGateway
 from tiny_hermes.runs.ports.memories import MemoryCandidates
@@ -292,6 +294,7 @@ class WorkerRuntime:
         mcp: McpGateway | None = None,
         memories: MemoryCandidates | None = None,
         searches: SessionSearches | None = None,
+        children: ChildRuns | None = None,
     ) -> None:
         self._sessions = session_factory
         self._model = model
@@ -318,6 +321,11 @@ class WorkerRuntime:
         # nothing: "no past message matched" and "nobody wired the search"
         # are different facts and a model cannot tell them apart.
         self._searches = searches
+        # Absent, `agent.delegate` is refused rather than answered with an
+        # empty list of children: a parent told it started nothing and a
+        # parent told nobody wired delegation are different situations, and
+        # only one of them is worth trying again.
+        self._children = children
         # Optional, because a deployment with no tools configured needs none.
         # A Run that binds a tool and finds this absent fails rather than
         # running the command anywhere else — product design §16 leaves no
@@ -961,6 +969,14 @@ class WorkerRuntime:
             if call.name == "memory.remember":
                 answered, event = await answer_memory_remember(
                     self._memories, context, call
+                )
+                results.append(answered)
+                if event is not None:
+                    events.append(event)
+                continue
+            if call.name == "agent.delegate":
+                answered, event = await answer_agent_delegate(
+                    self._children, context, call
                 )
                 results.append(answered)
                 if event is not None:

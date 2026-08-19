@@ -45,6 +45,7 @@ IMPLEMENTED_TOOLS = (
     "skill.propose",
     "memory.remember",
     "session.search",
+    "agent.delegate",
 )
 
 #: Tools the platform answers itself. `authorize` turns a call into a
@@ -60,6 +61,7 @@ PLATFORM_TOOLS = frozenset(
         "skill.propose",
         "memory.remember",
         "session.search",
+        "agent.delegate",
     }
 )
 
@@ -488,6 +490,128 @@ def session_search_of(call: ToolCallBlock) -> tuple[str, int | None]:
     return query.strip(), asked
 
 
+#: The most children one call may ask for. `DelegationPolicy.max_parallel` is
+#: the real ceiling and it belongs to the Agent; this is the shape bound, so a
+#: model asking for forty is refused on the argument rather than on the policy.
+MAX_DELEGATED_CHILDREN = 8
+
+#: The longest instruction one child may be given. A child starts from this
+#: sentence and nothing else — §13's seventh clause keeps the parent's context
+#: out of it — so it has to carry the task, and a limit that made that
+#: impossible would push the parent into passing files it should not.
+MAX_DELEGATION_INSTRUCTION = 2_000
+
+AGENT_DELEGATE_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "agent.delegate",
+        "description": (
+            "Hand one or more independent pieces of work to other Agents, "
+            "which run at the same time as each other. Each one starts from "
+            "the instruction you give it and nothing else: it cannot see this "
+            "conversation, your files, or what you have already done, so write "
+            "each instruction so it stands on its own. They spend the same "
+            "budget as you do. Use this for work that splits cleanly; do it "
+            "yourself when the pieces depend on each other."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "children": {
+                    "type": "array",
+                    "description": (
+                        f"Between one and {MAX_DELEGATED_CHILDREN} pieces of "
+                        "work. Your Agent decides how many may run at once."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "alias": {
+                                "type": "string",
+                                "description": (
+                                    "Which Agent to give it to, by the alias "
+                                    "your own configuration lists."
+                                ),
+                            },
+                            "instruction": {
+                                "type": "string",
+                                "description": (
+                                    "The whole task, in at most "
+                                    f"{MAX_DELEGATION_INSTRUCTION} characters. "
+                                    "It is all this Agent will be told."
+                                ),
+                            },
+                        },
+                        "required": ["alias", "instruction"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["children"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+AGENT_DELEGATE_ARGUMENTS = frozenset({"children"})
+
+CHILD_ARGUMENTS = frozenset({"alias", "instruction"})
+
+
+def delegation_of(call: ToolCallBlock) -> tuple[tuple[str, str], ...]:
+    """Which children `agent.delegate` asked for, as (alias, instruction) pairs.
+
+    Shape only, like every other reader here. Whether these aliases are bound,
+    how many may run at once, whether this Run is allowed to delegate at all
+    and what each child ends up permitted to do are answered where the children
+    are created — this refuses a call that is not a delegation, never one that
+    is merely not allowed.
+    """
+    unknown = set(call.arguments) - AGENT_DELEGATE_ARGUMENTS
+    if unknown:
+        raise ToolRefused(
+            RefusalReason.INVALID_ARGUMENTS, call.call_id, ",".join(sorted(unknown))
+        )
+    raw = call.arguments.get("children")
+    if not isinstance(raw, list) or not raw:
+        raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "children")
+    asked = cast(list[Any], raw)
+    if len(asked) > MAX_DELEGATED_CHILDREN:
+        raise ToolRefused(
+            RefusalReason.INVALID_ARGUMENTS, call.call_id, f"children={len(asked)}"
+        )
+    children: list[tuple[str, str]] = []
+    for item in asked:
+        if not isinstance(item, dict):
+            raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "children")
+        entry = cast(dict[str, Any], item)
+        extra = set(entry) - CHILD_ARGUMENTS
+        if extra:
+            raise ToolRefused(
+                RefusalReason.INVALID_ARGUMENTS, call.call_id, ",".join(sorted(extra))
+            )
+        alias = entry.get("alias")
+        instruction = entry.get("instruction")
+        if not isinstance(alias, str) or not alias.strip():
+            raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "alias")
+        if not isinstance(instruction, str) or not instruction.strip():
+            raise ToolRefused(
+                RefusalReason.INVALID_ARGUMENTS, call.call_id, "instruction"
+            )
+        cleaned = instruction.strip()
+        if len(cleaned) > MAX_DELEGATION_INSTRUCTION:
+            # Refused with the number rather than truncated, the same rule
+            # `memory.remember` follows: half an instruction is a task nobody
+            # set, and a child would carry it out anyway.
+            raise ToolRefused(
+                RefusalReason.INVALID_ARGUMENTS,
+                call.call_id,
+                f"instruction={len(cleaned)}",
+            )
+        children.append((alias.strip(), cleaned))
+    return tuple(children)
+
+
 def schemas_for(bound: tuple[str, ...]) -> list[dict[str, Any]]:
     """Step one: what the model is told exists.
 
@@ -509,6 +633,8 @@ def schemas_for(bound: tuple[str, ...]) -> list[dict[str, Any]]:
             schemas.append(MEMORY_REMEMBER_SCHEMA)
         elif name == "session.search":
             schemas.append(SESSION_SEARCH_SCHEMA)
+        elif name == "agent.delegate":
+            schemas.append(AGENT_DELEGATE_SCHEMA)
         elif name in FILE_SCHEMAS:
             schemas.append(FILE_SCHEMAS[name])
     return schemas

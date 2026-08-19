@@ -78,6 +78,12 @@ class DeterministicModelPolicy(BaseModel):
         # Searches the subject's own past conversations for the Run input
         # and answers with the snippets. §14.3 without a sandbox.
         "search_once",
+        # Delegates to every alias this Version bound, one instruction each,
+        # then answers with what came back. `agent.delegate` is a platform
+        # tool, so §13's creation path is drilled on a host with no sandbox —
+        # and "two children really ran" needs a producer that is not a test
+        # double, the same as every other state this provider can reach.
+        "delegate_once",
     ] = "complete"
 
 
