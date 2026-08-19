@@ -154,6 +154,25 @@ jobs:
 
   compose-e2e:
     runs-on: ubuntu-latest
+    # On the job rather than on the one `up` step: the restart and workspace
+    # drills below run `compose up` again, and Compose interpolates at every
+    # `up`. Set on one step, the proxy would be recreated without a token and
+    # would refuse to start — the boundary working, in the wrong place.
+    #
+    # It refuses on purpose (§16.5: a proxy that accepts unauthenticated
+    # platform callers is a proxy any process on the network can borrow). This
+    # value is local to the run and grants nothing by itself — it answers "is
+    # this one of ours", while the scope still comes from the directory.
+    #
+    # `OUTBOUND_ALLOWED_CIDRS` opens the Compose bridge so a tool can reach
+    # another container in the stack; loopback and link-local stay refused
+    # however wide it is. `EGRESS_ALLOWED_PORTS` adds the API's own 8000, which
+    # is what the tools walk points at.
+    env:
+      EGRESS_PROXY_URL: http://egress-proxy:3128
+      EGRESS_PROXY_TOKEN: ci-egress-token-not-a-secret
+      EGRESS_ALLOWED_PORTS: "80,443,8000"
+      OUTBOUND_ALLOWED_CIDRS: 172.16.0.0/12
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -178,6 +197,16 @@ jobs:
         run: |
           docker build -t tiny-hermes-sandbox:ci -f deploy/sandbox/Dockerfile deploy/sandbox
           echo "digest=$(docker image inspect tiny-hermes-sandbox:ci --format '{{.Id}}')" >> "$GITHUB_OUTPUT"
+      # The egress proxy refuses to start without a token, on purpose — §16.5's
+      # "a proxy that accepts unauthenticated platform callers is a proxy any
+      # process on the network can borrow". So the stack cannot come up at all
+      # until this is set, and `--wait` is what says so. The token is a local
+      # value for this run and grants nothing by itself: it answers "is this one
+      # of ours", while the scope still comes from the directory.
+      #
+      # `OUTBOUND_ALLOWED_CIDRS` opens the Compose bridge so a tool can reach
+      # another container in the stack. Loopback and link-local stay refused
+      # however wide this is.
       - env:
           SANDBOX_IMAGE_DIGEST: ${{ steps.sandbox.outputs.digest }}
         run: docker compose -f deploy/compose/compose.yaml up -d --build --wait
