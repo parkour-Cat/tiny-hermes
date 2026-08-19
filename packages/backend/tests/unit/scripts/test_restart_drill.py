@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
@@ -99,3 +99,44 @@ def test_await_status_fails_fast_when_the_run_already_ended_elsewhere() -> None:
     with pytest.raises(SystemExit, match="ended as 'failed'"):
         console.await_status("workspace", "run-id", ["completed"], 30.0)
     assert time.monotonic() - started < 1.0
+
+
+def test_worker_restart_accepts_the_verdict_written_after_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M2A records the platform's verdict after the terminal state event."""
+
+    class _Console:
+        def __init__(self) -> None:
+            statuses: list[tuple[dict[str, object], float]] = [
+                ({"status": "running", "last_event_sequence": 2}, 0.1),
+                ({"status": "completed", "last_event_sequence": 4}, 0.1),
+            ]
+            self._statuses: Iterator[tuple[dict[str, object], float]] = iter(statuses)
+
+        def submit(self, *_: object) -> str:
+            return "run-id"
+
+        def await_status(self, *_: object) -> tuple[dict[str, object], float]:
+            return next(self._statuses)
+
+        def events(self, *_: object) -> list[object]:
+            return [
+                restart_drill.Event(1, "run_created"),
+                restart_drill.Event(2, "run_lease_acquired"),
+                restart_drill.Event(3, "run_completed"),
+                restart_drill.Event(4, "goal_verdict"),
+            ]
+
+    def compose_succeeds(*_: str) -> None:
+        return None
+
+    def worker_is_healthy(_: str, timeout: float = 90.0) -> None:
+        del timeout
+
+    monkeypatch.setattr(restart_drill, "compose", compose_succeeds)
+    monkeypatch.setattr(restart_drill, "await_healthy", worker_is_healthy)
+
+    restart_drill.worker_restart(  # type: ignore[arg-type]
+        _Console(), "workspace-id", "agent-id"
+    )

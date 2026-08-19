@@ -304,7 +304,13 @@ def worker_restart(console: Console, workspace: str, agent: str) -> None:
 
     events = console.events(workspace, run)
     describe(events)
-    check(events[-1].event_type == "run_completed", "the history does not end in run_completed")
+    # M2A records the platform's goal verdict after the state transition that
+    # completed the Run. Completion must still be present in the durable
+    # history, but it is no longer necessarily the final event.
+    check(
+        any(event.event_type == "run_completed" for event in events),
+        "the history has no run_completed event",
+    )
     # Work continued past the point the restart interrupted, rather than the Run
     # having already finished before the restart landed on it.
     check(
