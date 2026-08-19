@@ -57,6 +57,7 @@ branch, with `SANDBOX_IMAGE_DIGEST` set to a locally built sandbox image.
 | `eslint .` (console) | clean |
 | `vitest run` (console) | 152 passed |
 | `playwright` (all projects, Compose stack) | **13 passed, 0 failed** |
+| §24.1 gates, 0.1 against 0.2 on one machine | **no regression**, and not a gate run — see §8 |
 
 `packages/backend/tests/integration/sandbox/` is excluded above and the reason
 is in §5: it fails identically on a clean checkout of this branch's base.
@@ -328,3 +329,76 @@ in the child's Session, and the console links there.
 of counters by design. A child that spends the root budget stops the whole tree,
 including the parent that was waiting for it. That is the intended reading of
 §12.4 and not a limitation to be worked around.
+
+
+## 8. §24.1, and what this machine could and could not answer
+
+The roadmap's release gate asks that "the 0.1 thresholds re-run on 0.2 without
+regressing". Those are two questions and this run can answer one of them.
+
+**The absolute gate did not run, because the harness refused this machine and
+it was right to.** `benchmark_m1.py --shape-only` reports `shape_ok: false`:
+the reference shape is Linux, 8 vCPU, 16 GiB, and this is macOS with an
+OrbStack VM holding 7.8 GiB — the host has 16 GiB but the VM does not get it.
+`benchmark_live.py` opens by saying that nothing in it lowers a cell or offers
+a skip, and nothing here did either. **No number below certifies anything
+against the product table.**
+
+**The regression question is answerable, and the answer is no.** The same
+machine, the same harness — `benchmark_m1.py` and `benchmark_live.py` are
+byte-identical between the two commits, and the only script that differs is
+`restart_drill.py`, by seven lines in a drill assertion the benchmark never
+calls — and both ends starting from `down -v`, so nothing but the code differs.
+
+| Gate | Threshold | 0.1 `5ad0e00` | 0.2 `5e28996` | Change |
+|---|---:|---:|---:|---:|
+| create_run | 300 ms | 37.0 | 36.5 | −1.3% |
+| run_event | 100 ms | 2.6 | 3.3 | +25.7% |
+| sse | — | 122.0 | 122.0 | ±0 |
+| sandbox_cold | 3000 ms | 1272.3 | 1253.9 | −1.5% |
+| sandbox_warm | 300 ms | 12.8 | 24.4 | +90.5% |
+| **workspace_small** | **1000 ms** | **2678.4** | **2772.3** | +3.5% |
+| workspace_large | 15000 ms | 3714.1 | 3458.2 | −6.9% |
+| next_run | 3000 ms | 2166.2 | 2213.2 | +2.2% |
+| worker_recovery | 30 s | 21152.6 | 20554.0 | −2.8% |
+| service_recovery | 60 s | 8643.5 | 8652.9 | +0.1% |
+
+p95 in milliseconds. Error rates were at or near zero on both sides throughout.
+
+The three that M2A's rounds and compaction and M2E's two new Scheduler sweeps
+were most likely to press on — `create_run`, `run_event`, `next_run` — all held,
+and the first is marginally faster.
+
+**Read the two large percentages as their absolute numbers.** `run_event` moved
+0.7 ms against a 100 ms threshold and `sandbox_warm` moved 11.6 ms against 300
+ms. At single-digit milliseconds a percentage says nothing, which is why both
+columns are here.
+
+**`workspace_small` fails on both sides and is not M2's.** 2678 ms before,
+2772 ms after, both against a 1000 ms threshold, 3.5% apart. Committing a 1 MiB
+file to MinIO takes that long on a 7.8 GiB VM running the whole stack. This is
+a measurement this machine cannot settle: it has to be re-run on the reference
+host before anybody knows whether the cell is genuinely over or the environment
+is. It is recorded as unresolved rather than attributed either way.
+
+### What is still owed to the release gate
+
+§24.1 must be re-run on a Linux 8 vCPU / 16 GiB reference host. Until then the
+release gate's performance line is **not** satisfied — this is evidence of no
+regression, which is a different claim.
+
+### Three failures on the way, none of them the code
+
+Recorded because whoever repeats this on a similar machine will meet them.
+
+- Six gates first came back `InvalidAuthorizationSpecificationError`. The
+  benchmark connects directly to `127.0.0.1:5432`, and this host runs its own
+  PostgreSQL bound to loopback, which shadows the stack's publish of the same
+  port. The harness has `TINY_HERMES_BENCHMARK_DATABASE` for exactly this; the
+  stack was republished on 15432 and pointed at, on both ends.
+- The 0.1 build failed twice pulling Docker Hub base images — `nginx` once,
+  `node` the next time — on TLS handshake timeouts. Neither produced any
+  measurement. Pre-pulling both fixed it, and pre-pulling rather than dropping
+  the `web` service kept the two ends symmetric.
+- Both ends were reset with `down -v` before measuring, because a database
+  carrying leftover e2e data is not the 100k-event preload the gate describes.

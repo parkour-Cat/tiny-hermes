@@ -215,5 +215,14 @@ flowchart LR
 - `egress-proxy` 是唯一出站路径，架构测试证明没有旁路。
 - 本里程碑新增的每一种暂停——`limit`、`context_overflow`、`tool_budget_exceeded`、`external_timeout`、审批相关——都演示过恢复，且恢复不重置累计安全阀。
 - §24.1 的 0.1 门槛在 0.2 上重跑不退化；新增的轮次与压缩没有引入新的性能回退。
+  **状态（2026-08-19）：回归这一半已答，绝对门槛这一半没答。** 同机 A/B
+  （0.1 `5ad0e00` 对 0.2 `5e28996`，同一份基准工具、两端 `down -v` 起）十项
+  无有意义退化，`create_run`、`run_event`、`next_run` 全部保持——记录见
+  `docs/superpowers/verification/2026-08-19-m2e-child-agents.md` §8。
+  但那台机器是 macOS、VM 只有 7.8 GiB，工具自报 `shape_ok: false`，所以
+  **绝对门槛仍需在 Linux 8 vCPU / 16 GiB 参考主机上重跑**才算数。
+  另有一项待查：`workspace_small` 在 0.1 和 0.2 两端都超门槛（2678ms /
+  2772ms 对 1000ms），差值仅 3.5%，不是 M2 引入的；是真超标还是环境所致，
+  要在参考主机上才能分辨。
 - 项目描述从「单 Agent 安全运行骨架」升级为「轻量 Hermes 内核预览」，仍不宣传为企业交付闭环。终端用户 Web Chat、飞书适配器、OIDC、审计查询导出与完整任务树都还没有，它们是 M3。
 - 发布后按 §1265 评估 Goal 失控率、子 Agent 成功率、审批负担、记忆误写和技能提案质量，再决定 M3 范围。
