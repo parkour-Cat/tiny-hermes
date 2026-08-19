@@ -29,14 +29,19 @@ async function openWorkspace(page: Page): Promise<void> {
  *
  * By the option's `title` rather than by its role: rc-select renders a second,
  * screen-reader-only option list that carries the same role and is never
- * visible, and a role query finds that one first.
+ * visible, and a role query finds that one first. Centering the field before
+ * opening it also keeps a virtualized option away from the viewport edge,
+ * where a pointer click can activate the row without selecting it.
  */
 async function choose(page: Page, label: string, value: string): Promise<void> {
-  await page.getByLabel(label).click();
+  const field = page.getByLabel(label);
+  await field.evaluate((element) => element.scrollIntoView({ block: "center" }));
+  await field.click();
   await page
     .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
     .locator(`.ant-select-item-option[title="${value}"]`)
     .click();
+  await expect(field.locator("xpath=..")).toHaveAttribute("title", value);
 }
 
 /**
