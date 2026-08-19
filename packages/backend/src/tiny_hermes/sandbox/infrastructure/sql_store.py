@@ -92,9 +92,7 @@ class SqlSandboxStore:
         row = await self._session.get(SandboxReservationRow, reservation_id)
         return None if row is None else _reservation(row)
 
-    async def keep(
-        self, reservation_id: UUID, *, idle_expires_at: datetime
-    ) -> SandboxReservation:
+    async def keep(self, reservation_id: UUID, *, idle_expires_at: datetime) -> SandboxReservation:
         row = await self._require(reservation_id)
         row.status = ReservationStatus.KEPT.value
         row.idle_expires_at = idle_expires_at

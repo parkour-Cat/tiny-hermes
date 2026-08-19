@@ -170,9 +170,7 @@ async def a_kept_reservation(
     run_id = uuid4()
     async with sessions() as session:
         store = SqlSandboxStore(session)
-        made = await store.reserve(
-            run_id=run_id, workspace_id=uuid4(), instance=instance()
-        )
+        made = await store.reserve(run_id=run_id, workspace_id=uuid4(), instance=instance())
         await store.keep(made.id, idle_expires_at=datetime.now(UTC) + expires_in)
         await session.commit()
         return run_id, made.instance_id
@@ -232,9 +230,7 @@ async def test_a_cleanup_that_cannot_be_confirmed_leaves_it_isolated(
 async def test_a_stale_cleanup_failure_cannot_reisolate_a_released_reservation(
     sessions: async_sessionmaker[AsyncSession],
 ) -> None:
-    run_id, _ = await a_kept_reservation(
-        sessions, expires_in=-timedelta(seconds=1)
-    )
+    run_id, _ = await a_kept_reservation(sessions, expires_in=-timedelta(seconds=1))
 
     await (await scheduler(sessions, ReleaseThenFailCleanup(sessions))).run_once()
 
@@ -407,9 +403,7 @@ async def test_an_interrupted_run_waits_until_its_sandbox_cleanup_succeeds(
     async with engine.connect() as connection:
         status, recovery_attempts = (
             await connection.execute(
-                text(
-                    "SELECT status, recovery_attempts FROM runs WHERE id = :id"
-                ),
+                text("SELECT status, recovery_attempts FROM runs WHERE id = :id"),
                 {"id": run_id},
             )
         ).one()
@@ -484,9 +478,7 @@ async def test_worker_close_failure_is_cleaned_before_the_run_recovers(
 
     order: list[str] = []
     await (
-        await scheduler(
-            sessions, StandInController(order=order), RecordingNotifier(order)
-        )
+        await scheduler(sessions, StandInController(order=order), RecordingNotifier(order))
     ).run_once()
 
     async with engine.connect() as connection:
