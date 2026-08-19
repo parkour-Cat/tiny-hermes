@@ -1050,6 +1050,105 @@ such field, so §9.4's rule about strict Token ceilings has nothing to guard yet
 and adding the field means teaching the platform to read more than one
 `schema_version`.
 
+## Delegating to child Agents
+
+An Agent can hand pieces of work to other Agents in the same workspace. They run
+as Runs of their own, at the same time as each other, and the Agent that
+delegated waits for them.
+
+### Configuring one
+
+Add a `delegation` document to the spec. It is absent unless you write one, and
+an Agent without it delegates to nobody:
+
+```json
+{
+  "tools": ["agent.delegate"],
+  "delegation": {
+    "max_parallel": 2,
+    "children": [
+      { "alias": "reader", "tools": ["shell.exec"] },
+      { "alias": "checker" }
+    ]
+  }
+}
+```
+
+Three things are checked when you publish, so you find out then rather than from
+a Run:
+
+- Every alias must be a published Agent in the same workspace.
+- A child may not be offered a permission the parent does not itself hold. The
+  refusal names which face was too wide — tools, network, skills or memory — so
+  you are not left guessing across six of them.
+- Binding `agent.delegate` is not enough on its own; without a `delegation`
+  document the tool is there and refuses every call.
+
+**What a child gets is an intersection, and only ever a narrowing.** A face you
+do not name grants nothing: `{ "alias": "checker" }` is a child with no tools,
+no network, no skills. There is no way to write "everything the parent has", on
+purpose — a child should be given what it needs rather than what happens to be
+available.
+
+`max_parallel` lives here rather than in `limits` because it is the shape of
+this Agent's work: a batch reconciler wants five, a summary Agent wants one.
+
+### What `all` and `any` mean
+
+The model chooses when it calls the tool; `all` is the default.
+
+- **`all`** — the parent continues when every child has reached a terminal
+  state, whatever that state is. It is told about the failures too.
+- **`any`** — the parent continues as soon as one child *succeeds*, and **the
+  rest are cancelled**, including one that was a second away from finishing.
+  That is deliberate: the siblings are spending the same budget, and the parent
+  already has the answer it asked for. Use `any` when the children are
+  alternative routes to the same thing, not when each does a different piece.
+
+How long the parent waits is not the model's to choose. The deadline is
+whatever is left of the parent's own elapsed budget. If it passes, the parent
+becomes `paused(external_timeout)` and somebody has to resume it.
+
+### What the parent sees when a child fails
+
+It is **told**, not failed. Every child failing still puts the parent back in
+the queue with a summary naming each child, its status and its reason — it may
+well be able to do the work itself, and failing it would take that decision
+away.
+
+What the parent never sees is a child's conversation. It gets an outcome, a
+short summary in the child's own words, and the ids of any files the child
+produced. The child's transcript stays in the child's Session, where you can
+read it in the console: the parent's Run detail page lists its children and
+each one is a link.
+
+### Files
+
+There is no shared directory. A parent and a child have separate Sessions and
+therefore separate SessionWorkspaces, separate sandboxes and separate working
+files. Anything that has to cross moves as an **Artifact authorization**:
+
+- Downward: name artifact ids on the delegation
+  (`{"alias": "reader", "artifacts": ["<id>"]}`). You may only pass on files
+  you can read yourself, and naming one you cannot refuses the whole delegation
+  rather than dropping that file quietly.
+- Upward: a child's own artifacts are granted to the parent when its result is
+  delivered, and their ids are in the summary.
+
+Either way the receiving Run opens them with `artifact.read`, which takes an id
+and never a path. A grant belongs to one Run, so a later Run of the same Agent
+cannot open what was passed to this piece of work.
+
+### Limits worth knowing
+
+- **One level.** A child Agent cannot delegate. This is refused on the creation
+  path and by a database constraint, so it holds even for a child whose own
+  spec was published with a delegation policy.
+- **One budget for the tree.** Tokens, cost, execution time, tool calls and
+  retries all accumulate against the Run somebody originally asked for.
+  Delegating resets nothing, and a tree that runs out stops as a whole.
+- **Cancelling a parent cancels its children**, including ones still running.
+
 ## Sandbox and `shell.exec`
 
 Phase 3B adds one platform-owned Docker sandbox and one tool, `shell.exec`. The

@@ -55,6 +55,17 @@ export default defineConfig({
       dependencies: ["setup"],
       use: { storageState: CONSOLE_STATE },
     },
+    // §13's walk. Needs no egress and no sandbox — the children here run
+    // platform tools only — but it does need a **Scheduler**, because nothing
+    // in the request path settles a `child_runs` wait. On a stack without one
+    // the parent waits until its deadline, which is the deployment being
+    // honest rather than this walk failing.
+    {
+      name: "children",
+      testMatch: /children\.spec\.ts$/,
+      dependencies: ["setup"],
+      use: { storageState: CONSOLE_STATE },
+    },
     // §14.1's walk. Needs no egress and no sandbox — memory is answered by the
     // platform itself — so it runs on any stack the console runs on.
     {

@@ -672,7 +672,19 @@ export function AgentDetailPage() {
             </Form.Item>
           ) : (
             <Form.Item name="scenario" label={t("modelScenario")} rules={[{ required: true }]}>
+              {/*
+                Searchable, and that is a fix rather than a nicety. The list is
+                long enough that rc-select virtualizes it, and an option below
+                the fold cannot be reliably clicked — the element under the
+                cursor is recycled mid-click and detaches. M2D's record filed
+                that as an open defect and worked around it by publishing
+                through the API; this is the change it said was needed. Typing
+                filters the list down to a few rows, so nothing is ever
+                selected out of a scrolling viewport.
+              */}
               <Select
+                showSearch
+                optionFilterProp="value"
                 options={MODEL_SCENARIOS.map((scenario) => ({ value: scenario, label: scenario }))}
               />
             </Form.Item>

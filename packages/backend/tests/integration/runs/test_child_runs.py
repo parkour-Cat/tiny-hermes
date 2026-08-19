@@ -785,3 +785,56 @@ async def test_a_childs_own_files_are_granted_up_when_its_result_is_delivered(
     )[0]
     reported = cast(dict[str, Any], result.delegation_result or {})
     assert str(produced) in cast(list[str], reported.get("artifacts", []))
+
+
+async def test_the_api_says_a_Run_is_part_of_a_tree(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    coordinator: str,
+) -> None:
+    """Through the HTTP boundary, not the table.
+
+    Its own test because the boundary is where this went wrong once: the
+    response model lists its fields, so a column and a snapshot can both be
+    correct while the console is served a document with the tree missing. The
+    suite read the database and passed; only the browser walk noticed. This is
+    that walk's claim, moved to where it costs seconds.
+    """
+    workspace_id = scope["X-Workspace-Id"]
+    parent_run = str(
+        client.post(
+            "/api/v1/runs",
+            headers={**scope, "Idempotency-Key": "delegate-api"},
+            json={"session_id": session_for(coordinator), "input": "reader,checker"},
+        ).json()["id"]
+    )
+
+    await _drain(engine, workspace_id)
+
+    document = client.get(f"/api/v1/runs/{parent_run}", headers=scope).json()
+    assert document["parent_run_id"] is None
+    assert document["depth"] == 0
+    children = document["children"]
+    assert len(children) == 2
+    assert {child["status"] for child in children} == {"completed"}
+
+    # And a child, from the same endpoint, names its parent back.
+    child = client.get(f"/api/v1/runs/{children[0]['id']}", headers=scope).json()
+    assert child["parent_run_id"] == parent_run
+    assert child["depth"] == 1
+    assert child["children"] == []
+
+    # The delivered report is attributed to the platform through the API too,
+    # and for the reason the field exists at all: a caller that cannot tell the
+    # platform's words from the person's is reading a transcript that
+    # misattributes them. Dropped at this boundary once already — see the
+    # docstring above — so it is asserted here rather than assumed.
+    messages = client.get(
+        f"/api/v1/sessions/{document['session_id']}/messages", headers=scope
+    ).json()
+    delivered = [item for item in messages if item.get("author") == "platform"]
+    assert len(delivered) == 1
+    said = "".join(part.get("text", "") for part in delivered[0]["parts"])
+    assert all(child["id"] in said for child in children)

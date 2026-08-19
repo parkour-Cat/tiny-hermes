@@ -29,18 +29,36 @@ async function openWorkspace(page: Page): Promise<void> {
  *
  * By the option's `title` rather than by its role: rc-select renders a second,
  * screen-reader-only option list that carries the same role and is never
- * visible, and a role query finds that one first. Centering the field before
- * opening it also keeps a virtualized option away from the viewport edge,
- * where a pointer click can activate the row without selecting it.
+ * visible, and a role query finds that one first.
+ *
+ * **It types first, and that is the fix rather than a flake workaround.** The
+ * scenario list is long enough that rc-select virtualizes it, and an option
+ * below the fold cannot be reliably clicked — the row under the cursor is
+ * recycled mid-click and detaches from the DOM. Scrolling the field to centre
+ * moved the problem around without removing it. Typing filters the list to a
+ * couple of rows, so the option is never selected out of a scrolling
+ * viewport. The select carries `showSearch` for the same reason, and that is a
+ * fix for the person using it, not only for this walk: nobody could pick an
+ * option near the bottom either.
  */
 async function choose(page: Page, label: string, value: string): Promise<void> {
   const field = page.getByLabel(label);
   await field.evaluate((element) => element.scrollIntoView({ block: "center" }));
   await field.click();
-  await page
+  // Typing only where the select accepts it. A non-search Ant select renders a
+  // readonly input, and `fill` on one fails outright — so this asks the field
+  // rather than assuming which selects on the page are searchable.
+  const searchable = await field.evaluate(
+    (element) => !(element as HTMLInputElement).readOnly,
+  );
+  if (searchable) {
+    await field.fill(value);
+  }
+  const option = page
     .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
-    .locator(`.ant-select-item-option[title="${value}"]`)
-    .click();
+    .locator(`.ant-select-item-option[title="${value}"]`);
+  await expect(option).toBeVisible();
+  await option.click();
   await expect(field.locator("xpath=..")).toHaveAttribute("title", value);
 }
 

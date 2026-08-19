@@ -338,6 +338,11 @@ export const IMPLEMENTED_TOOLS = [
   // the tool, and the feature is unreachable from the console it shipped with.
   "memory.remember",
   "session.search",
+  // §13. Same reason again: an Agent that cannot be given `agent.delegate`
+  // from the builder cannot delegate at all, and `artifact.read` is how
+  // whatever it is handed actually gets opened.
+  "agent.delegate",
+  "artifact.read",
 ] as const;
 
 /**
@@ -363,6 +368,7 @@ export const MODEL_SCENARIOS = [
   "mcp_once",
   "remember_once",
   "search_once",
+  "delegate_once",
 ] as const;
 
 export type SkillResponse = {

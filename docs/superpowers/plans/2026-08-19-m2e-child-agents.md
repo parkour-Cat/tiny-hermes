@@ -157,17 +157,23 @@ SessionWorkspace、事件、沙箱与费用记录;父子之间只经 Artifact �
 
 ## 7. 验收与记录
 
-- [ ] 后端、ruff、pyright、vitest、tsc、eslint、e2e 全跑。
-- [ ] 路线图 §8 的七条出口检查逐条对上证据。
-- [ ] `tests/e2e/children.spec.ts`：父 Agent 委派两个子 Agent,
+- [x] 后端、ruff、pyright、vitest、tsc、eslint、e2e 全跑。
+      e2e 全绿（13/13），过程里挖出三个真问题,见验收记录第 6 节:
+      Run 文档的新字段在 API 边界被响应模型丢掉了、`author` 一直都在被丢、
+      以及场景下拉框根本点不动（M2D 记过的老毛病）。
+- [x] 路线图 §8 的七条出口检查逐条对上证据。
+- [x] `tests/e2e/children.spec.ts`：父 Agent 委派两个子 Agent,
       控制台上看到任务树,父在等,两个子跑完,父醒来完成。
-- [ ] 写 `docs/superpowers/verification/2026-08-XX-m2e-child-agents.md`,
+      「父在等」不靠轮询去抓——这台机器上 Scheduler 会在两次轮询之间
+      把它叫醒,抓现行是在赌运气。改成断言等待留下的东西:那条投递消息
+      只有唤醒父 Run 的那一处会写。
+- [x] 写 `docs/superpowers/verification/2026-08-19-m2e-child-agents.md`,
       结构照 M2D:做了什么、走了哪一遍、出口检查逐条对证据、
       **哪些东西这一遍没能证明**、以及不声称什么。
       「不声称」至少要写清楚:一层就是一层,不是"暂时只开一层";
       交集是权限的交集,不是能力的保证;
       并行是两个 Run 同时在跑,不是两个 Agent 在协作。
-- [ ] `docs/development.md` 加一节:怎么配一个可委派的 Agent,
+- [x] `docs/development.md` 加一节:怎么配一个可委派的 Agent,
       `all` 和 `any` 分别意味着什么,子 Run 失败时父看到什么。
 
 ---

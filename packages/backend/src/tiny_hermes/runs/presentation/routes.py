@@ -81,6 +81,14 @@ class SessionResponse(BaseModel):
 class SessionMessageResponse(BaseModel):
     role: str
     parts: list[dict[str, Any]]
+    #: `"platform"` when the platform wrote this turn rather than the person the
+    #: role suggests — a Goal instruction, a compaction summary, a delegated
+    #: child's report. Absent otherwise, which is every turn written before the
+    #: field existed. Carried out to callers because that is the whole point of
+    #: it: a transcript where the platform's words cannot be told from
+    #: somebody's own misattributes them, and dropping the field here undid the
+    #: distinction the store went to the trouble of keeping.
+    author: str | None = None
 
     @classmethod
     def from_domain(cls, message: CanonicalMessage) -> "SessionMessageResponse":
@@ -123,6 +131,13 @@ class RunResponse(BaseModel):
     wait_deadline_at: datetime | None
     retry_of_run_id: UUID | None
     budget_root_run_id: UUID
+    #: §13. `None` and `0` for the ordinary Run, which is most of them.
+    parent_run_id: UUID | None
+    depth: int
+    #: ``[{"id", "status"}]`` — the Runs this one delegated, oldest first. The
+    #: minimal task tree: enough for a console to show that this Run is one of
+    #: several and to link to the others.
+    children: list[dict[str, Any]]
     last_event_sequence: int
     queue: QueueResponse
     budget: dict[str, Any]
