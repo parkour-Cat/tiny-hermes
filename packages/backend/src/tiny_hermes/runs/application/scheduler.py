@@ -35,6 +35,8 @@ RECOVERY = "recovery"
 HEADS = "heads"
 WAITS = "waits"
 APPROVALS = "approval_expiry"
+CHILDREN = "child_waits"
+CASCADE = "child_cascade"
 COMPAT = "compat_timeouts"
 RETENTION = "retention"
 UPLOADS = "workspace_uploads"
@@ -101,6 +103,8 @@ class SchedulerRuntime:
         await self._recover_interrupted()
         await self._repair_session_heads()
         await self._settle_due_waits(now)
+        await self._settle_child_waits()
+        await self._cascade_cancel_children()
         await self._expire_approvals(now)
         await self._cancel_aged_compat_timeouts(now)
         await self._collect_expired_records(now)
@@ -303,6 +307,54 @@ class SchedulerRuntime:
             # here: a Worker told to look before the row is visible finds a Run
             # that is still waiting and goes back to sleep.
             await self._announce(run_id)
+
+    async def _settle_child_waits(self) -> None:
+        """Hand finished children over to the parents waiting on them (§13).
+
+        Here rather than in the child's own terminal transition, and that is the
+        tenth clause rather than a convenience. A child very often finishes
+        while its parent is unavailable — held by another Worker, or still
+        waiting on a sibling — and a delivery attempted at that moment would
+        have to either fail or block. The child writes its result where it
+        cannot be lost, and this picks it up on a tick when the parent can take
+        it. A parent that is busy costs a few seconds, never an answer.
+
+        Exactly once is `result_delivered_at`, stamped inside the same
+        transaction that appends the turn.
+        """
+        woken: list[UUID] = []
+        async with self._sessions.begin() as session:
+            store = SqlRunStore(session)
+            if not await store.try_scan_lock(CHILDREN):
+                return
+            for run_id in await store.parents_awaiting_children(
+                self._settings.batch_size
+            ):
+                if await store.settle_child_wait(run_id, "scheduler-child-settle"):
+                    woken.append(run_id)
+        for run_id in woken:
+            # After the commit, like every other requeue here: a Worker told to
+            # look before the row is visible finds a Run that is still waiting.
+            await self._announce(run_id)
+
+    async def _cascade_cancel_children(self) -> None:
+        """§13's eleventh clause: no child outlives the parent that wanted it.
+
+        A sweep rather than something hung off the cancel path, because a
+        parent reaches a terminal state down several routes — a person
+        cancelling it, a failure, a deadline — and a cascade attached to one of
+        them is a cascade the other routes do not get. A child still running
+        for a parent that has gone is spending the root budget on work nobody
+        will read.
+        """
+        async with self._sessions.begin() as session:
+            store = SqlRunStore(session)
+            if not await store.try_scan_lock(CASCADE):
+                return
+            for run_id in await store.cancelled_parents_with_children(
+                self._settings.batch_size
+            ):
+                await store.cascade_cancel_children(run_id, "scheduler-child-cascade")
 
     async def _expire_approvals(self, now: datetime) -> None:
         """§16.3's deadline, enforced by the only process that can.

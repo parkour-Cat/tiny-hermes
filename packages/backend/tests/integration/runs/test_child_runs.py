@@ -34,6 +34,10 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from tiny_hermes.runs.application.scheduler import (
+    SchedulerRuntime,
+    SchedulerSettings,
+)
 from tiny_hermes.runs.application.worker import WorkerRuntime, WorkerSettings
 from tiny_hermes.runs.infrastructure.deterministic_model import (
     DeterministicModelProvider,
@@ -147,23 +151,45 @@ async def _rows(engine: AsyncEngine, sql: str, **params: object) -> list[Any]:
         return list(result.all())
 
 
+def _scheduler(engine: AsyncEngine) -> SchedulerRuntime:
+    return SchedulerRuntime(
+        session_factory=async_sessionmaker(engine, expire_on_commit=False),
+        notifier=NullWakeUpNotifier(),
+        settings=SchedulerSettings(max_recovery_attempts=3, event_retention_hours=24),
+    )
+
+
 async def _drain(
     engine: AsyncEngine, workspace_id: str, model: Recorder | None = None
 ) -> None:
-    """Run everything there is to run, with two Workers competing for it.
+    """Run everything there is to run: two Workers competing, and a Scheduler.
 
-    Two rather than one because "the children are not behind the parent" is the
-    claim: they hold Sessions of their own, so two Workers can hold two of them
-    at the same moment. A `run_once` that returns `None` means nothing was
-    claimable, which is how this knows to stop.
+    Two Workers rather than one because "the children are not behind the
+    parent" is the claim: they hold Sessions of their own, so two Workers can
+    hold two of them at the same moment.
+
+    The Scheduler is here because a parent waiting on children **does not wake
+    itself** — nothing in a Worker settles a wait, by design. A drain without
+    it would leave every parent in `waiting_external` forever, which is the
+    honest shape of this deployment rather than a quirk of the harness.
     """
     workers = (
         _worker(engine, workspace_id, "worker-a", model),
         _worker(engine, workspace_id, "worker-b", model),
     )
-    for _ in range(12):
+    scheduler = _scheduler(engine)
+    for _ in range(20):
         advanced = await asyncio.gather(*(worker.run_once() for worker in workers))
-        if not any(advanced):
+        before = await _rows(
+            engine,
+            "SELECT count(*) AS n FROM runs WHERE status = 'waiting_external'",
+        )
+        await scheduler.run_once()
+        after = await _rows(
+            engine,
+            "SELECT count(*) AS n FROM runs WHERE status = 'waiting_external'",
+        )
+        if not any(advanced) and before[0].n == after[0].n == 0:
             return
     raise AssertionError("the Runs never settled")
 

@@ -17,6 +17,7 @@ will retry it or invent what it returned.
 """
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID
 
 from tiny_hermes.agents.domain.models import WritePolicy
@@ -27,9 +28,14 @@ from tiny_hermes.runs.domain.models import (
     RunEventType,
     ToolCallBlock,
     ToolResultBlock,
+    WaitPolicy,
 )
 from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalGate
-from tiny_hermes.runs.ports.children import ChildRuns, DelegationRequest
+from tiny_hermes.runs.ports.children import (
+    ChildRuns,
+    DelegationRequest,
+    DelegationWait,
+)
 from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolSender
 from tiny_hermes.runs.ports.mcp import BoundMcpTool, McpGateway
 from tiny_hermes.runs.ports.memories import MemoryCandidates
@@ -47,6 +53,7 @@ from tiny_hermes.tools.domain.mcp import call_name as mcp_call_name
 from tiny_hermes.tools.domain.registry import (
     MAX_SKILL_FILE_BYTES,
     MAX_SKILL_LOADS,
+    MAX_WAIT_SECONDS,
     RefusalReason,
     ToolRefused,
     delegation_of,
@@ -301,11 +308,23 @@ async def answer_memory_remember(
     )
 
 
+@dataclass(frozen=True)
+class DelegationOutcome:
+    """What the round has to carry away from one `agent.delegate` call."""
+
+    result: ToolResultBlock
+    event: ReservedEvent | None = None
+    #: Set only when children were created. The round that made them does not
+    #: go on to be judged — it hands the Run over to a wait.
+    wait: DelegationWait | None = None
+
+
 async def answer_agent_delegate(
     children: ChildRuns | None,
     context: ExecutionContext,
     call: ToolCallBlock,
-) -> tuple[ToolResultBlock, ReservedEvent | None]:
+    now: datetime | None = None,
+) -> DelegationOutcome:
     """Hand work to other Agents, or say plainly why nothing was handed over.
 
     §13. The result is written for a model that has to decide what to do next,
@@ -321,18 +340,23 @@ async def answer_agent_delegate(
     every platform tool: a model that asks for a tool its Version did not bind
     is refused whether or not it was shown the schema.
 
-    **The parent does not wait yet.** This step creates children and returns;
-    making the parent hang on them is the next one. Said in the result too, so
-    a model is not left believing it has been handed answers.
+    **How long the parent waits is not the model's to choose.** The deadline
+    is whatever is left of this Run's own elapsed budget, capped: waiting past
+    the moment the parent itself runs out is waiting for an answer it could not
+    act on, and a `seconds` argument would be a way to ask for exactly that.
     """
     if "agent.delegate" not in context.spec.tools:
-        return refusal(call.call_id, RefusalReason.NOT_AUTHORIZED), None
+        return DelegationOutcome(refusal(call.call_id, RefusalReason.NOT_AUTHORIZED))
     try:
-        asked = delegation_of(call)
+        asked, wait = delegation_of(call)
     except ToolRefused as refused_call:
-        return refusal(call.call_id, refused_call.reason, refused_call.detail), None
+        return DelegationOutcome(
+            refusal(call.call_id, refused_call.reason, refused_call.detail)
+        )
     if children is None:
-        return text_refusal(call.call_id, "no delegation is configured here"), None
+        return DelegationOutcome(
+            text_refusal(call.call_id, "no delegation is configured here")
+        )
     result = await children.delegate(
         parent_run_id=context.run_id,
         requests=tuple(
@@ -344,22 +368,31 @@ async def answer_agent_delegate(
         # Not a failed call. Every one of these is something the platform
         # decided and the model could not have known, so it comes back as
         # something it can read and act on.
-        return text_refusal(call.call_id, result.refusal or "nothing was delegated"), None
+        return DelegationOutcome(
+            text_refusal(call.call_id, result.refusal or "nothing was delegated")
+        )
+    policy = WaitPolicy(wait)
     listed = ", ".join(f"{child.alias} ({child.run_id})" for child in result.children)
-    return (
-        ToolResultBlock(
+    settle = (
+        "You will be woken when all of them have finished."
+        if policy is WaitPolicy.ALL
+        else "You will be woken as soon as one succeeds, and the rest cancelled."
+    )
+    return DelegationOutcome(
+        result=ToolResultBlock(
             call_id=call.call_id,
             output=(
-                f"Started {len(result.children)}: {listed}. They are running now "
-                f"and spend the same budget you do. You do not have their results "
-                f"yet."
+                f"Started {len(result.children)}: {listed}. They spend the same "
+                f"budget you do. {settle} Stop working now — anything you do "
+                f"after this is discarded."
             ),
             exit_code=0,
             failed=False,
         ),
-        ReservedEvent(
+        event=ReservedEvent(
             event_type=RunEventType.RUN_DELEGATED,
             payload={
+                "wait": policy.value,
                 "children": [
                     {
                         "run_id": str(child.run_id),
@@ -367,10 +400,28 @@ async def answer_agent_delegate(
                         "alias": child.alias,
                     }
                     for child in result.children
-                ]
+                ],
             },
         ),
+        wait=DelegationWait(
+            child_run_ids=tuple(child.run_id for child in result.children),
+            policy=policy,
+            seconds=_child_wait_seconds(context, now),
+        ),
     )
+
+
+def _child_wait_seconds(context: ExecutionContext, now: datetime | None) -> int:
+    """How long the parent hangs on, from its own budget rather than the model.
+
+    Whatever is left of this Run's elapsed deadline, floored at a minute so a
+    parent that delegates near the end still gets a wait that can be observed,
+    and capped at the platform's own ceiling. A Run waiting past the point it
+    could act on an answer is a Session head nobody can use.
+    """
+    at = now or datetime.now(UTC)
+    remaining = int((context.budget.elapsed_deadline_at - at).total_seconds())
+    return max(60, min(MAX_WAIT_SECONDS, remaining))
 
 
 async def answer_session_search(

@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
+from tiny_hermes.runs.domain.models import WaitPolicy
+
 
 @dataclass(frozen=True)
 class DelegationRequest:
@@ -55,6 +57,26 @@ class DelegationResult:
     @property
     def refused(self) -> bool:
         return not self.children
+
+
+@dataclass(frozen=True)
+class DelegationWait:
+    """What a parent is waiting for, decided when the delegation was made.
+
+    Both fields are settled here rather than when the wait is later evaluated,
+    for the reason §16.3 hashes an approved call: a policy read at settlement
+    time is a policy that could have changed while the Run was asleep, and the
+    parent would then be woken by a rule it never agreed to.
+    """
+
+    #: The children this wait is about. Named explicitly rather than derived
+    #: from "every child of this Run", because a long Run may delegate twice
+    #: and the second wait is not about the first batch.
+    child_run_ids: tuple[UUID, ...]
+    policy: WaitPolicy
+    #: How long the parent will hang on before the deadline makes it
+    #: `paused(external_timeout)`.
+    seconds: int
 
 
 class ChildRuns(Protocol):

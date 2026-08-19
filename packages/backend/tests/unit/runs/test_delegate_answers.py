@@ -24,7 +24,7 @@ from uuid import UUID, uuid4
 import pytest
 from tiny_hermes.agents.domain.models import AgentSpec, DeterministicModelPolicy
 from tiny_hermes.runs.application.tool_answers import answer_agent_delegate
-from tiny_hermes.runs.domain.models import RunEventType, ToolCallBlock
+from tiny_hermes.runs.domain.models import RunEventType, ToolCallBlock, WaitPolicy
 from tiny_hermes.runs.ports.children import (
     DelegatedChild,
     DelegationRequest,
@@ -91,15 +91,16 @@ def _call(**arguments: object) -> ToolCallBlock:
 async def test_an_unbound_agent_is_refused_before_anything_is_asked() -> None:
     """§10.2's second step. The schema list is not the control, the binding is."""
     children = Children()
-    answered, event = await answer_agent_delegate(
+    outcome = await answer_agent_delegate(
         children,
         _context("shell.exec"),
         _call(children=[{"alias": "reader", "instruction": "Read it."}]),
     )
 
-    assert answered.failed
-    assert "not_authorized" in answered.output
-    assert event is None
+    assert outcome.result.failed
+    assert "not_authorized" in outcome.result.output
+    assert outcome.event is None
+    assert outcome.wait is None
     # The refusal is the point: nothing reached the creation path at all.
     assert children.asked == []
 
@@ -122,7 +123,7 @@ async def test_what_the_model_asked_for_reaches_the_creation_path_unchanged() ->
     )
     context = _context("agent.delegate")
 
-    answered, event = await answer_agent_delegate(
+    outcome = await answer_agent_delegate(
         children,
         context,
         _call(
@@ -133,38 +134,81 @@ async def test_what_the_model_asked_for_reaches_the_creation_path_unchanged() ->
         ),
     )
 
-    assert not answered.failed
+    assert not outcome.result.failed
     parent_run_id, requests = children.asked[0]
     assert parent_run_id == context.run_id
     assert requests == (
         DelegationRequest(alias="reader", instruction="Read the report."),
         DelegationRequest(alias="checker", instruction="Check the numbers."),
     )
-    assert event is not None
-    assert event.event_type is RunEventType.RUN_DELEGATED
-    assert [entry["alias"] for entry in event.payload["children"]] == [
+    assert outcome.event is not None
+    assert outcome.event.event_type is RunEventType.RUN_DELEGATED
+    assert [entry["alias"] for entry in outcome.event.payload["children"]] == [
         "reader",
         "checker",
     ]
+    # The wait names the children it is about, not "whatever this Run made".
+    assert outcome.wait is not None
+    assert outcome.wait.child_run_ids == tuple(
+        child.run_id for child in children.result.children
+    )
+    assert outcome.wait.policy is WaitPolicy.ALL
 
 
-async def test_the_result_says_the_children_are_running_and_not_that_they_are_done() -> (
-    None
-):
-    """The parent does not wait yet, and is told so.
+async def test_the_result_tells_the_model_to_stop_rather_than_carry_on() -> None:
+    """The round that delegated is the last round before the wait.
 
-    The wait is the next step of this phase. Until it exists a model that read
-    "started 2" and nothing else would go looking for two answers it has not
-    been given, and would invent them when it found none.
+    Anything the model does after this call is discarded — the Run is about to
+    hand back its lease and its sandbox — so the result says so. A model that
+    read "started 2" and kept working would produce a turn nobody keeps and
+    then be surprised by its own conversation when it woke up.
     """
-    answered, _ = await answer_agent_delegate(
+    outcome = await answer_agent_delegate(
         Children(),
         _context("agent.delegate"),
         _call(children=[{"alias": "reader", "instruction": "Read it."}]),
     )
 
-    assert "running now" in answered.output
-    assert "do not have their results yet" in answered.output
+    assert "Stop working now" in outcome.result.output
+    assert "woken when all of them have finished" in outcome.result.output
+
+
+async def test_any_says_the_others_will_be_cancelled() -> None:
+    """§13's default, in the result rather than only in the docs.
+
+    A parent choosing `any` is choosing to have siblings killed mid-flight. It
+    should read that where it makes the choice, not discover it on a bill.
+    """
+    outcome = await answer_agent_delegate(
+        Children(),
+        _context("agent.delegate"),
+        _call(
+            children=[{"alias": "reader", "instruction": "Read it."}], wait="any"
+        ),
+    )
+
+    assert outcome.wait is not None
+    assert outcome.wait.policy is WaitPolicy.ANY
+    assert "the rest cancelled" in outcome.result.output
+
+
+async def test_the_wait_never_outlives_the_parents_own_deadline() -> None:
+    """How long to wait is the platform's answer, not the model's.
+
+    There is no `seconds` argument, and the number comes from what is left of
+    this Run's elapsed budget. Waiting past the point the parent could act on
+    an answer is holding a Session head for nothing.
+    """
+    context = _context("agent.delegate")
+    outcome = await answer_agent_delegate(
+        Children(),
+        context,
+        _call(children=[{"alias": "reader", "instruction": "Read it."}]),
+    )
+
+    assert outcome.wait is not None
+    remaining = (context.budget.elapsed_deadline_at - datetime.now(UTC)).total_seconds()
+    assert outcome.wait.seconds <= remaining + 1
 
 
 async def test_a_refusal_from_the_creation_path_is_a_sentence_the_model_can_act_on() -> (
@@ -186,17 +230,18 @@ async def test_a_refusal_from_the_creation_path_is_a_sentence_the_model_can_act_
         )
     )
 
-    answered, event = await answer_agent_delegate(
+    outcome = await answer_agent_delegate(
         children,
         _context("agent.delegate"),
         _call(children=[{"alias": "reader", "instruction": "Read it."}]),
     )
 
-    assert answered.failed
-    assert "cannot delegate further" in answered.output
-    # No event: nothing was delegated, and a timeline saying otherwise would be
-    # a tree with a branch nobody grew.
-    assert event is None
+    assert outcome.result.failed
+    assert "cannot delegate further" in outcome.result.output
+    # No event and no wait: nothing was delegated, and a parent that waited on
+    # an empty set would hang until its deadline for no reason at all.
+    assert outcome.event is None
+    assert outcome.wait is None
 
 
 async def test_a_deployment_with_no_delegation_says_so_rather_than_starting_nothing() -> (
@@ -208,15 +253,16 @@ async def test_a_deployment_with_no_delegation_says_so_rather_than_starting_noth
     model told it started nothing would try again with different aliases
     forever.
     """
-    answered, event = await answer_agent_delegate(
+    outcome = await answer_agent_delegate(
         None,
         _context("agent.delegate"),
         _call(children=[{"alias": "reader", "instruction": "Read it."}]),
     )
 
-    assert answered.failed
-    assert "no delegation is configured here" in answered.output
-    assert event is None
+    assert outcome.result.failed
+    assert "no delegation is configured here" in outcome.result.output
+    assert outcome.event is None
+    assert outcome.wait is None
 
 
 @pytest.mark.parametrize(
@@ -229,7 +275,9 @@ async def test_a_deployment_with_no_delegation_says_so_rather_than_starting_noth
         {"children": [{"alias": "", "instruction": "Read it."}]},
         {"children": [{"alias": "reader", "instruction": "   "}]},
         {"children": [{"alias": "reader", "instruction": "Read it.", "depth": 0}]},
-        {"children": [{"alias": "reader", "instruction": "Read it."}], "wait": "all"},
+        {"children": [{"alias": "reader", "instruction": "Read it."}], "depth": 0},
+        {"children": [{"alias": "reader", "instruction": "Read it."}], "wait": "first"},
+        {"children": [{"alias": "reader", "instruction": "Read it."}], "seconds": 30},
     ],
     ids=[
         "nothing",
@@ -240,6 +288,8 @@ async def test_a_deployment_with_no_delegation_says_so_rather_than_starting_noth
         "blank instruction",
         "unknown key on a child",
         "unknown key on the call",
+        "a wait policy that is not one",
+        "a wait it does not get to time",
     ],
 )
 async def test_a_call_that_is_not_a_delegation_never_reaches_the_creation_path(
@@ -247,17 +297,19 @@ async def test_a_call_that_is_not_a_delegation_never_reaches_the_creation_path(
 ) -> None:
     """Shape is refused here, permission is refused there.
 
-    `depth` and `wait` are in this list on purpose. Neither is an argument a
-    model may pass — the first is a fact about a row and the second does not
-    exist yet — and both are the shape a model would guess at if the schema
-    let it. `additionalProperties: False` says so and this enforces it.
+    `depth` and `seconds` are in this list on purpose. Neither is an argument a
+    model may pass — the first is a fact about a row, and the second is the
+    platform's answer read off the parent's own budget — and both are the shape
+    a model would reach for if the schema let it. `additionalProperties: False`
+    says so and this enforces it.
     """
     children = Children()
-    answered, event = await answer_agent_delegate(
+    outcome = await answer_agent_delegate(
         children, _context("agent.delegate"), _call(**arguments)
     )
 
-    assert answered.failed
-    assert "invalid_arguments" in answered.output
-    assert event is None
+    assert outcome.result.failed
+    assert "invalid_arguments" in outcome.result.output
+    assert outcome.event is None
+    assert outcome.wait is None
     assert children.asked == []

@@ -238,17 +238,31 @@ class DeterministicModelProvider:
             # Version's policy is what lets one scenario drill both halves —
             # a bound alias creates a child, an unbound one comes back
             # refused, and the model reports whichever it got.
+            # The whole conversation, not the turns after the last user
+            # message. Waking from a `child_runs` wait appends a
+            # platform-authored `user` turn carrying the children's reports, so
+            # the delegation this Run already made sits *before* the newest
+            # user turn rather than after it. A scenario that looked only after
+            # it would delegate a second time on every wake-up.
             results = tuple(
                 block
-                for message in request.messages[_last_user_index(request) + 1 :]
+                for message in request.messages
                 for block in message.blocks
                 if isinstance(block, ToolResultBlock) and block.call_id == "delegate-1"
             )
             if not results:
+                # An optional `all:` or `any:` prefix on the Run input chooses
+                # the wait policy, the same way this scenario takes its aliases
+                # from the input. It cannot be set on the row beforehand: the
+                # round that delegates is what writes the policy, so a drill
+                # for `any` has to ask for it where a model would.
+                asked = _last_user_text(request)
+                wait = "all"
+                if ":" in asked and asked.split(":", 1)[0].strip() in ("all", "any"):
+                    prefix, asked = asked.split(":", 1)
+                    wait = prefix.strip()
                 named = [
-                    part.strip()
-                    for part in _last_user_text(request).split(",")
-                    if part.strip()
+                    part.strip() for part in asked.split(",") if part.strip()
                 ]
                 if not named:
                     return ModelResponse(
@@ -270,7 +284,8 @@ class DeterministicModelProvider:
                                         "instruction": f"Do the {alias} part.",
                                     }
                                     for alias in named
-                                ]
+                                ],
+                                "wait": wait,
                             },
                         ),
                     ),
@@ -278,9 +293,16 @@ class DeterministicModelProvider:
                     output_tokens=TOKENS_PER_ROUND // 2,
                 )
             answered = results[-1]
+            reported = "\n".join(
+                message.text
+                for message in request.messages
+                if message.author == "platform"
+            )
             return ModelResponse(
                 stop_reason=StopReason.COMPLETED,
-                text="delegation outcome\n" + answered.output[:2000],
+                text="delegation outcome\n"
+                + answered.output[:2000]
+                + ("\n" + reported[:2000] if reported else ""),
                 input_tokens=TOKENS_PER_ROUND // 2,
                 output_tokens=TOKENS_PER_ROUND // 2,
             )

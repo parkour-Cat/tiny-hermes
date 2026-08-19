@@ -2,8 +2,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from tiny_hermes.runs.domain.goal import GoalOutcome, GoalVerdict
-from tiny_hermes.runs.domain.models import PauseReason, RunSignal
+from tiny_hermes.runs.domain.models import PauseReason, RunSignal, WaitPolicy
 from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalVerdict
+from tiny_hermes.runs.ports.children import DelegationWait
 
 #: The only wait M2A produces (design §4.6): a duration, and a Scheduler that
 #: re-queues the Run when it is up.
@@ -13,6 +14,12 @@ WAIT_TIMER = "timer"
 #: that state without a kind, and naming it here rather than at the call site
 #: keeps the string one thing rather than three spellings.
 WAIT_APPROVAL = "approval"
+
+#: §13's wait: this Run handed work to children and is hanging on their
+#: outcomes. The third value rather than the third branch — M2A wrote down that
+#: `approval` and `child_runs` would arrive this way, and the state, the
+#: transition and the deadline are all the same ones `timer` uses.
+WAIT_CHILD_RUNS = "child_runs"
 
 
 @dataclass(frozen=True)
@@ -33,7 +40,11 @@ class RoundOutcome:
     #: already have one. Carries which of the three not-approved answers came
     #: back, because two of them stop the Run for good and one only pauses it
     #: until somebody clicks.
-    approval: "ApprovalCheck | None" = None
+    approval: ApprovalCheck | None = None
+    #: Set when this round delegated work and the children now exist. Carries
+    #: how long to wait and whether one answer is enough, because both are
+    #: decided when the delegation is made rather than when it is settled.
+    delegated: DelegationWait | None = None
 
 
 @dataclass(frozen=True)
@@ -54,6 +65,10 @@ class SliceDecision:
     #: the transition is written, which is a different clock and a transaction
     #: later than the moment this round decided.
     wait_seconds: int | None = None
+    #: Whether every child must finish or one is enough. Only ever set beside
+    #: `WAIT_CHILD_RUNS`: a timer and an approval each wait on exactly one
+    #: thing, so there is nothing for a policy to choose between.
+    wait_policy: WaitPolicy | None = None
 
     @property
     def keeps_lease(self) -> bool:
@@ -121,6 +136,19 @@ def decide_after_round(outcome: RoundOutcome) -> SliceDecision:
         # person who asked the Run to stop does not have to answer a question
         # first.
         return _awaiting(outcome.approval)
+    if outcome.delegated is not None:
+        # Above the verdict and below the user's own signals, in the same place
+        # and for the same reason an approval sits there: a round that
+        # delegated has not finished its work, and the judge is looking at a
+        # round whose answers do not exist yet. A cancel, a pause or a spent
+        # budget still outranks it — children that were just created are
+        # children that will be cancelled with their parent.
+        return SliceDecision(
+            RunSignal.EXTERNAL_WAIT_STARTED,
+            wait_kind=WAIT_CHILD_RUNS,
+            wait_seconds=outcome.delegated.seconds,
+            wait_policy=outcome.delegated.policy,
+        )
     if outcome.verdict.outcome is GoalOutcome.DONE:
         return SliceDecision(RunSignal.COMPLETED)
     if outcome.verdict.outcome is GoalOutcome.FAILED:

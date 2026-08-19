@@ -501,6 +501,11 @@ MAX_DELEGATED_CHILDREN = 8
 #: impossible would push the parent into passing files it should not.
 MAX_DELEGATION_INSTRUCTION = 2_000
 
+#: What `wait` may say. `all` is the default because it is the one that cannot
+#: silently lose work: a parent that meant to collect three answers and wrote
+#: nothing gets three, where an accidental `any` would throw two away.
+WAIT_POLICIES = ("all", "any")
+
 AGENT_DELEGATE_SCHEMA: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -546,6 +551,17 @@ AGENT_DELEGATE_SCHEMA: dict[str, Any] = {
                         "additionalProperties": False,
                     },
                 },
+                "wait": {
+                    "type": "string",
+                    "enum": list(WAIT_POLICIES),
+                    "description": (
+                        "Whether to wait for all of them or to carry on as "
+                        "soon as one succeeds. Defaults to all. With 'any' the "
+                        "others are cancelled once you have an answer, so use "
+                        "it when they are alternative routes to the same thing "
+                        "and not when each does a different piece of the work."
+                    ),
+                },
             },
             "required": ["children"],
             "additionalProperties": False,
@@ -553,19 +569,20 @@ AGENT_DELEGATE_SCHEMA: dict[str, Any] = {
     },
 }
 
-AGENT_DELEGATE_ARGUMENTS = frozenset({"children"})
+AGENT_DELEGATE_ARGUMENTS = frozenset({"children", "wait"})
 
 CHILD_ARGUMENTS = frozenset({"alias", "instruction"})
 
 
-def delegation_of(call: ToolCallBlock) -> tuple[tuple[str, str], ...]:
+def delegation_of(call: ToolCallBlock) -> tuple[tuple[tuple[str, str], ...], str]:
     """Which children `agent.delegate` asked for, as (alias, instruction) pairs.
 
-    Shape only, like every other reader here. Whether these aliases are bound,
-    how many may run at once, whether this Run is allowed to delegate at all
-    and what each child ends up permitted to do are answered where the children
-    are created — this refuses a call that is not a delegation, never one that
-    is merely not allowed.
+    Comes back with the wait policy, which defaults to `all`. Shape only, like
+    every other reader here: whether these aliases are bound, how many may run
+    at once, whether this Run is allowed to delegate at all and what each child
+    ends up permitted to do are answered where the children are created. This
+    refuses a call that is not a delegation, never one that is merely not
+    allowed.
     """
     unknown = set(call.arguments) - AGENT_DELEGATE_ARGUMENTS
     if unknown:
@@ -609,7 +626,10 @@ def delegation_of(call: ToolCallBlock) -> tuple[tuple[str, str], ...]:
                 f"instruction={len(cleaned)}",
             )
         children.append((alias.strip(), cleaned))
-    return tuple(children)
+    wait = call.arguments.get("wait", "all")
+    if wait not in WAIT_POLICIES:
+        raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "wait")
+    return tuple(children), str(wait)
 
 
 def schemas_for(bound: tuple[str, ...]) -> list[dict[str, Any]]:

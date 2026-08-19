@@ -9,6 +9,7 @@ from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from tiny_hermes.agents.domain.delegation import (
     MAX_DELEGATION_DEPTH,
@@ -74,10 +75,12 @@ from tiny_hermes.runs.domain.models import (
     StateDecision,
     StoredMessage,
     TextBlock,
+    WaitPolicy,
     WorkspaceCleanupTarget,
     event_type_for,
     message_from_document,
 )
+from tiny_hermes.runs.domain.slice_policy import WAIT_CHILD_RUNS
 from tiny_hermes.runs.domain.state_machine import (
     InvalidStateMetadata,
     InvalidStateTransition,
@@ -132,6 +135,12 @@ RESERVE_SEQUENCES = text(
 )
 
 IDEMPOTENCY_RETENTION = timedelta(hours=24)
+
+#: The longest a child's report may be. Long enough for a real answer, short
+#: enough that a parent waiting on five of them is not handed a context window
+#: full of somebody else's prose — which is the shape §13's seventh clause
+#: exists to keep out.
+MAX_CHILD_SUMMARY = 4_000
 
 RETRY_ERRORS: dict[str, RunCoordinationError] = {
     "retry_not_safe": RetryNotSafe(),
@@ -612,6 +621,7 @@ class SqlRunStore:
         request_id: str,
         payload: dict[str, Any],
         extra_events: tuple[ReservedEvent, ...] = (),
+        wait_policy: WaitPolicy | None = None,
     ) -> None:
         """Turn one signal into rows.
 
@@ -640,6 +650,12 @@ class SqlRunStore:
         )
 
         _apply_decision(run, decision, now)
+        # Cleared alongside `wait_kind` rather than left behind: a Run that is
+        # no longer waiting on children must not read as one that is waiting
+        # for `all` of nothing.
+        run.wait_policy = (
+            None if decision.wait_kind is None or wait_policy is None else wait_policy.value
+        )
         run.state_version += 1
         run.updated_at = now
         await self._session.flush()
@@ -1039,6 +1055,7 @@ class SqlRunStore:
             command.signal,
             pause_reason=command.pause_reason,
             wait_kind=command.wait_kind,
+            wait_policy=command.wait_policy,
             # Measured from this transaction's `now`, the same instant the
             # transition and its event are stamped with. A deadline carried in
             # from the Worker would be a few hundred milliseconds older than
@@ -1095,8 +1112,52 @@ class SqlRunStore:
             .with_for_update()
         )
 
+    async def _child_result(self, run: RunRow) -> dict[str, Any]:
+        """What a child reports, and deliberately not what it did.
+
+        §13's seventh clause: an outcome, a sentence, and the Artifacts it was
+        authorized to hand over — never the conversation. The child's own
+        transcript stays in the child's Session, where a person can read it and
+        where the parent's context planner never has to decide whether to trim
+        somebody else's turns to make room.
+
+        The summary is the child's last words rather than a generated
+        precis: it is what the child itself chose to say it had done, and a
+        second model call to compress it would be a claim nobody made.
+        """
+        said = await self._session.scalar(
+            select(SessionMessageRow)
+            .where(
+                SessionMessageRow.session_id == run.session_id,
+                SessionMessageRow.role == "assistant",
+                SessionMessageRow.redacted.is_(False),
+            )
+            .order_by(SessionMessageRow.sequence.desc())
+            .limit(1)
+        )
+        summary = "" if said is None else _to_message(said).text
+        return {
+            "status": run.status,
+            # Truncated with a number rather than silently: a parent reading a
+            # cut-off sentence cannot tell that it is holding half of one.
+            "summary": summary[:MAX_CHILD_SUMMARY],
+            "summary_truncated": len(summary) > MAX_CHILD_SUMMARY,
+            "failure_reason": _failure_reason(run.checkpoint),
+            # §5 of this phase fills this in. Empty rather than absent, so a
+            # parent reading the document never has to branch on whether the
+            # key exists.
+            "artifacts": [],
+        }
+
     async def _terminalize(self, run: RunRow, session: SessionRow, now: datetime) -> None:
         """Close a Run out and hand the Session to the next eligible Run."""
+        if run.parent_run_id is not None and run.delegation_result is None:
+            # Written here rather than delivered here, and that is the whole of
+            # §13's tenth clause: the parent is very often not in a state that
+            # can take an answer — another Worker holds it, or it is still
+            # waiting on a sibling — and a row survives that where a call would
+            # not. The sweep hands it over when the parent can take it.
+            run.delegation_result = await self._child_result(run)
         await self._session.execute(
             update(IdempotencyRecordRow)
             .where(IdempotencyRecordRow.run_id == run.id)
@@ -1549,6 +1610,229 @@ class SqlRunStore:
             request_id=request_id,
             payload={"reason": "compat_timeout_aged_out"},
         )
+
+    async def parents_awaiting_children(self, limit: int) -> Sequence[UUID]:
+        """Parents hanging on children, oldest wait first.
+
+        Every one of them, not only the settled ones: whether a wait is
+        satisfied is `settle_child_wait`'s question and it needs the Run locked
+        to answer it. A scan that pre-filtered would be reading the same rows
+        twice and deciding on the first read.
+        """
+        rows = await self._session.scalars(
+            select(RunRow.id)
+            .where(
+                RunRow.status == RunState.WAITING_EXTERNAL.value,
+                RunRow.wait_kind == WAIT_CHILD_RUNS,
+            )
+            .order_by(RunRow.updated_at)
+            .limit(limit)
+        )
+        return list(rows.all())
+
+    async def settle_child_wait(self, parent_run_id: UUID, request_id: str) -> bool:
+        """Hand over what the children finished, and wake the parent if it is time.
+
+        Returns whether the parent went back to the queue.
+
+        §13's tenth clause in one place, because its three outcomes are one
+        decision and splitting them would let two of them drift:
+
+        - `all` waits until no child is still going.
+        - `any` wakes on the first **success** and cancels the rest, which is
+          the section's default. The cancelled siblings are still spending the
+          root budget, and continuing to pay for an answer nobody will read is
+          the thing that default exists to stop.
+        - Every child terminal with no success is **not** an error. The parent
+          goes back to the queue holding a failure summary it can read and act
+          on — §13 is explicit that it is told, not that it fails.
+
+        Delivery and the wake are one transaction, and `result_delivered_at` is
+        stamped in it. A crash between them would otherwise either lose an
+        answer or hand it over twice.
+        """
+        parent = await self._lock_run_any_workspace(parent_run_id)
+        if parent is None or RunState(parent.status) is not RunState.WAITING_EXTERNAL:
+            return False
+        if parent.wait_kind != WAIT_CHILD_RUNS:  # pragma: no cover - scanned for
+            return False
+        children = list(
+            (
+                await self._session.scalars(
+                    select(RunRow)
+                    .where(
+                        RunRow.parent_run_id == parent.id,
+                        RunRow.result_delivered_at.is_(None),
+                    )
+                    .order_by(RunRow.created_at, RunRow.id)
+                    .with_for_update()
+                )
+            ).all()
+        )
+        if not children:  # pragma: no cover - a wait always has children
+            return False
+        policy = WaitPolicy(parent.wait_policy or WaitPolicy.ALL.value)
+        finished = [
+            child for child in children if RunState(child.status) in TERMINAL_STATES
+        ]
+        succeeded = [
+            child for child in finished if RunState(child.status) is RunState.COMPLETED
+        ]
+        if policy is WaitPolicy.ANY and succeeded:
+            # Cancel the rest before delivering, so the answer the parent reads
+            # already reflects what happened to its siblings.
+            for child in children:
+                if RunState(child.status) not in TERMINAL_STATES:
+                    await self._cancel_child(child, request_id, "sibling_succeeded")
+            finished = [
+                child
+                for child in children
+                if RunState(child.status) in TERMINAL_STATES
+            ]
+        elif len(finished) != len(children):
+            # `all`, and somebody is still working. Nothing is delivered
+            # piecemeal: a parent handed one of three answers would be a parent
+            # woken by a wait it did not ask for.
+            return False
+
+        session = await self._lock_session(parent.workspace_id, parent.session_id)
+        if session is None:  # pragma: no cover - a Run always has one
+            return False
+        await self._deliver_child_results(parent, session, finished)
+        await self._decide_and_write(
+            parent,
+            session,
+            RunSignal.EXTERNAL_READY,
+            pause_reason=None,
+            wait_kind=None,
+            wait_deadline_at=None,
+            request_id=request_id,
+            payload={
+                "reason": "children_settled",
+                "wait": policy.value,
+                "children": len(finished),
+                "succeeded": len(succeeded),
+            },
+        )
+        return True
+
+    async def _deliver_child_results(
+        self, parent: RunRow, session: SessionRow, children: Sequence[RunRow]
+    ) -> None:
+        """Append one platform turn carrying every child's report, once.
+
+        One turn rather than one per child: they are the answer to a single
+        question the parent asked, and a conversation in which they arrive as
+        separate messages is one where a context planner may trim half of them
+        and leave the parent believing it heard from everybody.
+        """
+        now = datetime.now(UTC)
+        lines: list[str] = []
+        for child in children:
+            report = child.delegation_result or {}
+            status = str(report.get("status", child.status))
+            summary = str(report.get("summary", "")).strip()
+            reason = report.get("failure_reason")
+            said = summary or "It reported nothing."
+            if status != RunState.COMPLETED.value:
+                said = f"{said} (reason: {reason})" if reason else said
+            lines.append(f"- {child.id} [{status}]: {said}")
+            child.result_delivered_at = now
+        body = (
+            "The Agents you delegated to have finished. This is everything they "
+            "reported; you cannot see how they worked.\n" + "\n".join(lines)
+        )
+        self._session.add(
+            SessionMessageRow(
+                id=uuid4(),
+                session_id=session.id,
+                workspace_id=parent.workspace_id,
+                sequence=session.next_message_sequence,
+                role="user",
+                # The platform's own words relaying somebody else's work, which
+                # is exactly what `author` exists to distinguish from something
+                # a person typed.
+                content=CanonicalMessage(
+                    role="user",
+                    blocks=(TextBlock(text=body),),
+                    author="platform",
+                ).document(),
+                source_run_id=parent.id,
+                redacted=False,
+                created_at=now,
+            )
+        )
+        session.next_message_sequence += 1
+        await self._session.flush()
+
+    async def _cancel_child(
+        self, child: RunRow, request_id: str, reason: str
+    ) -> None:
+        """Stop one child, whatever it is doing.
+
+        Used by `any`'s default and by a cancelled parent's cascade. A child
+        already terminal is left alone rather than refused: both callers are
+        sweeps, and racing a Run that finished a moment ago is ordinary.
+        """
+        if RunState(child.status) in TERMINAL_STATES:
+            return
+        session = await self._lock_session(child.workspace_id, child.session_id)
+        if session is None:  # pragma: no cover - a Run always has one
+            return
+        await self._decide_and_write(
+            child,
+            session,
+            RunSignal.CANCEL_REQUESTED,
+            pause_reason=None,
+            wait_kind=None,
+            wait_deadline_at=None,
+            request_id=request_id,
+            payload={"reason": reason},
+        )
+
+    async def cancelled_parents_with_children(self, limit: int) -> Sequence[UUID]:
+        """Terminated parents that still have a child going (§13's eleventh clause).
+
+        Read as a scan rather than done inside the parent's own transition for
+        one reason: a parent can reach a terminal state down several paths —
+        cancelled by a person, failed, timed out — and a cascade attached to
+        one of them is a cascade the others do not get.
+        """
+        child = aliased(RunRow)
+        rows = await self._session.scalars(
+            select(RunRow.id)
+            .join(child, child.parent_run_id == RunRow.id)
+            .where(
+                RunRow.status.in_([state.value for state in TERMINAL_STATES]),
+                child.status.not_in([state.value for state in TERMINAL_STATES]),
+            )
+            .distinct()
+            .limit(limit)
+        )
+        return list(rows.all())
+
+    async def cascade_cancel_children(self, parent_run_id: UUID, request_id: str) -> int:
+        """Cancel every child of a parent that is no longer going anywhere.
+
+        §13's eleventh clause. A child outliving its parent is a Run spending
+        the root budget on work whose only reader has gone.
+        """
+        parent = await self._lock_run_any_workspace(parent_run_id)
+        if parent is None or RunState(parent.status) not in TERMINAL_STATES:
+            return 0
+        children = (
+            await self._session.scalars(
+                select(RunRow)
+                .where(
+                    RunRow.parent_run_id == parent.id,
+                    RunRow.status.not_in([state.value for state in TERMINAL_STATES]),
+                )
+                .with_for_update()
+            )
+        ).all()
+        for child in children:
+            await self._cancel_child(child, request_id, "parent_terminated")
+        return len(children)
 
     async def time_out_external_wait(self, run_id: UUID, request_id: str) -> None:
         run = await self._lock_run_any_workspace(run_id)

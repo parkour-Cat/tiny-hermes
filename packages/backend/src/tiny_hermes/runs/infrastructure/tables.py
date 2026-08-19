@@ -168,11 +168,24 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
             ["budget_root_run_id"], ["runs.id"], name="fk_runs_budget_root"
         ),
         ForeignKeyConstraint(["parent_run_id"], ["runs.id"], name="fk_runs_parent"),
+        Index(
+            "ix_runs_undelivered_children",
+            "parent_run_id",
+            postgresql_where=text("result_delivered_at IS NULL"),
+        ),
         # §13's third clause, in the schema rather than in a code path. A child
         # Agent may not create a grandchild, and the creation path refuses one
         # — but a refusal somebody can forget to write is a different guarantee
         # from a row the database will not hold.
         CheckConstraint("depth >= 0 AND depth <= 1", name="ck_runs_depth"),
+        # Only a delegated Run reports to anybody, and nothing can be delivered
+        # that was never produced. Both halves: a delivery stamp without a
+        # result would be a parent told something nobody wrote.
+        CheckConstraint(
+            "(delegation_result IS NULL OR parent_run_id IS NOT NULL) AND "
+            "(result_delivered_at IS NULL OR delegation_result IS NOT NULL)",
+            name="ck_runs_delegation_result",
+        ),
         # A delegated Run is one with a parent, at depth 1, holding the scope
         # it was granted. All three or none of them: a Run with a parent and no
         # scope would be a child nobody can say the permissions of.
@@ -261,6 +274,24 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
     #: approval hash is stored this way for the same reason. Null on a Run
     #: nobody delegated.
     delegation_scope: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    #: What this child is reporting back, written when it reached a terminal
+    #: state and read by its parent when the parent is next able to take it.
+    #: **The result, never the transcript** (§13's seventh clause): an outcome,
+    #: a short summary and the Artifacts it was authorized to hand over.
+    #:
+    #: Written here rather than delivered directly because a parent is often
+    #: not in a state that can take it — held by another Worker, or waiting on
+    #: a sibling. A row survives that; a call does not.
+    delegation_result: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True
+    )
+    #: When the parent actually took it. **This is the idempotency key** for
+    #: §13's ninth clause: delivery sets it in the same transaction that
+    #: appends the turn, so a retry after a crash finds it already stamped and
+    #: delivers nothing a second time.
+    result_delivered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class ApprovalRow(IdMixin, CreatedAtMixin, Base):

@@ -91,30 +91,41 @@ SessionWorkspace、事件、沙箱与费用记录;父子之间只经 Artifact �
 
 ## 3. 父 Run 的等待：wait_kind=child_runs
 
-- [ ] `WAIT_CHILD_RUNS` 作为第三种 `wait_kind`（M2A 有 `timer`,M2C 有
+- [x] `WAIT_CHILD_RUNS` 作为第三种 `wait_kind`（M2A 有 `timer`,M2C 有
       `approval`）。父 Run 进入 `waiting_external`,带子 Run ID 集合、
-      `wait_policy=all|any` 和 `wait_deadline_at`。
-- [ ] 进入等待时**释放 WorkerLease 并销毁 SandboxReservation 与
+      `wait_policy=all|any` 和 `wait_deadline_at`。等多久**不是模型说了算**:
+      从父 Run 自己剩下的 elapsed 预算算,没有 `seconds` 参数——等到自己
+      都用完了才拿到答案,是白占一个 Session head。
+- [x] 进入等待时**释放 WorkerLease 并销毁 SandboxReservation 与
       SandboxInstance**（§13 第 10 条的原话）。M2A 的 `_close_sandbox`
-      已经做这件事,这一步是接上去并加一条测试证明容器真的没了。
-- [ ] 唤醒:`all` 在全部子 Run 进入终态后;`any` 在首个成功后唤醒
+      已经做这件事,这一步是接上去并加一条测试证明容器真的没了——
+      断言的是 `worker_leases` 和 `sandbox_reservations` 两张表的行。
+- [x] 唤醒:`all` 在全部子 Run 进入终态后;`any` 在首个成功后唤醒
       **并默认取消其余**。全部终止而无成功结果时父 Run 仍回 `queued`
       并收到**结构化失败摘要**——不是异常,是一份它能读的东西。
-- [ ] 到期:`wait_deadline_at` 过了按 `paused(external_timeout)` 处理。
+      三条都在 `SqlRunStore.settle_child_wait` 一个方法里,因为它们是
+      同一个决定的三个出口,拆开就会各自漂移。
+- [x] 到期:`wait_deadline_at` 过了按 `paused(external_timeout)` 处理。
       Scheduler 的 `_settle_due_waits` 已经这么做了,这一步验证它对
       `child_runs` 同样成立(它现在对非 timer 的 kind 就是这么处理的)。
-- [ ] 级联取消:取消父 Run 时,仍在运行或等待的子 Run 一并取消（§13 第 11 条）。
+- [x] 级联取消:取消父 Run 时,仍在运行或等待的子 Run 一并取消（§13 第 11 条）。
+      做成扫描而不是挂在 cancel 那条路上:父 Run 到终态有好几条路
+      （人取消、失败、超时）,挂在其中一条上,另外几条就没有级联。
 
 ## 4. 结果投递：幂等与保留
 
-- [ ] 子 Run 终止时把结构化结果投给父 Run,用幂等键（§13 第 9 条）。
+- [x] 子 Run 终止时把结构化结果投给父 Run,用幂等键（§13 第 9 条）。
       父 Run 暂时不可用（正在被别的 Worker 持有、或还没回到可写状态）时
-      结果**保留并重试**,不丢。
-- [ ] 一条集成测试直接制造这个情况:父 Run 不可用时子 Run 结束,
+      结果**保留并重试**,不丢。做法是子 Run 终止时把结果**写在自己行上**
+      （`runs.delegation_result`）,投递由 Scheduler 在父 Run 能接的那一拍做。
+      一行能扛住父 Run 正忙,一次调用扛不住。
+- [x] 一条集成测试直接制造这个情况:父 Run 不可用时子 Run 结束,
       恢复后结果**只投一次**。这是路线图的最后一条出口检查。
-- [ ] 父 Run 拿到的是**结构化结果 + 明确授权的 Artifact 引用**,
+      幂等键是 `runs.result_delivered_at`,和追加那条消息同一个事务里盖。
+- [x] 父 Run 拿到的是**结构化结果 + 明确授权的 Artifact 引用**,
       不是子 Run 的完整上下文（§13 第 7 条）。一条测试断言子 Run 的
-      transcript 没有整段进入父 Run。
+      transcript 没有整段进入父 Run。Artifact 那一半是第 5 节填的,
+      现在是空列表而不是缺这个键——父 Run 读文档时不用分支判断它在不在。
 
 ## 5. 文件：只经 Artifact 授权
 

@@ -69,7 +69,7 @@ from tiny_hermes.runs.domain.slice_policy import (
 )
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalGate
-from tiny_hermes.runs.ports.children import ChildRuns
+from tiny_hermes.runs.ports.children import ChildRuns, DelegationWait
 from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolSender
 from tiny_hermes.runs.ports.mcp import BoundMcpTool, McpGateway
 from tiny_hermes.runs.ports.memories import MemoryCandidates
@@ -214,6 +214,11 @@ class _RoundWork:
     #: survive a rolled-back round, and the next round would then believe it
     #: was holding text that is not in its conversation.
     events: tuple[ReservedEvent, ...] = ()
+    #: Set when the round delegated and the children exist. Unlike
+    #: `wait_seconds` this is not a request the judge may overrule: the
+    #: children are already running and spending the root budget, so the only
+    #: question left is whether something outranks waiting for them.
+    delegated: DelegationWait | None = None
 
 
 @dataclass(frozen=True)
@@ -472,6 +477,7 @@ class WorkerRuntime:
                     RoundOutcome(
                         verdict=verdict,
                         approval=work.approval,
+                        delegated=work.delegated,
                         cancel_requested=after.cancel_requested,
                         pause_requested=after.pause_requested,
                         budget_allows=_budget_after(after, response, executed_ms),
@@ -938,6 +944,7 @@ class WorkerRuntime:
 
         wrote = False
         wait_seconds: int | None = None
+        delegated: DelegationWait | None = None
         results: list[Block] = []
         events: list[ReservedEvent] = []
         # Counted across the whole Run and carried forward inside this round:
@@ -975,12 +982,15 @@ class WorkerRuntime:
                     events.append(event)
                 continue
             if call.name == "agent.delegate":
-                answered, event = await answer_agent_delegate(
-                    self._children, context, call
-                )
-                results.append(answered)
-                if event is not None:
-                    events.append(event)
+                outcome = await answer_agent_delegate(self._children, context, call)
+                results.append(outcome.result)
+                if outcome.event is not None:
+                    events.append(outcome.event)
+                if outcome.wait is not None:
+                    # Last one wins, and one is all a round can act on: the Run
+                    # enters a single `waiting_external` with a single
+                    # deadline, the same as `platform.wait`.
+                    delegated = outcome.wait
                 continue
             if call.name.startswith(f"{MCP_PREFIX}."):
                 # Sent by the platform, like an HTTP tool call and for the same
@@ -1079,6 +1089,7 @@ class WorkerRuntime:
             wrote,
             wait_seconds,
             events=tuple(events),
+            delegated=delegated,
         )
 
     async def _checkpoint_round(
@@ -1626,6 +1637,7 @@ class WorkerRuntime:
             limit_reached=decision.limit_reached,
             wait_kind=decision.wait_kind,
             wait_seconds=decision.wait_seconds,
+            wait_policy=decision.wait_policy,
             checkpoint=_checkpoint(response, judged),
             checkpoint_replay_safe=response.replay_safe,
             checkpoint_effect_status=(
