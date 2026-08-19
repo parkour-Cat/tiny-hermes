@@ -247,6 +247,69 @@ async def test_a_round_that_cannot_be_made_to_fit_is_never_sent(
     assert any("y" * 32_000 in content for _, content in rows)
 
 
+async def test_a_context_overflow_pause_can_be_recovered_and_keeps_what_it_spent(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    agent_on_the_small_endpoint: Any,
+) -> None:
+    """The release gate's rule for this pause: it recovers, and recovery
+    resets nothing.
+
+    `paused(context_overflow)` is the one pause reached without spending a
+    model call — the request was never sent. That makes it the awkward case for
+    "recovery does not reset a counter", because the counter it must not reset
+    is one that has not moved. Asserted anyway, and deliberately: the rule is
+    about the platform never starting a Run's accounting again, not about the
+    number happening to be interesting.
+
+    What makes it recoverable is a person acting — shortening the input or
+    moving the Agent to a larger endpoint. Here the conversation is redacted to
+    something that fits, which is the same shape as the first: the Run resumes
+    against a history it can send.
+    """
+    agent = agent_on_the_small_endpoint()
+    session = start_session(client, scope, agent)
+    run = ask(client, scope, session, "summarize this: " + "y" * 32_000)
+    await drive(engine, Recording(says("never asked")), None)
+
+    stopped = status(client, scope, run)
+    assert stopped["pause_reason"] == "context_overflow"
+    spent_before = stopped["budget"]["consumed_model_calls"]
+    # Resume is offered: this pause is somebody's to clear, not a dead end.
+    assert "resume" in stopped["available_actions"]
+
+    # The person's half. Nothing the platform is allowed to do on its own —
+    # §7.4.2 forbids shortening the request — so the oversized turn is dropped
+    # by hand, which is what redaction is for.
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "UPDATE session_messages SET redacted = true "
+                "WHERE session_id = :s AND content::text LIKE :big"
+            ),
+            {"s": UUID(session), "big": "%" + "y" * 200 + "%"},
+        )
+    later = ask(client, scope, session, "who are you?")
+    assert later
+
+    resumed = client.post(
+        f"/api/v1/runs/{run}/resume",
+        headers=scope,
+        json={"expected_state_version": stopped["state_version"]},
+    )
+    assert resumed.status_code == 200, resumed.text
+
+    await drive(engine, Recording(says("an agent")), None)
+
+    reloaded = status(client, scope, run)
+    assert reloaded["status"] == "completed"
+    # It ran, and its accounting continued from where the pause left it rather
+    # than starting again.
+    assert reloaded["budget"]["consumed_model_calls"] >= spent_before
+    assert reloaded["budget"]["consumed_model_calls"] > 0
+
+
 async def test_a_conversation_inside_the_window_is_sent_as_it_stands(
     client: TestClient,
     scope: dict[str, str],

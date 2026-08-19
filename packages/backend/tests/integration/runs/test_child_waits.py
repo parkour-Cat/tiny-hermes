@@ -574,3 +574,58 @@ async def test_a_child_loses_a_tool_its_own_version_bound_and_the_delegation_did
     assert finished[0].status != "waiting_external"
     scope_document = cast(dict[str, Any], finished[0].delegation_scope or {})
     assert cast(list[str], scope_document.get("tools", [])) == []
+
+
+async def test_an_external_timeout_pause_recovers_and_the_tree_keeps_its_counters(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+) -> None:
+    """The release gate's rule for the pause M2E's wait produces.
+
+    A `child_runs` wait whose deadline passes becomes
+    `paused(external_timeout)` — that much is asserted above. This is the other
+    half the gate asks for: somebody resumes it, it runs again, and **the root
+    budget carries on from where it was**. A tree that reset its counters by
+    timing out and being resumed would be a safety valve anybody can clear by
+    waiting.
+
+    The child is left running rather than tidied away, because that is the real
+    situation: the deadline passed while somebody else's work was still going,
+    and resuming the parent must not depend on the child having finished.
+    """
+    workspace_id = scope["X-Workspace-Id"]
+    _child(client, scope, "slow", "wait_once", tools=["platform.wait"])
+    parent = _parent(client, scope, ("slow",), {"slow": ["platform.wait"]})
+    parent_run = _start(client, scope, session_for(parent), "timeout-recover", "slow")
+
+    await _work(engine, workspace_id)
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE runs SET wait_deadline_at = :then WHERE id = :p"),
+            {"then": datetime.now(UTC) - timedelta(minutes=5), "p": UUID(parent_run)},
+        )
+    await _scheduler(engine).run_once()
+
+    stopped = client.get(f"/api/v1/runs/{parent_run}", headers=scope).json()
+    assert stopped["status"] == "paused"
+    assert stopped["pause_reason"] == "external_timeout"
+    spent_before = stopped["budget"]["consumed_model_calls"]
+    assert spent_before > 0, "the parent had already spent a round delegating"
+    assert "resume" in stopped["available_actions"]
+
+    resumed = client.post(
+        f"/api/v1/runs/{parent_run}/resume",
+        headers=scope,
+        json={"expected_state_version": stopped["state_version"]},
+    )
+    assert resumed.status_code == 200, resumed.text
+
+    await _work(engine, workspace_id)
+
+    reloaded = client.get(f"/api/v1/runs/{parent_run}", headers=scope).json()
+    assert reloaded["status"] != "paused"
+    # Forward from where it was, never from zero. This is the number that would
+    # move if a timeout-then-resume handed a tree a fresh budget.
+    assert reloaded["budget"]["consumed_model_calls"] >= spent_before

@@ -348,6 +348,52 @@ async def test_an_unanswered_approval_expires_and_pauses_the_run(
     assert late.json()["code"] == "approval_already_decided"
 
 
+async def test_an_expired_approval_pause_recovers_and_keeps_what_it_spent(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    api: tuple[StandIn, str],
+    proxy: ProxyHandle,
+) -> None:
+    """The release gate's rule for the approval pauses.
+
+    An approval that ran out cannot be honoured late — the test above pins
+    that, and it is why this pause is not a dead end but a **person's** to
+    clear. Resuming puts the Run back in the queue; the call it wanted is asked
+    about again, from the same history, rather than proceeding on a decision
+    nobody made in time.
+
+    And the counters carry forward. A Run that could clear its accounting by
+    letting an approval lapse and being resumed would be a safety valve with a
+    waiting-shaped hole in it.
+    """
+    run, _ = await _stopped_run(client, scope, engine, session_for, api, proxy)
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE approvals SET expires_at = now() - interval '1 hour'"),
+        )
+    await _scheduler(engine).run_once()
+
+    stopped = _status(client, scope, run["id"])
+    assert stopped["pause_reason"] == "approval_expired"
+    spent_before = stopped["budget"]["consumed_model_calls"]
+    assert spent_before > 0, "the Run had already spent the round that asked"
+    assert "resume" in stopped["available_actions"]
+
+    resumed = client.post(
+        f"/api/v1/runs/{run['id']}/resume",
+        headers=scope,
+        json={"expected_state_version": stopped["state_version"]},
+    )
+    assert resumed.status_code == 200, resumed.text
+
+    reloaded = _status(client, scope, run["id"])
+    assert reloaded["status"] == "queued"
+    # Never from zero: the rounds it already spent are still spent.
+    assert reloaded["budget"]["consumed_model_calls"] >= spent_before
+
+
 async def test_changing_the_arguments_invalidates_the_approval(
     client: TestClient,
     scope: dict[str, str],

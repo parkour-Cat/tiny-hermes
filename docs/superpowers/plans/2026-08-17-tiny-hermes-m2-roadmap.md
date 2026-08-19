@@ -214,6 +214,18 @@ flowchart LR
 - 全新 Linux Docker 主机可按文档启动，完成一次多轮 Goal 任务与一次并行子 Agent 委派。
 - `egress-proxy` 是唯一出站路径，架构测试证明没有旁路。
 - 本里程碑新增的每一种暂停——`limit`、`context_overflow`、`tool_budget_exceeded`、`external_timeout`、审批相关——都演示过恢复，且恢复不重置累计安全阀。
+  **状态（2026-08-20）：五种全部有恢复测试，均断言累计值不清零。**
+  | 暂停 | 恢复测试 |
+  |---|---|
+  | `limit` | `test_budget_expansion.py::test_the_run_goes_back_to_work_and_spends_the_room_it_was_given` |
+  | `tool_budget_exceeded` | `test_mcp_tools.py::test_resuming_measures_again_and_charges_nothing_for_the_first_try` |
+  | `context_overflow` | `test_context_budget.py::test_a_context_overflow_pause_can_be_recovered_and_keeps_what_it_spent` |
+  | `external_timeout` | `test_child_waits.py::test_an_external_timeout_pause_recovers_and_the_tree_keeps_its_counters` |
+  | 审批相关 | `test_approvals.py::test_an_expired_approval_pause_recovers_and_keeps_what_it_spent` |
+  前两条本来就有；后三条是补的——原先只测到「暂停发生」，没测到「恢复且不清零」。
+  `context_overflow` 是其中最别扭的一个：它是唯一没花掉模型调用就到达的暂停，
+  所以「恢复不重置」要守的那个计数器本身就没动过。仍然断言了，因为这条规矩
+  说的是平台永远不重开一个 Run 的账，而不是那个数字碰巧好看。
 - §24.1 的 0.1 门槛在 0.2 上重跑不退化；新增的轮次与压缩没有引入新的性能回退。
   **状态（2026-08-19）：回归这一半已答，绝对门槛这一半没答。** 同机 A/B
   （0.1 `5ad0e00` 对 0.2 `5e28996`，同一份基准工具、两端 `down -v` 起）十项
