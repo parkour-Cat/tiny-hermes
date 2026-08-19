@@ -619,6 +619,23 @@ class SessionSnapshot:
 
 
 @dataclass(frozen=True)
+class ChildRunRef:
+    """One delegated Run, as much of it as a task tree needs.
+
+    Id and status and nothing else. The full tree is M3; what a person needs
+    here is to see that this Run is one of several and to be able to click
+    through — and a summary that carried more would be a second place the
+    child's state is written down.
+    """
+
+    id: UUID
+    status: RunState
+
+    def document(self) -> dict[str, Any]:
+        return {"id": str(self.id), "status": self.status.value}
+
+
+@dataclass(frozen=True)
 class RunSnapshot:
     """Everything a caller may observe about one Run."""
 
@@ -683,6 +700,12 @@ class RunSnapshot:
     current_round: int | None = None
     goal_outcome: str | None = None
     goal_unmet: tuple[str, ...] = ()
+    #: The Runs this one delegated (§13), oldest first. Empty for the ordinary
+    #: Run, which is most of them. Carried on the snapshot rather than fetched
+    #: from a second endpoint because "is this a tree" is part of what a Run
+    #: is, and a console that had to ask twice would show the tree a moment
+    #: after showing the Run.
+    children: tuple[ChildRunRef, ...] = ()
 
     def document(self) -> dict[str, Any]:
         return {
@@ -700,6 +723,7 @@ class RunSnapshot:
             "budget_root_run_id": str(self.budget_root_run_id),
             "parent_run_id": _optional_id(self.parent_run_id),
             "depth": self.depth,
+            "children": [child.document() for child in self.children],
             "last_event_sequence": self.last_event_sequence,
             "queue": self._queue_document(),
             "budget": self.budget.document(),

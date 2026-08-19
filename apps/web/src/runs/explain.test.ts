@@ -138,3 +138,50 @@ test("a proposal says that nothing changed yet", () => {
   expect(sentence).toContain("approves");
   expect(sentence).not.toContain("{");
 });
+
+test("a run waiting on its children gets its own note, not the generic one", () => {
+  // Its own because the two call for opposite things from the reader: the
+  // generic note sends them to find out what is being waited on, and here the
+  // answer is on the same page, one card down, with links.
+  expect(statusNote(situation("waiting_external", { wait: "child_runs" }))).toBe(
+    "waitingChildRunsNote",
+  );
+});
+
+test("the note for a child wait says it will not wake itself", () => {
+  // The sentence a person reads has to answer "am I holding this up". For this
+  // wait the answer is no, and the reason is that the children are running —
+  // both must survive translation, which is why this asserts the text.
+  for (const said of [t("waitingChildRunsNote"), enUS.waitingChildRunsNote]) {
+    expect(said).toMatch(/不会醒|does not wake itself/);
+  }
+});
+
+test("a delegation says how many and whether the rest get cancelled", () => {
+  const all = eventNote({
+    event_type: "run_delegated",
+    payload: { wait: "all", children: [{ run_id: "a" }, { run_id: "b" }] },
+  });
+  expect(all).toEqual({ key: "delegatedAllNote", values: { count: "2" } });
+
+  const any = eventNote({
+    event_type: "run_delegated",
+    payload: { wait: "any", children: [{ run_id: "a" }, { run_id: "b" }] },
+  });
+  expect(any).toEqual({ key: "delegatedAnyNote", values: { count: "2" } });
+
+  // The cost of `any` is that a child about to succeed may be killed. It is
+  // stated where somebody reads the timeline rather than left to a bill.
+  for (const said of [t("delegatedAnyNote"), enUS.delegatedAnyNote]) {
+    expect(said).toMatch(/取消|cancelled/);
+  }
+});
+
+test("a delegation the console cannot read fully gets no sentence", () => {
+  // Same rule as every other note: a sentence with a hole in it reads like a
+  // bug in the platform rather than a fact about the Run.
+  expect(eventNote({ event_type: "run_delegated", payload: { wait: "all" } })).toBeNull();
+  expect(
+    eventNote({ event_type: "run_delegated", payload: { children: [] } }),
+  ).toBeNull();
+});

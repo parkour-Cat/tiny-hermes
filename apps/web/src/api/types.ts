@@ -198,6 +198,11 @@ export type GoalDocument = {
   unmet: string[];
 };
 
+export type ChildRunRef = {
+  id: string;
+  status: string;
+};
+
 export type RunResponse = {
   id: string;
   session_id: string;
@@ -211,6 +216,12 @@ export type RunResponse = {
   wait_deadline_at: string | null;
   retry_of_run_id: string | null;
   budget_root_run_id: string;
+  /** The Run that delegated this one, or null for one somebody asked for. */
+  parent_run_id: string | null;
+  /** 0 for a Run a caller created, 1 for a delegated one. Never more. */
+  depth: number;
+  /** The Runs this one delegated, oldest first. Empty for most Runs. */
+  children: ChildRunRef[];
   last_event_sequence: number;
   queue: QueueResponse;
   budget: BudgetDocument;

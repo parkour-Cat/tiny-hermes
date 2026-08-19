@@ -65,6 +65,7 @@ from tiny_hermes.runs.domain.models import (
     CallerType,
     CanonicalMessage,
     CheckpointEffectStatus,
+    ChildRunRef,
     DeliveryMode,
     PauseReason,
     QueueStatus,
@@ -2761,6 +2762,26 @@ class SqlRunStore:
             head_wait_kind=head_wait,
             head_wait_deadline_at=head_deadline,
             queue_available_actions=head_actions,
+            children=await self._child_refs(run),
+        )
+
+    async def _child_refs(self, run: RunRow) -> tuple[ChildRunRef, ...]:
+        """The Runs this one delegated, for the console's task tree.
+
+        Skipped entirely for a Run at depth 1: a child cannot have children,
+        so the query would return nothing every time it ran. Most Runs are not
+        parents either, but that is not knowable without asking.
+        """
+        if run.depth >= MAX_DELEGATION_DEPTH:
+            return ()
+        rows = await self._session.execute(
+            select(RunRow.id, RunRow.status)
+            .where(RunRow.parent_run_id == run.id)
+            .order_by(RunRow.created_at, RunRow.id)
+        )
+        return tuple(
+            ChildRunRef(id=row_id, status=RunState(status))
+            for row_id, status in rows.all()
         )
 
     async def _blocked_head_fields(

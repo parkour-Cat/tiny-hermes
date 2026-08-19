@@ -125,6 +125,16 @@ export const enUS: Record<MessageKey, string> = {
     "This Run asked to continue later. It goes back in the queue at the wait deadline on its own, holding no execution slot and no sandbox in the meantime. Nobody has to do anything.",
   waitingExternalNote:
     "This Run is waiting on an answer from outside the platform. If none arrives by the deadline it pauses instead. What it is waiting for is under Wait kind.",
+  waitingChildRunsNote:
+    "This Run handed work to the child Runs listed below and is waiting on them. It does not wake itself: it continues once they finish and the platform hands their results back. In the meantime it holds no execution slot and no sandbox. The children spend the same budget it does. If they have not finished by the wait deadline it pauses instead.",
+  delegatedAllNote:
+    "Handed work to {count} child Runs and will continue once all of them finish. They spend the same budget this Run does.",
+  delegatedAnyNote:
+    "Handed work to {count} child Runs and will continue as soon as any one of them succeeds. The rest are then cancelled, including any that were about to finish. They spend the same budget this Run does.",
+  runParent: "Delegated by",
+  runDepth: "Delegation depth",
+  childRunsSection: "Child runs",
+  childRunsNone: "This Run delegated nothing.",
   pausedLimitNote:
     "The shared budget ran out, so the Run stopped here rather than failing. Widen the budget and it continues from where it stopped; nothing already spent is reset.",
   pausedContextOverflowNote:

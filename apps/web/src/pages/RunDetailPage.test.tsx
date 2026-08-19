@@ -15,6 +15,7 @@ import { TestTheme } from "../test/TestTheme";
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
 const RUN = "44444444-5555-4666-8777-888888888888";
 const OTHER_RUN = "55555555-6666-4777-8888-999999999999";
+const THIRD_RUN = "66666666-7777-4888-8999-aaaaaaaaaaaa";
 const SESSION = "33333333-4444-4555-8666-777777777777";
 const VERSION = "66666666-7777-4888-8999-aaaaaaaaaaaa";
 
@@ -51,6 +52,9 @@ function run(overrides: Record<string, unknown> = {}) {
     wait_deadline_at: null,
     retry_of_run_id: null,
     budget_root_run_id: RUN,
+    parent_run_id: null,
+    depth: 0,
+    children: [],
     last_event_sequence: 2,
     queue: { position: 1, status: "head" },
     budget: BUDGET,
@@ -450,4 +454,67 @@ test("a Run whose endpoint has no price says unknown, never zero", async () => {
   // endpoint and one priced at nothing would be where the distinction died.
   expect(await screen.findByText("未知")).toBeInTheDocument();
   expect(screen.getByText("未配置价格")).toBeInTheDocument();
+});
+
+test("a Run that delegated shows its children and each one is a link", async () => {
+  // The minimal task tree: the full one is a later milestone, so what this has
+  // to do is make it visible that this Run is one of several and let somebody
+  // get to the others. A status beside each, because "two children, one of
+  // which failed" is the shape of the question a person opens this page with.
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () =>
+      HttpResponse.json(
+        run({
+          status: "waiting_external",
+          wait_kind: "child_runs",
+          children: [
+            { id: OTHER_RUN, status: "completed" },
+            { id: THIRD_RUN, status: "running" },
+          ],
+        }),
+      ),
+    ),
+  );
+  stream();
+
+  renderRun();
+
+  const link = await screen.findByRole("link", { name: OTHER_RUN });
+  expect(link).toHaveAttribute("href", `/workspaces/${WORKSPACE}/runs/${OTHER_RUN}`);
+  expect(screen.getByRole("link", { name: THIRD_RUN })).toBeInTheDocument();
+  // And the note that says nobody is being held up by this.
+  expect(screen.getByText(t("waitingChildRunsNote"))).toBeInTheDocument();
+});
+
+test("a delegated Run says who delegated it", async () => {
+  // A child holds a Session of its own, so without this the page gives no
+  // indication at all that somebody else asked for this work.
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () =>
+      HttpResponse.json(run({ parent_run_id: OTHER_RUN, depth: 1 })),
+    ),
+  );
+  stream();
+
+  renderRun();
+  const card = within(await summary());
+
+  expect(card.getByText(t("runParent"))).toBeInTheDocument();
+  expect(card.getByRole("link", { name: OTHER_RUN })).toHaveAttribute(
+    "href",
+    `/workspaces/${WORKSPACE}/runs/${OTHER_RUN}`,
+  );
+});
+
+test("an ordinary Run shows no tree at all", async () => {
+  // Most Runs are not part of one, and a card saying "no children" on every
+  // Run detail page would be a permanent reminder of a feature nobody used.
+  server.use(http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run())));
+  stream();
+
+  renderRun();
+  await summary();
+
+  expect(screen.queryByText(t("childRunsSection"))).not.toBeInTheDocument();
+  expect(screen.queryByText(t("runParent"))).not.toBeInTheDocument();
 });

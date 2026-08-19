@@ -62,6 +62,9 @@ function runSnapshot(finished: boolean) {
     wait_deadline_at: null,
     retry_of_run_id: null,
     budget_root_run_id: RUN,
+    parent_run_id: null,
+    depth: 0,
+    children: [],
     last_event_sequence: 2,
     queue: { position: 1, status: finished ? "terminal" : "head" },
     budget: {

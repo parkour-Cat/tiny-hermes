@@ -14,7 +14,17 @@ type Situation = Pick<RunResponse, "status" | "pause_reason" | "wait_kind">;
  */
 export function statusNote(run: Situation): MessageKey | null {
   if (run.status === "waiting_external") {
-    return run.wait_kind === "timer" ? "waitingTimerNote" : "waitingExternalNote";
+    if (run.wait_kind === "timer") {
+      return "waitingTimerNote";
+    }
+    // Its own sentence rather than the generic one, because this is the wait
+    // whose reader most needs to be told nothing is expected of them: the
+    // children are listed right below, they are running, and clicking one is
+    // the only useful thing to do.
+    if (run.wait_kind === "child_runs") {
+      return "waitingChildRunsNote";
+    }
+    return "waitingExternalNote";
   }
   if (run.status === "paused" && run.pause_reason === "limit") {
     return "pausedLimitNote";
@@ -143,6 +153,20 @@ export function eventNote(frame: Pick<RunEventFrame, "event_type" | "payload">):
         operation: typeof operation === "string" ? operation : "—",
         reason,
       },
+    };
+  }
+  if (frame.event_type === "run_delegated") {
+    // Who and how many, because the wait that follows is about exactly this
+    // set — and `all` versus `any` decides whether the reader should expect
+    // the siblings to finish or to be cancelled.
+    const children = frame.payload.children;
+    const wait = frame.payload.wait;
+    if (!Array.isArray(children) || typeof wait !== "string") {
+      return null;
+    }
+    return {
+      key: wait === "any" ? "delegatedAnyNote" : "delegatedAllNote",
+      values: { count: String(children.length) },
     };
   }
   if (frame.event_type === "run_approval_requested") {

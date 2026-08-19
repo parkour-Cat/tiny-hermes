@@ -275,6 +275,17 @@ export function RunDetailPage() {
   if (run.retry_of_run_id !== null) {
     facts.push({ key: "retry-of", label: t("retryOfRun"), children: runLink(run.retry_of_run_id) });
   }
+  if (run.parent_run_id !== null) {
+    // Only for a Run that was delegated. Shown as a link because "who asked
+    // for this" is the first thing somebody looking at a child wants, and a
+    // child holds a Session of its own so nothing else on the page says it.
+    facts.push({
+      key: "parent",
+      label: t("runParent"),
+      children: runLink(run.parent_run_id),
+    });
+    facts.push({ key: "depth", label: t("runDepth"), children: String(run.depth) });
+  }
   if (run.blocked_by_run_id !== null) {
     facts.push({
       key: "blocked-by",
@@ -377,6 +388,21 @@ export function RunDetailPage() {
         <Typography.Title level={5}>{t("budgetSection")}</Typography.Title>
         <Descriptions column={{ xs: 1, sm: 2 }} size="small" items={budgetRows(run.budget, t)} />
       </Card>
+      {run.children.length > 0 && (
+        // Only when there are any. The full task tree is a later milestone;
+        // what this has to do is make it visible that this Run is one of
+        // several and let somebody click through to the others.
+        <Card title={t("childRunsSection")} variant="borderless" className="page-alert">
+          <Space direction="vertical" size="small">
+            {run.children.map((child) => (
+              <Space key={child.id} size="small">
+                <Tag>{child.status}</Tag>
+                {runLink(child.id)}
+              </Space>
+            ))}
+          </Space>
+        </Card>
+      )}
       <Card title={t("messagesSection")} variant="borderless" className="page-alert">
         {turns.length === 0 ? (
           <Empty description={t("emptyMessages")} />
