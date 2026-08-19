@@ -61,6 +61,22 @@ class StandInController:
 
 
 @dataclass
+class ReleaseThenFailCleanup:
+    """A concurrent cleanup wins after the Scheduler selected stale work."""
+
+    sessions: async_sessionmaker[AsyncSession]
+
+    async def cleanup(self, *, run_id: UUID, sandbox_id: UUID) -> None:
+        del sandbox_id
+        async with self.sessions.begin() as session:
+            store = SqlSandboxStore(session)
+            reservation = await store.live_for_run(run_id)
+            assert reservation is not None
+            await store.release(reservation.id)
+        raise RuntimeError("the stale Scheduler cleanup was refused")
+
+
+@dataclass
 class RecordingNotifier:
     order: list[str]
 
@@ -211,6 +227,18 @@ async def test_a_cleanup_that_cannot_be_confirmed_leaves_it_isolated(
     await (await scheduler(sessions, controller)).run_once()
 
     assert await reservation_status(sessions, run_id) == ReservationStatus.ISOLATED.value
+
+
+async def test_a_stale_cleanup_failure_cannot_reisolate_a_released_reservation(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    run_id, _ = await a_kept_reservation(
+        sessions, expires_in=-timedelta(seconds=1)
+    )
+
+    await (await scheduler(sessions, ReleaseThenFailCleanup(sessions))).run_once()
+
+    assert await reservation_status(sessions, run_id) == ReservationStatus.RELEASED.value
 
 
 async def test_an_isolated_reservation_is_retried_rather_than_forgotten(
