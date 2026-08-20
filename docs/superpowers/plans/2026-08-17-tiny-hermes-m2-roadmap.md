@@ -234,6 +234,20 @@ flowchart LR
   **刻意没有为它补测试**：那个状态今天没有真实到达路径，要伪造一行审批记录
   才能让它发生，那样这一格会变绿而掩盖真问题。
 - 全新 Linux Docker 主机可按文档启动，完成一次多轮 Goal 任务与一次并行子 Agent 委派。
+  **状态（2026-08-20）：已完成。** 一台什么都没有的 Ubuntu 26.04，按
+  `docs/development.md` 装依赖、克隆、`docker compose up -d --build --wait`，
+  九个容器全部 healthy；随后经 API 跑通两件事：
+  - **多轮 Goal**：2 轮、判定 `done`、2 次模型调用——由 Goal 判断器结束，
+    不是 Provider 的 stop reason。
+  - **并行委派**：2 个子 Run 均 `completed`，各自 `depth=1`、独立 Session，
+    `budget_root_run_id` 都指向父 Run，根预算合计 4 次模型调用（父 2 + 子各 1）。
+
+  **但文档少了一段，这台机器把它暴露出来了。** 国内网络下按现有文档走会卡住：
+  Docker Hub 需要配 `registry-mirrors`（配好后 python/node/nginx 各 3–5 秒），
+  而 `ghcr.io/astral-sh/uv` **不在任何 Docker Hub 加速的覆盖范围内**，直连超时，
+  第一次构建有一层拉了 1488 秒才 26MB。这不是文档写错，是它假设了能直连境外
+  仓库的网络；既然这条关口写的是「可按文档启动」，文档就该覆盖用户手上真实的
+  机器。已补进 `docs/development.md` 的 Linux 安装一节。
 - `egress-proxy` 是唯一出站路径，架构测试证明没有旁路。
 - 本里程碑新增的每一种暂停——`limit`、`context_overflow`、`tool_budget_exceeded`、`external_timeout`、审批相关——都演示过恢复，且恢复不重置累计安全阀。
   **状态（2026-08-20）：五种全部有恢复测试，均断言累计值不清零。**
@@ -249,15 +263,30 @@ flowchart LR
   所以「恢复不重置」要守的那个计数器本身就没动过。仍然断言了，因为这条规矩
   说的是平台永远不重开一个 Run 的账，而不是那个数字碰巧好看。
 - §24.1 的 0.1 门槛在 0.2 上重跑不退化；新增的轮次与压缩没有引入新的性能回退。
-  **状态（2026-08-19）：回归这一半已答，绝对门槛这一半没答。** 同机 A/B
-  （0.1 `5ad0e00` 对 0.2 `5e28996`，同一份基准工具、两端 `down -v` 起）十项
-  无有意义退化，`create_run`、`run_event`、`next_run` 全部保持——记录见
-  `docs/superpowers/verification/2026-08-19-m2e-child-agents.md` §8。
-  但那台机器是 macOS、VM 只有 7.8 GiB，工具自报 `shape_ok: false`，所以
-  **绝对门槛仍需在 Linux 8 vCPU / 16 GiB 参考主机上重跑**才算数。
-  另有一项待查：`workspace_small` 在 0.1 和 0.2 两端都超门槛（2678ms /
-  2772ms 对 1000ms），差值仅 3.5%，不是 M2 引入的；是真超标还是环境所致，
-  要在参考主机上才能分辨。
+  **状态（2026-08-20）：已在参考主机上通过，十项全绿。**
+  Ubuntu 26.04 / 8 vCPU / 15.12 GiB，工具自报 `shape_ok: true`、`passed: true`，
+  这是本项目第一次真正满足 §24.1 的参考环境（此前所有性能数字都是
+  `shape_ok: false`，只能说「没退化」，不能说「达标」）。
+
+  | 指标 | 门槛 | 参考主机 p95 | 本地 7.8GiB VM |
+  |---|---:|---:|---:|
+  | create_run | 300 ms | 25.9 | 36.5 |
+  | run_event | 100 ms | 1.0 | 3.3 |
+  | sse | — | 122.0 | 122.0 |
+  | sandbox_cold | 3000 ms | 408.0 | 1253.9 |
+  | sandbox_warm | 300 ms | 28.9 | 24.4 |
+  | workspace_small | 1000 ms | **601.0** | 2772.3 |
+  | workspace_large | 15000 ms | 2039.1 | 3458.2 |
+  | next_run | 3000 ms | 107.7 | 2213.2 |
+  | worker_recovery | 30 s | 20.3 s | 20.6 s |
+  | service_recovery | 60 s | 6.4 s | 8.7 s |
+
+  **先前挂着的那条「未决」结掉了。** `workspace_small` 在本地两端都超门槛
+  （0.1 2678ms / 0.2 2772ms 对 1000ms），当时记为「不是 M2 引入，是真超标还是
+  环境所致要在参考主机上才能分辨」。分辨结果是**环境**：参考主机 601ms，通过。
+  `next_run` 的差距最能说明为什么绝对门槛必须在参考主机上测——107.7ms 对
+  本地 2213ms，二十倍。
+
 - 项目描述从「单 Agent 安全运行骨架」升级为「轻量 Hermes 内核预览」，仍不宣传为企业交付闭环。终端用户 Web Chat、飞书适配器、OIDC、审计查询导出与完整任务树都还没有，它们是 M3。
   **状态（2026-08-20）：已改。** `pyproject.toml` 是唯一活的描述位；M1 的计划
   与规格文档里那句话是当时的记录，没有动。守着它的那条测试
