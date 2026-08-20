@@ -254,11 +254,12 @@ async def test_disabling_an_issuer_refuses_new_credentials_but_not_the_already_e
 # -- revocation, design §4.3 -----------------------------------------------
 
 
-def test_revoking_an_end_users_sessions_invalidates_the_cookie_immediately(
+async def test_revoking_an_end_users_sessions_invalidates_the_cookie_immediately(
     client: TestClient,
     scope: dict[str, str],
     workspace_id: str,
     registered_issuer: Callable[..., dict[str, object]],
+    engine: AsyncEngine,
 ) -> None:
     registered_issuer()
     exchanged = _exchange(client, workspace_id, _credential(workspace_id=workspace_id))
@@ -267,6 +268,18 @@ def test_revoking_an_end_users_sessions_invalidates_the_cookie_immediately(
     revoked = client.delete(f"/api/v1/end-user/sessions/{end_user_id}", headers=scope)
 
     assert revoked.status_code == 204
+    # The session is not just deleted-by-response-code: the row itself must
+    # carry the revocation, which is what "the same request but replayed
+    # against the row" actually checks rather than trusting the status code
+    # alone.
+    async with engine.connect() as connection:
+        revoked_at = (
+            await connection.execute(
+                text("SELECT revoked_at FROM end_user_sessions WHERE end_user_id = :id"),
+                {"id": end_user_id},
+            )
+        ).scalar_one()
+    assert revoked_at is not None
 
 
 async def test_a_workspace_viewer_cannot_revoke_end_user_sessions(
