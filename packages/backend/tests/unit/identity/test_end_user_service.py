@@ -27,6 +27,8 @@ from tiny_hermes.identity.application.end_user_service import (
     EndUserIdentityService,
     EndUserSession,
     ForbiddenEndUserAction,
+    InvalidChannelIssuer,
+    UnknownChannelIssuer,
 )
 from tiny_hermes.identity.domain.end_user_credential import RefusalReason
 from tiny_hermes.identity.domain.models import ChannelIssuerStatus
@@ -478,3 +480,118 @@ async def test_a_non_admin_cannot_revoke_sessions() -> None:
 
     with pytest.raises(ForbiddenEndUserAction):
         await svc.revoke_sessions(viewer, WORKSPACE_ID, exchanged.end_user_id, "req-2", NOW)
+
+
+# -- issuer registry, design §3 --------------------------------------------
+
+
+async def test_a_workspace_admin_registers_an_issuer_and_it_is_audited() -> None:
+    store = FakeEndUserStore()
+    svc, _ = service(store)
+    admin = _admin_actor(store)
+
+    record = await svc.register_issuer(
+        admin,
+        WORKSPACE_ID,
+        channel=CHANNEL,
+        issuer=ISSUER,
+        public_key=RSA_PUBLIC_PEM,
+        jwks_url=None,
+        allowed_origins=["https://acme.example"],
+        request_id="req-1",
+    )
+
+    assert record.channel == CHANNEL
+    assert record.issuer == ISSUER
+    assert any(a["action"] == "end_user.issuer_registered" for a in store.audits)
+
+
+async def test_a_non_admin_cannot_register_an_issuer() -> None:
+    store = FakeEndUserStore()
+    svc, _ = service(store)
+    viewer = Actor.new(is_platform_admin=False)
+    store.memberships[(WORKSPACE_ID, viewer.id)] = Role.VIEWER
+
+    with pytest.raises(ForbiddenEndUserAction):
+        await svc.register_issuer(
+            viewer,
+            WORKSPACE_ID,
+            channel=CHANNEL,
+            issuer=ISSUER,
+            public_key=RSA_PUBLIC_PEM,
+            jwks_url=None,
+            allowed_origins=[],
+            request_id="req-1",
+        )
+
+
+async def test_an_issuer_with_neither_a_public_key_nor_a_jwks_url_is_invalid() -> None:
+    store = FakeEndUserStore()
+    svc, _ = service(store)
+    admin = _admin_actor(store)
+
+    with pytest.raises(InvalidChannelIssuer):
+        await svc.register_issuer(
+            admin,
+            WORKSPACE_ID,
+            channel=CHANNEL,
+            issuer=ISSUER,
+            public_key=None,
+            jwks_url=None,
+            allowed_origins=[],
+            request_id="req-1",
+        )
+
+
+async def test_an_issuer_with_both_a_public_key_and_a_jwks_url_is_invalid() -> None:
+    store = FakeEndUserStore()
+    svc, _ = service(store)
+    admin = _admin_actor(store)
+
+    with pytest.raises(InvalidChannelIssuer):
+        await svc.register_issuer(
+            admin,
+            WORKSPACE_ID,
+            channel=CHANNEL,
+            issuer=ISSUER,
+            public_key=RSA_PUBLIC_PEM,
+            jwks_url="https://idp.acme.example/jwks.json",
+            allowed_origins=[],
+            request_id="req-1",
+        )
+
+
+async def test_any_workspace_member_can_list_issuers_but_a_stranger_cannot() -> None:
+    store = FakeEndUserStore()
+    store.register()
+    svc, _ = service(store)
+    viewer = Actor.new(is_platform_admin=False)
+    store.memberships[(WORKSPACE_ID, viewer.id)] = Role.VIEWER
+    stranger = Actor.new(is_platform_admin=False)
+
+    listed = await svc.list_issuers(viewer, WORKSPACE_ID)
+    assert len(listed) == 1
+
+    with pytest.raises(ForbiddenEndUserAction):
+        await svc.list_issuers(stranger, WORKSPACE_ID)
+
+
+async def test_disabling_an_unknown_issuer_is_named_rather_than_silent() -> None:
+    store = FakeEndUserStore()
+    svc, _ = service(store)
+    admin = _admin_actor(store)
+
+    with pytest.raises(UnknownChannelIssuer):
+        await svc.disable_issuer(admin, WORKSPACE_ID, uuid4(), "req-1")
+
+
+async def test_disabling_an_issuer_is_audited() -> None:
+    store = FakeEndUserStore()
+    registered = store.register()
+    svc, _ = service(store)
+    admin = _admin_actor(store)
+
+    record = await svc.disable_issuer(admin, WORKSPACE_ID, registered.id, "req-1")
+
+    assert record.status == ChannelIssuerStatus.DISABLED
+    assert any(a["action"] == "end_user.issuer_disabled" for a in store.audits)

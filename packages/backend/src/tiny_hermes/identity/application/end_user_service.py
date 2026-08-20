@@ -42,11 +42,7 @@ from tiny_hermes.identity.domain.end_user_credential import (
 )
 from tiny_hermes.identity.domain.models import ChannelIssuerStatus
 from tiny_hermes.identity.ports.end_user_keys import EndUserKeySource
-from tiny_hermes.identity.ports.end_user_store import (
-    ChannelIssuerRecord,
-    EndUserStore,
-    IssuerAlreadyRegistered,
-)
+from tiny_hermes.identity.ports.end_user_store import ChannelIssuerRecord, EndUserStore
 from tiny_hermes.tenancy.domain.models import Actor, Role
 
 #: A key pair generated once for this file and never used to sign anything
@@ -249,18 +245,15 @@ class EndUserIdentityService:
             raise InvalidChannelIssuer(
                 "a channel issuer takes a public key or a JWKS URL, not both"
             )
-        try:
-            record = await self._store.create_issuer(
-                workspace_id=workspace_id,
-                channel=normalized_channel,
-                issuer=normalized_issuer,
-                public_key=public_key,
-                jwks_url=jwks_url,
-                allowed_origins=tuple(allowed_origins),
-                created_by=actor.id,
-            )
-        except IssuerAlreadyRegistered:
-            raise
+        record = await self._store.create_issuer(
+            workspace_id=workspace_id,
+            channel=normalized_channel,
+            issuer=normalized_issuer,
+            public_key=public_key,
+            jwks_url=jwks_url,
+            allowed_origins=tuple(allowed_origins),
+            created_by=actor.id,
+        )
         await self._store.append_audit(
             workspace_id=workspace_id,
             actor_type="user",
