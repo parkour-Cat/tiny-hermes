@@ -24,7 +24,7 @@ another.
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, ForeignKeyConstraint, String
+from sqlalchemy import JSON, DateTime, ForeignKey, ForeignKeyConstraint, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from tiny_hermes.shared.database import Base, CreatedAtMixin, IdMixin
@@ -53,3 +53,11 @@ class EndUserSessionRow(IdMixin, CreatedAtMixin, Base):
     #: the workspace admin's way to end a session immediately, independent of
     #: `expires_at` and independent of whatever `channel_issuers.status` says.
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: §5's enterprise-side half of the two-gate check, copied out of the
+    #: credential's own `agents` claim at exchange time (migration 0032). The
+    #: credential itself is gone the moment this row exists — design's own
+    #: red line is that it is exchanged for a session and never held onto —
+    #: so this is the only place left that can answer "which Agents did this
+    #: end user's employer actually delegate" on the Run this session starts
+    #: an hour, or a week, later.
+    agents: Mapped[list[str]] = mapped_column(JSON, default=list)

@@ -66,7 +66,8 @@ class MemoryRow(IdMixin, CreatedAtMixin, Base):
             name="ck_memories_subject_matches_kind",
         ),
         CheckConstraint(
-            "subject_type IS NULL OR subject_type IN ('user', 'service_account')",
+            "subject_type IS NULL OR subject_type IN "
+            "('user', 'service_account', 'end_user')",
             name="ck_memories_subject_type",
         ),
         # The read path's index, in the order it filters: a Run asks for one

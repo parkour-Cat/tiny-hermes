@@ -283,13 +283,15 @@ class SqlRunStore:
             checkpoint_workspace_revision_id=session.workspace_revision_id,
             delivery_mode=command.delivery_mode,
             # §16.3's `user_confirmation` may only be answered by the EndUser
-            # who started the Run. Through M2 that is the logged-in caller;
-            # a ServiceAccount's Run gets none, which is why such an Agent has
-            # to have chosen a pre-authorization or a governance approval at
-            # publish rather than relying on somebody being there.
+            # who started the Run. Through M2 that was only ever the logged-in
+            # caller; end-user entry design §5 adds the real subject a
+            # `caller_type=end_user` Run confirms to. A ServiceAccount's Run
+            # gets none either way, which is why such an Agent has to have
+            # chosen a pre-authorization or a governance approval at publish
+            # rather than relying on somebody being there.
             end_user_id=(
                 command.caller.caller_id
-                if command.caller.caller_type is CallerType.USER
+                if command.caller.caller_type in (CallerType.USER, CallerType.END_USER)
                 else None
             ),
             model_pricing_version_id=pricing_version_id,
