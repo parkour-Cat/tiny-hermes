@@ -68,6 +68,37 @@ A fresh Ubuntu host has none of the five requirements. This is the whole
 sequence, verified on Ubuntu 26.04 with 8 vCPU and 16 GB
 (`docs/superpowers/verification/2026-08-16-fresh-host-install.md`).
 
+### If the host cannot reach Docker Hub or ghcr.io directly
+
+Skip this if `docker pull debian:13-slim` finishes in seconds. On a host behind
+a slow or filtered route to those registries — a mainland-China cloud VM, for
+instance — the build does not fail, it **hangs**: the first `compose up --build`
+sits on one layer for twenty-five minutes with no error to read. Two separate
+problems, and the second one catches people who fixed the first.
+
+**Docker Hub** takes a mirror, configured on the daemon:
+
+```bash
+sudo mkdir -p /etc/docker && sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
+{ "registry-mirrors": ["https://docker.m.daocloud.io"] }
+EOF
+sudo systemctl restart docker
+```
+
+**`ghcr.io` does not.** `registry-mirrors` only ever applies to Docker Hub, and
+this repository pulls `ghcr.io/astral-sh/uv` for every backend image — so a host
+with a working Hub mirror still stalls there, which is the confusing part. Pull
+it through a ghcr mirror and retag it under the name the Dockerfile asks for:
+
+```bash
+docker pull ghcr.nju.edu.cn/astral-sh/uv:0.11.26
+docker tag ghcr.nju.edu.cn/astral-sh/uv:0.11.26 ghcr.io/astral-sh/uv:0.11.26
+```
+
+Mirrors are third-party services that go away; if one does not answer, any
+other that carries the same image works, and so does pulling on a host that can
+reach the registry and `docker save`/`docker load` across.
+
 Ubuntu's `needrestart` opens a dialog after a libc upgrade. Over SSH, with no
 terminal for it to draw on, `apt-get` is stopped by `SIGTTOU` and waits
 forever rather than failing — so silence both frontends before installing
