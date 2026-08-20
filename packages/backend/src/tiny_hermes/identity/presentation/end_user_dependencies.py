@@ -40,6 +40,11 @@ EndUserSessionCookie = Annotated[str | None, Cookie(alias=END_USER_SESSION_COOKI
 class EndUserCaller:
     end_user_id: UUID
     workspace_id: UUID
+    #: §5's enterprise-side gate, carried from the session — see
+    #: `EndUserSession.agents`. A route that starts a Run passes this
+    #: straight to `AgentCatalog.resolve_end_user_agent` rather than reading
+    #: it off anything the caller asserts on this particular request.
+    agents: tuple[str, ...] = ()
 
 
 def end_user_unauthenticated() -> AppError:
@@ -68,7 +73,7 @@ async def resolve_end_user_caller(
     session = await service.authenticate(session_token, datetime.now(UTC))
     if session is None:
         raise end_user_unauthenticated()
-    return EndUserCaller(session.end_user_id, session.workspace_id)
+    return EndUserCaller(session.end_user_id, session.workspace_id, session.agents)
 
 
 def reject_end_user_caller(end_user_session: EndUserSessionCookie = None) -> None:

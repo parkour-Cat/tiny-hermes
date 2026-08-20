@@ -117,6 +117,10 @@ class ExchangedSession:
 class EndUserSession:
     end_user_id: UUID
     workspace_id: UUID
+    #: §5's enterprise-side gate, carried from the credential this session
+    #: was exchanged for — see `EndUserSessionRow.agents` for why it has to
+    #: live here rather than be re-read from a credential that is long gone.
+    agents: tuple[str, ...] = ()
 
 
 class EndUserIdentityService:
@@ -173,7 +177,11 @@ class EndUserIdentityService:
         session_token = secrets.token_urlsafe(32)
         expires_at = now + self._session_ttl
         await self._store.create_session(
-            identity.end_user_id, workspace_id, self.digest_token(session_token), expires_at
+            identity.end_user_id,
+            workspace_id,
+            self.digest_token(session_token),
+            expires_at,
+            result.agents,
         )
         await self._store.append_audit(
             workspace_id=workspace_id,
@@ -191,7 +199,7 @@ class EndUserIdentityService:
         stored = await self._store.find_session(self.digest_token(session_token), now)
         if stored is None:
             return None
-        return EndUserSession(stored.end_user_id, stored.workspace_id)
+        return EndUserSession(stored.end_user_id, stored.workspace_id, stored.agents)
 
     # -- revocation, design §4.3 ------------------------------------------
 

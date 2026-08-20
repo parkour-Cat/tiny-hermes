@@ -44,6 +44,12 @@ BUDGET_HOLDERS = {Role.WORKSPACE_ADMIN}
 
 RUNS_ENDPOINT = "POST /api/v1/runs"
 RETRY_ENDPOINT = "POST /api/v1/runs/{run_id}/retry"
+#: A separate idempotency/fingerprint namespace from `RUNS_ENDPOINT`, on
+#: purpose (§5). The two are reached by different subjects through different
+#: authorization — a workspace Role for one, the two-gate Agent check for the
+#: other — and collapsing them into one endpoint string would let a replayed
+#: request from one path be satisfied by a row the other path wrote.
+END_USER_RUNS_ENDPOINT = "POST /api/v1/end-user/sessions/{session_id}/runs"
 
 
 class RunCoordinationError(Exception):
@@ -169,6 +175,34 @@ class RunCoordination:
             raise UnknownSession
         return session
 
+    async def create_end_user_session(
+        self,
+        workspace_id: UUID,
+        end_user_id: UUID,
+        agent_id: UUID,
+        session_mode: SessionMode,
+        request_id: str,
+    ) -> SessionSnapshot:
+        """§5's Session half, for a subject with no workspace Role at all.
+
+        No `_require_role`: an end user is never a member, so that check has
+        nothing to look up. Authorization already happened one layer up —
+        the caller reaches `agent_id` only by resolving an alias through
+        `AgentCatalog.resolve_end_user_agent`'s two gates — so this only
+        writes what that resolution already approved. `caller_type=end_user`
+        here is what makes this Session's private memory the end user's own
+        (`_remembered`'s own docstring) rather than nobody's.
+        """
+        return await self._store.create_session(
+            CreateSessionCommand(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                caller=CallerIdentity(CallerType.END_USER, end_user_id),
+                session_mode=session_mode,
+                request_id=request_id,
+            )
+        )
+
     async def list_sessions(
         self, workspace_id: UUID, actor: Actor
     ) -> Sequence[SessionSnapshot]:
@@ -202,6 +236,57 @@ class RunCoordination:
                 message=message,
                 request_id=request_id,
                 delivery_mode=None if delivery_mode is None else delivery_mode.value,
+            )
+        )
+
+    async def submit_end_user_run(
+        self,
+        workspace_id: UUID,
+        end_user_id: UUID,
+        session_id: UUID,
+        text: str,
+        idempotency_key: str | None,
+        request_id: str,
+    ) -> AcceptedRun:
+        """§5's Run half.
+
+        `session_id` must be a Session this same end user started. Checked
+        here rather than left implicit: a Session's private-memory subject is
+        read off *its own* `caller_type`/`caller_id`, never off whoever is
+        submitting a Run against it (`_remembered`'s own docstring), so an end
+        user who guessed another end user's `session_id` would otherwise be
+        able to speak into that other subject's conversation — and have it
+        remembered as theirs.
+
+        `RunCapabilities` is `can_control=True, can_retry=True`
+        unconditionally: there is no workspace Role to read one off, and both
+        capabilities are about this Run and nobody else's — the same reason
+        `_require_role`'s WRITERS/READERS split does not apply here at all.
+        """
+        session = await self._store.get_session(workspace_id, session_id)
+        if session is None:
+            raise UnknownSession
+        if (
+            session.caller.caller_type is not CallerType.END_USER
+            or session.caller.caller_id != end_user_id
+        ):
+            raise ForbiddenRunAction
+        key = _require_idempotency_key(idempotency_key)
+        message = CanonicalMessage("user", (TextBlock(text=text),))
+        return await self._store.accept_run(
+            AcceptRunCommand(
+                workspace_id=workspace_id,
+                session_id=session_id,
+                caller=CallerIdentity(CallerType.END_USER, end_user_id),
+                capabilities=RunCapabilities(can_control=True, can_retry=True),
+                endpoint=END_USER_RUNS_ENDPOINT,
+                idempotency_key=key,
+                request_fingerprint=fingerprint_request(
+                    "POST", END_USER_RUNS_ENDPOINT, workspace_id, session_id, message, None
+                ),
+                message=message,
+                request_id=request_id,
+                delivery_mode=None,
             )
         )
 

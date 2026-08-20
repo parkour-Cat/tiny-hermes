@@ -179,7 +179,12 @@ class SqlEndUserStore:
     # -- end_user_sessions, design §4.2-4.3 --------------------------------
 
     async def create_session(
-        self, end_user_id: UUID, workspace_id: UUID, token_digest: str, expires_at: datetime
+        self,
+        end_user_id: UUID,
+        workspace_id: UUID,
+        token_digest: str,
+        expires_at: datetime,
+        agents: Sequence[str],
     ) -> None:
         self._session.add(
             EndUserSessionRow(
@@ -188,6 +193,7 @@ class SqlEndUserStore:
                 token_digest=token_digest,
                 expires_at=expires_at,
                 revoked_at=None,
+                agents=list(agents),
             )
         )
 
@@ -202,7 +208,7 @@ class SqlEndUserStore:
         )
         if row is None or row.revoked_at is not None:
             return None
-        return StoredEndUserSession(row.end_user_id, row.workspace_id)
+        return StoredEndUserSession(row.end_user_id, row.workspace_id, tuple(row.agents))
 
     async def revoke_sessions(self, end_user_id: UUID, workspace_id: UUID, now: datetime) -> None:
         await self._session.execute(

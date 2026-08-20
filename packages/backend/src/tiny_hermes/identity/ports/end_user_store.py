@@ -51,6 +51,9 @@ class StoredEndUserSession:
 
     end_user_id: UUID
     workspace_id: UUID
+    #: The credential's own `agents` claim, copied in at exchange time. See
+    #: `EndUserSessionRow.agents` for why this row is where it has to live.
+    agents: tuple[str, ...] = ()
 
 
 class EndUserStore(Protocol):
@@ -92,7 +95,12 @@ class EndUserStore(Protocol):
     ) -> UpsertedIdentity: ...
 
     async def create_session(
-        self, end_user_id: UUID, workspace_id: UUID, token_digest: str, expires_at: datetime
+        self,
+        end_user_id: UUID,
+        workspace_id: UUID,
+        token_digest: str,
+        expires_at: datetime,
+        agents: Sequence[str],
     ) -> None: ...
 
     async def find_session(

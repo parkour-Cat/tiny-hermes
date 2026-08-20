@@ -14,6 +14,7 @@ proves it for a disabled one: a spy on `jwt.decode` shows the expensive
 signature check ran, not a wall-clock measurement.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -177,9 +178,16 @@ class FakeEndUserStore:
         return UpsertedIdentity(end_user_id=end_user_id, erased_at=erased_at)
 
     async def create_session(
-        self, end_user_id: UUID, workspace_id: UUID, token_digest: str, expires_at: datetime
+        self,
+        end_user_id: UUID,
+        workspace_id: UUID,
+        token_digest: str,
+        expires_at: datetime,
+        agents: Sequence[str],
     ) -> None:
-        self.sessions[token_digest] = StoredEndUserSession(end_user_id, workspace_id)
+        self.sessions[token_digest] = StoredEndUserSession(
+            end_user_id, workspace_id, tuple(agents)
+        )
 
     async def find_session(
         self, token_digest: str, now: datetime
@@ -408,7 +416,9 @@ async def test_authenticate_resolves_a_stored_session() -> None:
 
     result = await svc.authenticate(exchanged.session_token, NOW)
 
-    assert result == EndUserSession(exchanged.end_user_id, WORKSPACE_ID)
+    assert result == EndUserSession(
+        exchanged.end_user_id, WORKSPACE_ID, ("support-bot",)
+    )
 
 
 async def test_authenticate_rejects_an_unknown_token() -> None:
@@ -466,7 +476,7 @@ async def test_disabling_an_issuer_does_not_revoke_an_already_exchanged_session(
         store.issuers[key] = replace(record, status=ChannelIssuerStatus.DISABLED)
 
     assert await svc.authenticate(exchanged.session_token, NOW) == EndUserSession(
-        exchanged.end_user_id, WORKSPACE_ID
+        exchanged.end_user_id, WORKSPACE_ID, ("support-bot",)
     )
 
 

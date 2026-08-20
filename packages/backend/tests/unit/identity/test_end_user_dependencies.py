@@ -59,7 +59,7 @@ async def test_a_valid_session_resolves_to_the_end_user_who_owns_it() -> None:
 
     caller = await resolve_end_user_caller(service, exchanged.session_token)
 
-    assert caller == EndUserCaller(exchanged.end_user_id, WORKSPACE_ID)
+    assert caller == EndUserCaller(exchanged.end_user_id, WORKSPACE_ID, ("support-bot",))
 
 
 def test_no_end_user_cookie_passes_through() -> None:
