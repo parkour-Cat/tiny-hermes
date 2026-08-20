@@ -120,10 +120,11 @@ def both_agents(client: TestClient, scope: dict[str, str]) -> None:
 
 
 def _sign_in(client: TestClient, workspace_id: str, sub: str, agents: list[str]) -> None:
+    credential = _credential(workspace_id=workspace_id, sub=sub, agents=agents)
     exchanged = client.post(
         "/api/v1/end-user/sessions",
         headers={
-            "Authorization": f"Bearer {_credential(workspace_id=workspace_id, sub=sub, agents=agents)}",
+            "Authorization": f"Bearer {credential}",
             "X-Workspace-Id": workspace_id,
         },
     )

@@ -33,6 +33,7 @@ from tiny_hermes.model_catalog.presentation.routes import model_endpoint_router
 from tiny_hermes.outbound.presentation.routes import outbound_scope_router
 from tiny_hermes.runs.presentation.approval_routes import approval_router
 from tiny_hermes.runs.presentation.completions import completions_router
+from tiny_hermes.runs.presentation.end_user_approval_routes import end_user_approval_router
 from tiny_hermes.runs.presentation.end_user_routes import end_user_run_router
 from tiny_hermes.runs.presentation.events import run_event_router
 from tiny_hermes.runs.presentation.routes import run_router, session_router
@@ -123,6 +124,10 @@ def create_app(
     # workspace Role, so there is no console session for the guard to reject
     # in the first place.
     app.include_router(end_user_run_router(resources))
+    # §4.6's matrix, 仅发起人本人 row: the end user who owns a
+    # `user_confirmation` answers it here, never through `approval_router`
+    # above, which is `_CONSOLE_ONLY` and would refuse the cookie this needs.
+    app.include_router(end_user_approval_router(resources))
     # §4.6's "本人" row for an end user — see the module's own docstring for
     # why this cannot be `subject_router` with a second auth branch.
     app.include_router(end_user_subject_router(resources))

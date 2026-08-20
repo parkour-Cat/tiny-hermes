@@ -14,7 +14,6 @@ until this task tried to build its consumer.
 """
 
 from collections.abc import Callable
-from typing import Any
 
 from sqlalchemy import Inspector, inspect
 from sqlalchemy.ext.asyncio import AsyncEngine
