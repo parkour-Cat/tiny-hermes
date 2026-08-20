@@ -30,7 +30,7 @@ from tiny_hermes.agents.domain.models import (
 )
 from tiny_hermes.runs.application.tool_answers import answer_http_call
 from tiny_hermes.runs.domain.approval import ApprovalType, NormalizedCall
-from tiny_hermes.runs.domain.models import RunEventType, ToolCallBlock
+from tiny_hermes.runs.domain.models import CallerType, RunEventType, ToolCallBlock
 from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalVerdict
 from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolAnswer
 from tiny_hermes.runs.ports.store import BudgetSummary, ExecutionContext
@@ -133,7 +133,9 @@ def writer() -> BoundOperation:
 
 
 def context(
-    *operations: BoundOperation, policy: WritePolicy | None = None
+    *operations: BoundOperation,
+    policy: WritePolicy | None = None,
+    caller_type: CallerType | None = None,
 ) -> ExecutionContext:
     return ExecutionContext(
         run_id=uuid4(),
@@ -142,6 +144,7 @@ def context(
         history=(),
         cancel_requested=False,
         pause_requested=False,
+        caller_type=caller_type,
         budget=BudgetSummary(
             max_execution_seconds=900,
             consumed_execution_ms=0,
@@ -265,6 +268,25 @@ async def test_an_external_write_is_asked_of_an_administrator() -> None:
 
     assert gate.types == [ApprovalType.GOVERNANCE_APPROVAL]
     assert gate.permissions == ["http.orders.write"]
+
+
+async def test_an_end_users_own_write_opens_a_user_confirmation_instead() -> None:
+    """End-user entry design §5: the same `governance` policy asks a
+    different person depending on whose Run this is. A `caller_type=
+    end_user` Run is that end user's own conversation, so the write it
+    triggers is their own write — answered by them, not by a workspace
+    administrator standing in for them."""
+    gate = Gate()
+
+    await answer_http_call(
+        Sender(),
+        context(writer(), policy=WritePolicy.GOVERNANCE, caller_type=CallerType.END_USER),
+        call("http.orders.createOrder"),
+        CLAIM,
+        gate,
+    )
+
+    assert gate.types == [ApprovalType.USER_CONFIRMATION]
 
 
 async def test_the_approval_is_bound_to_the_composed_request() -> None:

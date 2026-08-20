@@ -25,7 +25,7 @@ from tiny_hermes.agents.domain.models import (
 )
 from tiny_hermes.runs.application.tool_answers import answer_mcp_call
 from tiny_hermes.runs.domain.approval import ApprovalType, NormalizedCall
-from tiny_hermes.runs.domain.models import RunEventType, ToolCallBlock
+from tiny_hermes.runs.domain.models import CallerType, RunEventType, ToolCallBlock
 from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalVerdict
 from tiny_hermes.runs.ports.http_calls import EgressClaim
 from tiny_hermes.runs.ports.mcp import BoundMcpTool, McpAnswer, McpRevalidation
@@ -78,6 +78,7 @@ class Gateway:
 class Gate:
     verdict: ApprovalVerdict = ApprovalVerdict.REQUESTED
     asked: list[NormalizedCall] = field(default_factory=list[NormalizedCall])
+    types: list[ApprovalType] = field(default_factory=list[ApprovalType])
     permissions: list[str | None] = field(default_factory=list[str | None])
 
     async def check(
@@ -90,8 +91,9 @@ class Gate:
         call: NormalizedCall,
         required_permission: str | None,
     ) -> ApprovalCheck:
-        del run_id, approval_type, tool, call_id
+        del run_id, tool, call_id
         self.asked.append(call)
+        self.types.append(approval_type)
         self.permissions.append(required_permission)
         return ApprovalCheck(self.verdict, uuid4())
 
@@ -108,7 +110,11 @@ def bound(name: str = "search", server: str = "docs") -> BoundMcpTool:
     )
 
 
-def context(policy: WritePolicy | None = WritePolicy.PREAUTHORIZED) -> ExecutionContext:
+def context(
+    policy: WritePolicy | None = WritePolicy.PREAUTHORIZED,
+    *,
+    caller_type: CallerType | None = None,
+) -> ExecutionContext:
     return ExecutionContext(
         run_id=uuid4(),
         state_version=1,
@@ -116,6 +122,7 @@ def context(policy: WritePolicy | None = WritePolicy.PREAUTHORIZED) -> Execution
         history=(),
         cancel_requested=False,
         pause_requested=False,
+        caller_type=caller_type,
         budget=BudgetSummary(
             max_execution_seconds=900,
             consumed_execution_ms=0,
@@ -260,6 +267,25 @@ async def test_every_mcp_call_is_treated_as_one_that_might_change_something() ->
     assert outcome.result is None
     assert gateway.called == []
     assert gate.permissions == ["mcp.docs.call"]
+    assert gate.types == [ApprovalType.GOVERNANCE_APPROVAL]
+
+
+async def test_an_end_users_own_mcp_write_opens_a_user_confirmation_instead() -> None:
+    """The same branch `test_http_tool_answers.py` proves for an HTTP write
+    (end-user entry design §5): a `caller_type=end_user` Run's own write asks
+    that end user, not a workspace administrator."""
+    gate = Gate()
+
+    await answer_mcp_call(
+        Gateway(),
+        context(WritePolicy.GOVERNANCE, caller_type=CallerType.END_USER),
+        call("mcp.docs.search"),
+        (bound(),),
+        CLAIM,
+        gate,
+    )
+
+    assert gate.types == [ApprovalType.USER_CONFIRMATION]
 
 
 async def test_an_approved_call_runs() -> None:
