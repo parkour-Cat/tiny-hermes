@@ -211,6 +211,28 @@ flowchart LR
 
 - 五个阶段的出口检查全部通过。
 - 产品设计 §27.2 的 9 个场景全部有自动检查，或有证据的人工验收记录。
+  **状态（2026-08-20）：七条完全满足，一条刚补齐，一条有条件。**
+
+  | # | 场景 | 证据 |
+  |---|---|---|
+  | 1 | Goal 三种判断 + 可恢复暂停 | `test_goal.py`、`test_worker_goal.py`、`test_external_wait.py`、`test_budget_expansion.py` |
+  | 2 | 并行子 Agent、Artifact 传文件、树**与重试链**共享根预算 | `test_child_runs.py`（含 `test_retrying_a_child_keeps_it_on_the_trees_budget`，本次补） |
+  | 3 | 子 Agent 读不到父私有记忆、不能扩大权限 | `test_child_runs.py`、`test_delegation.py`、`test_child_waits.py` |
+  | 4 | 两类记忆按策略写入 | `test_memory_write.py` |
+  | 5 | 技能提案到不可变版本 | `integration/skills/`、`skills.spec.ts` |
+  | 6 | 审批队列、终端用户不能批治理、参数变化失效、ServiceAccount 限制 | 前三项 `test_approvals.py` / `test_approval.py`；第四项见下 |
+  | 7 | 压缩保留原始引用、装不下则暂停 | `test_context_budget.py` |
+  | 8 | egress-proxy 唯一出站、四层交集 | `unit/outbound/`（5 条架构测试）、`integration/egress/` |
+  | 9 | 两次权限检查、schema 超预算暂停 | `test_mcp_tools.py` |
+
+  **场景 6 的第四句成立，但成立的原因是错的，不能就这样勾掉。**
+  「无 EndUser 的 ServiceAccount Run 只能使用预授权或治理审批」今天是真的——
+  但不是因为 ServiceAccount 被限制住了，而是因为**谁都拿不到用户确认**：
+  `USER_CONFIRMATION` 在整个 `src` 里只有四处引用，全是枚举定义和消费端，
+  `tool_answers.py` 只产生 `GOVERNANCE_APPROVAL`。M2C 的验收记录第 5 节已经
+  写明这一点。等 M3 的终端用户入口把生产者接上，这一句才第一次被真正检验。
+  **刻意没有为它补测试**：那个状态今天没有真实到达路径，要伪造一行审批记录
+  才能让它发生，那样这一格会变绿而掩盖真问题。
 - 全新 Linux Docker 主机可按文档启动，完成一次多轮 Goal 任务与一次并行子 Agent 委派。
 - `egress-proxy` 是唯一出站路径，架构测试证明没有旁路。
 - 本里程碑新增的每一种暂停——`limit`、`context_overflow`、`tool_budget_exceeded`、`external_timeout`、审批相关——都演示过恢复，且恢复不重置累计安全阀。

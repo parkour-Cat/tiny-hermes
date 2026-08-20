@@ -838,3 +838,85 @@ async def test_the_api_says_a_Run_is_part_of_a_tree(
     assert len(delivered) == 1
     said = "".join(part.get("text", "") for part in delivered[0]["parts"])
     assert all(child["id"] in said for child in children)
+
+
+async def test_retrying_a_child_keeps_it_on_the_trees_budget(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+) -> None:
+    """§27.2's second scenario names the task tree **and its retry chain** in
+    one sentence, and this is the square where the two cross.
+
+    That a tree shares one root is asserted above; that a retry chain shares
+    one root has been true since M2A. Nobody had put a retry *on a child*,
+    which is where a derived Run could quietly be handed a budget of its own —
+    `derive_retry` reads the source's root, and a child's root is the tree's,
+    but "it follows from two things that are each tested" is not the same as
+    tested.
+
+    The child fails at a replay-safe checkpoint so there is something to retry.
+    """
+    workspace_id = scope["X-Workspace-Id"]
+    for alias, scenario in (("reader", "fail_replay_safe"), ("checker", "complete")):
+        _publish(
+            client,
+            scope,
+            alias,
+            {
+                **VALID_SPEC,
+                "model_policy": {"provider": "deterministic", "scenario": scenario},
+            },
+        )
+    parent_agent = _publish(
+        client,
+        scope,
+        "coordinator",
+        {
+            **VALID_SPEC,
+            "model_policy": {"provider": "deterministic", "scenario": "delegate_once"},
+            "tools": ["agent.delegate"],
+            "delegation": {
+                "max_parallel": 2,
+                "children": [{"alias": "reader"}, {"alias": "checker"}],
+            },
+        },
+    )
+    parent_run = str(
+        client.post(
+            "/api/v1/runs",
+            headers={**scope, "Idempotency-Key": "child-retry"},
+            json={"session_id": session_for(parent_agent), "input": "reader,checker"},
+        ).json()["id"]
+    )
+
+    await _drain(engine, workspace_id)
+
+    failed = (
+        await _rows(
+            engine,
+            "SELECT id, budget_root_run_id FROM runs "
+            "WHERE parent_run_id = :p AND status = 'failed'",
+            p=UUID(parent_run),
+        )
+    )[0]
+    assert failed.budget_root_run_id == UUID(parent_run)
+
+    derived = client.post(
+        f"/api/v1/runs/{failed.id}/retry",
+        headers={**scope, "Idempotency-Key": "child-retry-derived"},
+        json={},
+    )
+    assert derived.status_code == 201, derived.text
+
+    # The derived Run is measured against the whole tree, not against the child
+    # it came from and not against itself.
+    assert derived.json()["budget_root_run_id"] == parent_run
+
+    scopes = await _rows(
+        engine,
+        "SELECT root_run_id FROM run_budget_scopes WHERE root_run_id = ANY(:ids)",
+        ids=[UUID(parent_run), failed.id, UUID(str(derived.json()["id"]))],
+    )
+    assert len(scopes) == 1, "a retried child must not get a budget row of its own"
