@@ -41,6 +41,15 @@ class ServiceAccountStatus(StrEnum):
     DISABLED = "disabled"
 
 
+class ChannelIssuerStatus(StrEnum):
+    """Design §4.3: disabling a row invalidates that issuer's *new* credentials
+    immediately. A session already exchanged is unaffected until it is
+    separately revoked — a real trade documented there, not a gap here."""
+
+    ACTIVE = "active"
+    DISABLED = "disabled"
+
+
 API_KEY_SCOPES = frozenset({"runs.read", "runs.write", "runs.control", "agents.read"})
 TOKEN_PREFIX = "thk_"  # noqa: S105 - public token prefix, not a secret
 TOKEN_PREFIX_LENGTH = 8
