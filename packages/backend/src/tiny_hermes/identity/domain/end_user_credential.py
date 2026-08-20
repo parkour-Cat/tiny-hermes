@@ -206,7 +206,11 @@ def verify(
         if iat_at is None or iat_at > now + CLOCK_SKEW:
             return _refused()
 
-    if exp_at <= now - CLOCK_SKEW:
+    if exp_at <= now:
+        # No skew here on purpose: §4.1 grants the 60-second allowance to
+        # `nbf` and `iat` only, and §8 lists expiry as a flat refusal — a
+        # token past `exp` is refused at the instant it passes, not up to a
+        # minute later.
         return _refused()
 
     if exp_at - now > MAX_CREDENTIAL_LIFETIME:

@@ -241,6 +241,23 @@ def test_an_expired_credential_is_refused() -> None:
     assert result == Refusal(RefusalReason.INVALID)
 
 
+def test_a_credential_expired_by_one_second_is_refused() -> None:
+    """No grace period on `exp`: design §4.1 grants the 60-second clock skew
+    to `nbf` and `iat` only, and §8 lists expiry as a flat refusal. A token
+    one second past `exp` sits well inside the 60-second skew window, so this
+    is the case that catches the skew leaking onto the wrong claim."""
+    token = rs256(
+        claims(
+            iat=int((NOW - timedelta(minutes=20)).timestamp()),
+            exp=int((NOW - timedelta(seconds=1)).timestamp()),
+        )
+    )
+
+    result = verify(token, issuer_record(), NOW)
+
+    assert result == Refusal(RefusalReason.INVALID)
+
+
 def test_a_credential_not_yet_valid_is_refused() -> None:
     token = rs256(claims(nbf=int((NOW + timedelta(minutes=5)).timestamp())))
 
