@@ -1,5 +1,32 @@
 # Development
 
+## What this is
+
+tiny-hermes is a **轻量 Hermes 内核预览** — a lightweight Hermes kernel. An
+Agent can judge for itself whether a task is done, run for a long time without
+bursting its context window, load a workspace's skills, remember the person it
+works with, and hand pieces of work to other Agents in parallel. Every one of
+those runs on the same Run pipeline: one Worker, one state machine, one set of
+checkpoints and events.
+
+**It is not an enterprise delivery product, and this section exists so nobody
+has to find that out by looking.** These do not exist yet and are M3:
+
+- An end-user web chat. The console is an operator's tool; there is no place
+  for the person an Agent is working *for* to talk to it.
+- A Feishu adapter. `docs/superpowers/verification/2026-08-13-m1-feishu.md` is
+  a laboratory note and says so in its first paragraph.
+- OIDC. Sign-in is this platform's own accounts and service-account keys.
+- Audit query and export. Audit rows are written; nothing reads them back out.
+- A full task tree. A Run's detail page shows its parent and its children, one
+  level, which is what §13 delivers.
+
+Two more limits worth knowing before you build on it. HTTP and MCP tools
+**cannot be delegated** to a child Agent — that fails closed, so a delegated
+child calls none of them. And §24.1's performance thresholds have been shown
+not to regress from 0.1, but have **not** been certified on the Linux 8 vCPU /
+16 GiB reference host the product design requires.
+
 ## Requirements
 
 - Python 3.12
