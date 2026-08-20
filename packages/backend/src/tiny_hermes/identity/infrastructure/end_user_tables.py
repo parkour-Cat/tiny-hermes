@@ -117,6 +117,14 @@ class ChannelIssuerRow(IdMixin, CreatedAtMixin, Base):
         # A verifier needs a key from somewhere. Neither column is required on
         # its own — an issuer may rotate through a JWKS or hand over one fixed
         # key — but a row with neither is one nothing could ever verify against.
+        #
+        # This only catches the gross error (neither key source given).
+        # `EndUserIdentityService.register_issuer` enforces the stricter rule
+        # this schema does not: exactly one, not "at least one". A row with
+        # both set is not something this schema can express as invalid, but
+        # it is a configuration nobody should reach for on purpose — with two
+        # key sources on one row, which one a given exchange actually trusts
+        # stops being obvious from the row itself.
         CheckConstraint(
             "public_key IS NOT NULL OR jwks_url IS NOT NULL",
             name="ck_channel_issuers_key_source",
