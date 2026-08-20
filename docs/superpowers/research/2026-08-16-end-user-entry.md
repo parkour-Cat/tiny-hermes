@@ -74,6 +74,16 @@ count suggests, and much smaller than rebuilding the UI.
 
 ## 4. The decisions this needs, which are the product's and not the code's
 
+> **决定于 2026-08-20，见产品设计 v2.5 §4.5.1–§4.5.4。** 四条都已回答：身份由企业
+> 签发短期凭证、平台只做映射；Agent 分配是平台闸门与企业分配两层；开发者可见状态
+> 与事件、不可见消息正文；聊天界面是独立应用而非控制台路由。以下原文保留，因为它
+> 记录了当时为什么答不了——那份不确定本身是这份笔记最有用的部分。
+>
+> 一处更正:本节写「§4.5 只说了身份体系是分开的,没说它是什么」,当时没有引到
+> **§278 与 §282** ——它们其实已经定下了 `EndUser`、`ExternalIdentity` 和
+> `workspace_id + channel + external_user_id` 这个唯一键。所以真正没答的只是
+> **Web 渠道的 `external_user_id` 从哪来**,比本节框的范围小。
+
 None of these can be inferred from the repository. They are listed in the
 order that blocks the most work.
 
