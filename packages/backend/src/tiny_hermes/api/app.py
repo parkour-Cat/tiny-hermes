@@ -25,6 +25,7 @@ from tiny_hermes.identity.presentation.end_user_routes import (
 from tiny_hermes.identity.presentation.machine_routes import machine_router
 from tiny_hermes.identity.presentation.routes import identity_router
 from tiny_hermes.mcp.presentation.routes import mcp_router
+from tiny_hermes.memory.presentation.end_user_subject_routes import end_user_subject_router
 from tiny_hermes.memory.presentation.routes import memory_router
 from tiny_hermes.memory.presentation.subject_routes import subject_router
 from tiny_hermes.model_catalog.presentation.pricing_routes import pricing_router
@@ -122,6 +123,9 @@ def create_app(
     # workspace Role, so there is no console session for the guard to reject
     # in the first place.
     app.include_router(end_user_run_router(resources))
+    # §4.6's "本人" row for an end user — see the module's own docstring for
+    # why this cannot be `subject_router` with a second auth branch.
+    app.include_router(end_user_subject_router(resources))
     return app
 
 
