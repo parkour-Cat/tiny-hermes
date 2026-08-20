@@ -119,7 +119,44 @@ class SqlEndUserStore:
     async def upsert_external_identity(
         self, workspace_id: UUID, channel: str, external_user_id: str
     ) -> UpsertedIdentity:
-        existing = await self._session.execute(
+        existing = await self._find_identity(workspace_id, channel, external_user_id)
+        if existing is not None:
+            return existing
+
+        end_user = EndUserRow(workspace_id=workspace_id)
+        try:
+            # A savepoint, so losing the race costs this insert rather than
+            # whatever else the caller's transaction had already done (the
+            # same technique `SqlSkillStore.add_version` uses for its own
+            # first-writer-wins race). Two tabs exchanging the same
+            # enterprise credential at once both pass the SELECT above
+            # before either has written a row — `uq_external_identities_*`
+            # is what actually decides who was first, and the loser should
+            # get the winner's `end_user_id` rather than an unhandled
+            # `IntegrityError` for what is an ordinary double-open.
+            async with self._session.begin_nested():
+                self._session.add(end_user)
+                await self._session.flush()
+                self._session.add(
+                    ExternalIdentityRow(
+                        workspace_id=workspace_id,
+                        channel=channel,
+                        external_user_id=external_user_id,
+                        end_user_id=end_user.id,
+                    )
+                )
+                await self._session.flush()
+        except IntegrityError:
+            raced = await self._find_identity(workspace_id, channel, external_user_id)
+            if raced is None:
+                raise
+            return raced
+        return UpsertedIdentity(end_user_id=end_user.id, erased_at=None)
+
+    async def _find_identity(
+        self, workspace_id: UUID, channel: str, external_user_id: str
+    ) -> UpsertedIdentity | None:
+        result = await self._session.execute(
             select(ExternalIdentityRow.end_user_id, EndUserRow.erased_at)
             .join(EndUserRow, EndUserRow.id == ExternalIdentityRow.end_user_id)
             .where(
@@ -128,23 +165,8 @@ class SqlEndUserStore:
                 ExternalIdentityRow.external_user_id == external_user_id,
             )
         )
-        row = existing.one_or_none()
-        if row is not None:
-            return UpsertedIdentity(end_user_id=row[0], erased_at=row[1])
-
-        end_user = EndUserRow(workspace_id=workspace_id)
-        self._session.add(end_user)
-        await self._session.flush()
-        self._session.add(
-            ExternalIdentityRow(
-                workspace_id=workspace_id,
-                channel=channel,
-                external_user_id=external_user_id,
-                end_user_id=end_user.id,
-            )
-        )
-        await self._session.flush()
-        return UpsertedIdentity(end_user_id=end_user.id, erased_at=None)
+        row = result.one_or_none()
+        return None if row is None else UpsertedIdentity(end_user_id=row[0], erased_at=row[1])
 
     async def end_user_exists(self, workspace_id: UUID, end_user_id: UUID) -> bool:
         value = await self._session.scalar(

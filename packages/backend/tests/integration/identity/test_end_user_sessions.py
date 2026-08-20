@@ -13,9 +13,10 @@ request used, which is what makes the jar carry the cookie on the next
 request the way a real browser would.
 """
 
+import asyncio
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import jwt
 import pytest
@@ -23,8 +24,10 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from tiny_hermes.api.app import create_app
+from tiny_hermes.identity.application.end_user_service import EndUserIdentityService
+from tiny_hermes.identity.infrastructure.sql_end_user_store import SqlEndUserStore
 from tiny_hermes.identity.presentation.end_user_dependencies import END_USER_SESSION_COOKIE
 from tiny_hermes.shared.config import Settings
 
@@ -423,3 +426,53 @@ def test_an_end_user_session_cookie_cannot_reach_this_tasks_own_admin_routes(
     response = client.request(method, path, headers=scope, json=json_body)
 
     assert response.status_code == 403, response.text
+
+
+# -- the race: two tabs open the assistant on the same subject at once ------
+
+
+class _PassthroughKeySource:
+    """Direct pass-through: this test's issuer uses a fixed public key, not
+    a JWKS URL, so JWKS resolution is never exercised here."""
+
+    async def resolve(
+        self, *, public_key: str | None, jwks_url: str | None, token: str
+    ) -> str | None:
+        del jwks_url, token
+        return public_key
+
+
+async def test_two_simultaneous_first_time_exchanges_for_the_same_subject_both_succeed(
+    client: TestClient,
+    workspace_id: str,
+    registered_issuer: Callable[..., dict[str, object]],
+    engine: AsyncEngine,
+) -> None:
+    """The realistic trigger is someone opening the assistant in two browser
+    tabs at once: both requests read `external_identities` before either has
+    written to it, so both try to create the first identity for this
+    subject. The `UNIQUE` constraint is what actually decides who is first
+    — the loser must come away with the winner's `end_user_id`, not a raw
+    500 for what is an ordinary double-open.
+    """
+    registered_issuer()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def attempt(index: int) -> UUID:
+        async with factory.begin() as session:
+            service = EndUserIdentityService(
+                SqlEndUserStore(session), _PassthroughKeySource(), timedelta(hours=8)
+            )
+            exchanged = await service.exchange(
+                _credential(workspace_id=workspace_id),
+                UUID(workspace_id),
+                datetime.now(UTC),
+                f"req-race-{index}",
+            )
+            return exchanged.end_user_id
+
+    results = await asyncio.gather(attempt(1), attempt(2), return_exceptions=True)
+
+    failures = [value for value in results if isinstance(value, BaseException)]
+    assert not failures, failures
+    assert results[0] == results[1]
