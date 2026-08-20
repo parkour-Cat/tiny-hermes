@@ -320,6 +320,36 @@ def test_a_credential_from_a_disabled_issuer_is_refused() -> None:
     assert result == Refusal(RefusalReason.INVALID)
 
 
+def test_a_disabled_issuer_still_pays_for_signature_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§8 wants a disabled/unregistered issuer indistinguishable from every
+    other refusal, specifically so an attacker cannot probe which issuers
+    exist. A short-circuit that refuses a disabled issuer *before*
+    `jwt.decode` runs answers faster than a bad-signature refusal on an
+    active issuer, which is exactly the timing side-channel that leaks it.
+    `jwt.decode` — the expensive asymmetric verification — must run before
+    the disabled-issuer refusal is returned, same as every other path."""
+    token = rs256(claims())
+    calls: list[str] = []
+    real_decode = jwt.decode
+
+    def spy_decode(*args: object, **kwargs: object) -> dict[str, object]:
+        calls.append("decoded")
+        return real_decode(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "tiny_hermes.identity.domain.end_user_credential.jwt.decode", spy_decode
+    )
+
+    result = verify(
+        token, issuer_record(status=ChannelIssuerStatus.DISABLED), NOW
+    )
+
+    assert result == Refusal(RefusalReason.INVALID)
+    assert calls == ["decoded"]
+
+
 # -- malformed claims ---------------------------------------------------------
 
 

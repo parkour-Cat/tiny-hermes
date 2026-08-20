@@ -160,12 +160,6 @@ def verify(
 ) -> VerifiedCredential | Refusal:
     """The whole check, claim by claim, or the one refusal that covers all
     of them but one (module docstring)."""
-    if issuer_record.status is not ChannelIssuerStatus.ACTIVE:
-        # §4.3: disabling a row invalidates its issuer's *new* credentials
-        # immediately. A token that verifies structurally against a disabled
-        # row is exactly the credential this check exists to catch.
-        return _refused()
-
     try:
         claims = jwt.decode(
             token,
@@ -186,6 +180,25 @@ def verify(
         # Bad signature, wrong `iss`, wrong `aud`, or a missing required
         # claim all raise a subclass of this and all mean the same thing to
         # a caller: no subject.
+        return _refused()
+
+    if issuer_record.status is not ChannelIssuerStatus.ACTIVE:
+        # §4.3: disabling a row invalidates its issuer's *new* credentials
+        # immediately. Checked *after* `jwt.decode` rather than before it on
+        # purpose: `jwt.decode` is where the expensive asymmetric signature
+        # check happens, and §8 wants a disabled issuer indistinguishable
+        # from every other refusal — including in how long the refusal takes
+        # to arrive. Refusing before decode ran would make a disabled issuer
+        # answer faster than a bad-signature refusal on an active one, and
+        # that timing gap is itself a way to probe which issuers exist.
+        #
+        # This only closes the gap *within this function*. A truly
+        # unregistered issuer — one with no `channel_issuers` row at all —
+        # never reaches `verify` carrying a real key to check a signature
+        # against, so the caller's lookup is faster than this whole
+        # function by construction. That half of the channel is the
+        # caller's to close (e.g. by verifying against some fixed dummy key
+        # on a lookup miss), not this one's.
         return _refused()
 
     sub = claims.get("sub")
