@@ -18,7 +18,10 @@ from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.artifacts.presentation.routes import artifact_router
 from tiny_hermes.http_tools.presentation.routes import http_tool_router
 from tiny_hermes.identity.presentation.end_user_dependencies import reject_end_user_caller
-from tiny_hermes.identity.presentation.end_user_routes import end_user_router
+from tiny_hermes.identity.presentation.end_user_routes import (
+    end_user_console_router,
+    end_user_router,
+)
 from tiny_hermes.identity.presentation.machine_routes import machine_router
 from tiny_hermes.identity.presentation.routes import identity_router
 from tiny_hermes.mcp.presentation.routes import mcp_router
@@ -86,8 +89,10 @@ def create_app(
     app.include_router(health_router(selected_readiness))
     # End-user entry design §4.5's first sentence: an end user never reaches
     # any of these. Every router below is a console capability and carries
-    # the guard; `end_user_router` is the one router that must not, since it
-    # is the end user's own entry point.
+    # the guard, including `end_user_console_router` — this task's own
+    # admin routes are not exempt just because they live next to the end
+    # user's entry point in the same module. `end_user_router` is the one
+    # router that must not carry it, since it is that entry point.
     app.include_router(identity_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(machine_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(workspace_router(resources), dependencies=_CONSOLE_ONLY)
@@ -108,6 +113,7 @@ def create_app(
     app.include_router(mcp_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(pricing_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(skill_proposal_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(end_user_console_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(end_user_router(resources))
     return app
 

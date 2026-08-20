@@ -15,6 +15,7 @@ request the way a real browser would.
 
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import jwt
 import pytest
@@ -229,6 +230,11 @@ async def test_disabling_an_issuer_refuses_new_credentials_but_not_the_already_e
     already_exchanged = _exchange(client, workspace_id, _credential(workspace_id=workspace_id))
     assert already_exchanged.status_code == 201
     end_user_id = already_exchanged.json()["end_user_id"]
+    # The console guard (design §8's last row) does not care that this is
+    # the same admin who just exchanged a credential above — a real admin
+    # browser and a real end-user browser never share a cookie jar, so this
+    # drops the one the test picked up standing in for both.
+    del client.cookies[END_USER_SESSION_COOKIE]
 
     disabled = client.post(f"/api/v1/channel-issuers/{issuer['id']}/disable", headers=scope)
     assert disabled.status_code == 200, disabled.text
@@ -264,6 +270,9 @@ async def test_revoking_an_end_users_sessions_invalidates_the_cookie_immediately
     registered_issuer()
     exchanged = _exchange(client, workspace_id, _credential(workspace_id=workspace_id))
     end_user_id = exchanged.json()["end_user_id"]
+    # See the same note in the disable-issuer test above: a real admin
+    # browser never carries this cookie, so the test shouldn't either.
+    del client.cookies[END_USER_SESSION_COOKIE]
 
     revoked = client.delete(f"/api/v1/end-user/sessions/{end_user_id}", headers=scope)
 
@@ -292,9 +301,11 @@ async def test_a_workspace_viewer_cannot_revoke_end_user_sessions(
     registered_issuer()
     exchanged = _exchange(client, workspace_id, _credential(workspace_id=workspace_id))
     end_user_id = exchanged.json()["end_user_id"]
-    # The console guard (design §8) does not care who else is signed in —
-    # holding the end-user cookie at all is enough to be refused, which is
-    # exactly what the next few admin calls would hit if it stayed.
+    end_user_cookie = exchanged.cookies.get(END_USER_SESSION_COOKIE)
+    assert end_user_cookie is not None
+    # Cleared here so the admin setup below (itself console calls, already
+    # guarded) is not collaterally blocked by the cookie this test is
+    # actually about — put back just before the call under test.
     del client.cookies[END_USER_SESSION_COOKIE]
 
     async with engine.begin() as connection:
@@ -327,6 +338,11 @@ async def test_a_workspace_viewer_cannot_revoke_end_user_sessions(
     )
     assert login.status_code == 201
     csrf = login.cookies["tiny_hermes_csrf"]
+    # Put back deliberately, right before the guarded call: the console
+    # guard (design §8's last row) refuses on the end-user cookie's
+    # presence alone, regardless of who else is signed in — this proves
+    # that fires here rather than assuming it would.
+    client.cookies.set(END_USER_SESSION_COOKIE, end_user_cookie)
 
     response = client.delete(
         f"/api/v1/end-user/sessions/{end_user_id}",
@@ -361,5 +377,49 @@ def test_an_end_user_session_cookie_cannot_reach_console_endpoints(
     response = client.request(
         method, path, headers={"X-Workspace-Id": workspace_id}
     )
+
+    assert response.status_code == 403, response.text
+
+
+@pytest.mark.parametrize(
+    "method,path,json_body",
+    [
+        (
+            "POST",
+            "/api/v1/channel-issuers",
+            {
+                "channel": "web",
+                "issuer": "https://other.example",
+                "public_key": RSA_PUBLIC_PEM,
+                "allowed_origins": [],
+            },
+        ),
+        ("GET", "/api/v1/channel-issuers", None),
+        ("POST", f"/api/v1/channel-issuers/{uuid4()}/disable", None),
+        ("DELETE", f"/api/v1/end-user/sessions/{uuid4()}", None),
+    ],
+)
+def test_an_end_user_session_cookie_cannot_reach_this_tasks_own_admin_routes(
+    client: TestClient,
+    workspace_id: str,
+    scope: dict[str, str],
+    registered_issuer: Callable[..., dict[str, object]],
+    method: str,
+    path: str,
+    json_body: dict[str, object] | None,
+) -> None:
+    """These four routes are this task's own — `channel_issuers` CRUD and
+    session revocation — and reaching 403 here must come from the console
+    guard, not incidentally from something else that would also refuse.
+    `scope` carries a *valid* CSRF token and the platform admin's own
+    session cookie, both of which are enough on their own to get each of
+    these calls past everything except the guard — which is exactly what
+    makes this prove the guard fired rather than some unrelated check.
+    """
+    registered_issuer()
+    exchanged = _exchange(client, workspace_id, _credential(workspace_id=workspace_id))
+    assert exchanged.status_code == 201
+
+    response = client.request(method, path, headers=scope, json=json_body)
 
     assert response.status_code == 403, response.text

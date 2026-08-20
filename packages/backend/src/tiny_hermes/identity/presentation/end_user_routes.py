@@ -1,5 +1,5 @@
 """Design §3 (issuer registry) and §4.2-4.3 (credential exchange, session
-revocation). Two audiences share this router: a workspace admin manages
+revocation). Two audiences share this module: a workspace admin manages
 `channel_issuers` the same way they manage service accounts, and an end user
 — who never signs in to this platform at all — exchanges an enterprise-signed
 credential for the one thing this platform ever gives them: a session cookie.
@@ -9,6 +9,16 @@ constraint that a new endpoint must never leave that ambiguous. The
 credential-exchange and revocation shapes are the brief's own — a path or a
 cookie attribute changed here is a contract changed with every enterprise
 that already integrated against it.
+
+Two router-building functions, not one, is what makes design §8's last row
+structural rather than incidental here: `end_user_console_router` carries
+every admin capability (issuer CRUD, session revocation) and gets
+`_CONSOLE_ONLY` in `api/app.py` exactly like every other console router;
+`end_user_router` carries only the end user's own entry point and must never
+get that dependency. A single router serving both would force the guard
+onto the credential-exchange route too, or leave it off the admin routes —
+there is no `dependencies=` that expresses "all but one of this router's
+routes."
 """
 
 from datetime import UTC, datetime
@@ -92,7 +102,13 @@ class EndUserSessionResponse(BaseModel):
     expires_at: datetime
 
 
-def end_user_router(resources: ApplicationResources) -> APIRouter:
+def end_user_console_router(resources: ApplicationResources) -> APIRouter:
+    """The admin half: `channel_issuers` CRUD and session revocation. Every
+    route here is a console capability, so `api/app.py` includes this router
+    with `_CONSOLE_ONLY` — the same mechanism every other console router
+    uses, which is what makes an end user's 403 here structural instead of a
+    side effect of these routes needing a session cookie they don't have.
+    """
     router = APIRouter(prefix="/api/v1", tags=["end-user-identity"])
     auth_dependency = resources.auth_service
     end_users_dependency = resources.end_user_identity_service
@@ -187,7 +203,54 @@ def end_user_router(resources: ApplicationResources) -> APIRouter:
             raise _unknown_issuer() from error
         return ChannelIssuerResponse.from_domain(record)
 
-    # -- the end user's own entry point, design §4.2-4.3 --------------------
+    # -- end_user_sessions revocation: also a workspace admin's capability --
+    # (design §4.3 — "the workspace admin may call it now", the endpoint
+    # that makes disabling an issuer, above, apply to whoever is already
+    # signed in rather than only to new credentials)
+
+    @router.delete("/end-user/sessions/{end_user_id}", status_code=status.HTTP_204_NO_CONTENT)
+    async def revoke_end_user_sessions(  # pyright: ignore[reportUnusedFunction]
+        end_user_id: UUID,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        end_users: Annotated[
+            EndUserIdentityService, Depends(end_users_dependency, scope="function")
+        ],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> None:
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            await end_users.revoke_sessions(
+                _actor(user),
+                workspace_id,
+                end_user_id,
+                request.state.request_id,
+                datetime.now(UTC),
+            )
+        except ForbiddenEndUserAction as error:
+            raise forbidden() from error
+        except UnknownEndUser as error:
+            raise AppError(
+                code="end_user_not_found",
+                title="End user not found",
+                status=404,
+                detail="No end user by that identifier is available in this workspace.",
+            ) from error
+
+    return router
+
+
+def end_user_router(resources: ApplicationResources) -> APIRouter:
+    """The end user's own entry point, design §4.2 — never `_CONSOLE_ONLY`.
+    This is the one route in the whole feature an end user is meant to
+    reach with no platform session at all, which is exactly why it does not
+    live in `end_user_console_router`.
+    """
+    router = APIRouter(prefix="/api/v1", tags=["end-user-identity"])
+    end_users_dependency = resources.end_user_identity_service
 
     @router.post(
         "/end-user/sessions",
@@ -229,38 +292,6 @@ def end_user_router(resources: ApplicationResources) -> APIRouter:
         return EndUserSessionResponse(
             end_user_id=exchanged.end_user_id, expires_at=exchanged.expires_at
         )
-
-    @router.delete("/end-user/sessions/{end_user_id}", status_code=status.HTTP_204_NO_CONTENT)
-    async def revoke_end_user_sessions(  # pyright: ignore[reportUnusedFunction]
-        end_user_id: UUID,
-        request: Request,
-        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        end_users: Annotated[
-            EndUserIdentityService, Depends(end_users_dependency, scope="function")
-        ],
-        selected_workspace: WorkspaceHeader = None,
-        session_token: SessionCookie = None,
-        csrf_token: CsrfHeader = None,
-    ) -> None:
-        user = await verify_browser_write(auth, session_token, csrf_token)
-        workspace_id = require_workspace_id(selected_workspace)
-        try:
-            await end_users.revoke_sessions(
-                _actor(user),
-                workspace_id,
-                end_user_id,
-                request.state.request_id,
-                datetime.now(UTC),
-            )
-        except ForbiddenEndUserAction as error:
-            raise forbidden() from error
-        except UnknownEndUser as error:
-            raise AppError(
-                code="end_user_not_found",
-                title="End user not found",
-                status=404,
-                detail="No end user by that identifier is available in this workspace.",
-            ) from error
 
     return router
 
