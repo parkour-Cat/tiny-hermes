@@ -47,8 +47,9 @@ React/Vite），新增 PyJWT。
       三张表，字段见设计 §3。`external_identities` 上
       `UNIQUE (workspace_id, channel, external_user_id)`——§282 的原话，是这套设计
       的地基，不是索引优化。
-- [ ] `CallerType` 增加 `end_user`。`sessions` 与 `runs` 的 `caller_type` CHECK 随之
-      放宽（它们由 `_in_enum` 从枚举生成，所以迁移里要显式重建约束）。
+- [ ] `CallerType` 增加 `end_user`。带 `caller_type` 列的是 `sessions` 与
+      `idempotency_records`——**不是 `runs`**（`runs` 上是 `end_user_id`，没有
+      `caller_type`）。两处 CHECK 由 `_in_enum` 从枚举生成，迁移里要显式重建。
 - [ ] `end_users` **不含**邮箱、姓名等可识别信息。企业若在凭证里给，存
       `external_identities.profile`（JSON）。**一条测试断言 `end_users` 的列里没有
       任何可识别字段**——这是 §344 抹除能保持廉价的前提，写成测试才不会被后来的人
@@ -121,6 +122,9 @@ React/Vite），新增 PyJWT。
 
 ## 5. Run 与记忆：接上已经预留的电
 
+- [ ] 迁移 `20260820_0031`：`memories.subject_type` 的 CHECK 是**硬编码**的
+      `IN ('user', 'service_account')`，不由枚举生成，所以第 1 节没有连带放宽它。
+      终端用户成为记忆主体之前必须先放宽，否则第一条私有记忆就写不进去。
 - [ ] 终端用户创建的 Session：`caller_type='end_user'`、`caller_id=end_user.id`。
 - [ ] `runs.end_user_id` 写入真正的 `EndUser` id（此前只在 `caller_type=user` 时
       写调用者）。
