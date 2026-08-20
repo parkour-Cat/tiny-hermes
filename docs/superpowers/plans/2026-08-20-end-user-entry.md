@@ -131,6 +131,12 @@ React/Vite），新增 PyJWT。
 - [ ] `USER_CONFIRMATION` **第一次有生产者**：终端用户发起的 Run 遇到需要本人确认的
       写操作时，开一个 `user_confirmation` 而不是 `governance_approval`。
       §27.2 场景 6 那格「绿得不对」因此变成真的绿——**验收记录要同步更新那句话**。
+- [ ] **本人能答自己的确认。** 只上生产者不上消费者比不上更糟——审批路由是
+      `_CONSOLE_ONLY` 且会 403 掉终端用户 cookie，于是那个 `user_confirmation`
+      属于谁、谁就答不了，Run 一路挂到过期。§4.6 矩阵写的是「用户确认审批 |
+      终端用户 | 仅发起人本人」，所以要有一条终端用户自己的审批端点，且**只能**
+      答自己发起的、`approval_type=user_confirmation` 的那一条。治理审批对终端
+      用户永远 403，这条不能有例外。
 - [ ] `tests/integration/runs/test_end_user_memory.py`：M2D 的隔离测试换成
       `EndUser` 主体重跑——A 的私有记忆不出现在 B 的同 Agent 会话里，断言的是
       **发给模型的字节**而不是查询结果。
