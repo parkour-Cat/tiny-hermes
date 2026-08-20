@@ -13,7 +13,17 @@ alias the credential never mentioned is the enterprise's own assignment
 decision, and the end user simply does not see it.
 """
 
+from uuid import UUID, uuid4
+
+import pytest
+from tiny_hermes.agents.application.service import (
+    AgentCatalog,
+    EndUserAccessGateClosed,
+    EndUserAccessNotAssigned,
+)
 from tiny_hermes.agents.domain.models import AgentSpec, normalize_agent_spec
+from tiny_hermes.agents.infrastructure.memory_store import MemoryAgentStore
+from tiny_hermes.tenancy.domain.models import Actor, Role
 
 from .test_agent_models import valid_spec
 from .test_model_policy import DETERMINISTIC_HASH
@@ -38,3 +48,95 @@ def test_a_declared_end_user_access_survives_normalization_and_changes_the_hash(
 
     assert document["end_user_access"] == {"enabled": True}
     assert content_hash != DETERMINISTIC_HASH
+
+
+# -- publishing one Agent, ready to be resolved ------------------------------
+
+
+async def _published(
+    *, end_user_access_enabled: bool | None
+) -> tuple[AgentCatalog, MemoryAgentStore, UUID, str]:
+    """A published Agent named "helper", with `end_user_access` set as asked.
+
+    `None` means the field is never written at all — the default an Agent
+    published before this task existed always had.
+    """
+    workspace_id = uuid4()
+    actor = Actor(uuid4(), False)
+    store = MemoryAgentStore()
+    store.roles[(workspace_id, actor.id)] = Role.WORKSPACE_ADMIN
+    catalog = AgentCatalog(store)
+
+    agent = await catalog.create_agent(workspace_id, actor, "Helper", "helper", "req-1")
+    spec_values = dict(valid_spec())
+    if end_user_access_enabled is not None:
+        spec_values["end_user_access"] = {"enabled": end_user_access_enabled}
+    draft = await catalog.replace_draft(workspace_id, actor, agent.id, 1, spec_values, "req-2")
+    await catalog.publish(workspace_id, actor, agent.id, draft.revision, "req-3")
+    return catalog, store, workspace_id, "helper"
+
+
+# -- the four combinations ----------------------------------------------------
+
+
+async def test_gate_open_and_listed_is_permitted() -> None:
+    catalog, _store, workspace_id, alias = await _published(end_user_access_enabled=True)
+
+    found_agent, found_version = await catalog.resolve_end_user_agent(
+        workspace_id, alias, (alias,)
+    )
+
+    assert found_agent.alias == alias
+    assert found_version.version_number == 1
+
+
+async def test_gate_open_but_not_listed_is_refused_as_not_assigned() -> None:
+    catalog, _store, workspace_id, alias = await _published(end_user_access_enabled=True)
+
+    with pytest.raises(EndUserAccessNotAssigned):
+        await catalog.resolve_end_user_agent(workspace_id, alias, ())
+
+
+async def test_gate_closed_but_listed_is_refused_as_gate_closed_and_names_the_alias() -> None:
+    catalog, _store, workspace_id, alias = await _published(end_user_access_enabled=False)
+
+    with pytest.raises(EndUserAccessGateClosed) as excinfo:
+        await catalog.resolve_end_user_agent(workspace_id, alias, (alias,))
+
+    assert excinfo.value.alias == alias
+
+
+async def test_gate_closed_and_not_listed_is_refused_as_not_assigned() -> None:
+    """Both problems at once resolves to the enterprise's, not the author's:
+    listing it would not have been enough on its own either way, so naming
+    the author's switch would send the wrong person to fix it."""
+    catalog, _store, workspace_id, alias = await _published(end_user_access_enabled=False)
+
+    with pytest.raises(EndUserAccessNotAssigned):
+        await catalog.resolve_end_user_agent(workspace_id, alias, ())
+
+
+async def test_an_agent_that_never_declared_end_user_access_is_refused_as_gate_closed() -> None:
+    """The default an Agent published before this task existed always had:
+    absent means closed, not "ask the enterprise"."""
+    catalog, _store, workspace_id, alias = await _published(end_user_access_enabled=None)
+
+    with pytest.raises(EndUserAccessGateClosed):
+        await catalog.resolve_end_user_agent(workspace_id, alias, (alias,))
+
+
+# -- the workspace-scoping requirement ---------------------------------------
+
+
+async def test_an_alias_from_another_workspace_is_never_resolved() -> None:
+    """§4's last bullet: the platform must not trust a credential's own claim
+    that an alias belongs to its workspace. An enterprise's `aud` fixes which
+    workspace a credential is verified for; resolving that alias against any
+    other workspace's catalog would let a signed credential reach an Agent
+    its own workspace never published.
+    """
+    catalog, _store, _workspace_id, alias = await _published(end_user_access_enabled=True)
+    other_workspace_id = uuid4()
+
+    with pytest.raises(EndUserAccessGateClosed):
+        await catalog.resolve_end_user_agent(other_workspace_id, alias, (alias,))
