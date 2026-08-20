@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     session_cookie_secret: str = Field(min_length=32)
     bootstrap_token: str = Field(min_length=32)
     session_ttl_seconds: int = Field(default=28_800, ge=300, le=604_800)
+    #: End-user entry design §4.2: independent of `session_ttl_seconds` on
+    #: purpose — the two identity systems must never share a setting any more
+    #: than they share a cookie name, or a change meant for one silently
+    #: reaches the other. Same 8-hour default as the design's own number, not
+    #: because the two happen to agree today.
+    end_user_session_ttl_seconds: int = Field(default=28_800, ge=300, le=604_800)
 
     # Execution tuning. Every bound is explicit so an operator cannot configure
     # a lease shorter than a slice, or a retention window that silently

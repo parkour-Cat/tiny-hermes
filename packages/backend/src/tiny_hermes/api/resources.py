@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from datetime import timedelta
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import (
@@ -21,7 +22,10 @@ from tiny_hermes.artifacts.infrastructure.sql_store import SqlArtifactStore
 from tiny_hermes.http_tools.application.service import HttpToolCatalog
 from tiny_hermes.http_tools.infrastructure.sql_store import SqlHttpToolStore
 from tiny_hermes.identity.application.auth_service import AuthService
+from tiny_hermes.identity.application.end_user_service import EndUserIdentityService
 from tiny_hermes.identity.application.machine_service import MachineIdentityService
+from tiny_hermes.identity.infrastructure.jwks_key_source import OutboundJwksKeySource
+from tiny_hermes.identity.infrastructure.sql_end_user_store import SqlEndUserStore
 from tiny_hermes.identity.infrastructure.sql_machine_store import SqlMachineIdentityStore
 from tiny_hermes.identity.infrastructure.sql_store import SqlAuthStore
 from tiny_hermes.mcp.application.service import McpCatalog
@@ -126,6 +130,24 @@ class ApplicationResources:
         async with self.session_factory()() as session:
             try:
                 yield MachineIdentityService(SqlMachineIdentityStore(session))
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
+
+    async def end_user_identity_service(self) -> AsyncGenerator[EndUserIdentityService]:
+        async with self.session_factory()() as session:
+            try:
+                yield EndUserIdentityService(
+                    SqlEndUserStore(session),
+                    # A JWKS fetch is outbound traffic (design §3), so it
+                    # goes through the same egress route every other outbound
+                    # call in this process does — never a client this
+                    # service builds for itself.
+                    OutboundJwksKeySource(self.outbound_client),
+                    timedelta(seconds=self.settings.end_user_session_ttl_seconds),
+                )
             except BaseException:
                 await session.rollback()
                 raise

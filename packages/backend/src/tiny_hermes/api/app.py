@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from tiny_hermes.agents.presentation.routes import agent_router
@@ -17,6 +17,8 @@ from tiny_hermes.api.request_context import RequestIdMiddleware
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.artifacts.presentation.routes import artifact_router
 from tiny_hermes.http_tools.presentation.routes import http_tool_router
+from tiny_hermes.identity.presentation.end_user_dependencies import reject_end_user_caller
+from tiny_hermes.identity.presentation.end_user_routes import end_user_router
 from tiny_hermes.identity.presentation.machine_routes import machine_router
 from tiny_hermes.identity.presentation.routes import identity_router
 from tiny_hermes.mcp.presentation.routes import mcp_router
@@ -34,6 +36,14 @@ from tiny_hermes.shared.config import Settings
 from tiny_hermes.shared.errors import AppError
 from tiny_hermes.skills.presentation.routes import skill_proposal_router, skill_router
 from tiny_hermes.tenancy.presentation.routes import workspace_router
+
+#: Design §8's last row, applied once here rather than as a branch in
+#: `resolve_workspace_caller` or a dependency repeated in every router below.
+#: `include_router(..., dependencies=[...])` runs this ahead of every route a
+#: console router defines, today and in whatever gets added to these routers
+#: later — which is what makes "no exceptions" true without a per-router
+#: opt-in that a future router could forget.
+_CONSOLE_ONLY = [Depends(reject_end_user_caller)]
 
 
 async def app_error_handler(request: Request, error: Exception) -> JSONResponse:
@@ -74,26 +84,31 @@ def create_app(
     app.add_middleware(RequestIdMiddleware)
     app.add_exception_handler(AppError, app_error_handler)
     app.include_router(health_router(selected_readiness))
-    app.include_router(identity_router(resources))
-    app.include_router(machine_router(resources))
-    app.include_router(workspace_router(resources))
-    app.include_router(agent_router(resources))
-    app.include_router(model_endpoint_router(resources))
-    app.include_router(session_router(resources))
-    app.include_router(run_router(resources))
-    app.include_router(run_event_router(resources))
-    app.include_router(completions_router(resources))
-    app.include_router(artifact_router(resources))
-    app.include_router(secret_router(resources))
-    app.include_router(outbound_scope_router(resources))
-    app.include_router(skill_router(resources))
-    app.include_router(http_tool_router(resources))
-    app.include_router(approval_router(resources))
-    app.include_router(memory_router(resources))
-    app.include_router(subject_router(resources))
-    app.include_router(mcp_router(resources))
-    app.include_router(pricing_router(resources))
-    app.include_router(skill_proposal_router(resources))
+    # End-user entry design §4.5's first sentence: an end user never reaches
+    # any of these. Every router below is a console capability and carries
+    # the guard; `end_user_router` is the one router that must not, since it
+    # is the end user's own entry point.
+    app.include_router(identity_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(machine_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(workspace_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(agent_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(model_endpoint_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(session_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(run_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(run_event_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(completions_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(artifact_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(secret_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(outbound_scope_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(skill_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(http_tool_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(approval_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(memory_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(subject_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(mcp_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(pricing_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(skill_proposal_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(end_user_router(resources))
     return app
 
 
