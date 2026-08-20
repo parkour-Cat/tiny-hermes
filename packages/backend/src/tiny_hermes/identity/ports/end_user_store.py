@@ -99,12 +99,14 @@ class EndUserStore(Protocol):
         self, token_digest: str, now: datetime
     ) -> StoredEndUserSession | None: ...
 
-    async def revoke_sessions(self, end_user_id: UUID, workspace_id: UUID, now: datetime) -> int:
-        """Every not-yet-revoked, not-yet-expired session for this subject.
+    async def revoke_sessions(self, end_user_id: UUID, workspace_id: UUID, now: datetime) -> None:
+        """Every not-yet-revoked session for this subject, in this workspace.
 
         Design §4.3's immediate half of the two-part revocation story: the
         other half, a disabled `channel_issuers` row, only stops *new*
-        credentials and is handled by `disable_issuer`.
+        credentials and is handled by `disable_issuer`. Idempotent — revoking
+        a subject with no active sessions is not an error, so there is
+        nothing for a caller to do with a count.
         """
         ...
 

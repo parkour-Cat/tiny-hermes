@@ -187,15 +187,11 @@ class FakeEndUserStore:
             return None
         return self.sessions.get(token_digest)
 
-    async def revoke_sessions(self, end_user_id: UUID, workspace_id: UUID, now: datetime) -> int:
+    async def revoke_sessions(self, end_user_id: UUID, workspace_id: UUID, now: datetime) -> None:
         del now
-        count = 0
         for digest, stored in self.sessions.items():
             if stored.end_user_id == end_user_id and stored.workspace_id == workspace_id:
-                if digest not in self.revoked:
-                    self.revoked.add(digest)
-                    count += 1
-        return count
+                self.revoked.add(digest)
 
     async def end_user_exists(self, workspace_id: UUID, end_user_id: UUID) -> bool:
         return any(
