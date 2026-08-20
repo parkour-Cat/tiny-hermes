@@ -366,9 +366,20 @@ class ApprovalRow(IdMixin, CreatedAtMixin, Base):
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
     document: Mapped[dict[str, Any]] = mapped_column(JSON)
     required_permission: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    requested_by: Mapped[UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="RESTRICT", name="fk_approvals_requested_by")
-    )
+    #: Who may decide this (§16.3): the workspace member asked for a
+    #: `governance_approval`, the real `end_users.id` for a
+    #: `user_confirmation` (`SqlApprovalGate._subject`).
+    #:
+    #: No FK, unlike its first version (migration 0033 drops
+    #: `fk_approvals_requested_by`). It used to point at `users.id` alone,
+    #: correct while only a workspace member's own id was ever written here;
+    #: `runs.end_user_id`'s own id space took the same fix one migration
+    #: earlier and for the same reason — one column cannot satisfy two
+    #: foreign keys chosen by a row it cannot see. `sessions.caller_id`
+    #: remains the precedent: a polymorphic subject reference is a
+    #: `CallerType`/`ApprovalType` check in code, not a constraint the schema
+    #: can express.
+    requested_by: Mapped[UUID] = mapped_column()
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     decided_by: Mapped[UUID | None] = mapped_column(nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(
