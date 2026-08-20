@@ -12,6 +12,7 @@ import { moment } from "../i18n/moment";
 import { useT } from "../i18n/locale";
 import type { MessageKey } from "../i18n/zh-CN";
 import { RUN_ACTIONS } from "../runs/actions";
+import { eventNote, fill, outcomeLabel, statusNote } from "../runs/explain";
 import { artifactIdsIn, mergeArtifacts, textOf, toolsOf } from "../runs/transcript";
 import { runQueryOptions, useRunEvents } from "../runs/useRunEvents";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
@@ -21,7 +22,32 @@ function against(consumed: number, limit: number | null, unlimited: string): str
   return `${consumed} / ${limit === null ? unlimited : limit}`;
 }
 
+/**
+ * What this Run has spent, and how far that can be trusted.
+ *
+ * A null amount is rendered as the word for "unknown", never as a zero. That
+ * is the whole of §12.4 as a person sees it: an endpoint nobody priced and an
+ * endpoint priced at nothing are different facts, and a console that showed
+ * `0` for both would be the place the distinction died.
+ */
+function costOf(budget: BudgetDocument, t: (key: MessageKey) => string): string {
+  if (budget.consumed_cost === null) {
+    return t("costUnknown");
+  }
+  const spent = `${budget.consumed_cost} ${budget.cost_currency ?? ""}`.trim();
+  const limit =
+    budget.max_cost === null ? t("budgetUnlimited") : `${budget.max_cost}`;
+  return `${spent} / ${limit}`;
+}
+
 type Rows = NonNullable<DescriptionsProps["items"]>;
+
+/** The same three words a person already sees beside token counts. */
+const COST_QUALITY: Record<string, MessageKey> = {
+  provider: "costProvider",
+  estimated: "costEstimated",
+  unknown: "costUnknownLabel",
+};
 
 function budgetRows(budget: BudgetDocument, t: (key: MessageKey) => string): Rows {
   return [
@@ -54,6 +80,20 @@ function budgetRows(budget: BudgetDocument, t: (key: MessageKey) => string): Row
       key: "derived-retries",
       label: t("budgetDerivedRetries"),
       children: against(budget.derived_retry_count, budget.max_derived_retries, t("budgetUnlimited")),
+    },
+    {
+      key: "cost",
+      label: t("budgetCost"),
+      children: (
+        <Space size="small" wrap>
+          <span>{costOf(budget, t)}</span>
+          {/* The provenance is always shown, never only when it is bad: a
+              figure whose origin appears sometimes is one a reader stops
+              looking for. The words are the same three used beside token
+              counts. */}
+          <Tag>{t(COST_QUALITY[budget.cost_quality] ?? "costUnknownLabel")}</Tag>
+        </Space>
+      ),
     },
   ];
 }
@@ -186,9 +226,25 @@ export function RunDetailPage() {
     return <Link to={`/workspaces/${workspaceId ?? ""}/runs/${id}`}>{id}</Link>;
   }
 
+  const situation = statusNote(run);
+  const outcome = outcomeLabel(run.goal.outcome);
+
   const facts: Rows = [
     { key: "status", label: t("runStatus"), children: <Tag>{run.status}</Tag> },
     { key: "queue", label: t("runQueue"), children: run.queue.status },
+    {
+      key: "goal-round",
+      label: t("runGoalRound"),
+      children: run.goal.round === null ? t("runGoalNotJudged") : run.goal.round,
+    },
+    {
+      key: "goal-outcome",
+      label: t("runGoalOutcome"),
+      // The raw value when this console has no word for it: a verdict it does
+      // not recognise is still the reason the Run is where it is.
+      children:
+        outcome === null ? (run.goal.outcome ?? t("runGoalNotJudged")) : t(outcome),
+    },
     { key: "session-sequence", label: t("runSessionSequence"), children: run.session_sequence },
     { key: "state-version", label: t("runStateVersion"), children: run.state_version },
     {
@@ -219,6 +275,17 @@ export function RunDetailPage() {
   if (run.retry_of_run_id !== null) {
     facts.push({ key: "retry-of", label: t("retryOfRun"), children: runLink(run.retry_of_run_id) });
   }
+  if (run.parent_run_id !== null) {
+    // Only for a Run that was delegated. Shown as a link because "who asked
+    // for this" is the first thing somebody looking at a child wants, and a
+    // child holds a Session of its own so nothing else on the page says it.
+    facts.push({
+      key: "parent",
+      label: t("runParent"),
+      children: runLink(run.parent_run_id),
+    });
+    facts.push({ key: "depth", label: t("runDepth"), children: String(run.depth) });
+  }
   if (run.blocked_by_run_id !== null) {
     facts.push({
       key: "blocked-by",
@@ -239,33 +306,49 @@ export function RunDetailPage() {
       children: moment(run.wait_deadline_at),
     });
   }
+  if (run.goal.unmet.length > 0) {
+    facts.push({
+      key: "goal-unmet",
+      label: t("runGoalUnmet"),
+      children: run.goal.unmet.join("; "),
+    });
+  }
 
-  const timeline = events.entries.map((entry) =>
-    entry.kind === "gap"
-      ? {
-          key: `gap-${entry.after}`,
-          color: "red",
-          children: (
-            <Typography.Text type="danger">
-              {`${t("eventGapPrefix")}${entry.missing}${t("eventGapSuffix")}`}
-            </Typography.Text>
-          ),
-        }
-      : {
-          key: `event-${entry.frame.sequence}`,
-          children: (
-            <Space size="middle" wrap>
-              <Typography.Text strong>{entry.frame.event_type}</Typography.Text>
-              <Typography.Text type="secondary">{`#${entry.frame.sequence}`}</Typography.Text>
-              <Typography.Text type="secondary">{moment(entry.frame.occurred_at)}</Typography.Text>
-              <details>
-                <summary>{t("eventPayload")}</summary>
-                <pre>{JSON.stringify(entry.frame.payload, null, 2)}</pre>
-              </details>
-            </Space>
-          ),
-        },
-  );
+  const timeline = events.entries.map((entry) => {
+    if (entry.kind === "gap") {
+      return {
+        key: `gap-${entry.after}`,
+        color: "red",
+        children: (
+          <Typography.Text type="danger">
+            {`${t("eventGapPrefix")}${entry.missing}${t("eventGapSuffix")}`}
+          </Typography.Text>
+        ),
+      };
+    }
+    const said = eventNote(entry.frame);
+    return {
+      key: `event-${entry.frame.sequence}`,
+      children: (
+        <>
+          <Space size="middle" wrap>
+            <Typography.Text strong>{entry.frame.event_type}</Typography.Text>
+            <Typography.Text type="secondary">{`#${entry.frame.sequence}`}</Typography.Text>
+            <Typography.Text type="secondary">{moment(entry.frame.occurred_at)}</Typography.Text>
+            <details>
+              <summary>{t("eventPayload")}</summary>
+              <pre>{JSON.stringify(entry.frame.payload, null, 2)}</pre>
+            </details>
+          </Space>
+          {said === null ? null : (
+            <Typography.Paragraph className="fact-note">
+              {fill(t(said.key), said.values)}
+            </Typography.Paragraph>
+          )}
+        </>
+      ),
+    };
+  });
 
   return (
     <>
@@ -297,11 +380,29 @@ export function RunDetailPage() {
       {events.error === null ? null : (
         <Alert className="page-alert" type="warning" title={events.error} showIcon />
       )}
+      {situation === null ? null : (
+        <Alert className="page-alert" type="info" title={t(situation)} showIcon />
+      )}
       <Card title={t("summarySection")} variant="borderless" className="page-alert">
         <Descriptions column={{ xs: 1, sm: 2 }} size="small" items={facts} />
         <Typography.Title level={5}>{t("budgetSection")}</Typography.Title>
         <Descriptions column={{ xs: 1, sm: 2 }} size="small" items={budgetRows(run.budget, t)} />
       </Card>
+      {run.children.length > 0 && (
+        // Only when there are any. The full task tree is a later milestone;
+        // what this has to do is make it visible that this Run is one of
+        // several and let somebody click through to the others.
+        <Card title={t("childRunsSection")} variant="borderless" className="page-alert">
+          <Space direction="vertical" size="small">
+            {run.children.map((child) => (
+              <Space key={child.id} size="small">
+                <Tag>{child.status}</Tag>
+                {runLink(child.id)}
+              </Space>
+            ))}
+          </Space>
+        </Card>
+      )}
       <Card title={t("messagesSection")} variant="borderless" className="page-alert">
         {turns.length === 0 ? (
           <Empty description={t("emptyMessages")} />

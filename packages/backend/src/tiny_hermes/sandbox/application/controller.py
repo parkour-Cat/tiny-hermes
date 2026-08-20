@@ -27,6 +27,7 @@ from tiny_hermes.sandbox.domain.command import (
 from tiny_hermes.sandbox.domain.container_policy import (
     DEFAULT_PROFILE,
     ContainerPolicyError,
+    EgressNetwork,
     ResourceProfile,
     container_config,
     profile_named,
@@ -119,6 +120,7 @@ class SandboxController:
         leases: LeaseAuthority | None = None,
         audit: SandboxAudit | None = None,
         ceiling: ResourceProfile = DEFAULT_PROFILE,
+        egress: EgressNetwork | None = None,
     ) -> None:
         self.engine = engine
         self.store = store
@@ -126,6 +128,9 @@ class SandboxController:
         self.leases: LeaseAuthority = leases or _AlwaysHolds()
         self.audit: SandboxAudit = audit or _Recording()
         self.ceiling = ceiling
+        # Absent on a deployment with no boundary, and then a sandbox has no
+        # network at all — never an unguarded one.
+        self.egress = egress
 
     # -- Worker actions ----------------------------------------------------
 
@@ -161,6 +166,7 @@ class SandboxController:
                 session_id=session_id,
                 approved_digests=self.approved_digests,
                 ceiling=self.ceiling,
+                egress=self.egress,
             )
         except ContainerPolicyError as refused:
             # Before Docker is asked, so a refused image leaves nothing behind.
@@ -183,6 +189,7 @@ class SandboxController:
                 status=InstanceStatus.RUNNING,
             ),
         )
+        await self._register_address(container_id, run_id, instance_id)
         return AcquireResult(sandbox_id=instance_id, cache_state=CacheState.RESET)
 
     async def execute(
@@ -282,6 +289,9 @@ class SandboxController:
         await self._require_lease(run_id, lease_id)
         instance = await self._require_running(run_id, sandbox_id)
         await self.engine.pause(instance.container_id)
+        # Before the status, so there is no window in which a paused container
+        # is still somebody as far as the proxy is concerned.
+        await self.store.clear_egress_address(sandbox_id)
         await self.store.set_instance_status(sandbox_id, InstanceStatus.FROZEN)
 
     async def thaw(self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID) -> None:
@@ -289,6 +299,7 @@ class SandboxController:
         instance = await self._require_owned(run_id, sandbox_id)
         await self.engine.unpause(instance.container_id)
         await self.store.set_instance_status(sandbox_id, InstanceStatus.RUNNING)
+        await self._register_address(instance.container_id, run_id, sandbox_id)
 
     async def destroy(self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID) -> None:
         await self._require_lease(run_id, lease_id)
@@ -351,9 +362,28 @@ class SandboxController:
             await self.store.set_instance_status(instance.id, InstanceStatus.DESTROYED)
         await self.store.release(reservation.id)
 
+    async def _register_address(
+        self, container_id: str, run_id: UUID, sandbox_id: UUID
+    ) -> None:
+        """Write down where this container's packets will come from.
+
+        A container with no network has no address and needs no row: it cannot
+        reach the proxy, so nobody will ever ask who it is.
+        """
+        address = await self.engine.address_of(container_id)
+        if address is None:
+            return
+        await self.store.register_egress_address(
+            address=address, run_id=run_id, sandbox_id=sandbox_id
+        )
+
     async def _remove(self, run_id: UUID, sandbox_id: UUID) -> None:
         reservation = await self._reservation(run_id, sandbox_id)
         instance = await self.store.read_instance(sandbox_id)
+        # Before the container goes: once Docker has the address back it may
+        # hand it to the next container, and a stale row would make that
+        # container this Run.
+        await self.store.clear_egress_address(sandbox_id)
         if instance is not None:
             await self.engine.remove(instance.container_id)
             await self.store.set_instance_status(sandbox_id, InstanceStatus.DESTROYED)

@@ -12,6 +12,8 @@ happened — early feedback that is the same code path the Worker will take.
 
 import time
 from dataclasses import dataclass
+from typing import Protocol
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from tiny_hermes.model_catalog.domain.models import (
@@ -53,23 +55,39 @@ def _forbidden() -> AppError:
     )
 
 
+class EndpointScopeWriter(Protocol):
+    """The two writes an endpoint makes to the outbound scope, and no reads."""
+
+    async def approve_endpoint_host(
+        self, *, endpoint_id: UUID, host: str, created_by: UUID
+    ) -> None: ...
+
+    async def withdraw_endpoint_host(self, endpoint_id: UUID) -> int: ...
+
+
 class ModelEndpointService:
     def __init__(
         self,
         store: ModelEndpointStore,
         secrets: SecretStore | None = None,
         kek: bytes | None = None,
+        scopes: EndpointScopeWriter | None = None,
     ) -> None:
         self._store = store
         self._secrets = secrets
         self._kek = kek
+        # Registering an endpoint approves the host it names. Optional so the
+        # domain tests, which are about who may register what, keep reading the
+        # way they did — and absent, an endpoint simply approves nothing, which
+        # a platform administrator can still do by hand.
+        self._scopes = scopes
 
     async def register(self, actor: Actor, spec: ModelEndpointSpec) -> ModelEndpoint:
         if not actor.is_platform_admin:
             raise _forbidden()
         await self._require_credential(spec)
         try:
-            return await self._store.register(spec, created_by=actor.id)
+            registered = await self._store.register(spec, created_by=actor.id)
         except EndpointNameTaken as clash:
             raise AppError(
                 code="endpoint_name_taken",
@@ -77,6 +95,8 @@ class ModelEndpointService:
                 status=409,
                 detail="Another model endpoint already uses this name.",
             ) from clash
+        await self._approve_host(registered, actor)
+        return registered
 
     async def update(
         self, actor: Actor, endpoint_id: UUID, spec: ModelEndpointSpec
@@ -95,6 +115,10 @@ class ModelEndpointService:
             ) from clash
         if updated is None:
             raise self._unknown()
+        # The host may have moved. The old entry goes with it, so a `base_url`
+        # that was corrected does not leave its predecessor approved.
+        await self._withdraw_host(endpoint_id)
+        await self._approve_host(updated, actor)
         return updated
 
     async def set_status(
@@ -105,7 +129,35 @@ class ModelEndpointService:
         updated = await self._store.set_status(endpoint_id, status)
         if updated is None:
             raise self._unknown()
+        # An endpoint nobody may select is an endpoint nothing should be able
+        # to reach: the approval exists because the endpoint does.
+        if updated.is_selectable:
+            await self._approve_host(updated, actor)
+        else:
+            await self._withdraw_host(endpoint_id)
         return updated
+
+    async def _approve_host(self, endpoint: ModelEndpoint, actor: Actor) -> None:
+        """Registering an endpoint is the approval; there is no second one.
+
+        Requiring an administrator to write the host into the outbound scope as
+        well would add a step that gets forgotten rather than a judgement that
+        gets made — and the symptom of forgetting it is a Run failing at
+        runtime, a long way from the cause.
+        """
+        if self._scopes is None:
+            return
+        host = urlsplit(endpoint.spec.base_url).hostname
+        if not host:  # pragma: no cover - a spec without a host does not validate
+            return
+        await self._scopes.approve_endpoint_host(
+            endpoint_id=endpoint.id, host=host, created_by=actor.id
+        )
+
+    async def _withdraw_host(self, endpoint_id: UUID) -> None:
+        if self._scopes is None:
+            return
+        await self._scopes.withdraw_endpoint_host(endpoint_id)
 
     async def read(self, actor: Actor, endpoint_id: UUID) -> ModelEndpoint:
         if not actor.is_platform_admin:

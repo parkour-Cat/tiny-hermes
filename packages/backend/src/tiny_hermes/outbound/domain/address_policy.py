@@ -43,6 +43,22 @@ class RefusalReason(StrEnum):
     SCHEME_NOT_ALLOWED = "scheme_not_allowed"
     PLAINTEXT_NOT_APPROVED = "plaintext_not_approved"
 
+    # Also raised by the client rather than by `verdict`, and the two are
+    # different operational problems: nobody stood a proxy up, versus one is
+    # standing and did not answer. A deployment with neither configured sends
+    # nothing at all, which is the point.
+    EGRESS_NOT_CONFIGURED = "egress_not_configured"
+    EGRESS_UNAVAILABLE = "egress_unavailable"
+
+    # The proxy's own answers, spelled the same here as there. A caller reads
+    # them off a refused response and turns them back into a typed refusal, so
+    # a Run's failure names the scope that stopped it rather than a status
+    # code — and there is still one list of reasons, not two.
+    UNKNOWN_CALLER = "unknown_caller"
+    PORT_NOT_ALLOWED = "port_not_allowed"
+    TARGET_NOT_IN_SCOPE = "target_not_in_scope"
+    SCOPE_EMPTY = "scope_empty"
+
     UNRESOLVED = "unresolved"
     LOOPBACK = "loopback"
     LINK_LOCAL = "link_local"

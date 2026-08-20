@@ -4,8 +4,13 @@ from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
+from tiny_hermes.agents.domain.delegation import DelegationScope
 from tiny_hermes.agents.domain.models import AgentSpec
+from tiny_hermes.memory.ports.library import RememberedFact
+from tiny_hermes.model_catalog.domain.pricing import Cost, TokenPrices
+from tiny_hermes.runs.domain.context_budget import ContextWindow
 from tiny_hermes.runs.domain.models import (
+    BoundSkill,
     BudgetSummary,
     CallerIdentity,
     CallerType,
@@ -19,9 +24,12 @@ from tiny_hermes.runs.domain.models import (
     RunSnapshot,
     SessionMode,
     SessionSnapshot,
+    StoredMessage,
+    WaitPolicy,
     WorkspaceCleanupTarget,
 )
 from tiny_hermes.tenancy.domain.models import Role
+from tiny_hermes.tools.domain.http_calls import BoundOperation
 
 
 @dataclass(frozen=True)
@@ -71,6 +79,26 @@ class ControlRunCommand:
     capabilities: RunCapabilities
     signal: RunSignal
     expected_state_version: int
+    request_id: str
+
+
+@dataclass(frozen=True)
+class WidenBudgetCommand:
+    """Raise one ceiling on a Run's shared budget scope.
+
+    Product design §12.3 requires an explicit act by an authorized subject, so
+    this is its own command rather than a field someone can set while doing
+    something else. It carries no `consumed_*` value at all: the counters are
+    not this operation's business, and a widening that could reset one would be
+    a way to defeat the safety valve by re-spending the same budget.
+    """
+
+    workspace_id: UUID
+    run_id: UUID
+    caller: CallerIdentity
+    capabilities: RunCapabilities
+    expected_state_version: int
+    max_model_calls: int
     request_id: str
 
 
@@ -166,6 +194,21 @@ class RecordSliceCommand:
     #: their reason here). Only written when ``signal`` is not None — a round
     #: that keeps the lease has no transition to attach them to.
     events: tuple["ReservedEvent", ...] = ()
+    #: Set only with ``EXTERNAL_WAIT_STARTED``. The store turns the duration
+    #: into ``wait_deadline_at`` against the same ``now`` it stamps the rest of
+    #: the transition with, so the deadline the Scheduler scans for cannot
+    #: predate the row that announced it.
+    wait_kind: str | None = None
+    wait_seconds: int | None = None
+    #: Whether every child must finish or one is enough (§13). Only ever set
+    #: beside a `child_runs` wait — a timer and an approval each wait on one
+    #: thing, and there is nothing to choose between.
+    wait_policy: WaitPolicy | None = None
+    #: What this round cost, as `model_catalog.domain.pricing` computed it.
+    #: `None` when nothing can be said — no configured price, or an endpoint
+    #: that reported no usage — and the store then keeps the Run's total
+    #: unknown from here on rather than adding a zero to it.
+    cost: Cost | None = None
 
 
 @dataclass(frozen=True)
@@ -184,13 +227,131 @@ class ExecutionContext:
     #: hands over everything said in it so far; an ephemeral one hands over only
     #: this Run's own input, which is the first behaviour `session_mode` has
     #: ever had.
-    messages: tuple[CanonicalMessage, ...]
+    #:
+    #: Carried with each message's id and sequence, because a compaction has to
+    #: record the range it covered and the ids it stood in for. Anything that
+    #: only wants the conversation reads ``messages`` below.
+    history: tuple[StoredMessage, ...]
     cancel_requested: bool
     pause_requested: bool
     budget: BudgetSummary
+    #: What the endpoint this Run's policy names declared it can take, read at
+    #: the same time as the conversation. ``None`` for a policy that names no
+    #: endpoint — the deterministic model declares no window, and there is
+    #: nothing to plan against.
+    window: ContextWindow | None = None
     #: When set, this Run was admitted by Chat Completions and the Worker must
     #: not emit ``SLICE_ENDED`` for an ordinary slice boundary before it.
     compat_deadline_at: datetime | None = None
+    #: What the Version bound, in the order the author bound it. Read with the
+    #: conversation and the window rather than on demand: what one round sends
+    #: is decided at one moment, and a summary read later than the history it
+    #: is planned against would be planned against the wrong history.
+    skills: tuple[BoundSkill, ...] = ()
+    #: The versions this Run has already loaded text from, oldest first. Two
+    #: questions come from one fact — how many loads are left, and which
+    #: summaries count as 命中 — and reading it as events rather than counting
+    #: `skill.load` calls in the transcript keeps it a fact about *this Run*
+    #: even when a persistent Session hands over another Run's turns.
+    loaded_skills: tuple[UUID, ...] = ()
+    #: The HTTP operations this Run's Version bound, assembled from the catalog
+    #: at the same moment as the skills and for the same reason. Each carries
+    #: everything the call needs — base URL, credential reference, the parsed
+    #: operation — so a round composes a request without asking the catalog
+    #: anything mid-flight.
+    http_operations: tuple[BoundOperation, ...] = ()
+    #: What this Run is priced at, fixed when it was created (§12.4). `None`
+    #: for a deterministic Agent, for an endpoint nobody has priced, and for a
+    #: Run created before anybody entered one — all three mean the same thing
+    #: downstream, and none of them means free.
+    prices: TokenPrices | None = None
+    #: What this Run may be told it remembers: its subject's own private
+    #: memories and its Agent's shared ones, read at the same moment as the
+    #: conversation. Never anything `pending` — a candidate that reached a
+    #: model's context would have been remembered without anybody agreeing.
+    memories: tuple[RememberedFact, ...] = ()
+    #: How far down the delegation tree this Run sits. `0` unless it was
+    #: delegated. Read here rather than looked up when `agent.delegate` is
+    #: answered, because §13's third clause has to be decidable from what the
+    #: round already holds — a depth fetched separately is a depth that can be
+    #: fetched from the wrong Run.
+    depth: int = 0
+    #: The six faces this Run holds, as they were computed when it was created.
+    #: `None` for a Run nobody delegated, which is not the same as one granted
+    #: nothing: an empty scope is a child that may do nothing at all.
+    delegated_scope: DelegationScope | None = None
+
+    @property
+    def messages(self) -> tuple[CanonicalMessage, ...]:
+        return tuple(item.message for item in self.history)
+
+    @property
+    def tools(self) -> tuple[str, ...]:
+        """What this Run may actually call, after the delegation narrowed it.
+
+        **Read this, never `spec.tools`.** §13's sixth clause makes a child's
+        permission the intersection of its parent's and the delegation's, and
+        an intersection computed at one call site is an intersection some other
+        call site forgot. Every check the Worker makes goes through here, and
+        so does the schema list the model is shown — §10.2's two steps agreeing
+        because they read one thing.
+
+        A face nobody named grants nothing: a delegation that lists no tools
+        gives a child no tools, even where the child's own Version bound them.
+        That is the documented rule rather than a strict reading of it — a
+        child should be given what it needs, and a spec that binds `shell.exec`
+        for one kind of work does not thereby authorize it for somebody else's.
+
+        An undelegated Run is unnarrowed, which is every Run created before
+        this existed and every Run somebody asks for directly.
+        """
+        if self.delegated_scope is None:
+            return self.spec.tools
+        return tuple(
+            name for name in self.spec.tools if name in self.delegated_scope.tools
+        )
+
+    @property
+    def granted_skills(self) -> tuple[BoundSkill, ...]:
+        """The skills this Run may load, after the same narrowing.
+
+        By version id, which is what the `skills` face carries and what a
+        binding is — a name would let a delegation grant a document its author
+        never read.
+        """
+        if self.delegated_scope is None:
+            return self.skills
+        return tuple(
+            skill
+            for skill in self.skills
+            if str(skill.skill_version_id) in self.delegated_scope.skills
+        )
+
+    @property
+    def granted_operations(self) -> tuple[BoundOperation, ...]:
+        """The HTTP operations this Run may call, narrowed on two faces at once.
+
+        `tools` decides whether the operation may be called at all, by the name
+        the model would type. `secrets` decides whether the credential behind
+        it may be used, so a child granted the call and not the credential is
+        refused rather than sent out unauthenticated — the second is the whole
+        reason the two are separate faces.
+
+        An operation needing no credential passes the secrets face, because
+        there is no secret being lent.
+        """
+        if self.delegated_scope is None:
+            return self.http_operations
+        scope = self.delegated_scope
+        return tuple(
+            operation
+            for operation in self.http_operations
+            if operation.call_name in scope.tools
+            and (
+                operation.credential_ref is None
+                or operation.credential_ref in scope.secrets
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -292,6 +453,8 @@ class RunStore(Protocol):
     ) -> Sequence[RunSnapshot]: ...
 
     async def control_run(self, command: ControlRunCommand) -> RunSnapshot: ...
+
+    async def widen_budget(self, command: WidenBudgetCommand) -> RunSnapshot: ...
 
     async def apply_signal(self, command: ApplySignalCommand) -> RunSnapshot: ...
 

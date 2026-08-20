@@ -12,6 +12,7 @@ from tiny_hermes.sandbox.domain.models import (
     SandboxReservation,
 )
 from tiny_hermes.sandbox.infrastructure.tables import (
+    SandboxEgressAddressRow,
     SandboxInstanceRow,
     SandboxReservationRow,
 )
@@ -92,9 +93,7 @@ class SqlSandboxStore:
         row = await self._session.get(SandboxReservationRow, reservation_id)
         return None if row is None else _reservation(row)
 
-    async def keep(
-        self, reservation_id: UUID, *, idle_expires_at: datetime
-    ) -> SandboxReservation:
+    async def keep(self, reservation_id: UUID, *, idle_expires_at: datetime) -> SandboxReservation:
         row = await self._require(reservation_id)
         row.status = ReservationStatus.KEPT.value
         row.idle_expires_at = idle_expires_at
@@ -103,7 +102,17 @@ class SqlSandboxStore:
         return _reservation(row)
 
     async def isolate(self, reservation_id: UUID, *, reason: str) -> SandboxReservation:
-        row = await self._require(reservation_id)
+        found = await self._session.execute(
+            select(SandboxReservationRow)
+            .where(SandboxReservationRow.id == reservation_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        row = found.scalar_one_or_none()
+        if row is None:
+            raise UnknownReservation
+        if ReservationStatus(row.status) not in LIVE_RESERVATIONS:
+            return _reservation(row)
         row.status = ReservationStatus.ISOLATED.value
         row.isolation_reason = reason
         # A deadline on an isolated claim would put it in the Scheduler's expiry
@@ -151,6 +160,34 @@ class SqlSandboxStore:
     async def read_instance(self, instance_id: UUID) -> SandboxInstance | None:
         row = await self._session.get(SandboxInstanceRow, instance_id)
         return None if row is None else _instance(row)
+
+    async def register_egress_address(
+        self, *, address: str, run_id: UUID, sandbox_id: UUID
+    ) -> None:
+        """Claim this address for this Run, taking it from whoever had it.
+
+        A `merge` rather than an insert: Docker reuses addresses, and the
+        container that has one now is the one that owns it. The row a previous
+        container left behind is exactly the row that must not survive.
+        """
+        await self._session.merge(
+            SandboxEgressAddressRow(
+                address=address, run_id=run_id, sandbox_id=sandbox_id
+            )
+        )
+        await self._session.flush()
+
+    async def clear_egress_address(self, sandbox_id: UUID) -> None:
+        rows = (
+            await self._session.scalars(
+                select(SandboxEgressAddressRow).where(
+                    SandboxEgressAddressRow.sandbox_id == sandbox_id
+                )
+            )
+        ).all()
+        for row in rows:
+            await self._session.delete(row)
+        await self._session.flush()
 
     async def set_instance_status(
         self, instance_id: UUID, status: InstanceStatus

@@ -1,19 +1,45 @@
 import hashlib
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from decimal import Decimal
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
-from tiny_hermes.agents.domain.models import AgentLimits, AgentSpec
+from tiny_hermes.agents.domain.delegation import (
+    MAX_DELEGATION_DEPTH,
+    DelegationScope,
+    granted,
+)
+from tiny_hermes.agents.domain.models import AgentLimits, AgentSpec, EndpointModelPolicy
 from tiny_hermes.agents.infrastructure.tables import AgentRow, AgentVersionRow
+from tiny_hermes.artifacts.infrastructure.tables import (
+    ArtifactGrantRow,
+    ArtifactRow,
+)
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
+from tiny_hermes.http_tools.infrastructure.documents import operation_from_document
+from tiny_hermes.http_tools.infrastructure.tables import (
+    HttpToolRow,
+    HttpToolVersionRow,
+)
+from tiny_hermes.memory.domain.scope import scopes_for_run
+from tiny_hermes.memory.infrastructure.sql_library import SqlMemoryLibrary
+from tiny_hermes.memory.ports.library import RememberedFact
+from tiny_hermes.model_catalog.domain.pricing import Cost, CostQuality, TokenPrices
+from tiny_hermes.model_catalog.infrastructure.pricing_tables import (
+    ModelPricingVersionRow,
+)
+from tiny_hermes.model_catalog.infrastructure.tables import ModelEndpointRow
 from tiny_hermes.runs.application.service import (
     AgentNotPublished,
+    BudgetNotWidened,
     DeniedRunControl,
     EventSequenceConflict,
     ForbiddenRunAction,
@@ -29,13 +55,17 @@ from tiny_hermes.runs.application.service import (
     UnknownRun,
     UnknownSession,
 )
+from tiny_hermes.runs.domain.approval import ApprovalStatus
+from tiny_hermes.runs.domain.context_budget import Accounting, ContextWindow
 from tiny_hermes.runs.domain.models import (
     TERMINAL_STATES,
+    BoundSkill,
     BudgetSummary,
     CallerIdentity,
     CallerType,
     CanonicalMessage,
     CheckpointEffectStatus,
+    ChildRunRef,
     DeliveryMode,
     PauseReason,
     QueueStatus,
@@ -49,10 +79,14 @@ from tiny_hermes.runs.domain.models import (
     SessionMode,
     SessionSnapshot,
     StateDecision,
+    StoredMessage,
+    TextBlock,
+    WaitPolicy,
     WorkspaceCleanupTarget,
     event_type_for,
     message_from_document,
 )
+from tiny_hermes.runs.domain.slice_policy import WAIT_CHILD_RUNS
 from tiny_hermes.runs.domain.state_machine import (
     InvalidStateMetadata,
     InvalidStateTransition,
@@ -61,6 +95,7 @@ from tiny_hermes.runs.domain.state_machine import (
     RunStateMachine,
 )
 from tiny_hermes.runs.infrastructure.tables import (
+    ApprovalRow,
     IdempotencyRecordRow,
     RunBudgetScopeRow,
     RunEventRow,
@@ -68,6 +103,11 @@ from tiny_hermes.runs.infrastructure.tables import (
     SessionMessageRow,
     SessionRow,
     WorkerLeaseRow,
+)
+from tiny_hermes.runs.ports.children import (
+    DelegatedChild,
+    DelegationRequest,
+    DelegationResult,
 )
 from tiny_hermes.runs.ports.store import (
     AcceptedRun,
@@ -87,9 +127,12 @@ from tiny_hermes.runs.ports.store import (
     RetryRunCommand,
     RunEventRecord,
     RunEventWindow,
+    WidenBudgetCommand,
 )
+from tiny_hermes.skills.infrastructure.tables import SkillRow, SkillVersionRow
 from tiny_hermes.tenancy.domain.models import Role
-from tiny_hermes.tenancy.infrastructure.tables import MembershipRow
+from tiny_hermes.tenancy.infrastructure.tables import MembershipRow, WorkspaceRow
+from tiny_hermes.tools.domain.http_calls import BoundOperation
 
 RESERVE_SEQUENCES = text(
     "UPDATE runs SET next_event_sequence = next_event_sequence + :count "
@@ -98,6 +141,12 @@ RESERVE_SEQUENCES = text(
 )
 
 IDEMPOTENCY_RETENTION = timedelta(hours=24)
+
+#: The longest a child's report may be. Long enough for a real answer, short
+#: enough that a parent waiting on five of them is not handed a context window
+#: full of somebody else's prose — which is the shape §13's seventh clause
+#: exists to keep out.
+MAX_CHILD_SUMMARY = 4_000
 
 RETRY_ERRORS: dict[str, RunCoordinationError] = {
     "retry_not_safe": RetryNotSafe(),
@@ -109,6 +158,13 @@ RETRY_ERRORS: dict[str, RunCoordinationError] = {
 WAITING_HEAD_STATES = frozenset(
     {RunState.PAUSED, RunState.WAITING_APPROVAL, RunState.WAITING_EXTERNAL}
 )
+
+
+#: How many memories one scope may contribute to a round before the planner
+#: sees them. A ceiling on the read rather than on the segment: the segment's
+#: own budget decides what fits, and this stops a subject with ten thousand
+#: memories from being loaded into a process to find out.
+MEMORY_READ_LIMIT = 200
 
 
 class SqlRunStore:
@@ -206,6 +262,11 @@ class SqlRunStore:
 
         run_id = uuid4()
         now = datetime.now(UTC)
+        # Both read once, here, and copied onto the Run. §12.4: a price
+        # correction or a raised ceiling entered tomorrow must not change what
+        # a Run that is already running is measured at.
+        pricing_version_id = await self._current_pricing(version_id)
+        ceiling = await self._cost_ceiling(command.workspace_id)
         run = RunRow(
             id=run_id,
             workspace_id=command.workspace_id,
@@ -221,6 +282,17 @@ class SqlRunStore:
             checkpoint_effect_status=CheckpointEffectStatus.NONE.value,
             checkpoint_workspace_revision_id=session.workspace_revision_id,
             delivery_mode=command.delivery_mode,
+            # §16.3's `user_confirmation` may only be answered by the EndUser
+            # who started the Run. Through M2 that is the logged-in caller;
+            # a ServiceAccount's Run gets none, which is why such an Agent has
+            # to have chosen a pre-authorization or a governance approval at
+            # publish rather than relying on somebody being there.
+            end_user_id=(
+                command.caller.caller_id
+                if command.caller.caller_type is CallerType.USER
+                else None
+            ),
+            model_pricing_version_id=pricing_version_id,
             created_at=now,
             updated_at=now,
         )
@@ -242,7 +314,7 @@ class SqlRunStore:
                 created_at=now,
             )
         )
-        self._session.add(_new_budget(run_id, limits, now))
+        self._session.add(_new_budget(run_id, limits, now, ceiling))
         session.next_run_sequence += 1
         session.next_message_sequence += 1
         if session.head_run_id is None:
@@ -418,6 +490,66 @@ class SqlRunStore:
             )
             raise DeniedRunControl(_denial_code(error)) from error
 
+    async def widen_budget(self, command: WidenBudgetCommand) -> RunSnapshot:
+        """Raise one ceiling on the shared scope, leaving every counter alone.
+
+        Not routed through `RunStateMachine`: this changes no Run state. What
+        it changes is whether the machine's own `budget_allows_execution` is
+        true, so a `paused(limit)` Run starts offering `resume` again without
+        anything here deciding that it should.
+        """
+        if not command.capabilities.can_control:
+            raise ForbiddenRunAction
+        run = await self._lock_run(command.workspace_id, command.run_id)
+        if run is None:
+            raise UnknownRun
+        if run.state_version != command.expected_state_version:
+            raise StateVersionConflict
+        budget = await self._session.scalar(
+            select(RunBudgetScopeRow)
+            .where(RunBudgetScopeRow.root_run_id == run.budget_root_run_id)
+            .with_for_update()
+        )
+        if budget is None:
+            raise UnknownRun
+        if command.max_model_calls <= budget.max_model_calls:
+            self._audit(
+                command.workspace_id,
+                command.caller.caller_id,
+                "run.budget_widen_denied",
+                "run",
+                command.run_id,
+                command.request_id,
+                result="denied",
+                context={
+                    "asked": command.max_model_calls,
+                    "in_force": budget.max_model_calls,
+                },
+                actor_type=command.caller.caller_type.value,
+            )
+            raise BudgetNotWidened
+        previous = budget.max_model_calls
+        budget.max_model_calls = command.max_model_calls
+        budget.version += 1
+        self._audit(
+            command.workspace_id,
+            command.caller.caller_id,
+            "run.budget_widened",
+            "run",
+            command.run_id,
+            command.request_id,
+            context={
+                "max_model_calls": {"from": previous, "to": command.max_model_calls},
+                # The counters are recorded, not changed. An auditor reading
+                # this row can see how much of the old ceiling was already
+                # spent at the moment the new one was granted.
+                "consumed_model_calls": budget.consumed_model_calls,
+            },
+            actor_type=command.caller.caller_type.value,
+        )
+        await self._session.flush()
+        return await self._snapshot(run, command.capabilities)
+
     async def apply_signal(self, command: ApplySignalCommand) -> RunSnapshot:
         """Apply exactly the mutation ``RunStateMachine`` returns, once."""
         run = await self._lock_run(command.workspace_id, command.run_id)
@@ -495,6 +627,7 @@ class SqlRunStore:
         request_id: str,
         payload: dict[str, Any],
         extra_events: tuple[ReservedEvent, ...] = (),
+        wait_policy: WaitPolicy | None = None,
     ) -> None:
         """Turn one signal into rows.
 
@@ -523,6 +656,12 @@ class SqlRunStore:
         )
 
         _apply_decision(run, decision, now)
+        # Cleared alongside `wait_kind` rather than left behind: a Run that is
+        # no longer waiting on children must not read as one that is waiting
+        # for `all` of nothing.
+        run.wait_policy = (
+            None if decision.wait_kind is None or wait_policy is None else wait_policy.value
+        )
         run.state_version += 1
         run.updated_at = now
         await self._session.flush()
@@ -573,6 +712,10 @@ class SqlRunStore:
             scoped = scoped.where(SessionMessageRow.source_run_id == run.id)
         found = await self._session.scalars(scoped.order_by(SessionMessageRow.sequence))
         spec = AgentSpec.model_validate(version.spec)
+        history = tuple(
+            StoredMessage(id=row.id, sequence=row.sequence, message=_to_message(row))
+            for row in found
+        )
         deadline = None
         if run.delivery_mode == DeliveryMode.CHAT_COMPLETIONS.value:
             deadline = run.created_at + timedelta(seconds=spec.delivery.sync_timeout_seconds)
@@ -580,11 +723,225 @@ class SqlRunStore:
             run_id=run.id,
             state_version=run.state_version,
             spec=spec,
-            messages=tuple(_to_message(row) for row in found),
+            history=history,
             cancel_requested=run.cancel_requested_at is not None,
             pause_requested=run.pause_requested_at is not None,
             budget=_budget_summary(budget),
+            window=await self._context_window(spec),
             compat_deadline_at=deadline,
+            skills=await self._bound_skills(spec),
+            loaded_skills=await self._loaded_skills(run.id),
+            http_operations=await self._bound_operations(spec),
+            prices=await self._pinned_prices(run.model_pricing_version_id),
+            memories=await self._remembered(run, owning, _latest_request(history)),
+            depth=run.depth,
+            delegated_scope=(
+                None
+                if run.delegation_scope is None
+                else DelegationScope.from_document(run.delegation_scope)
+            ),
+        )
+
+    async def _bound_skills(self, spec: AgentSpec) -> tuple[BoundSkill, ...]:
+        """What the Version bound, in the order the author bound it.
+
+        Read by version id and nothing else. The skill's own name column
+        answers what the model calls it, and the version's manifest answers
+        what it is for — read from the version rather than from the skill,
+        because a later version may describe itself differently and this Run is
+        not on it.
+
+        A binding whose rows are gone is skipped rather than failing the round.
+        Publishing checked every one of them, so this can only happen after a
+        deletion, and a Run that cannot start because one of four skills was
+        deleted is worse off than one running with three.
+        """
+        if not spec.skills:
+            return ()
+        wanted = [binding.skill_version_id for binding in spec.skills]
+        found = await self._session.execute(
+            select(SkillVersionRow.id, SkillVersionRow.manifest, SkillRow.name)
+            .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+            .where(SkillVersionRow.id.in_(wanted))
+        )
+        rows = {
+            version_id: (manifest, name) for version_id, manifest, name in found.all()
+        }
+        skills: list[BoundSkill] = []
+        for version_id in wanted:
+            row = rows.get(version_id)
+            if row is None:
+                continue
+            manifest, name = row
+            skills.append(
+                BoundSkill(
+                    skill_version_id=version_id,
+                    name=name,
+                    description=str(manifest.get("description", "")),
+                )
+            )
+        return tuple(skills)
+
+    async def _remembered(
+        self, run: RunRow, session: SessionRow | None, query: str
+    ) -> tuple[RememberedFact, ...]:
+        """This Run's own two scopes, read as two scoped queries.
+
+        The subject comes from the Session's `CallerIdentity`, which is who
+        started the conversation — not from `runs.end_user_id`, which is who
+        may confirm. They are the same person for a `caller_type=user` Run
+        today, and writing the difference down here is what will keep §4.5's
+        end-user identity from being wired to the wrong one.
+
+        `query` is this Run's latest request, and the ordering it produces is
+        **keyword relevance, not meaning** (§14.3 excludes vector memory). It
+        decides which memories the planner sees first, and therefore which ones
+        survive when the segment is over budget.
+
+        A Session that is gone means no subject, and no subject means no
+        private memory rather than everybody's.
+        """
+        if session is None:  # pragma: no cover - the caller read it
+            return ()
+        agent_id = await self._session.scalar(
+            select(AgentVersionRow.agent_id).where(
+                AgentVersionRow.id == run.agent_version_id
+            )
+        )
+        if agent_id is None:  # pragma: no cover - a Run always has a version
+            return ()
+        library = SqlMemoryLibrary(self._session)
+        found: list[RememberedFact] = []
+        for scope in scopes_for_run(
+            workspace_id=run.workspace_id,
+            agent_id=agent_id,
+            subject=CallerIdentity(
+                caller_type=CallerType(session.caller_type),
+                caller_id=session.caller_id,
+            ),
+        ):
+            found.extend(
+                await library.relevant_in(scope, query, limit=MEMORY_READ_LIMIT)
+            )
+        return tuple(found)
+
+    async def _pinned_prices(self, version_id: UUID | None) -> TokenPrices | None:
+        """The price this Run fixed, read back.
+
+        Read from the version rather than from the endpoint's current price:
+        that is the whole of §12.4's promise, and reading the current one here
+        would quietly undo it every time an administrator corrected a rate.
+        """
+        if version_id is None:
+            return None
+        row = await self._session.get(ModelPricingVersionRow, version_id)
+        if row is None:
+            return None
+        return TokenPrices(
+            currency=row.currency,
+            input_per_million=row.input_per_million,
+            output_per_million=row.output_per_million,
+            cached_input_per_million=row.cached_input_per_million,
+        )
+
+    async def _bound_operations(self, spec: AgentSpec) -> tuple[BoundOperation, ...]:
+        """What the Version bound, assembled into callable operations.
+
+        Read by version id, like the skills. The tool row answers where the
+        requests go and which credential to resolve; the version row answers
+        what the operation is. Both are read here rather than at the call so a
+        round composes its request from one consistent read.
+
+        An operation the version no longer declares is skipped rather than
+        failing the round — publishing checked every one, so this can only
+        follow a deletion, and a Run that loses one of four tools is better off
+        than one that cannot start.
+        """
+        if not spec.http_tools:
+            return ()
+        wanted = [binding.http_tool_version_id for binding in spec.http_tools]
+        found = await self._session.execute(
+            select(
+                HttpToolVersionRow.id,
+                HttpToolVersionRow.operations,
+                HttpToolRow.name,
+                HttpToolRow.base_url,
+                HttpToolRow.credential_ref,
+            )
+            .join(HttpToolRow, HttpToolRow.id == HttpToolVersionRow.http_tool_id)
+            .where(HttpToolVersionRow.id.in_(wanted))
+        )
+        rows = {row[0]: row for row in found.all()}
+        operations: list[BoundOperation] = []
+        for binding in spec.http_tools:
+            row = rows.get(binding.http_tool_version_id)
+            if row is None:
+                continue
+            _, documents, name, base_url, credential_ref = row
+            declared = {
+                str(entry["operation_id"]): entry
+                for entry in cast(list[dict[str, Any]], documents)
+            }
+            for operation_id in binding.operations:
+                document = declared.get(operation_id)
+                if document is None:
+                    continue
+                operations.append(
+                    BoundOperation(
+                        tool_name=name,
+                        version_id=binding.http_tool_version_id,
+                        base_url=base_url,
+                        credential_ref=credential_ref,
+                        operation=operation_from_document(document),
+                    )
+                )
+        return tuple(operations)
+
+    async def _loaded_skills(self, run_id: UUID) -> tuple[UUID, ...]:
+        """Which versions this Run has already read text from, oldest first."""
+        found = await self._session.scalars(
+            select(RunEventRow.payload)
+            .where(
+                RunEventRow.run_id == run_id,
+                RunEventRow.event_type == RunEventType.SKILL_LOADED.value,
+            )
+            .order_by(RunEventRow.sequence)
+        )
+        loaded: list[UUID] = []
+        for payload in found:
+            raw = payload.get("skill_version_id")
+            if isinstance(raw, str):
+                loaded.append(UUID(raw))
+        return tuple(loaded)
+
+    async def _context_window(self, spec: AgentSpec) -> ContextWindow | None:
+        """What the endpoint this Run's policy names declared it can take.
+
+        Read from the endpoint row rather than guessed from the provider name,
+        per §7.4.2 — and read fresh each round rather than frozen into the
+        Version, because the window is a property of the endpoint an
+        administrator maintains, not of the Agent an author published.
+        """
+        policy = spec.model_policy
+        if not isinstance(policy, EndpointModelPolicy):
+            # The deterministic model declares no window. Nothing to plan
+            # against, and inventing one would trim a stand-in's conversation
+            # against a number no endpoint ever gave.
+            return None
+        endpoint = await self._session.get(ModelEndpointRow, policy.endpoint_id)
+        if endpoint is None:
+            return None
+        return ContextWindow(
+            context_window=endpoint.context_window,
+            # The Agent's own ceiling narrows the endpoint's, never widens it —
+            # the same minimum `build_payload` sends, so the round is planned
+            # against the space the request will actually leave.
+            reserved_output_tokens=min(
+                policy.max_output_tokens or endpoint.max_output_tokens,
+                endpoint.max_output_tokens,
+            ),
+            accounting=Accounting(endpoint.context_accounting),
+            tokenizer=endpoint.tokenizer,
         )
 
     async def renew_lease(self, command: RenewLeaseCommand) -> RenewedLease | None:
@@ -675,9 +1032,21 @@ class SqlRunStore:
             command.executed_ms,
             command.model_calls,
             command.tokens,
+            command.cost,
         )
 
         if command.signal is None:
+            # A round that keeps the slice changes no state, so it has no
+            # transition to hang an event on — and that is exactly the Run
+            # whose timeline would otherwise be empty for however many rounds
+            # it worked. Its events are written on their own.
+            await self.append_events(
+                AppendEventsCommand(
+                    workspace_id=command.workspace_id,
+                    run_id=command.run_id,
+                    events=command.events,
+                )
+            )
             await self._session.flush()
             return await self._snapshot(run, command.capabilities)
 
@@ -691,8 +1060,17 @@ class SqlRunStore:
             session,
             command.signal,
             pause_reason=command.pause_reason,
-            wait_kind=None,
-            wait_deadline_at=None,
+            wait_kind=command.wait_kind,
+            wait_policy=command.wait_policy,
+            # Measured from this transaction's `now`, the same instant the
+            # transition and its event are stamped with. A deadline carried in
+            # from the Worker would be a few hundred milliseconds older than
+            # the row announcing it, and on a slow round rather more.
+            wait_deadline_at=(
+                None
+                if command.wait_seconds is None
+                else now + timedelta(seconds=command.wait_seconds)
+            ),
             request_id=command.request_id,
             payload=_slice_payload(command.executed_ms, command.checkpoint),
             extra_events=(*extra, *command.events),
@@ -702,7 +1080,12 @@ class SqlRunStore:
         return await self._snapshot(run, command.capabilities)
 
     async def _consume_budget(
-        self, root_run_id: UUID, executed_ms: int, model_calls: int, tokens: int
+        self,
+        root_run_id: UUID,
+        executed_ms: int,
+        model_calls: int,
+        tokens: int,
+        cost: Cost | None = None,
     ) -> None:
         """Accumulate one slice's usage on the single root budget row."""
         consumed = await self._session.scalar(
@@ -721,6 +1104,11 @@ class SqlRunStore:
             raise UnknownRun
         budget = await self._session.get(RunBudgetScopeRow, root_run_id)
         if budget is not None:
+            _accumulate_cost(budget, cost)
+            # Written before the refresh below, which re-reads the row to pick
+            # up what the statement above set. Without this the refresh would
+            # discard the cost that was just accumulated in memory.
+            await self._session.flush()
             await self._session.refresh(budget)
 
     async def _lock_lease(self, lease_id: UUID, run_id: UUID) -> WorkerLeaseRow | None:
@@ -730,8 +1118,60 @@ class SqlRunStore:
             .with_for_update()
         )
 
+    async def _child_result(self, run: RunRow) -> dict[str, Any]:
+        """What a child reports, and deliberately not what it did.
+
+        §13's seventh clause: an outcome, a sentence, and the Artifacts it was
+        authorized to hand over — never the conversation. The child's own
+        transcript stays in the child's Session, where a person can read it and
+        where the parent's context planner never has to decide whether to trim
+        somebody else's turns to make room.
+
+        The summary is the child's last words rather than a generated
+        precis: it is what the child itself chose to say it had done, and a
+        second model call to compress it would be a claim nobody made.
+        """
+        said = await self._session.scalar(
+            select(SessionMessageRow)
+            .where(
+                SessionMessageRow.session_id == run.session_id,
+                SessionMessageRow.role == "assistant",
+                SessionMessageRow.redacted.is_(False),
+            )
+            .order_by(SessionMessageRow.sequence.desc())
+            .limit(1)
+        )
+        summary = "" if said is None else _to_message(said).text
+        produced = (
+            await self._session.scalars(
+                select(ArtifactRow.id)
+                .where(ArtifactRow.run_id == run.id)
+                .order_by(ArtifactRow.created_at, ArtifactRow.id)
+            )
+        ).all()
+        return {
+            "status": run.status,
+            # Truncated with a number rather than silently: a parent reading a
+            # cut-off sentence cannot tell that it is holding half of one.
+            "summary": summary[:MAX_CHILD_SUMMARY],
+            "summary_truncated": len(summary) > MAX_CHILD_SUMMARY,
+            "failure_reason": _failure_reason(run.checkpoint),
+            # What the child produced, by id. The parent is granted each of
+            # them at delivery — §13's eighth clause going upward — so this
+            # list is a set of things it can actually open rather than a
+            # catalogue of things it may not.
+            "artifacts": [str(item) for item in produced],
+        }
+
     async def _terminalize(self, run: RunRow, session: SessionRow, now: datetime) -> None:
         """Close a Run out and hand the Session to the next eligible Run."""
+        if run.parent_run_id is not None and run.delegation_result is None:
+            # Written here rather than delivered here, and that is the whole of
+            # §13's tenth clause: the parent is very often not in a state that
+            # can take an answer — another Worker holds it, or it is still
+            # waiting on a sibling — and a row survives that where a call would
+            # not. The sweep hands it over when the parent can take it.
+            run.delegation_result = await self._child_result(run)
         await self._session.execute(
             update(IdempotencyRecordRow)
             .where(IdempotencyRecordRow.run_id == run.id)
@@ -1055,9 +1495,18 @@ class SqlRunStore:
         rows = await self._session.scalars(statement)
         return list(rows.all())
 
-    async def expired_wait_runs(self, now: datetime, limit: int) -> Sequence[UUID]:
-        rows = await self._session.scalars(
-            select(RunRow.id)
+    async def expired_wait_runs(
+        self, now: datetime, limit: int
+    ) -> Sequence[tuple[UUID, str | None]]:
+        """Runs whose deadline has passed, each with what it was waiting for.
+
+        The kind comes back with the id because it decides what reaching the
+        deadline *means*. For a timer the platform owns the deadline and
+        reaching it is the wake; for a kind whose wake comes from outside —
+        an approval, a child Run — reaching it means nobody answered.
+        """
+        rows = await self._session.execute(
+            select(RunRow.id, RunRow.wait_kind)
             .where(
                 RunRow.status == RunState.WAITING_EXTERNAL.value,
                 RunRow.wait_deadline_at.is_not(None),
@@ -1066,7 +1515,81 @@ class SqlRunStore:
             .order_by(RunRow.wait_deadline_at)
             .limit(limit)
         )
-        return list(rows.all())
+        return [(row.id, row.wait_kind) for row in rows.all()]
+
+    async def wake_external_wait(self, run_id: UUID, request_id: str) -> bool:
+        """A timer that came due. Back to the queue, not into a pause."""
+        run = await self._lock_run_any_workspace(run_id)
+        if run is None or RunState(run.status) is not RunState.WAITING_EXTERNAL:
+            return False
+        session = await self._lock_session(run.workspace_id, run.session_id)
+        if session is None:
+            return False
+        await self._decide_and_write(
+            run,
+            session,
+            RunSignal.EXTERNAL_READY,
+            pause_reason=None,
+            wait_kind=None,
+            wait_deadline_at=None,
+            request_id=request_id,
+            payload={"reason": "wait_timer_elapsed"},
+        )
+        return True
+
+    async def expired_approvals(
+        self, now: datetime, limit: int
+    ) -> Sequence[tuple[UUID, UUID]]:
+        """Pending approvals nobody answered in time, with the Run each stopped.
+
+        Read from the approvals rather than from the Runs, because the approval
+        is where the deadline was written and a Run's `wait_deadline_at` is a
+        copy of it. One source, so the sweep and the person clicking cannot
+        disagree about whether there was still time.
+        """
+        rows = await self._session.execute(
+            select(ApprovalRow.id, ApprovalRow.run_id)
+            .where(
+                ApprovalRow.status == ApprovalStatus.PENDING.value,
+                ApprovalRow.expires_at <= now,
+            )
+            .order_by(ApprovalRow.expires_at)
+            .limit(limit)
+        )
+        return [(row.id, row.run_id) for row in rows.all()]
+
+    async def expire_approval(
+        self, approval_id: UUID, run_id: UUID, request_id: str, now: datetime
+    ) -> None:
+        """Nobody answered. The row says so and the Run pauses.
+
+        The Run is moved only if it is still waiting: it may have been
+        cancelled, or answered a moment ago by somebody whose click and this
+        sweep raced. Forcing the transition would turn that race into an error
+        for the person who clicked in time.
+        """
+        approval = await self._session.get(ApprovalRow, approval_id)
+        if approval is None or approval.status != ApprovalStatus.PENDING.value:
+            return
+        approval.status = ApprovalStatus.EXPIRED.value
+        approval.decided_at = now
+        await self._session.flush()
+        run = await self._lock_run_any_workspace(run_id)
+        if run is None or RunState(run.status) is not RunState.WAITING_APPROVAL:
+            return
+        session = await self._lock_session(run.workspace_id, run.session_id)
+        if session is None:  # pragma: no cover - a Run always has one
+            return
+        await self._decide_and_write(
+            run,
+            session,
+            RunSignal.APPROVAL_PAUSED,
+            pause_reason=PauseReason.APPROVAL_EXPIRED,
+            wait_kind=None,
+            wait_deadline_at=None,
+            request_id=request_id,
+            payload={"approval_id": str(approval_id)},
+        )
 
     async def aged_compat_timeout_runs(self, now: datetime, limit: int) -> Sequence[UUID]:
         cutoff = now - timedelta(hours=24)
@@ -1101,6 +1624,236 @@ class SqlRunStore:
             request_id=request_id,
             payload={"reason": "compat_timeout_aged_out"},
         )
+
+    async def parents_awaiting_children(self, limit: int) -> Sequence[UUID]:
+        """Parents hanging on children, oldest wait first.
+
+        Every one of them, not only the settled ones: whether a wait is
+        satisfied is `settle_child_wait`'s question and it needs the Run locked
+        to answer it. A scan that pre-filtered would be reading the same rows
+        twice and deciding on the first read.
+        """
+        rows = await self._session.scalars(
+            select(RunRow.id)
+            .where(
+                RunRow.status == RunState.WAITING_EXTERNAL.value,
+                RunRow.wait_kind == WAIT_CHILD_RUNS,
+            )
+            .order_by(RunRow.updated_at)
+            .limit(limit)
+        )
+        return list(rows.all())
+
+    async def settle_child_wait(self, parent_run_id: UUID, request_id: str) -> bool:
+        """Hand over what the children finished, and wake the parent if it is time.
+
+        Returns whether the parent went back to the queue.
+
+        §13's tenth clause in one place, because its three outcomes are one
+        decision and splitting them would let two of them drift:
+
+        - `all` waits until no child is still going.
+        - `any` wakes on the first **success** and cancels the rest, which is
+          the section's default. The cancelled siblings are still spending the
+          root budget, and continuing to pay for an answer nobody will read is
+          the thing that default exists to stop.
+        - Every child terminal with no success is **not** an error. The parent
+          goes back to the queue holding a failure summary it can read and act
+          on — §13 is explicit that it is told, not that it fails.
+
+        Delivery and the wake are one transaction, and `result_delivered_at` is
+        stamped in it. A crash between them would otherwise either lose an
+        answer or hand it over twice.
+        """
+        parent = await self._lock_run_any_workspace(parent_run_id)
+        if parent is None or RunState(parent.status) is not RunState.WAITING_EXTERNAL:
+            return False
+        if parent.wait_kind != WAIT_CHILD_RUNS:  # pragma: no cover - scanned for
+            return False
+        children = list(
+            (
+                await self._session.scalars(
+                    select(RunRow)
+                    .where(
+                        RunRow.parent_run_id == parent.id,
+                        RunRow.result_delivered_at.is_(None),
+                    )
+                    .order_by(RunRow.created_at, RunRow.id)
+                    .with_for_update()
+                )
+            ).all()
+        )
+        if not children:  # pragma: no cover - a wait always has children
+            return False
+        policy = WaitPolicy(parent.wait_policy or WaitPolicy.ALL.value)
+        finished = [
+            child for child in children if RunState(child.status) in TERMINAL_STATES
+        ]
+        succeeded = [
+            child for child in finished if RunState(child.status) is RunState.COMPLETED
+        ]
+        if policy is WaitPolicy.ANY and succeeded:
+            # Cancel the rest before delivering, so the answer the parent reads
+            # already reflects what happened to its siblings.
+            for child in children:
+                if RunState(child.status) not in TERMINAL_STATES:
+                    await self._cancel_child(child, request_id, "sibling_succeeded")
+            finished = [
+                child
+                for child in children
+                if RunState(child.status) in TERMINAL_STATES
+            ]
+        elif len(finished) != len(children):
+            # `all`, and somebody is still working. Nothing is delivered
+            # piecemeal: a parent handed one of three answers would be a parent
+            # woken by a wait it did not ask for.
+            return False
+
+        session = await self._lock_session(parent.workspace_id, parent.session_id)
+        if session is None:  # pragma: no cover - a Run always has one
+            return False
+        await self._deliver_child_results(parent, session, finished)
+        await self._decide_and_write(
+            parent,
+            session,
+            RunSignal.EXTERNAL_READY,
+            pause_reason=None,
+            wait_kind=None,
+            wait_deadline_at=None,
+            request_id=request_id,
+            payload={
+                "reason": "children_settled",
+                "wait": policy.value,
+                "children": len(finished),
+                "succeeded": len(succeeded),
+            },
+        )
+        return True
+
+    async def _deliver_child_results(
+        self, parent: RunRow, session: SessionRow, children: Sequence[RunRow]
+    ) -> None:
+        """Append one platform turn carrying every child's report, once.
+
+        One turn rather than one per child: they are the answer to a single
+        question the parent asked, and a conversation in which they arrive as
+        separate messages is one where a context planner may trim half of them
+        and leave the parent believing it heard from everybody.
+        """
+        now = datetime.now(UTC)
+        lines: list[str] = []
+        for child in children:
+            report = child.delegation_result or {}
+            status = str(report.get("status", child.status))
+            summary = str(report.get("summary", "")).strip()
+            reason = report.get("failure_reason")
+            said = summary or "It reported nothing."
+            if status != RunState.COMPLETED.value:
+                said = f"{said} (reason: {reason})" if reason else said
+            handed = [str(item) for item in report.get("artifacts", [])]
+            for artifact_id in handed:
+                await self._grant_artifact(
+                    parent.workspace_id, UUID(artifact_id), parent.id, "delivered_up"
+                )
+            if handed:
+                said = f"{said} Files: {', '.join(handed)}."
+            lines.append(f"- {child.id} [{status}]: {said}")
+            child.result_delivered_at = now
+        body = (
+            "The Agents you delegated to have finished. This is everything they "
+            "reported; you cannot see how they worked.\n" + "\n".join(lines)
+        )
+        self._session.add(
+            SessionMessageRow(
+                id=uuid4(),
+                session_id=session.id,
+                workspace_id=parent.workspace_id,
+                sequence=session.next_message_sequence,
+                role="user",
+                # The platform's own words relaying somebody else's work, which
+                # is exactly what `author` exists to distinguish from something
+                # a person typed.
+                content=CanonicalMessage(
+                    role="user",
+                    blocks=(TextBlock(text=body),),
+                    author="platform",
+                ).document(),
+                source_run_id=parent.id,
+                redacted=False,
+                created_at=now,
+            )
+        )
+        session.next_message_sequence += 1
+        await self._session.flush()
+
+    async def _cancel_child(
+        self, child: RunRow, request_id: str, reason: str
+    ) -> None:
+        """Stop one child, whatever it is doing.
+
+        Used by `any`'s default and by a cancelled parent's cascade. A child
+        already terminal is left alone rather than refused: both callers are
+        sweeps, and racing a Run that finished a moment ago is ordinary.
+        """
+        if RunState(child.status) in TERMINAL_STATES:
+            return
+        session = await self._lock_session(child.workspace_id, child.session_id)
+        if session is None:  # pragma: no cover - a Run always has one
+            return
+        await self._decide_and_write(
+            child,
+            session,
+            RunSignal.CANCEL_REQUESTED,
+            pause_reason=None,
+            wait_kind=None,
+            wait_deadline_at=None,
+            request_id=request_id,
+            payload={"reason": reason},
+        )
+
+    async def cancelled_parents_with_children(self, limit: int) -> Sequence[UUID]:
+        """Terminated parents that still have a child going (§13's eleventh clause).
+
+        Read as a scan rather than done inside the parent's own transition for
+        one reason: a parent can reach a terminal state down several paths —
+        cancelled by a person, failed, timed out — and a cascade attached to
+        one of them is a cascade the others do not get.
+        """
+        child = aliased(RunRow)
+        rows = await self._session.scalars(
+            select(RunRow.id)
+            .join(child, child.parent_run_id == RunRow.id)
+            .where(
+                RunRow.status.in_([state.value for state in TERMINAL_STATES]),
+                child.status.not_in([state.value for state in TERMINAL_STATES]),
+            )
+            .distinct()
+            .limit(limit)
+        )
+        return list(rows.all())
+
+    async def cascade_cancel_children(self, parent_run_id: UUID, request_id: str) -> int:
+        """Cancel every child of a parent that is no longer going anywhere.
+
+        §13's eleventh clause. A child outliving its parent is a Run spending
+        the root budget on work whose only reader has gone.
+        """
+        parent = await self._lock_run_any_workspace(parent_run_id)
+        if parent is None or RunState(parent.status) not in TERMINAL_STATES:
+            return 0
+        children = (
+            await self._session.scalars(
+                select(RunRow)
+                .where(
+                    RunRow.parent_run_id == parent.id,
+                    RunRow.status.not_in([state.value for state in TERMINAL_STATES]),
+                )
+                .with_for_update()
+            )
+        ).all()
+        for child in children:
+            await self._cancel_child(child, request_id, "parent_terminated")
+        return len(children)
 
     async def time_out_external_wait(self, run_id: UUID, request_id: str) -> None:
         run = await self._lock_run_any_workspace(run_id)
@@ -1312,6 +2065,15 @@ class SqlRunStore:
             checkpoint_effect_status=CheckpointEffectStatus.NONE.value,
             checkpoint_workspace_revision_id=session.workspace_revision_id,
             delivery_mode=source.delivery_mode,
+            # Carried from the Run being retried rather than from whoever asked
+            # for the retry: the confirmations this Run may need are about the
+            # original caller's data, and an operator retrying somebody's work
+            # does not become the person who may confirm it.
+            end_user_id=source.end_user_id,
+            # The price the original was measured at. A retry is the same work
+            # again, and repricing it because a rate changed in between would
+            # make one Run's cost depend on when it happened to fail.
+            model_pricing_version_id=source.model_pricing_version_id,
             created_at=now,
             updated_at=now,
         )
@@ -1367,6 +2129,326 @@ class SqlRunStore:
             document,
         )
         return AcceptedRun(run_id=run_id, document=document, replayed=False)
+
+    async def delegate_children(
+        self, *, parent_run_id: UUID, requests: tuple[DelegationRequest, ...]
+    ) -> DelegationResult:
+        """Create one child Run per request, or none of them (§13).
+
+        Every refusal is decided before the first row is written, so the "all
+        or none" this returns is a property of the order rather than of a
+        rollback. A parent told it delegated three pieces of work and given two
+        would sit waiting for a piece nobody is doing.
+
+        Three of §13's clauses are settled here and each is settled from a row
+        rather than from an argument:
+
+        **Depth.** The caller's own `depth` decides whether it may delegate at
+        all. A child Agent asking is refused here even if its published spec
+        somehow carries a delegation policy — §13's third clause is about the
+        creation path, not about what a spec happens to bind. The CHECK
+        constraint behind it is the second answer to the same question.
+
+        **Scope.** `granted` recomputes the intersection of the parent's own
+        scope and the binding, and the result is written onto the child as a
+        snapshot. Publishing already refused a binding wider than its parent;
+        this is that answer computed again at the moment it becomes a Run,
+        because between publishing and running is where a scope could drift.
+
+        **Budget.** The child gets the parent's `budget_root_run_id` and **no
+        budget row of its own**. One tree is one set of counters, and there is
+        no way to spell "reset" here because there is nothing to reset.
+
+        Its own Session, and therefore its own SessionWorkspace, because those
+        are keyed by Session — §13's eighth clause is a shape rather than a
+        check, and this is where the shape is chosen.
+        """
+        parent = await self._session.get(RunRow, parent_run_id)
+        if parent is None:  # pragma: no cover - the Worker holds this Run
+            return DelegationResult(refusal="this Run is not on record")
+        if parent.depth >= MAX_DELEGATION_DEPTH:
+            # §13's third clause. Refused on the caller's depth rather than on
+            # anything about the children, because that is the fact that makes
+            # it a grandchild.
+            return DelegationResult(
+                refusal=(
+                    "you were delegated this work yourself, and an Agent working "
+                    "on somebody else's behalf cannot delegate further"
+                )
+            )
+        version = await self._session.get(AgentVersionRow, parent.agent_version_id)
+        owning = await self._session.get(SessionRow, parent.session_id)
+        if version is None or owning is None:  # pragma: no cover - held by the Worker
+            return DelegationResult(refusal="this Run is not on record")
+        spec = AgentSpec.model_validate(version.spec)
+        policy = spec.delegation
+        if policy is None:
+            return DelegationResult(refusal="you are not configured to delegate to anybody")
+        bindings = {child.alias: child for child in policy.children}
+        unbound = sorted({item.alias for item in requests} - set(bindings))
+        if unbound:
+            return DelegationResult(
+                refusal=(
+                    f"you may not delegate to {', '.join(unbound)}. "
+                    f"You may delegate to {', '.join(sorted(bindings))}"
+                )
+            )
+        if len(requests) > policy.max_parallel:
+            return DelegationResult(
+                refusal=(
+                    f"you asked for {len(requests)} at once and may run "
+                    f"{policy.max_parallel}"
+                )
+            )
+        agents = await self._child_agents(
+            parent.workspace_id, tuple(bindings[item.alias].alias for item in requests)
+        )
+        missing = sorted({item.alias for item in requests} - set(agents))
+        if missing:
+            # Bound at publish and unpublished since. The parent is told which
+            # one rather than that something went wrong, because it may be able
+            # to do the work itself.
+            return DelegationResult(
+                refusal=f"{', '.join(missing)} is not published in this workspace"
+            )
+
+        wanted = {name for item in requests for name in item.artifacts}
+        readable = await self._readable_artifacts(parent, wanted)
+        unreadable = sorted(wanted - set(readable))
+        if unreadable:
+            # §13's eighth clause from the other side: a parent may pass on
+            # what it can read and nothing else. Refused before any child
+            # exists, so a delegation is never half granted.
+            return DelegationResult(
+                refusal=(
+                    f"you cannot read {', '.join(unreadable)}, so you cannot "
+                    f"pass it on"
+                )
+            )
+
+        now = datetime.now(UTC)
+        created: list[DelegatedChild] = []
+        for item in requests:
+            # The files face is filled in here rather than by `granted`: these
+            # are runtime references the spec never bound, which is exactly
+            # what `scope_of_spec` says it leaves to be decided where it is
+            # used. This is that place.
+            scope = replace(
+                granted(spec, bindings[item.alias]),
+                files=frozenset(str(readable[name]) for name in item.artifacts),
+            )
+            child_version_id = agents[item.alias]
+            child_session = SessionRow(
+                id=uuid4(),
+                workspace_id=parent.workspace_id,
+                agent_id=await self._agent_of_version(child_version_id),
+                # Ephemeral: a child Session holds one Run and nobody continues
+                # it. A persistent one would suggest there is a conversation
+                # here to come back to, and there is not — the parent reads a
+                # result, not a thread.
+                session_mode=SessionMode.EPHEMERAL.value,
+                # §13's fourth clause: the child inherits the calling subject
+                # for identity, audit and data ownership. It does **not**
+                # inherit the parent Agent's private memories, and this is why
+                # it cannot — the memory scope is workspace + agent + subject,
+                # and the agent here is the child's own.
+                caller_type=owning.caller_type,
+                caller_id=owning.caller_id,
+                head_run_id=None,
+                next_run_sequence=1,
+                next_message_sequence=1,
+                workspace_revision_id=None,
+                created_at=now,
+            )
+            self._session.add(child_session)
+            await self._session.flush()
+
+            child_id = uuid4()
+            child = RunRow(
+                id=child_id,
+                workspace_id=parent.workspace_id,
+                session_id=child_session.id,
+                agent_version_id=child_version_id,
+                status=RunState.QUEUED.value,
+                state_version=1,
+                next_event_sequence=1,
+                session_sequence=1,
+                blocked_by_run_id=None,
+                parent_run_id=parent.id,
+                depth=parent.depth + 1,
+                delegation_scope=scope.document(),
+                # Red line four: the root, never a new one. Creating a child
+                # spends the same Token, cost, time, tool-call and retry
+                # counters the parent has already been spending.
+                budget_root_run_id=parent.budget_root_run_id,
+                checkpoint_replay_safe=True,
+                checkpoint_effect_status=CheckpointEffectStatus.NONE.value,
+                checkpoint_workspace_revision_id=None,
+                # Carried from the parent: a confirmation a child needs is
+                # about the same person's data, and a child with no EndUser
+                # would be unable to ask anybody.
+                end_user_id=parent.end_user_id,
+                # The child's own endpoint at today's price. Not the parent's:
+                # they may be different models, and measuring one at the
+                # other's rate would put a number on this Run that is about
+                # somebody else's.
+                model_pricing_version_id=await self._current_pricing(child_version_id),
+                created_at=now,
+                updated_at=now,
+            )
+            self._session.add(child)
+            await self._session.flush()
+
+            for name in item.artifacts:
+                await self._grant_artifact(
+                    parent.workspace_id, readable[name], child_id, "delegated_down"
+                )
+
+            self._session.add(
+                SessionMessageRow(
+                    id=uuid4(),
+                    session_id=child_session.id,
+                    workspace_id=parent.workspace_id,
+                    sequence=1,
+                    role="user",
+                    # `platform` rather than unattributed: §13's seventh clause
+                    # keeps the parent's transcript out of the child, so this
+                    # turn is the platform relaying a delegation and not
+                    # something a person typed.
+                    content=CanonicalMessage(
+                        role="user",
+                        blocks=(TextBlock(text=item.instruction),),
+                        author="platform",
+                    ).document(),
+                    source_run_id=child_id,
+                    redacted=False,
+                    created_at=now,
+                )
+            )
+            child_session.head_run_id = child_id
+            child_session.next_run_sequence = 2
+            child_session.next_message_sequence = 2
+            await self._session.flush()
+
+            await self.append_events(
+                AppendEventsCommand(
+                    workspace_id=parent.workspace_id,
+                    run_id=child_id,
+                    events=(
+                        ReservedEvent(
+                            RunEventType.RUN_CREATED,
+                            {
+                                "parent_run_id": str(parent.id),
+                                "depth": child.depth,
+                                "delegation_scope": scope.document(),
+                            },
+                        ),
+                    ),
+                )
+            )
+            self._audit(
+                parent.workspace_id,
+                owning.caller_id,
+                "run.delegated",
+                "run",
+                child_id,
+                f"delegate-{parent.id}",
+                actor_type=owning.caller_type,
+            )
+            created.append(
+                DelegatedChild(
+                    run_id=child_id, session_id=child_session.id, alias=item.alias
+                )
+            )
+        return DelegationResult(children=tuple(created))
+
+    async def _readable_artifacts(
+        self, run: RunRow, named: set[str]
+    ) -> dict[str, UUID]:
+        """Which of these ids this Run may actually read, keyed by what it typed.
+
+        Two ways in, and no third: an Artifact this Run produced itself, or one
+        somebody granted it. That is the whole reachability rule, and it is
+        asked here rather than trusted from the caller because this is the only
+        place that knows which Run is asking.
+
+        An id that is not a UUID is simply absent from the answer, so a model
+        that invented one is told it cannot read it — which is true — rather
+        than crashing the round on a parse.
+        """
+        if not named:
+            return {}
+        wanted: dict[UUID, str] = {}
+        for name in named:
+            try:
+                wanted[UUID(name)] = name
+            except ValueError:
+                continue
+        if not wanted:
+            return {}
+        rows = await self._session.execute(
+            select(ArtifactRow.id)
+            .outerjoin(
+                ArtifactGrantRow,
+                (ArtifactGrantRow.artifact_id == ArtifactRow.id)
+                & (ArtifactGrantRow.run_id == run.id),
+            )
+            .where(
+                ArtifactRow.id.in_(list(wanted)),
+                ArtifactRow.workspace_id == run.workspace_id,
+                (ArtifactRow.run_id == run.id) | (ArtifactGrantRow.id.is_not(None)),
+            )
+        )
+        return {wanted[found]: found for (found,) in rows.all()}
+
+    async def _grant_artifact(
+        self, workspace_id: UUID, artifact_id: UUID, run_id: UUID, reason: str
+    ) -> None:
+        """Let one Run read one Artifact, once.
+
+        `ON CONFLICT DO NOTHING` rather than a check first: granting twice is
+        ordinary — the same file to two children, a redelivered result — and a
+        read-then-write here would be a race between two Workers doing exactly
+        that.
+        """
+        await self._session.execute(
+            pg_insert(ArtifactGrantRow)
+            .values(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                artifact_id=artifact_id,
+                run_id=run_id,
+                reason=reason,
+                created_at=datetime.now(UTC),
+            )
+            .on_conflict_do_nothing(constraint="uq_artifact_grants_pair")
+        )
+
+    async def _child_agents(
+        self, workspace_id: UUID, aliases: tuple[str, ...]
+    ) -> dict[str, UUID]:
+        """The published Version behind each alias, in this workspace only.
+
+        Missing aliases are simply absent from the answer. Whoever asked names
+        them in the refusal, which is more use to a parent than an exception it
+        cannot read.
+        """
+        if not aliases:
+            return {}
+        rows = await self._session.execute(
+            select(AgentRow.alias, AgentRow.current_version_id).where(
+                AgentRow.workspace_id == workspace_id,
+                AgentRow.alias.in_(list(set(aliases))),
+                AgentRow.current_version_id.is_not(None),
+            )
+        )
+        return {alias: version_id for alias, version_id in rows.all()}
+
+    async def _agent_of_version(self, agent_version_id: UUID) -> UUID:
+        version = await self._session.get(AgentVersionRow, agent_version_id)
+        if version is None:  # pragma: no cover - just read from the same row
+            raise UnknownRun
+        return version.agent_id
 
     async def list_session_messages(
         self, workspace_id: UUID, session_id: UUID
@@ -1547,6 +2629,46 @@ class SqlRunStore:
             .with_for_update()
         )
 
+    async def _current_pricing(self, agent_version_id: UUID) -> UUID | None:
+        """The price in force for whatever endpoint this Version names.
+
+        `None` for a deterministic Agent, which reaches no endpoint, and for an
+        endpoint nobody has priced. Both mean the same thing downstream — this
+        Run's cost cannot be stated — and neither means it was free.
+        """
+        spec = await self._session.scalar(
+            select(AgentVersionRow.spec).where(AgentVersionRow.id == agent_version_id)
+        )
+        if not spec:
+            return None
+        policy: dict[str, Any] = spec.get("model_policy") or {}
+        endpoint_id = policy.get("endpoint_id")
+        if endpoint_id is None:
+            return None
+        return await self._session.scalar(
+            select(ModelPricingVersionRow.id)
+            .where(
+                ModelPricingVersionRow.endpoint_id == UUID(str(endpoint_id)),
+                ModelPricingVersionRow.effective_at <= datetime.now(UTC),
+            )
+            .order_by(
+                ModelPricingVersionRow.effective_at.desc(),
+                ModelPricingVersionRow.version_number.desc(),
+            )
+            .limit(1)
+        )
+
+    async def _cost_ceiling(
+        self, workspace_id: UUID
+    ) -> tuple[Decimal | None, str | None]:
+        found = await self._session.execute(
+            select(WorkspaceRow.max_run_cost, WorkspaceRow.cost_currency).where(
+                WorkspaceRow.id == workspace_id
+            )
+        )
+        row = found.first()
+        return (None, None) if row is None else (row[0], row[1])
+
     async def _published_version(self, session: SessionRow) -> tuple[UUID, AgentLimits]:
         agent = await self._session.scalar(
             select(AgentRow).where(
@@ -1616,6 +2738,8 @@ class SqlRunStore:
             wait_deadline_at=run.wait_deadline_at,
             retry_of_run_id=run.retry_of_run_id,
             budget_root_run_id=run.budget_root_run_id,
+            parent_run_id=run.parent_run_id,
+            depth=run.depth,
             last_event_sequence=run.next_event_sequence - 1,
             queue_position=position,
             queue_status=queue_status,
@@ -1627,6 +2751,9 @@ class SqlRunStore:
             checkpoint_effect_status=CheckpointEffectStatus(run.checkpoint_effect_status),
             checkpoint_usage_quality=_usage_quality(run.checkpoint),
             failure_reason=_failure_reason(run.checkpoint),
+            current_round=_round(run.checkpoint),
+            goal_outcome=_goal_outcome(run.checkpoint),
+            goal_unmet=_goal_unmet(run.checkpoint),
             created_at=run.created_at,
             started_at=run.started_at,
             finished_at=run.finished_at,
@@ -1635,6 +2762,26 @@ class SqlRunStore:
             head_wait_kind=head_wait,
             head_wait_deadline_at=head_deadline,
             queue_available_actions=head_actions,
+            children=await self._child_refs(run),
+        )
+
+    async def _child_refs(self, run: RunRow) -> tuple[ChildRunRef, ...]:
+        """The Runs this one delegated, for the console's task tree.
+
+        Skipped entirely for a Run at depth 1: a child cannot have children,
+        so the query would return nothing every time it ran. Most Runs are not
+        parents either, but that is not knowable without asking.
+        """
+        if run.depth >= MAX_DELEGATION_DEPTH:
+            return ()
+        rows = await self._session.execute(
+            select(RunRow.id, RunRow.status)
+            .where(RunRow.parent_run_id == run.id)
+            .order_by(RunRow.created_at, RunRow.id)
+        )
+        return tuple(
+            ChildRunRef(id=row_id, status=RunState(status))
+            for row_id, status in rows.all()
         )
 
     async def _blocked_head_fields(
@@ -1754,7 +2901,48 @@ class SqlRunStore:
             await self._session.refresh(row, ["next_event_sequence"])
 
 
-def _new_budget(run_id: UUID, limits: AgentLimits, now: datetime) -> RunBudgetScopeRow:
+def _accumulate_cost(budget: RunBudgetScopeRow, cost: Cost | None) -> None:
+    """Add one round's cost, and let unknown stay unknown.
+
+    §12.4's rule at the only place it can be enforced. A Run that has made no
+    calls has genuinely spent nothing, so it starts at a known zero; the first
+    round that cannot be priced turns the total unknown, and nothing turns it
+    back. Skipping such a round instead would report a total smaller than what
+    was actually spent — the one wrong answer a spending figure must never
+    give.
+    """
+    if budget.cost_quality == CostQuality.UNKNOWN.value:
+        return
+    if cost is None or not cost.known:
+        budget.consumed_cost = None
+        budget.cost_quality = CostQuality.UNKNOWN.value
+        return
+    running = Cost(
+        amount=budget.consumed_cost if budget.consumed_cost is not None else Decimal(0),
+        currency=budget.cost_currency or cost.currency,
+        quality=CostQuality(budget.cost_quality),
+    )
+    total = running.plus(cost)
+    budget.consumed_cost = total.amount
+    budget.cost_quality = total.quality.value
+    if budget.cost_currency is None:
+        budget.cost_currency = total.currency
+
+
+def _new_budget(
+    run_id: UUID,
+    limits: AgentLimits,
+    now: datetime,
+    ceiling: tuple[Decimal | None, str | None] = (None, None),
+) -> RunBudgetScopeRow:
+    """The Run's own copy of every valve it will be measured against.
+
+    The money ceiling is copied like the rest rather than read from the
+    workspace each round: a limit that moved underneath a running Run would
+    mean the same Run was measured against two different numbers, and neither
+    would be the one anybody set.
+    """
+    max_cost, currency = ceiling
     return RunBudgetScopeRow(
         root_run_id=run_id,
         max_execution_seconds=limits.max_execution_seconds,
@@ -1769,8 +2957,29 @@ def _new_budget(run_id: UUID, limits: AgentLimits, now: datetime) -> RunBudgetSc
         consumed_tokens=0,
         max_derived_retries=limits.max_derived_retries,
         derived_retry_count=0,
+        max_cost=max_cost,
+        cost_currency=currency,
+        # A known zero, because a Run that has made no model call has genuinely
+        # spent nothing. The first round that cannot be priced turns this
+        # unknown, and nothing turns it back — that is where §12.4's "unknown
+        # is not zero" actually bites, rather than here.
+        consumed_cost=Decimal(0),
+        cost_quality=CostQuality.PROVIDER.value,
         version=1,
     )
+
+
+def _latest_request(history: Sequence[StoredMessage]) -> str:
+    """What this Run was last asked, as the query memories are ranked against.
+
+    The last user turn rather than the whole conversation: what the person just
+    said is what this round is about, and ranking against the transcript would
+    let an early digression outweigh the current question forever.
+    """
+    for item in reversed(history):
+        if item.message.role == "user":
+            return item.message.text
+    return ""
 
 
 def _budget_summary(row: RunBudgetScopeRow) -> BudgetSummary:
@@ -1787,6 +2996,10 @@ def _budget_summary(row: RunBudgetScopeRow) -> BudgetSummary:
         consumed_tokens=row.consumed_tokens,
         max_derived_retries=row.max_derived_retries,
         derived_retry_count=row.derived_retry_count,
+        max_cost=row.max_cost,
+        cost_currency=row.cost_currency,
+        consumed_cost=row.consumed_cost,
+        cost_quality=row.cost_quality,
     )
 
 
@@ -1891,6 +3104,42 @@ def _usage_quality(checkpoint: dict[str, Any] | None) -> str | None:
         return None
     value: Any = checkpoint.get("usage_quality")
     return str(value) if isinstance(value, str) else None
+
+
+def _round(checkpoint: dict[str, Any] | None) -> int | None:
+    """Which round the checkpoint describes, counted across the whole Run.
+
+    Written by the Worker from the same number it gave the model, so what a
+    reader sees and what the round saw are one count. Absent for the writes
+    that record something other than a judged round — a rolled-back commit, a
+    slice that ended before any model call.
+    """
+    if not checkpoint:
+        return None
+    value: Any = checkpoint.get("round")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _goal_outcome(checkpoint: dict[str, Any] | None) -> str | None:
+    if not checkpoint:
+        return None
+    value: Any = checkpoint.get("goal_outcome")
+    return str(value) if isinstance(value, str) and value else None
+
+
+def _goal_unmet(checkpoint: dict[str, Any] | None) -> tuple[str, ...]:
+    """The declared conditions the last judged round did not meet.
+
+    Empty both when everything passed and when the Agent declared nothing to
+    check; `goal_outcome` is what tells those apart.
+    """
+    if not checkpoint:
+        return ()
+    value: Any = checkpoint.get("goal_unmet")
+    if not isinstance(value, list):
+        return ()
+    names = cast(list[Any], value)
+    return tuple(name for name in names if isinstance(name, str))
 
 
 def _to_message(row: SessionMessageRow) -> CanonicalMessage:

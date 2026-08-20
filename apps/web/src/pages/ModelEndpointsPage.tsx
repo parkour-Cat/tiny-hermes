@@ -20,6 +20,8 @@ type RegisterValues = {
   context_window: number;
   max_output_tokens: number;
   usage_quality: "provider" | "unavailable";
+  context_accounting: "shared" | "separate";
+  tokenizer?: string;
   credential_ref: string;
 };
 
@@ -125,6 +127,7 @@ export function ModelEndpointsPage() {
             initialValues={{
               kind: "openai_compatible",
               usage_quality: "unavailable",
+              context_accounting: "shared",
               context_window: 128000,
               max_output_tokens: 4096,
             }}
@@ -176,6 +179,21 @@ export function ModelEndpointsPage() {
                 ]}
               />
             </Form.Item>
+            <Form.Item name="context_accounting" label={t("endpointContextAccounting")}>
+              <Select
+                options={[
+                  { value: "shared", label: t("endpointAccountingShared") },
+                  { value: "separate", label: t("endpointAccountingSeparate") },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item
+              name="tokenizer"
+              label={t("endpointTokenizer")}
+              extra={t("endpointTokenizerNote")}
+            >
+              <Input />
+            </Form.Item>
             <Form.Item
               name="credential_ref"
               label={t("endpointCredentialRef")}
@@ -200,6 +218,17 @@ export function ModelEndpointsPage() {
                 <div className="workspace-summary">
                   <Typography.Title level={4}>{entry.name}</Typography.Title>
                   <Typography.Paragraph type="secondary">{entry.model}</Typography.Paragraph>
+                  <Typography.Paragraph type="secondary">
+                    {t("endpointWindowSummary")
+                      .replace("{window}", String(entry.context_window))
+                      .replace("{output}", String(entry.max_output_tokens))
+                      .replace(
+                        "{accounting}",
+                        entry.context_accounting === "separate"
+                          ? t("endpointAccountingSeparate")
+                          : t("endpointAccountingShared"),
+                      )}
+                  </Typography.Paragraph>
                   {detail === undefined ? null : (
                     <>
                       <Typography.Paragraph type="secondary">{detail.base_url}</Typography.Paragraph>

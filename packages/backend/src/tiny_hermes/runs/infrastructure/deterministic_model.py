@@ -1,4 +1,5 @@
 import asyncio
+from typing import Any, cast
 
 from tiny_hermes.agents.domain.models import DeterministicModelPolicy
 from tiny_hermes.runs.domain.models import TextBlock, ToolCallBlock, ToolResultBlock
@@ -8,9 +9,15 @@ from tiny_hermes.runs.ports.model import (
     StopReason,
     UsageQuality,
 )
+from tiny_hermes.tools.domain.http_calls import HTTP_PREFIX
+from tiny_hermes.tools.domain.mcp import MCP_PREFIX
 
 MAX_DELAY_MS = 5_000
 TOKENS_PER_ROUND = 32
+#: Long enough that a test can see the Run sitting in `waiting_external`, short
+#: enough that a real deployment's drill is not left there. Tests that want the
+#: deadline reached move it in the row rather than sleeping through it.
+WAIT_SECONDS = 60
 
 
 class DeterministicModelProvider:
@@ -145,6 +152,328 @@ class DeterministicModelProvider:
                 input_tokens=TOKENS_PER_ROUND // 2,
                 output_tokens=TOKENS_PER_ROUND // 2,
             )
+        if scenario == "wait_once":
+            # Asked for once per Run, not once per slice. The wait's own result
+            # turn is in the transcript when the Scheduler wakes this Run, so
+            # the second round sees it and moves on instead of waiting again.
+            waited = any(
+                isinstance(block, ToolResultBlock) and block.call_id == "wait-1"
+                for message in request.messages
+                for block in message.blocks
+            )
+            if not waited:
+                return ModelResponse(
+                    stop_reason=StopReason.TOOL_CALL,
+                    text="The deterministic scenario waits for something outside it.",
+                    tool_calls=(
+                        ToolCallBlock(
+                            call_id="wait-1",
+                            name="platform.wait",
+                            arguments={"seconds": WAIT_SECONDS},
+                        ),
+                    ),
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                )
+            return ModelResponse(
+                stop_reason=StopReason.COMPLETED,
+                text="The deterministic scenario was woken and finished.",
+                input_tokens=TOKENS_PER_ROUND // 2,
+                output_tokens=TOKENS_PER_ROUND // 2,
+            )
+        if scenario == "skill_once":
+            # The skill drill: the Run input names the skill, the model loads
+            # it, and its answer is the document's own text. Nothing here
+            # touches a sandbox, so this scenario runs anywhere.
+            #
+            # Only results after the last user message count, for the same
+            # reason `shell_from_input` says: a shared Session's transcript
+            # already carries earlier Runs' results under this call id.
+            results = tuple(
+                block
+                for message in request.messages[_last_user_index(request) + 1 :]
+                for block in message.blocks
+                if isinstance(block, ToolResultBlock) and block.call_id == "skill-load-1"
+            )
+            if not results:
+                name = _last_user_text(request) or _first_skill_name(request)
+                if not name:
+                    return ModelResponse(
+                        stop_reason=StopReason.FAILED,
+                        text="",
+                        failure="deterministic_no_skill_named",
+                    )
+                return ModelResponse(
+                    stop_reason=StopReason.TOOL_CALL,
+                    text="Loading the skill the drill named.",
+                    tool_calls=(
+                        ToolCallBlock(
+                            call_id="skill-load-1",
+                            name="skill.load",
+                            arguments={"skill": name},
+                        ),
+                    ),
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                )
+            loaded = results[-1]
+            if loaded.failed:
+                return ModelResponse(
+                    stop_reason=StopReason.FAILED,
+                    text="",
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                    failure="deterministic_skill_load_refused",
+                )
+            return ModelResponse(
+                stop_reason=StopReason.COMPLETED,
+                text=f"skill loaded\n{loaded.output[:2000]}",
+                input_tokens=TOKENS_PER_ROUND // 2,
+                output_tokens=TOKENS_PER_ROUND // 2,
+            )
+        if scenario == "delegate_once":
+            # The delegation drill: the Run input names the aliases to hand
+            # work to, comma separated, and the model gives each one a
+            # sentence. Taking them from the input rather than from the
+            # Version's policy is what lets one scenario drill both halves —
+            # a bound alias creates a child, an unbound one comes back
+            # refused, and the model reports whichever it got.
+            # The whole conversation, not the turns after the last user
+            # message. Waking from a `child_runs` wait appends a
+            # platform-authored `user` turn carrying the children's reports, so
+            # the delegation this Run already made sits *before* the newest
+            # user turn rather than after it. A scenario that looked only after
+            # it would delegate a second time on every wake-up.
+            results = tuple(
+                block
+                for message in request.messages
+                for block in message.blocks
+                if isinstance(block, ToolResultBlock) and block.call_id == "delegate-1"
+            )
+            if not results:
+                # An optional `all:` or `any:` prefix on the Run input chooses
+                # the wait policy, the same way this scenario takes its aliases
+                # from the input. It cannot be set on the row beforehand: the
+                # round that delegates is what writes the policy, so a drill
+                # for `any` has to ask for it where a model would.
+                asked = _last_user_text(request)
+                wait = "all"
+                if ":" in asked and asked.split(":", 1)[0].strip() in ("all", "any"):
+                    prefix, asked = asked.split(":", 1)
+                    wait = prefix.strip()
+                # `alias#file-id` hands that child one file. Written into the
+                # input like everything else this scenario takes, so one
+                # scenario drills a delegation with files and one without.
+                named = [
+                    part.strip() for part in asked.split(",") if part.strip()
+                ]
+                if not named:
+                    return ModelResponse(
+                        stop_reason=StopReason.FAILED,
+                        text="",
+                        failure="deterministic_nobody_to_delegate_to",
+                    )
+                return ModelResponse(
+                    stop_reason=StopReason.TOOL_CALL,
+                    text="Splitting this up.",
+                    tool_calls=(
+                        ToolCallBlock(
+                            call_id="delegate-1",
+                            name="agent.delegate",
+                            arguments={
+                                "children": [
+                                    _delegation_entry(entry) for entry in named
+                                ],
+                                "wait": wait,
+                            },
+                        ),
+                    ),
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                )
+            answered = results[-1]
+            reported = "\n".join(
+                message.text
+                for message in request.messages
+                if message.author == "platform"
+            )
+            return ModelResponse(
+                stop_reason=StopReason.COMPLETED,
+                text="delegation outcome\n"
+                + answered.output[:2000]
+                + ("\n" + reported[:2000] if reported else ""),
+                input_tokens=TOKENS_PER_ROUND // 2,
+                output_tokens=TOKENS_PER_ROUND // 2,
+            )
+        if scenario == "search_once":
+            # The retrieval drill: the Run input is the query, the model
+            # searches its own past conversations once, and answers with what
+            # came back. Nothing here touches a sandbox.
+            results = tuple(
+                block
+                for message in request.messages[_last_user_index(request) + 1 :]
+                for block in message.blocks
+                if isinstance(block, ToolResultBlock) and block.call_id == "search-1"
+            )
+            if not results:
+                query = _last_user_text(request)
+                if not query:
+                    return ModelResponse(
+                        stop_reason=StopReason.FAILED,
+                        text="",
+                        failure="deterministic_nothing_to_search",
+                    )
+                return ModelResponse(
+                    stop_reason=StopReason.TOOL_CALL,
+                    text="Looking back through what was said before.",
+                    tool_calls=(
+                        ToolCallBlock(
+                            call_id="search-1",
+                            name="session.search",
+                            arguments={"query": query},
+                        ),
+                    ),
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                )
+            answered = results[-1]
+            return ModelResponse(
+                stop_reason=StopReason.COMPLETED,
+                text="search results\n" + answered.output[:2000],
+                input_tokens=TOKENS_PER_ROUND // 2,
+                output_tokens=TOKENS_PER_ROUND // 2,
+            )
+        if scenario == "remember_once":
+            # The memory drill: the Run input is the body to remember, the model
+            # proposes it once, and its answer is what came back — refused,
+            # pending, or written. Nothing here touches a sandbox.
+            results = tuple(
+                block
+                for message in request.messages[_last_user_index(request) + 1 :]
+                for block in message.blocks
+                if isinstance(block, ToolResultBlock) and block.call_id == "remember-1"
+            )
+            if not results:
+                body = _last_user_text(request)
+                if not body:
+                    return ModelResponse(
+                        stop_reason=StopReason.FAILED,
+                        text="",
+                        failure="deterministic_nothing_to_remember",
+                    )
+                return ModelResponse(
+                    stop_reason=StopReason.TOOL_CALL,
+                    text="Proposing one thing worth remembering.",
+                    tool_calls=(
+                        ToolCallBlock(
+                            call_id="remember-1",
+                            name="memory.remember",
+                            arguments={"body": body},
+                        ),
+                    ),
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                )
+            answered = results[-1]
+            return ModelResponse(
+                stop_reason=StopReason.COMPLETED,
+                text="memory outcome\n" + answered.output[:2000],
+                input_tokens=TOKENS_PER_ROUND // 2,
+                output_tokens=TOKENS_PER_ROUND // 2,
+            )
+        if scenario in ("http_once", "mcp_once"):
+            # §16.2 end to end without a real model: call the first HTTP
+            # operation this Version bound, and answer with what came back. The
+            # Run input may name a different one, which is how the same
+            # scenario drills a refusal — an unbound name, or a write.
+            called = tuple(
+                block
+                for message in request.messages[_last_user_index(request) + 1 :]
+                for block in message.blocks
+                if isinstance(block, ToolResultBlock) and block.call_id == "http-1"
+            )
+            if not called:
+                name = _tool_call_name(request, scenario)
+                if not name:
+                    return ModelResponse(
+                        stop_reason=StopReason.FAILED,
+                        text="",
+                        failure="deterministic_no_http_tool_bound",
+                    )
+                return ModelResponse(
+                    stop_reason=StopReason.TOOL_CALL,
+                    text="Calling the operation the drill named.",
+                    tool_calls=(
+                        ToolCallBlock(call_id="http-1", name=name, arguments={}),
+                    ),
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                )
+            answer = called[-1]
+            # A refused call still completes the Run here. The drill is about
+            # what the tool result says, and a failed Run would hide it behind
+            # a state transition.
+            return ModelResponse(
+                stop_reason=StopReason.COMPLETED,
+                text=f"http answered\n{answer.output[:2000]}",
+                input_tokens=TOKENS_PER_ROUND // 2,
+                output_tokens=TOKENS_PER_ROUND // 2,
+            )
+        if scenario == "propose_once":
+            # §15.3 end to end without a sandbox and without a real model: the
+            # Run loads the skill it was given, proposes one line added to it,
+            # and stops. What it proposes is deliberately dull — the drill is
+            # about the governance path, not about the content.
+            proposed = tuple(
+                block
+                for message in request.messages[_last_user_index(request) + 1 :]
+                for block in message.blocks
+                if isinstance(block, ToolResultBlock) and block.call_id == "propose-1"
+            )
+            if not proposed:
+                name = _last_user_text(request) or _first_skill_name(request)
+                if not name:
+                    return ModelResponse(
+                        stop_reason=StopReason.FAILED,
+                        text="",
+                        failure="deterministic_no_skill_named",
+                    )
+                return ModelResponse(
+                    stop_reason=StopReason.TOOL_CALL,
+                    text="Suggesting one line for a person to review.",
+                    tool_calls=(
+                        ToolCallBlock(
+                            call_id="propose-1",
+                            name="skill.propose",
+                            arguments={
+                                "skill": name,
+                                "files": [
+                                    {
+                                        "path": "SKILL.md",
+                                        "content": _proposed_manifest(name),
+                                    }
+                                ],
+                            },
+                        ),
+                    ),
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                )
+            outcome = proposed[-1]
+            if outcome.failed:
+                return ModelResponse(
+                    stop_reason=StopReason.FAILED,
+                    text="",
+                    input_tokens=TOKENS_PER_ROUND // 2,
+                    output_tokens=TOKENS_PER_ROUND // 2,
+                    failure="deterministic_proposal_refused",
+                )
+            return ModelResponse(
+                stop_reason=StopReason.COMPLETED,
+                text=f"proposal opened\n{outcome.output[:2000]}",
+                input_tokens=TOKENS_PER_ROUND // 2,
+                output_tokens=TOKENS_PER_ROUND // 2,
+            )
         if scenario == "fail_replay_safe":
             return ModelResponse(
                 stop_reason=StopReason.FAILED,
@@ -176,6 +505,62 @@ def _last_user_index(request: ModelRequest) -> int:
     return -1
 
 
+#: What `propose_once` suggests. A whole package, because a proposal is the
+#: files the skill should end up with rather than a patch — the drill would not
+#: prove much if it sent something the catalog could not store.
+PROPOSED_LINE = "Check the dashboard before you start."
+
+
+def _proposed_manifest(name: str) -> str:
+    """A whole package, because a proposal is files rather than a patch."""
+    lines = (
+        "---",
+        f"name: {name}",
+        "description: How this company takes a machine out of rotation before a deploy.",
+        "---",
+        "",
+        f"# {name}",
+        "",
+        PROPOSED_LINE,
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _tool_call_name(request: ModelRequest, scenario: str) -> str:
+    """Which generated tool the drill should call.
+
+    The Run input wins when it names one, so a single scenario can drill the
+    answer, an unbound name and a refused write. With no input it falls back to
+    the first tool of the right family the Version bound.
+    """
+    prefix = HTTP_PREFIX if scenario == "http_once" else MCP_PREFIX
+    asked = _last_user_text(request).strip()
+    if asked.startswith(f"{prefix}."):
+        return asked
+    for schema in request.tools:
+        function = schema.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = str(cast(dict[str, Any], function).get("name", ""))
+        if name.startswith(f"{prefix}."):
+            return name
+    return ""
+
+
+def _first_skill_name(request: ModelRequest) -> str:
+    """The name out of the first summary line, or nothing.
+
+    The summaries the Worker builds read ``- name: description``, and the
+    drill's fallback is to load whichever skill the Version bound first — so a
+    Run started with no input still exercises the path.
+    """
+    for summary in request.skill_summaries:
+        head = summary.lstrip("- ").split(":", 1)[0].strip()
+        if head:
+            return head
+    return ""
+
+
 def _last_user_text(request: ModelRequest) -> str:
     last = _last_user_index(request)
     if last < 0:
@@ -184,3 +569,20 @@ def _last_user_text(request: ModelRequest) -> str:
         if isinstance(block, TextBlock):
             return block.text.strip()
     return ""
+
+
+def _delegation_entry(named: str) -> dict[str, Any]:
+    """One child of the `delegate_once` scenario, as `alias` or `alias#file-id`.
+
+    The separator is `#` rather than `:` because the input already uses `:` for
+    the wait policy, and a scenario whose grammar is ambiguous is a scenario
+    that will eventually drill something other than what its test says.
+    """
+    alias, _, artifact = named.partition("#")
+    entry: dict[str, Any] = {
+        "alias": alias,
+        "instruction": f"Do the {alias} part.",
+    }
+    if artifact:
+        entry["artifacts"] = [artifact]
+    return entry

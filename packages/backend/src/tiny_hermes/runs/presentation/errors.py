@@ -2,6 +2,7 @@ from tiny_hermes.identity.domain.models import AuthenticatedUser
 from tiny_hermes.identity.presentation.dependencies import forbidden
 from tiny_hermes.runs.application.service import (
     AgentNotPublished,
+    BudgetNotWidened,
     DeniedRunControl,
     EventSequenceConflict,
     ForbiddenRunAction,
@@ -70,6 +71,13 @@ def as_app_error(error: RunCoordinationError) -> AppError:
             status=409,
             detail="The run cannot accept that control in its current state.",
             audited=True,
+        )
+    if isinstance(error, BudgetNotWidened):
+        return AppError(
+            code="budget_not_widened",
+            title="Budget not widened",
+            status=422,
+            detail="That ceiling is not above the one already in force.",
         )
     if isinstance(error, EventSequenceConflict):
         return AppError(

@@ -13,7 +13,11 @@ export default defineConfig({
   expect: { timeout: 60_000 },
   reporter: [["list"], ["html", { open: "never" }]],
   use: {
-    baseURL: "http://127.0.0.1:3000",
+    // The demo stack's address by default. An isolated stack brought up beside
+    // it — the procedure in `docs/development.md` for a platform that was
+    // bootstrapped with some other account — publishes different host ports,
+    // and this is how the walk is pointed at it.
+    baseURL: process.env.TINY_HERMES_E2E_BASE_URL ?? "http://127.0.0.1:3000",
     trace: "retain-on-failure",
   },
   projects: [
@@ -28,6 +32,45 @@ export default defineConfig({
     {
       name: "console",
       testMatch: /(console|stream-contract)\.spec\.ts$/,
+      dependencies: ["setup"],
+      use: { storageState: CONSOLE_STATE },
+    },
+    // Its own project rather than another file in `console`: this walk runs
+    // two Runs end to end and needs the whole catalog, and keeping it separate
+    // means a failure says which of the two areas broke.
+    {
+      name: "skills",
+      testMatch: /skills\.spec\.ts$/,
+      dependencies: ["setup"],
+      use: { storageState: CONSOLE_STATE },
+    },
+    // Its own project for the same reason, and with one extra requirement it
+    // states rather than assumes: this walk calls out through the egress
+    // proxy, so it needs a stack where `EGRESS_PROXY_URL` is set and
+    // `OUTBOUND_ALLOWED_CIDRS` covers the Compose bridge. Without those every
+    // outbound call refuses — which is M2C-1 working, not this walk failing.
+    {
+      name: "tools",
+      testMatch: /tools\.spec\.ts$/,
+      dependencies: ["setup"],
+      use: { storageState: CONSOLE_STATE },
+    },
+    // §13's walk. Needs no egress and no sandbox — the children here run
+    // platform tools only — but it does need a **Scheduler**, because nothing
+    // in the request path settles a `child_runs` wait. On a stack without one
+    // the parent waits until its deadline, which is the deployment being
+    // honest rather than this walk failing.
+    {
+      name: "children",
+      testMatch: /children\.spec\.ts$/,
+      dependencies: ["setup"],
+      use: { storageState: CONSOLE_STATE },
+    },
+    // §14.1's walk. Needs no egress and no sandbox — memory is answered by the
+    // platform itself — so it runs on any stack the console runs on.
+    {
+      name: "memory",
+      testMatch: /memory\.spec\.ts$/,
       dependencies: ["setup"],
       use: { storageState: CONSOLE_STATE },
     },

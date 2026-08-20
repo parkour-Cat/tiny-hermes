@@ -211,9 +211,61 @@ flowchart LR
 
 - 五个阶段的出口检查全部通过。
 - 产品设计 §27.2 的 9 个场景全部有自动检查，或有证据的人工验收记录。
+  **状态（2026-08-20）：七条完全满足，一条刚补齐，一条有条件。**
+
+  | # | 场景 | 证据 |
+  |---|---|---|
+  | 1 | Goal 三种判断 + 可恢复暂停 | `test_goal.py`、`test_worker_goal.py`、`test_external_wait.py`、`test_budget_expansion.py` |
+  | 2 | 并行子 Agent、Artifact 传文件、树**与重试链**共享根预算 | `test_child_runs.py`（含 `test_retrying_a_child_keeps_it_on_the_trees_budget`，本次补） |
+  | 3 | 子 Agent 读不到父私有记忆、不能扩大权限 | `test_child_runs.py`、`test_delegation.py`、`test_child_waits.py` |
+  | 4 | 两类记忆按策略写入 | `test_memory_write.py` |
+  | 5 | 技能提案到不可变版本 | `integration/skills/`、`skills.spec.ts` |
+  | 6 | 审批队列、终端用户不能批治理、参数变化失效、ServiceAccount 限制 | 前三项 `test_approvals.py` / `test_approval.py`；第四项见下 |
+  | 7 | 压缩保留原始引用、装不下则暂停 | `test_context_budget.py` |
+  | 8 | egress-proxy 唯一出站、四层交集 | `unit/outbound/`（5 条架构测试）、`integration/egress/` |
+  | 9 | 两次权限检查、schema 超预算暂停 | `test_mcp_tools.py` |
+
+  **场景 6 的第四句成立，但成立的原因是错的，不能就这样勾掉。**
+  「无 EndUser 的 ServiceAccount Run 只能使用预授权或治理审批」今天是真的——
+  但不是因为 ServiceAccount 被限制住了，而是因为**谁都拿不到用户确认**：
+  `USER_CONFIRMATION` 在整个 `src` 里只有四处引用，全是枚举定义和消费端，
+  `tool_answers.py` 只产生 `GOVERNANCE_APPROVAL`。M2C 的验收记录第 5 节已经
+  写明这一点。等 M3 的终端用户入口把生产者接上，这一句才第一次被真正检验。
+  **刻意没有为它补测试**：那个状态今天没有真实到达路径，要伪造一行审批记录
+  才能让它发生，那样这一格会变绿而掩盖真问题。
 - 全新 Linux Docker 主机可按文档启动，完成一次多轮 Goal 任务与一次并行子 Agent 委派。
 - `egress-proxy` 是唯一出站路径，架构测试证明没有旁路。
 - 本里程碑新增的每一种暂停——`limit`、`context_overflow`、`tool_budget_exceeded`、`external_timeout`、审批相关——都演示过恢复，且恢复不重置累计安全阀。
+  **状态（2026-08-20）：五种全部有恢复测试，均断言累计值不清零。**
+  | 暂停 | 恢复测试 |
+  |---|---|
+  | `limit` | `test_budget_expansion.py::test_the_run_goes_back_to_work_and_spends_the_room_it_was_given` |
+  | `tool_budget_exceeded` | `test_mcp_tools.py::test_resuming_measures_again_and_charges_nothing_for_the_first_try` |
+  | `context_overflow` | `test_context_budget.py::test_a_context_overflow_pause_can_be_recovered_and_keeps_what_it_spent` |
+  | `external_timeout` | `test_child_waits.py::test_an_external_timeout_pause_recovers_and_the_tree_keeps_its_counters` |
+  | 审批相关 | `test_approvals.py::test_an_expired_approval_pause_recovers_and_keeps_what_it_spent` |
+  前两条本来就有；后三条是补的——原先只测到「暂停发生」，没测到「恢复且不清零」。
+  `context_overflow` 是其中最别扭的一个：它是唯一没花掉模型调用就到达的暂停，
+  所以「恢复不重置」要守的那个计数器本身就没动过。仍然断言了，因为这条规矩
+  说的是平台永远不重开一个 Run 的账，而不是那个数字碰巧好看。
 - §24.1 的 0.1 门槛在 0.2 上重跑不退化；新增的轮次与压缩没有引入新的性能回退。
+  **状态（2026-08-19）：回归这一半已答，绝对门槛这一半没答。** 同机 A/B
+  （0.1 `5ad0e00` 对 0.2 `5e28996`，同一份基准工具、两端 `down -v` 起）十项
+  无有意义退化，`create_run`、`run_event`、`next_run` 全部保持——记录见
+  `docs/superpowers/verification/2026-08-19-m2e-child-agents.md` §8。
+  但那台机器是 macOS、VM 只有 7.8 GiB，工具自报 `shape_ok: false`，所以
+  **绝对门槛仍需在 Linux 8 vCPU / 16 GiB 参考主机上重跑**才算数。
+  另有一项待查：`workspace_small` 在 0.1 和 0.2 两端都超门槛（2678ms /
+  2772ms 对 1000ms），差值仅 3.5%，不是 M2 引入的；是真超标还是环境所致，
+  要在参考主机上才能分辨。
 - 项目描述从「单 Agent 安全运行骨架」升级为「轻量 Hermes 内核预览」，仍不宣传为企业交付闭环。终端用户 Web Chat、飞书适配器、OIDC、审计查询导出与完整任务树都还没有，它们是 M3。
+  **状态（2026-08-20）：已改。** `pyproject.toml` 是唯一活的描述位；M1 的计划
+  与规格文档里那句话是当时的记录，没有动。守着它的那条测试
+  （`test_acceptance_records.py`）从钉 M1 的说法改成钉这一句，并加了一条
+  「不许出现『企业』」。项目没有 README，所以「0.2 是什么、**不是**什么」
+  写进了 `docs/development.md` 开头一节：五项 M3 的缺失逐条列出，外加
+  HTTP/MCP 不可委派与 §24.1 未在参考主机认证两条。
+  **注意顺序**：这一条是「标记 0.2」的条件之一，而关口尚未全部满足——
+  合并后 `main` 上就写着「预览」，「预览」本身是诚实的，但真正可以宣布 0.2
+  仍要等 Linux 参考主机那两条。
 - 发布后按 §1265 评估 Goal 失控率、子 Agent 成功率、审批负担、记忆误写和技能提案质量，再决定 M3 范围。

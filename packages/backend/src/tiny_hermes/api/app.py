@@ -16,15 +16,23 @@ from tiny_hermes.api.health import (
 from tiny_hermes.api.request_context import RequestIdMiddleware
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.artifacts.presentation.routes import artifact_router
+from tiny_hermes.http_tools.presentation.routes import http_tool_router
 from tiny_hermes.identity.presentation.machine_routes import machine_router
 from tiny_hermes.identity.presentation.routes import identity_router
+from tiny_hermes.mcp.presentation.routes import mcp_router
+from tiny_hermes.memory.presentation.routes import memory_router
+from tiny_hermes.memory.presentation.subject_routes import subject_router
+from tiny_hermes.model_catalog.presentation.pricing_routes import pricing_router
 from tiny_hermes.model_catalog.presentation.routes import model_endpoint_router
+from tiny_hermes.outbound.presentation.routes import outbound_scope_router
+from tiny_hermes.runs.presentation.approval_routes import approval_router
 from tiny_hermes.runs.presentation.completions import completions_router
 from tiny_hermes.runs.presentation.events import run_event_router
 from tiny_hermes.runs.presentation.routes import run_router, session_router
 from tiny_hermes.secrets.presentation.routes import secret_router
 from tiny_hermes.shared.config import Settings
 from tiny_hermes.shared.errors import AppError
+from tiny_hermes.skills.presentation.routes import skill_proposal_router, skill_router
 from tiny_hermes.tenancy.presentation.routes import workspace_router
 
 
@@ -77,6 +85,15 @@ def create_app(
     app.include_router(completions_router(resources))
     app.include_router(artifact_router(resources))
     app.include_router(secret_router(resources))
+    app.include_router(outbound_scope_router(resources))
+    app.include_router(skill_router(resources))
+    app.include_router(http_tool_router(resources))
+    app.include_router(approval_router(resources))
+    app.include_router(memory_router(resources))
+    app.include_router(subject_router(resources))
+    app.include_router(mcp_router(resources))
+    app.include_router(pricing_router(resources))
+    app.include_router(skill_proposal_router(resources))
     return app
 
 

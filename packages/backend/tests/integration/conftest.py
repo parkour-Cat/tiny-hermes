@@ -17,6 +17,7 @@ from tiny_hermes.secrets.infrastructure import tables as secret_tables
 from tiny_hermes.session_workspace.infrastructure import tables as workspace_tables
 from tiny_hermes.shared.config import Settings
 from tiny_hermes.shared.database import Base
+from tiny_hermes.skills.infrastructure import tables as skill_tables
 
 from integration.support import EventsUrl, ReadStream
 
@@ -28,6 +29,7 @@ assert sandbox_tables.SandboxReservationRow.__tablename__
 assert workspace_tables.ObjectUploadRow.__tablename__
 assert artifact_tables.ArtifactRow.__tablename__
 assert secret_tables.SecretRow.__tablename__
+assert skill_tables.SkillRow.__tablename__
 
 STREAM_TIMEOUT = 20
 
@@ -187,7 +189,9 @@ def agent_with_scenario(
 ) -> Callable[..., str]:
     """Publish an Agent whose validated policy selects a model scenario."""
 
-    def publish(scenario: str, alias: str = "runner") -> str:
+    def publish(
+        scenario: str, alias: str = "runner", tools: list[str] | None = None
+    ) -> str:
         agent_id = str(
             client.post(
                 "/api/v1/agents",
@@ -198,6 +202,7 @@ def agent_with_scenario(
         spec = {
             **VALID_SPEC,
             "model_policy": {"provider": "deterministic", "scenario": scenario},
+            **({} if tools is None else {"tools": tools}),
         }
         draft = client.put(
             f"/api/v1/agents/{agent_id}/draft",

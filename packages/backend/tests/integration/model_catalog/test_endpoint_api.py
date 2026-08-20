@@ -154,7 +154,10 @@ def test_the_list_carries_no_credential_and_no_address(
     """Asserted on the absence of keys, not on the absence of values.
 
     `base_url` is left out because an internal model host is a piece of network
-    map, and the console has no use for it.
+    map, and the console has no use for it. How the window is counted is here
+    for the opposite reason: two endpoints of the same declared size hold
+    different amounts of conversation depending on it, so a list that shows the
+    number without it shows half a fact.
     """
     assert register(client, admin_csrf).status_code == 201
     entry = client.get("/api/v1/model-endpoints").json()[0]
@@ -164,6 +167,8 @@ def test_the_list_carries_no_credential_and_no_address(
         "model",
         "context_window",
         "max_output_tokens",
+        "context_accounting",
+        "tokenizer",
         "usage_quality",
         "status",
     }
@@ -207,13 +212,18 @@ def test_disabling_takes_it_out_of_the_list(client: TestClient, admin_csrf: str)
     assert client.get(f"/api/v1/model-endpoints/{endpoint_id}").status_code == 200
 
 
-def test_a_check_against_a_forbidden_address_reports_the_refusal(
+def test_a_check_on_a_deployment_with_no_boundary_says_so(
     client: TestClient, admin_csrf: str
 ) -> None:
-    """A literal address, so this test needs neither DNS nor a network.
+    """Since M2C-1 this fixture's platform has no egress proxy configured, and
+    a platform with no boundary reaches nothing at all.
 
-    The cloud metadata service is the address a mistyped `base_url` is most
-    likely to reach and the one it must never reach.
+    The check reports that as itself rather than as an unreachable endpoint,
+    which is the difference between an administrator fixing a setting and one
+    debugging somebody else's server. Which *address* may be reached is the
+    proxy's question now, and `tests/integration/egress/` and
+    `tests/unit/egress/` settle it — including the metadata address, which is
+    what this test used to be about.
     """
     endpoint_id = register(
         client, admin_csrf, base_url="https://169.254.169.254/latest"
@@ -224,17 +234,18 @@ def test_a_check_against_a_forbidden_address_reports_the_refusal(
     assert checked.status_code == 200
     body = checked.json()
     assert body["reachable"] is False
-    assert body["refusal"] == "link_local"
+    assert body["refusal"] == "egress_not_configured"
 
 
-def test_a_check_against_loopback_is_refused_too(
+def test_a_check_reaches_nothing_when_there_is_no_boundary(
     client: TestClient, admin_csrf: str
 ) -> None:
+    """The same for an address on this very machine: no route, no request."""
     endpoint_id = register(client, admin_csrf, base_url="https://127.0.0.1:9/v1").json()["id"]
     checked = client.post(
         f"/api/v1/model-endpoints/{endpoint_id}/check", headers={"X-CSRF-Token": admin_csrf}
     )
-    assert checked.json()["refusal"] == "loopback"
+    assert checked.json()["refusal"] == "egress_not_configured"
 
 
 def test_a_check_never_returns_what_the_endpoint_said(

@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import logging
+import shlex
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -10,9 +11,46 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from tiny_hermes.agents.domain.models import ContextBudget, EndpointModelPolicy
 from tiny_hermes.artifacts.application.service import ArtifactLimits, ArtifactRecorder
+from tiny_hermes.model_catalog.domain.pricing import (
+    CeilingVerdict,
+    Cost,
+    CostCeiling,
+    CostQuality,
+    TokenPrices,
+    cost_of,
+    projected_cost,
+    within_ceiling,
+)
+from tiny_hermes.model_catalog.domain.pricing import unknown as unknown_cost
 from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
+from tiny_hermes.runs.application.tool_answers import (
+    answer_agent_delegate,
+    answer_artifact_read,
+    answer_http_call,
+    answer_mcp_call,
+    answer_memory_remember,
+    answer_platform_tool,
+    answer_session_search,
+    answer_skill_load,
+    answer_skill_propose,
+)
+from tiny_hermes.runs.domain.context_budget import (
+    ContextPlan,
+    SegmentName,
+    SkillSummary,
+    plan_context,
+)
+from tiny_hermes.runs.domain.goal import (
+    CompletionCheck,
+    GoalEvidence,
+    GoalProposal,
+    GoalVerdict,
+    judge,
+)
 from tiny_hermes.runs.domain.models import (
+    SAFETY_PREAMBLE,
     Block,
     CacheStateHint,
     CanonicalMessage,
@@ -31,6 +69,12 @@ from tiny_hermes.runs.domain.slice_policy import (
     decide_after_round,
 )
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
+from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalGate
+from tiny_hermes.runs.ports.artifacts import ArtifactReads
+from tiny_hermes.runs.ports.children import ChildRuns, DelegationWait
+from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolSender
+from tiny_hermes.runs.ports.mcp import BoundMcpTool, McpGateway
+from tiny_hermes.runs.ports.memories import MemoryCandidates
 from tiny_hermes.runs.ports.model import (
     ModelProvider,
     ModelRequest,
@@ -39,6 +83,9 @@ from tiny_hermes.runs.ports.model import (
     UsageQuality,
 )
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
+from tiny_hermes.runs.ports.proposals import SkillProposals
+from tiny_hermes.runs.ports.searches import SessionSearches
+from tiny_hermes.runs.ports.skills import SkillLibrary
 from tiny_hermes.runs.ports.store import (
     AppendEventsCommand,
     ApplySignalCommand,
@@ -77,11 +124,28 @@ from tiny_hermes.tools.application.execute import (
     run_tool_call,
 )
 from tiny_hermes.tools.domain.files import DATA_ROOT, FILE_HELPER, changes_workspace
-from tiny_hermes.tools.domain.registry import DEFAULT_OUTPUT_BYTES, schemas_for
+from tiny_hermes.tools.domain.http_calls import HTTP_PREFIX
+from tiny_hermes.tools.domain.mcp import (
+    MCP_PREFIX,
+    estimated_tokens,
+    fits_schema_budget,
+    schemas_for_tools,
+)
+from tiny_hermes.tools.domain.openapi import estimated_tokens_of
+from tiny_hermes.tools.domain.registry import (
+    DEFAULT_OUTPUT_BYTES,
+    PLATFORM_TOOLS,
+    schemas_for_agent,
+)
 
 logger = logging.getLogger(__name__)
 
 PLATFORM = RunCapabilities(can_control=True, can_retry=True)
+
+#: How long a declared verification command may take. Long enough for a real
+#: test suite, short enough that a check which hangs pauses the Run for a
+#: person inside one slice rather than spending the whole budget on silence.
+_VERIFICATION_TIMEOUT_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -129,6 +193,47 @@ class _LeaseHandle:
     lease_id: UUID
     version: int
     lost: bool = False
+
+
+@dataclass(frozen=True)
+class _RoundWork:
+    """What one round's tool calls produced.
+
+    ``wait_seconds`` is set only when the round called `platform.wait` and the
+    call was well formed. It is a *request*: `judge` decides whether waiting is
+    what this round actually gets, the same as it does for a completion claim.
+    """
+
+    appended: tuple[CanonicalMessage, ...]
+    wrote: bool
+    wait_seconds: int | None = None
+    #: Set when a call in this round needs a person and did not get one. The
+    #: round's turns are discarded rather than appended — see `HttpCallOutcome`
+    #: — so a resumed Run asks the model again and the approved call runs then.
+    approval: ApprovalCheck | None = None
+    #: Facts the round's own tool calls produced, written in the transaction
+    #: that records the round. A `skill_loaded` written separately could
+    #: survive a rolled-back round, and the next round would then believe it
+    #: was holding text that is not in its conversation.
+    events: tuple[ReservedEvent, ...] = ()
+    #: Set when the round delegated and the children exist. Unlike
+    #: `wait_seconds` this is not a request the judge may overrule: the
+    #: children are already running and spending the root budget, so the only
+    #: question left is whether something outranks waiting for them.
+    delegated: DelegationWait | None = None
+
+
+@dataclass(frozen=True)
+class _Judged:
+    """One round's number and what the platform decided about it.
+
+    The two travel together because neither is legible alone: a `continue`
+    without a round number does not say how long this has been going on, and a
+    round number without a verdict does not say why it went on.
+    """
+
+    round: int
+    verdict: GoalVerdict
 
 
 @dataclass(frozen=True)
@@ -189,11 +294,49 @@ class WorkerRuntime:
         settings: WorkerSettings,
         sandbox: SandboxSession | None = None,
         workspace: WorkspaceRuntime | None = None,
+        skills: SkillLibrary | None = None,
+        proposals: SkillProposals | None = None,
+        http_sender: HttpToolSender | None = None,
+        approvals: ApprovalGate | None = None,
+        mcp: McpGateway | None = None,
+        memories: MemoryCandidates | None = None,
+        searches: SessionSearches | None = None,
+        children: ChildRuns | None = None,
+        artifacts: ArtifactReads | None = None,
     ) -> None:
         self._sessions = session_factory
         self._model = model
         self._notifier = notifier
         self._settings = settings
+        # Optional for the same reason the sandbox is: a deployment with no
+        # skill catalog needs none. An Agent that bound a skill and finds this
+        # absent is told so in the tool result rather than reading nothing and
+        # believing the skill was empty.
+        self._skills = skills
+        self._proposals = proposals
+        self._http_sender = http_sender
+        # Absent, a write that would need a person is refused rather than run:
+        # a platform that cannot ask must not decide.
+        self._approvals = approvals
+        # Absent, a Version that bound MCP tools runs without them and says
+        # so, rather than pretending it was never bound any.
+        self._mcp = mcp
+        # Absent, `memory.remember` is refused rather than silently
+        # dropped: a model told nothing would propose the same thing every
+        # round, and a deployment with no memory store should say so.
+        self._memories = memories
+        # Absent, `session.search` is refused rather than answered with
+        # nothing: "no past message matched" and "nobody wired the search"
+        # are different facts and a model cannot tell them apart.
+        self._searches = searches
+        # Absent, `agent.delegate` is refused rather than answered with an
+        # empty list of children: a parent told it started nothing and a
+        # parent told nobody wired delegation are different situations, and
+        # only one of them is worth trying again.
+        self._children = children
+        # Absent, `artifact.read` is refused rather than answered with
+        # nothing: an empty answer reads to a model like an empty file.
+        self._artifacts = artifacts
         # Optional, because a deployment with no tools configured needs none.
         # A Run that binds a tool and finds this absent fails rather than
         # running the command anywhere else — product design §16 leaves no
@@ -246,7 +389,17 @@ class WorkerRuntime:
             first = await self._read_context(workspace_id, claimed.run.id)
             if first is None:
                 return
-            if first.spec.tools:
+            mcp = await self._revalidate(claimed, handle, first)
+            if mcp is None:
+                # The bound subset does not fit the segment that carries it.
+                # §16.2: measured, never truncated, so the Run stops before it
+                # spends a model call on a tool list it cannot send.
+                return
+            if any(tool not in PLATFORM_TOOLS for tool in first.tools):
+                # Platform tools do not run anywhere. An Agent that binds only
+                # those has nothing to put in a container, and starting one for
+                # it would mean a Run about to wait held an instance while it
+                # waited — the opposite of what §12.3 promises.
                 box = await self._open_sandbox(claimed, handle, first)
                 if box is None:
                     return
@@ -255,16 +408,40 @@ class WorkerRuntime:
                 context = await self._read_context(workspace_id, claimed.run.id)
                 if context is None:
                     return
+                plan = _plan(context, mcp)
+                if not plan.fits:
+                    await self._overflow(claimed, handle, box, context, plan)
+                    return
+                if plan.changed:
+                    await self._record_planning(claimed, plan)
+                spend = _cost_precheck(context, plan)
+                if not spend.allowed:
+                    # §12.4: checked before the call, because a limit tested
+                    # afterwards is a limit that has already been passed. The
+                    # projection uses the largest output the endpoint may
+                    # produce, so a valve cannot be talked past by a round that
+                    # was going to be cheap.
+                    await self._cost_exceeded(claimed, handle, box, context, spend)
+                    return
                 round_started = monotonic()
-                response = await self._model.complete(_request(context, box))
+                response = await self._model.complete(
+                    _request(context, box, plan, mcp)
+                )
                 if box is not None:
                     # Only the first round of a slice is told, because only the
                     # first one is news.
                     box = replace(box, hint=None)
                 executed_ms = int((monotonic() - round_started) * 1000)
 
-                appended, wrote = await self._answer_tools(
-                    claimed, handle, box, response, context
+                work = await self._answer_tools(
+                    claimed, handle, box, response, context, mcp
+                )
+                appended, wrote = work.appended, work.wrote
+                # Before the re-read, for the same reason the tool calls are:
+                # a cancellation that arrives while a check is running should
+                # be seen by the read that follows it.
+                evidence = await self._completion_evidence(
+                    claimed, handle, box, context, response
                 )
 
                 # Re-read after the call: a user may have asked to pause or
@@ -278,9 +455,35 @@ class WorkerRuntime:
                     after.compat_deadline_at is not None
                     and now >= after.compat_deadline_at
                 )
+                verdict = judge(
+                    GoalProposal(
+                        stop_reason=response.stop_reason,
+                        wait_seconds=work.wait_seconds,
+                    ),
+                    evidence,
+                )
+                # The number the model was given for this round, not the one
+                # the next read would compute: the two differ the moment this
+                # round's own model call is counted.
+                judged = _Judged(round=_round_index(context), verdict=verdict)
+                if verdict.instruction is not None:
+                    # §12.1: continue 生成下一轮指令. Recorded even if the Run
+                    # then pauses for some other reason — why the platform
+                    # disagreed with the claim stays true, and the next round
+                    # after a resume is the one that needs to read it.
+                    appended = (
+                        *appended,
+                        CanonicalMessage(
+                            role="user",
+                            blocks=(TextBlock(text=verdict.instruction),),
+                            author="platform",
+                        ),
+                    )
                 decision = decide_after_round(
                     RoundOutcome(
-                        stop_reason=response.stop_reason,
+                        verdict=verdict,
+                        approval=work.approval,
+                        delegated=work.delegated,
                         cancel_requested=after.cancel_requested,
                         pause_requested=after.pause_requested,
                         budget_allows=_budget_after(after, response, executed_ms),
@@ -298,7 +501,8 @@ class WorkerRuntime:
                     # the data mount, one frozen scan and one commit cover the
                     # round's effects before the next model call.
                     continuation = await self._checkpoint_round(
-                        claimed, handle, box, after, decision, response, executed_ms, appended
+                        claimed, handle, box, after, decision, response, executed_ms,
+                        appended, judged, work.events,
                     )
                     if continuation is None:
                         return
@@ -320,12 +524,80 @@ class WorkerRuntime:
                     response,
                     executed_ms,
                     appended=appended,
+                    events=work.events,
+                    judged=judged,
+                    prices=context.prices,
                 )
                 if written is False or decision.signal is not None:
                     return
         finally:
             renewal.cancel()
             await asyncio.gather(renewal, return_exceptions=True)
+
+    async def _revalidate(
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        context: ExecutionContext,
+    ) -> tuple[BoundMcpTool, ...] | None:
+        """§16.2's check, once per slice. `None` means the Run must stop.
+
+        Before the Run works rather than during it: a subset measured after the
+        first model call would already have been sent, and a remote that
+        changed shape mid-slice would give one round a different tool list from
+        the next.
+
+        Nothing is charged here. The revalidation makes no model call, so a Run
+        that paused on the budget and was resumed is measured again from the
+        same place — the earlier attempt cost it nothing to repeat.
+        """
+        if not context.spec.mcp_tools:
+            return ()
+        if self._mcp is None:
+            await self._append_event(
+                claimed,
+                RunEventType.MCP_TOOLS_REVALIDATED,
+                {"tools": 0, "unreachable": [], "missing": [], "configured": False},
+            )
+            return ()
+        checked = await self._mcp.revalidate(
+            context.spec.mcp_tools, _claim_of(claimed)
+        )
+        if checked.unreachable or checked.missing:
+            # Written whenever the subset came back short. A Run that quietly
+            # had fewer tools than its Version bound is one whose behaviour
+            # changed with nobody publishing anything.
+            await self._append_event(
+                claimed,
+                RunEventType.MCP_TOOLS_REVALIDATED,
+                {
+                    "tools": len(checked.tools),
+                    "unreachable": list(checked.unreachable),
+                    "missing": list(checked.missing),
+                    "configured": True,
+                },
+            )
+        budget = fits_schema_budget(
+            _schema_estimate(context, checked.tools), _schema_allowance(context)
+        )
+        if budget.fits:
+            return checked.tools
+        await self._append_event(
+            claimed,
+            RunEventType.TOOL_SCHEMA_BUDGET_EXCEEDED,
+            {"estimate": budget.estimate, "allowance": budget.allowance},
+        )
+        await self._record(
+            claimed,
+            handle,
+            context.state_version,
+            SliceDecision(
+                RunSignal.SAFE_PAUSE_REACHED, PauseReason.TOOL_BUDGET_EXCEEDED
+            ),
+            _no_round(),
+            executed_ms=0,
+        )
+        return None
 
     async def _open_sandbox(
         self, claimed: ClaimedRun, handle: _LeaseHandle, context: ExecutionContext
@@ -383,7 +655,7 @@ class WorkerRuntime:
 
         if self._workspace is None:
             return box
-        if any(name.startswith("file.") for name in context.spec.tools):
+        if any(name.startswith("file.") for name in context.tools):
             if not await self._file_safety_holds(claimed, handle, box):
                 await self._discard_sandbox(claimed, handle, box)
                 await self._fail(claimed, handle, context, "file_safety_unavailable")
@@ -463,6 +735,101 @@ class WorkerRuntime:
             )
             return None
         return replace(box, revision=result.revision_id)
+
+    async def _completion_evidence(
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        box: "_Sandbox | None",
+        context: ExecutionContext,
+        response: ModelResponse,
+    ) -> GoalEvidence:
+        """Check the claim, in this Run's own sandbox.
+
+        Only a claim is worth checking: a round that asked for a tool has not
+        said it is finished, and an Agent that declared no condition has given
+        the platform nothing to check. Both of those leave here having run no
+        command at all, which is why an Agent published before this slice
+        costs exactly what it used to.
+
+        Whatever the checks write is not committed. A check observes; the
+        Agent's own rounds are what produce the workspace, and a passing check
+        that quietly added files to the record would make the record wrong.
+        """
+        condition = context.spec.completion
+        if condition is None or response.stop_reason is not StopReason.COMPLETED:
+            return GoalEvidence(declared=condition is not None)
+        if box is None or self._sandbox is None:  # pragma: no cover - publish refuses it
+            return GoalEvidence(declared=True, observable=False)
+
+        checks: list[CompletionCheck] = []
+        for path in condition.expected_artifacts:
+            # `test -e` and not a stat of the host: the artifact is a path
+            # inside the sandbox, and this is the only place it exists.
+            met = await self._check_holds(
+                claimed, handle, box, f"test -e {shlex.quote(f'{DATA_ROOT}/{path}')}", 30
+            )
+            if met is None:
+                return GoalEvidence(declared=True, observable=False)
+            checks.append(CompletionCheck(name=path, met=met))
+
+        if condition.verification_command is not None:
+            met = await self._check_holds(
+                claimed,
+                handle,
+                box,
+                condition.verification_command,
+                _VERIFICATION_TIMEOUT_SECONDS,
+            )
+            if met is None:
+                return GoalEvidence(declared=True, observable=False)
+            checks.append(CompletionCheck(name=condition.verification_command, met=met))
+
+        return GoalEvidence(declared=True, checks=tuple(checks))
+
+    async def _check_holds(
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        box: _Sandbox,
+        line: str,
+        timeout_seconds: int,
+    ) -> bool | None:
+        """Run one check. ``None`` means it did not answer.
+
+        A command that was killed on its timeout, or a controller that refused
+        to run it, said nothing about whether the goal was met. Reporting
+        either as "not met" would loop a healthy Run against a broken sandbox
+        until the budget stopped it, and reporting it as met would accept a
+        claim on no evidence.
+        """
+        sandbox = self._sandbox
+        if sandbox is None:  # pragma: no cover - guarded by the caller
+            return None
+        try:
+            result = await sandbox.execute(
+                run_id=claimed.run.id,
+                lease_id=handle.lease_id,
+                sandbox_id=box.sandbox_id,
+                command=SandboxCommand(
+                    # The same shell the Agent's own commands get, so the
+                    # verification an author wrote and tested by hand is the
+                    # one that runs — and so §16's no-host-fallback rule
+                    # covers it without a second execution path existing.
+                    argv=["/bin/bash", "-lc", line],
+                    cwd=DATA_ROOT,
+                    timeout_seconds=timeout_seconds,
+                    output_limit=DEFAULT_OUTPUT_BYTES,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "completion check could not run", extra={"run_id": str(claimed.run.id)}
+            )
+            return None
+        if result.timed_out:
+            return None
+        return int(result.exit_code) == 0
 
     async def _file_safety_holds(
         self, claimed: ClaimedRun, handle: _LeaseHandle, box: _Sandbox
@@ -559,18 +926,21 @@ class WorkerRuntime:
         box: "_Sandbox | None",
         response: ModelResponse,
         context: ExecutionContext,
-    ) -> tuple[tuple[CanonicalMessage, ...], bool]:
+        mcp: tuple[BoundMcpTool, ...] = (),
+    ) -> "_RoundWork":
         """Run whatever the round asked for, and build the turns to append.
 
-        The second value answers design §8's question: may this round have
-        changed `/workspace/data`? A refused call never ran, so it cannot
-        have; a successful `file.read` looked and touched nothing.
+        ``wrote`` answers design §8's question: may this round have changed
+        `/workspace/data`? A refused call never ran, so it cannot have; a
+        successful `file.read` looked and touched nothing.
         """
         if response.stop_reason is StopReason.FAILED:
             # A failed round said nothing the transcript should keep.
-            return (), False
+            return _RoundWork((), False)
         if response.stop_reason is not StopReason.TOOL_CALL:
-            return (CanonicalMessage("assistant", (TextBlock(text=response.text),)),), False
+            return _RoundWork(
+                (CanonicalMessage("assistant", (TextBlock(text=response.text),)),), False
+            )
 
         blocks: list[Block] = []
         if response.text:
@@ -579,8 +949,110 @@ class WorkerRuntime:
         assistant = CanonicalMessage("assistant", tuple(blocks))
 
         wrote = False
+        wait_seconds: int | None = None
+        delegated: DelegationWait | None = None
         results: list[Block] = []
+        events: list[ReservedEvent] = []
+        # Counted across the whole Run and carried forward inside this round:
+        # eight loads is a Run's ceiling, not a slice's, and a round asking
+        # three times must not get three answers out of one round's worth of
+        # room.
+        loaded = list(context.loaded_skills)
         for call in response.tool_calls:
+            if call.name == "skill.load":
+                answered, event = await answer_skill_load(self._skills, context, call, loaded)
+                results.append(answered)
+                if event is not None:
+                    events.append(event)
+                    loaded.append(UUID(str(event.payload["skill_version_id"])))
+                continue
+            if call.name == "skill.propose":
+                answered, event = await answer_skill_propose(
+                    self._proposals, context, call
+                )
+                results.append(answered)
+                if event is not None:
+                    events.append(event)
+                continue
+            if call.name == "session.search":
+                results.append(
+                    await answer_session_search(self._searches, context, call)
+                )
+                continue
+            if call.name == "memory.remember":
+                answered, event = await answer_memory_remember(
+                    self._memories, context, call
+                )
+                results.append(answered)
+                if event is not None:
+                    events.append(event)
+                continue
+            if call.name == "artifact.read":
+                results.append(
+                    await answer_artifact_read(self._artifacts, context, call)
+                )
+                continue
+            if call.name == "agent.delegate":
+                outcome = await answer_agent_delegate(self._children, context, call)
+                results.append(outcome.result)
+                if outcome.event is not None:
+                    events.append(outcome.event)
+                if outcome.wait is not None:
+                    # Last one wins, and one is all a round can act on: the Run
+                    # enters a single `waiting_external` with a single
+                    # deadline, the same as `platform.wait`.
+                    delegated = outcome.wait
+                continue
+            if call.name.startswith(f"{MCP_PREFIX}."):
+                # Sent by the platform, like an HTTP tool call and for the same
+                # reasons: the credential belongs on this side, and the request
+                # leaves through the egress proxy with this Run's layers named.
+                outcome = await answer_mcp_call(
+                    self._mcp,
+                    context,
+                    call,
+                    mcp,
+                    _claim_of(claimed),
+                    self._approvals,
+                )
+                if outcome.event is not None:
+                    events.append(outcome.event)
+                if outcome.result is None:
+                    return _RoundWork((), False, approval=outcome.approval)
+                results.append(outcome.result)
+                continue
+            if call.name.startswith(f"{HTTP_PREFIX}."):
+                # Sent by the platform rather than by the sandbox: the
+                # credential belongs on this side of the boundary, and the
+                # request has to leave through the egress proxy like every
+                # other outbound call this process makes.
+                outcome = await answer_http_call(
+                    self._http_sender,
+                    context,
+                    call,
+                    _claim_of(claimed),
+                    self._approvals,
+                )
+                if outcome.event is not None:
+                    events.append(outcome.event)
+                if outcome.result is None:
+                    # A person has to answer before this call can run. Nothing
+                    # this round produced is kept: the Run stops here, and when
+                    # it resumes the model is asked from the same history it
+                    # had, so the call it makes is the one that was approved.
+                    return _RoundWork((), False, approval=outcome.approval)
+                results.append(outcome.result)
+                continue
+            if call.name in PLATFORM_TOOLS:
+                # Answered here, never sent down. What this asks for happens to
+                # the Run; the Controller has nothing to do with it.
+                answered, seconds = answer_platform_tool(call, context.tools)
+                results.append(answered)
+                if seconds is not None:
+                    # Last one wins, and one is all a round can act on: the Run
+                    # enters a single `waiting_external` with a single deadline.
+                    wait_seconds = seconds
+                continue
             if box is None or self._sandbox is None:
                 # A tool round only follows a slice that opened a sandbox, so
                 # this is unreachable today. Written as an answer rather than
@@ -601,7 +1073,7 @@ class WorkerRuntime:
                 run_id=claimed.run.id,
                 lease_id=handle.lease_id,
                 sandbox_id=box.sandbox_id,
-                bound=context.spec.tools,
+                bound=context.tools,
                 call=call,
                 streamer=_streamer_of(self._sandbox),
                 open_artifact=self._open_artifact(claimed),
@@ -623,7 +1095,13 @@ class WorkerRuntime:
             if not answer.failed and changes_workspace(call.name):
                 wrote = True
             results.append(answer)
-        return (assistant, CanonicalMessage("tool", tuple(results))), wrote
+        return _RoundWork(
+            (assistant, CanonicalMessage("tool", tuple(results))),
+            wrote,
+            wait_seconds,
+            events=tuple(events),
+            delegated=delegated,
+        )
 
     async def _checkpoint_round(
         self,
@@ -635,6 +1113,8 @@ class WorkerRuntime:
         response: ModelResponse,
         executed_ms: int,
         appended: tuple[CanonicalMessage, ...],
+        judged: "_Judged",
+        events: tuple[ReservedEvent, ...] = (),
     ) -> "_Sandbox | None":
         """One write round's whole consequence: scan, commit, dispose, signal.
 
@@ -659,6 +1139,9 @@ class WorkerRuntime:
             response,
             executed_ms,
             appended,
+            events=events,
+            judged=judged,
+            prices=after.prices,
         )
         try:
             await sandbox.freeze(
@@ -674,6 +1157,7 @@ class WorkerRuntime:
                 response,
                 executed_ms,
                 appended=appended,
+                events=events,
             )
             return None
 
@@ -735,6 +1219,8 @@ class WorkerRuntime:
                 response,
                 executed_ms,
                 appended=appended,
+                events=events,
+                judged=judged,
             )
             if written is False or final.signal is not None:
                 return None
@@ -1018,6 +1504,98 @@ class WorkerRuntime:
             executed_ms=0,
         )
 
+    async def _record_planning(self, claimed: ClaimedRun, plan: ContextPlan) -> None:
+        """Say what was done to the context before the round that used it.
+
+        Written ahead of the model call rather than with the round's own
+        transition: what the planner did is true whatever the call then
+        returns, and a round that fails would otherwise erase the only record
+        of why the model saw less than the transcript holds.
+        """
+        for record in plan.trimmed:
+            await self._append_event(
+                claimed, RunEventType.CONTEXT_TRIMMED, record.payload()
+            )
+        if plan.compacted is not None:
+            await self._append_event(
+                claimed, RunEventType.CONTEXT_COMPACTED, plan.compacted.payload()
+            )
+
+    async def _overflow(
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        box: "_Sandbox | None",
+        context: ExecutionContext,
+        plan: ContextPlan,
+    ) -> None:
+        """§7.4.2's last line: the originals do not fit, so the Run pauses.
+
+        No provider call is made — which is why the round is recorded with
+        `model_calls=0`. Sending a request the endpoint would refuse costs the
+        Run a call it never got and tells a reader the model failed, when what
+        happened is that the platform declined to ask.
+
+        Nothing is trimmed or compacted on this path, so no event says either
+        was. What the pause is about is carried by its reason and by the two
+        numbers below, and the transcript still holds every message.
+        """
+        logger.info(
+            "context overflow",
+            extra={
+                "run_id": str(claimed.run.id),
+                "input_estimate": plan.input_estimate,
+                "allowance": plan.allowance,
+            },
+        )
+        decision = SliceDecision(RunSignal.SAFE_PAUSE_REACHED, PauseReason.CONTEXT_OVERFLOW)
+        if box is not None:
+            decision = await self._close_sandbox(claimed, handle, box, decision)
+        await self._record(
+            claimed,
+            handle,
+            context.state_version,
+            decision,
+            _no_round(),
+            executed_ms=0,
+        )
+
+    async def _cost_exceeded(
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        box: "_Sandbox | None",
+        context: ExecutionContext,
+        verdict: CeilingVerdict,
+    ) -> None:
+        """The spending valve, reached. No provider call was made.
+
+        Recorded with `model_calls=0` for the same reason a context overflow
+        is: sending a request this platform had already decided not to pay for
+        would cost the Run a call it never got, and would tell a reader the
+        model did something.
+        """
+        logger.info(
+            "cost ceiling reached",
+            extra={"run_id": str(claimed.run.id), "reason": verdict.reason},
+        )
+        await self._append_event(
+            claimed, RunEventType.RUN_LIMIT_REACHED, {"valve": "cost", "reason": verdict.reason}
+        )
+        decision = SliceDecision(
+            RunSignal.SAFE_PAUSE_REACHED, PauseReason.LIMIT, limit_reached=True
+        )
+        if box is not None:
+            decision = await self._close_sandbox(claimed, handle, box, decision)
+        await self._record(
+            claimed,
+            handle,
+            context.state_version,
+            decision,
+            _no_round(),
+            executed_ms=0,
+        )
+
     async def _append_event(
         self,
         claimed: ClaimedRun,
@@ -1051,7 +1629,15 @@ class WorkerRuntime:
         events: tuple[ReservedEvent, ...] = (),
         cleanup_target: "WorkspaceCleanupTarget | None" = None,
         cleanup_sandbox_id: UUID | None = None,
+        judged: "_Judged | None" = None,
+        prices: TokenPrices | None = None,
     ) -> RecordSliceCommand:
+        if judged is not None:
+            # Every write of a judged round carries the verdict, whichever path
+            # got here: the commit that lands a write round, and the plain
+            # record that lands every other. A round whose write was rolled
+            # back carries none, which is the truth — the verdict did not take.
+            events = (*events, _verdict_event(judged))
         return RecordSliceCommand(
             workspace_id=claimed.run.workspace_id,
             run_id=claimed.run.id,
@@ -1060,7 +1646,10 @@ class WorkerRuntime:
             signal=decision.signal,
             pause_reason=decision.pause_reason,
             limit_reached=decision.limit_reached,
-            checkpoint=_checkpoint(response),
+            wait_kind=decision.wait_kind,
+            wait_seconds=decision.wait_seconds,
+            wait_policy=decision.wait_policy,
+            checkpoint=_checkpoint(response, judged),
             checkpoint_replay_safe=response.replay_safe,
             checkpoint_effect_status=(
                 CheckpointEffectStatus.UNKNOWN
@@ -1070,6 +1659,11 @@ class WorkerRuntime:
             executed_ms=executed_ms,
             model_calls=response.model_calls,
             tokens=response.billable_tokens,
+            # The correction half of §12.4: what the round actually cost, at
+            # the price this Run fixed, from whatever the provider reported.
+            # `None` when nothing can be said, which makes the Run's total
+            # unknown from here on rather than adding a zero.
+            cost=_cost_from(response, prices),
             # A failed round said nothing the transcript should
             # keep, so nothing is appended for it.
             appended=appended,
@@ -1092,6 +1686,8 @@ class WorkerRuntime:
         events: tuple[ReservedEvent, ...] = (),
         cleanup_target: "WorkspaceCleanupTarget | None" = None,
         cleanup_sandbox_id: UUID | None = None,
+        judged: "_Judged | None" = None,
+        prices: TokenPrices | None = None,
     ) -> bool:
         """Persist the round. Returns False when this Worker lost the Run."""
         async with self._lease_lock:
@@ -1110,6 +1706,8 @@ class WorkerRuntime:
                             events=events,
                             cleanup_target=cleanup_target,
                             cleanup_sandbox_id=cleanup_sandbox_id,
+                            judged=judged,
+                            prices=prices,
                         )
                     )
                     if decision.signal is RunSignal.SAFE_CANCEL_STARTED:
@@ -1218,20 +1816,222 @@ def _no_round(failure: str | None = None) -> ModelResponse:
     )
 
 
-def _request(context: ExecutionContext, box: "_Sandbox | None") -> ModelRequest:
+def _round_index(context: ExecutionContext) -> int:
+    """Which round this is, counted across the Run rather than the slice.
+
+    So a scenario that needs a second round still gets one after the Run has
+    been re-queued at a slice boundary — and so the number the model is told
+    and the number a person reads off the Run are the same number.
+    """
+    return context.budget.consumed_model_calls + 1
+
+
+def _summaries(context: ExecutionContext) -> tuple[SkillSummary, ...]:
+    """One line per bound skill, in the order the author bound them.
+
+    A skill this Run has already loaded is marked as hit, so the planner knows
+    not to take away the summary that explains a document already in the
+    conversation.
+    """
+    loaded = set(context.loaded_skills)
+    return tuple(
+        SkillSummary(
+            name=skill.name,
+            text=f"- {skill.name}: {skill.description}",
+            loaded=skill.skill_version_id in loaded,
+        )
+        for skill in context.granted_skills
+    )
+
+
+def _cost_precheck(context: ExecutionContext, plan: ContextPlan) -> CeilingVerdict:
+    """Whether one more round fits under this Run's spending limit.
+
+    A Run with no limit is allowed without asking anything, so a deployment
+    that never set one is not made to configure prices it does not need.
+
+    Streaming is the honest gap: a provider's final usage only arrives when the
+    round ends, so a single call may pass the ceiling before the platform can
+    see that it did. The ceiling stops the *next* one. That is written here,
+    in `docs/development.md` and in the console rather than left for somebody
+    to discover from a bill.
+    """
+    budget = context.budget
+    if budget.max_cost is None:
+        return CeilingVerdict(allowed=True)
+    consumed = (
+        unknown_cost()
+        if budget.consumed_cost is None
+        else Cost(
+            amount=budget.consumed_cost,
+            currency=budget.cost_currency,
+            quality=CostQuality(budget.cost_quality),
+        )
+    )
+    projected = projected_cost(
+        context.prices,
+        input_estimate=plan.input_estimate,
+        max_output_tokens=_max_output(context),
+    )
+    return within_ceiling(
+        CostCeiling(max_amount=budget.max_cost, currency=budget.cost_currency),
+        consumed,
+        projected,
+    )
+
+
+def _max_output(context: ExecutionContext) -> int:
+    """The largest answer this Run may be charged for.
+
+    The Agent's own cap when it set one, and the window's reserved output
+    otherwise. Never a guess at the likely length: the pre-check exists to
+    stop the expensive round, and the expensive round is the long one.
+    """
+    policy = context.spec.model_policy
+    if isinstance(policy, EndpointModelPolicy) and policy.max_output_tokens is not None:
+        return policy.max_output_tokens
+    return 0 if context.window is None else context.window.reserved_output_tokens
+
+
+def _cost_from(response: ModelResponse, prices: TokenPrices | None = None) -> Cost | None:
+    """One round's cost, or `None` when the platform cannot state it."""
+    if prices is None:
+        return None
+    return cost_of(
+        prices,
+        input_tokens=response.input_tokens,
+        output_tokens=response.output_tokens,
+        usage_quality=response.usage_quality,
+    )
+
+
+def _claim_of(claimed: ClaimedRun) -> EgressClaim:
+    return EgressClaim(
+        workspace_id=claimed.run.workspace_id,
+        agent_version_id=claimed.run.agent_version_id,
+        run_id=claimed.run.id,
+    )
+
+
+def _schema_estimate(
+    context: ExecutionContext, mcp: tuple[BoundMcpTool, ...]
+) -> int:
+    """What this Agent's whole tool list costs, MCP and everything else.
+
+    Measured together because the segment carries them together: an MCP subset
+    that fits on its own and not beside four HTTP operations does not fit.
+    """
+    servers = dict.fromkeys(item.server_name for item in mcp)
+    mcp_total = sum(
+        estimated_tokens(
+            server, [item.tool for item in mcp if item.server_name == server]
+        )
+        for server in servers
+    )
+    named = estimated_tokens_of(
+        [
+            schema["function"]
+            for schema in schemas_for_agent(
+                context.tools, context.granted_operations
+            )
+        ]
+    )
+    return mcp_total + named
+
+
+def _schema_allowance(context: ExecutionContext) -> int:
+    """What the segment that carries tool schemas will hold.
+
+    §7.4.2's table as this Agent adjusted it. Read from the same resolved
+    budget the planner uses, so an author who raised the segment gets the room
+    they asked for here too.
+    """
+    budget = (context.spec.context_budget or ContextBudget()).resolve()
+    ceiling = budget[SegmentName.TOOL_SCHEMAS].max_tokens
+    # `None` would mean "whatever is left", which this segment never is.
+    return ceiling if ceiling is not None else 0
+
+
+def _plan(
+    context: ExecutionContext, mcp: tuple[BoundMcpTool, ...] = ()
+) -> ContextPlan:
+    """Decide what this round may send, before it is sent.
+
+    An endpoint that declared no window — the deterministic stand-in — gets a
+    plan that fits by construction and changes nothing. That is not a bypass:
+    there is no window to plan against, so there is no number this could
+    honestly compare the conversation to. The summaries still go out: a
+    stand-in with no window is still an Agent whose skills it was bound to —
+    and, for the same reason, still a Run whose subject has memories.
+    """
+    summaries = _summaries(context)
+    if context.window is None:
+        return ContextPlan(
+            messages=context.messages,
+            fits=True,
+            input_estimate=0,
+            allowance=0,
+            skill_summaries=tuple(item.text for item in summaries),
+            memories=tuple(fact.body for fact in context.memories),
+        )
+    return plan_context(
+        window=context.window,
+        safety_rules=SAFETY_PREAMBLE,
+        personality=context.spec.personality,
+        tool_schemas=_tool_schemas(context, mcp),
+        history=context.history,
+        skill_summaries=summaries,
+        memories=[fact.body for fact in context.memories],
+        segments=(context.spec.context_budget or ContextBudget()).resolve(),
+    )
+
+
+def _tool_schemas(
+    context: ExecutionContext, mcp: tuple[BoundMcpTool, ...] = ()
+) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        schemas_for_agent(context.tools, context.granted_operations)
+        + _mcp_schemas(mcp)
+    )
+
+
+def _mcp_schemas(mcp: tuple[BoundMcpTool, ...]) -> list[dict[str, Any]]:
+    """One schema list per server, so two servers offering a `search` do
+    not fight over the name."""
+    schemas: list[dict[str, Any]] = []
+    for server in dict.fromkeys(item.server_name for item in mcp):
+        schemas.extend(
+            schemas_for_tools(
+                server, [item.tool for item in mcp if item.server_name == server]
+            )
+        )
+    return schemas
+
+
+def _request(
+    context: ExecutionContext,
+    box: "_Sandbox | None",
+    plan: ContextPlan,
+    mcp: tuple[BoundMcpTool, ...] = (),
+) -> ModelRequest:
     """Build one round's request.
 
-    The round number counts the Run's model calls so far rather than this
-    slice's, so a scenario that needs a second round still gets one after the
-    Run has been re-queued at a slice boundary.
+    The messages come from the plan, never from the context: the planner is the
+    only thing that decides what one round sends, and a caller that reached
+    past it would send a request the window was never measured against.
     """
     return ModelRequest(
         policy=context.spec.model_policy,
         personality=context.spec.personality,
-        messages=context.messages,
-        round_index=context.budget.consumed_model_calls + 1,
-        tools=tuple(schemas_for(context.spec.tools)),
+        messages=plan.messages,
+        round_index=_round_index(context),
+        tools=_tool_schemas(context, mcp),
         cache_hint=box.hint if box is not None else None,
+        skill_summaries=plan.skill_summaries,
+        # From the plan, not the context: the planner budgets the memory
+        # segment and trims lowest-relevance first, so what the model is told
+        # is what survived rather than everything that was read.
+        memories=plan.memories,
     )
 
 
@@ -1248,17 +2048,45 @@ def _budget_after(
     return projected.allows_execution(datetime.now(UTC))
 
 
-def _checkpoint(response: ModelResponse) -> dict[str, object]:
+def _checkpoint(
+    response: ModelResponse, judged: "_Judged | None" = None
+) -> dict[str, object]:
     """What the round was, in terms a reader of the Run can act on.
 
     ``usage_quality`` is recorded rather than merely implied by a zero count:
     "nothing was used" and "nobody counted" are different facts, and only one of
     them means the Token limit was meaningfully enforced.
+
+    The round number and the verdict ride here rather than in columns of their
+    own for the reason ``failure`` already does: all of it describes one round,
+    this is where a round is described, and a column would have to be kept in
+    step with it.
     """
-    return {
+    checkpoint: dict[str, object] = {
         "kind": "model_call",
         "stop_reason": response.stop_reason.value,
         "tokens": response.billable_tokens,
         "usage_quality": response.usage_quality.value,
         "failure": response.failure,
     }
+    if judged is not None:
+        checkpoint["round"] = judged.round
+        checkpoint["goal_outcome"] = judged.verdict.outcome.value
+        checkpoint["goal_unmet"] = list(judged.verdict.unmet)
+    return checkpoint
+
+
+def _verdict_event(judged: "_Judged") -> ReservedEvent:
+    """The judge's answer, on the timeline where a person is watching.
+
+    The instruction is left out: it is derived from ``unmet`` and is already in
+    the transcript, where the model that has to act on it will read it.
+    """
+    return ReservedEvent(
+        event_type=RunEventType.GOAL_VERDICT,
+        payload={
+            "round": judged.round,
+            "outcome": judged.verdict.outcome.value,
+            "unmet": list(judged.verdict.unmet),
+        },
+    )

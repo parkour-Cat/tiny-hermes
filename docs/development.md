@@ -1,5 +1,32 @@
 # Development
 
+## What this is
+
+tiny-hermes is a **轻量 Hermes 内核预览** — a lightweight Hermes kernel. An
+Agent can judge for itself whether a task is done, run for a long time without
+bursting its context window, load a workspace's skills, remember the person it
+works with, and hand pieces of work to other Agents in parallel. Every one of
+those runs on the same Run pipeline: one Worker, one state machine, one set of
+checkpoints and events.
+
+**It is not an enterprise delivery product, and this section exists so nobody
+has to find that out by looking.** These do not exist yet and are M3:
+
+- An end-user web chat. The console is an operator's tool; there is no place
+  for the person an Agent is working *for* to talk to it.
+- A Feishu adapter. `docs/superpowers/verification/2026-08-13-m1-feishu.md` is
+  a laboratory note and says so in its first paragraph.
+- OIDC. Sign-in is this platform's own accounts and service-account keys.
+- Audit query and export. Audit rows are written; nothing reads them back out.
+- A full task tree. A Run's detail page shows its parent and its children, one
+  level, which is what §13 delivers.
+
+Two more limits worth knowing before you build on it. HTTP and MCP tools
+**cannot be delegated** to a child Agent — that fails closed, so a delegated
+child calls none of them. And §24.1's performance thresholds have been shown
+not to regress from 0.1, but have **not** been certified on the Linux 8 vCPU /
+16 GiB reference host the product design requires.
+
 ## Requirements
 
 - Python 3.12
@@ -576,6 +603,169 @@ An API Key's plaintext appears once in a dismissible panel; later listings show
 only the prefix. A Secret's plaintext is typed on create and is never returned
 by GET; the list shows a mask.
 
+## Outbound and the egress proxy
+
+Nothing in this platform reaches the network on its own. Every outbound
+request — model calls, skill imports from Git, endpoint connectivity checks,
+and anything a sandbox does — goes through a separate process whose only job is
+to decide whether a packet may leave. A deployment that has not stood one up
+sends **nothing**; there is no code path that falls back to a direct
+connection, which is what makes that sentence true rather than a rule people
+follow.
+
+Bring it up with the rest of the stack and give the platform processes its
+address and a token:
+
+```powershell
+$env:EGRESS_PROXY_URL = "http://egress-proxy:3128"
+$env:EGRESS_PROXY_TOKEN = (python -c "import secrets; print(secrets.token_urlsafe(32))")
+$env:SANDBOX_EGRESS_NETWORK = "tiny-hermes_sandbox-egress"
+docker compose --env-file .env -f deploy/compose/compose.yaml up -d --build
+```
+
+The token answers "is this one of ours" and nothing more: what a caller may
+reach still comes from the scope tables, so a leaked token widens nothing by
+itself. A sandbox presents no token at all — it is identified by the address
+its packets come from, because a process inside a container that holds a
+credential is a process that can lend one.
+
+### Four layers, and none of them may widen
+
+The effective scope of any request is the intersection of four:
+
+| Layer | Who sets it | Where |
+|---|---|---|
+| Platform | Platform administrator | 出站范围 → 平台批准 |
+| Workspace | Workspace administrator, inside the platform's | 出站范围 → 本工作空间 |
+| Agent | Agent author, inside the workspace's | Agent builder → 网络 |
+| Run | Delegation (M2E) | not yet |
+
+An entry is a host (`api.example.com`), one leftmost wildcard
+(`*.example.com`), or a network (`10.1.0.0/16`). Never a URL, never a port: a
+scope approves a target, and the port belongs to the request. `*` and `*.com`
+are refused — an entry nobody can review at a glance is an entry nobody
+reviews.
+
+Everything starts empty. A workspace naming something the platform never
+approved is refused when it is written, and an Agent naming something its
+workspace did not approve is refused at publish with every offending entry
+listed. A layer can only ever narrow the one above it.
+
+Registering a model endpoint approves the host it names, and disabling the
+endpoint takes the approval away. That entry is marked as the endpoint's and
+cannot be removed by hand: choosing an endpoint *is* the approval, and a second
+step would be one that gets forgotten rather than a judgement that gets made.
+
+### What a sandbox can reach
+
+With `SANDBOX_EGRESS_NETWORK` set, a sandbox is attached to a Docker network
+declared `internal` — a bridge with no gateway. The only thing on it besides
+sandboxes is the proxy, so a container has exactly one place to send a packet
+and that place decides. Without the setting a sandbox has **no network at
+all**, which is the default and what §16.4 asks for.
+
+The container also gets `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`, for the
+runtimes that read them. Nothing relies on that: a tool that ignored them would
+still find only one reachable address.
+
+A sandbox holds its identity only while it may use it. Freezing an instance
+removes it, thawing restores it, and destroying removes it before the container
+goes — otherwise Docker could hand the address to the next container and make
+it this Run.
+
+### Reading a refusal
+
+A refusal from the boundary is not the target saying no, and the two are told
+apart on purpose: one will never change on a retry. A refused plaintext request
+carries its reason back (`target_not_in_scope`, `scope_empty`,
+`plaintext_not_approved`, and the address classes such as `link_local`). A
+refused TLS target is reached through `CONNECT`, so there is no response for a
+reason to ride on and the caller sees `egress_unavailable` — the specific rule
+is in the proxy's log.
+
+## Skills
+
+A skill is reference material an administrator uploads. Binding one gives an
+Agent **no** new capability: no tool, no network, no credential. It changes
+what the Agent is told, not what it may do.
+
+Upload one from 技能 in the workspace nav. The picker takes a **directory of
+files**, never an archive — the browser reads them and posts a list, so no
+server here unpacks anything. The directory needs a `SKILL.md` at its root with
+two frontmatter fields:
+
+```markdown
+---
+name: rollout
+description: How this company takes a machine out of rotation before a deploy.
+---
+
+# Rollout
+
+Take the machine out of the pool first, then drain it.
+```
+
+The name is read from the file rather than typed into a form, so the catalog
+and the package cannot disagree about what a skill is. A version whose files
+carry credential material is refused outright, with the offending path named.
+「从 Git 导入」 takes a public HTTPS `tar.gz` URL instead; it goes through the
+platform's outbound policy like any other external request, is read as a stream,
+and is never written to disk. Re-importing unchanged content answers 200 and
+creates no second version.
+
+### What a bound Agent actually sees
+
+Bind a skill in the Agent builder's 技能 section. What is stored is a **skill
+version id**, never a name. Every round then carries one line per bound skill —
+its name and its description — inside boundary markers, as a system message of
+its own after the personality:
+
+```
+--- begin skills available to you (workspace material) ---
+- rollout: How this company takes a machine out of rotation before a deploy.
+--- end skills available to you ---
+```
+
+The document itself costs nothing until the model asks for it. An Agent that
+also binds `skill.load` may call it with a skill name (and optionally a path
+inside the package, `SKILL.md` by default); the file comes back as a tool
+result and the Run's timeline gains a `skill_loaded` entry saying which
+document entered the conversation. One load may bring in at most 64 KiB — a
+larger file is refused *with its size*, never truncated — and one Run may load
+at most eight times.
+
+When the bound summaries no longer fit their segment of the context budget, the
+platform drops whole summaries, newest binding first, and never a partial one.
+A skill this Run has already loaded is never dropped. Publishing refuses
+outright if the summaries cannot fit at all, and the refusal says what each one
+costs so the expensive description can be found.
+
+### Why publishing a new skill version changes nothing
+
+Because an Agent binds a version id. Uploading version 2 of `rollout` leaves
+every published Agent running version 1, including the ones that were running
+when you uploaded it. Moving 「设为新绑定起点」 changes where the *next* binding
+starts and nothing else; 停用 stops new bindings and leaves running ones alone.
+Switching an Agent over is a deliberate act: edit its draft to name the new
+version, and publish again.
+
+### Proposals
+
+An Agent that binds `skill.propose` may suggest a change to a skill it was
+given, or a new skill. What it writes is a **pending proposal** and never a
+version — there is no path from a proposal to a version that does not pass
+through a person. One proposal per Run.
+
+Review them under 技能提案: the queue shows where each came from, with a link
+to the Run that opened it, and 「差异」 shows the change line by line against
+the version the Agent actually read. Approving publishes a new immutable
+version whose source is recorded as the proposal; rejecting ends it and creates
+nothing. Both are audited. A proposal the static scan blocked can be read and
+cannot be approved, and the console says which file stopped it.
+
+Approving does **not** repoint anything. The skill's default for new bindings
+stays where it was, and so does every published Agent's binding.
+
 ## Model endpoints
 
 Phase 3A adds a second model provider: a real OpenAI-compatible endpoint. The
@@ -612,6 +802,7 @@ $endpoint = Invoke-RestMethod -Uri "$api/model-endpoints" -Method Post -WebSessi
     name = "acme-gpt"; kind = "openai_compatible"
     base_url = "https://models.example.com/v1"; model = "acme-large"
     context_window = 128000; max_output_tokens = 4096
+    context_accounting = "shared"; tokenizer = $null
     usage_quality = "provider"; credential_ref = "TINY_HERMES_MODEL_KEY_ACME"
   } | ConvertTo-Json)
 
@@ -661,6 +852,196 @@ because an Agent that quietly produces less than it was configured for behaves
 unlike the one its author published. A draft may name anything; the check is at
 publish, which is the last moment a mistake is still cheap.
 
+### The context window, and what an Agent may plan to fill it with
+
+`context_accounting` says whether the endpoint's window holds the output as well
+as the input. `shared` is the default and the conservative answer: the reserved
+output is subtracted, so a 128,000 window with 4,096 reserved has an input
+allowance of 123,904. `separate` leaves the whole window for input. It is
+declared rather than guessed from the provider's name, because two endpoints of
+the same size hold different amounts of conversation depending on it.
+
+`tokenizer` records a name and nothing more in this version. No tokenizer ships
+verified here, so every endpoint is planned with a conservative
+characters-based upper bound; the field exists so a verified implementation can
+be added later without moving the planner. Every number the planner produces is
+a plan estimate and is never added to `consumed_tokens` — billing still comes
+only from what the provider reported.
+
+Publishing checks that the endpoint can serve the Agent's segment budget. The
+platform default sums to 9,472 tokens, so an endpoint whose *input allowance* is
+below that is refused with `context_budget_unsatisfied`, and the refusal carries
+a suggested number for every segment rather than the word "invalid". The advice
+does not apply itself: take it into the draft and publish again. An endpoint
+that cannot hold even the 768-token floor is `context_window_too_small`, which
+no advice would fix.
+
+At run time the same shortage is `paused(context_overflow)`: the round is not
+sent, no model call is spent, and the transcript keeps every message. Before
+that the platform trims the oldest large tool results (leaving each call
+answered by a stub naming its `call_id` and its size) and then compacts the
+oldest turns into one generated summary, recording the range and the ids it
+stood in for. Both leave a `context_trimmed` or `context_compacted` event on the
+Run, and the console says in words what each one did.
+
+### What an Agent remembers, and who decided it should
+
+Memory is **private by default and per subject**. A memory belongs to one
+workspace, one Agent and one caller, and there is no way to ask for "this
+Agent's memories" — the read takes a scope and a scope cannot be built without
+a subject. A's preference never appears in B's conversation, and that is a
+property of the type rather than of a filter somebody remembered to add.
+
+A Run does not write memory; it **proposes** one, with `memory.remember`. What
+happens to the candidate is the workspace's policy, set on the workspace row:
+
+- `off` — refused, and **nothing is stored**. A workspace that turned memory off
+  did not ask for a queue of things it will not read.
+- `all_pending` — the default. The candidate is written `pending` and waits for
+  a person. A pending memory never reaches a model: that is the whole difference
+  between proposing and remembering.
+- `low_risk_auto` — a **widening** of `all_pending`, never a bypass. A candidate
+  the rule check calls low risk is written straight away; everything else still
+  waits.
+
+The rule check's default answer is "not low risk". A candidate waits if it
+carries anything that looks like a secret, mentions permissions or identity,
+looks like it is about another person, is long, or does not read as a
+first-person preference. It is a heuristic and it decides only what may skip the
+queue — never what is true.
+
+Review the queue and decide:
+
+    GET  /api/v1/memories/pending
+    POST /api/v1/memories/{id}/approve
+    POST /api/v1/memories/{id}/reject
+
+**Shared memory has exactly two doors** (§14.2), and a running Agent is neither.
+An administrator writes one directly with `POST /api/v1/memories/shared`, or a
+proposal is approved. No Run can produce a `kind=shared` row by any path.
+
+Memories enter the model's context through the `memory` segment, ranked by
+keyword relevance to what the person just asked and trimmed from the
+lowest-relevance end when the segment is over budget. Relevance is PostgreSQL
+full-text ranking, not meaning — §14.3 excludes vector memory on purpose, and
+nothing here understands what a memory is about.
+
+Past conversations are searched on demand rather than loaded whole:
+
+    GET /api/v1/memories/search?q=...          (the console, workspace-wide)
+
+and inside a Run with the `session.search` tool, which searches **this
+subject's own** history and never anybody else's. Results are bounded snippets,
+and a snippet that had to be cut says so. A Run does not find what it just
+said: its own turns are already in its context.
+
+Every subject can see, correct, withdraw and export what is held about them,
+and ask for all of it to be erased:
+
+    GET  /api/v1/subjects/{id}/export?agent_id=...
+    POST /api/v1/subjects/memories/{id}/correct
+    POST /api/v1/subjects/memories/{id}/forget
+    POST /api/v1/subjects/{id}/erase
+
+A correction keeps the old text as a rejected row, so "this was changed" and
+"this was always so" stay apart. An erasure **deletes** — memories, sessions,
+messages and the files those sessions produced — and writes an audit record
+saying how many of each went, with none of what they said. That record is the
+only way, afterwards, to tell an erasure from an erasure that never ran. A
+workspace or platform administrator may do any of this on somebody's behalf, and
+the trail says whose behalf it was on.
+
+### External tools, and why a write stops
+
+Two kinds, one shape. An **HTTP tool** is an OpenAPI document a workspace
+registers; an **MCP server** is an address this platform reads a tool list
+from. Both are registered under *HTTP 工具* and *MCP 服务* in the console, and
+both refuse a host that is not already in the workspace's outbound scope —
+approve it under *出站* first, or the registration is refused and names the
+host.
+
+An Agent binds a **version** and a **subset**, never the tool itself:
+
+- HTTP: a document version plus the operation ids it may call.
+- MCP: a server snapshot plus the tool names it may call. There is deliberately
+  no way to bind "all of them" — a server that later advertises forty more
+  would otherwise widen a published Agent with nobody publishing anything.
+
+An MCP server's tool list is **re-read before every execution slice**, and only
+the bound names are offered. If the bound schemas no longer fit the
+`tool_schemas` segment the Run pauses with `tool_budget_exceeded` before it
+spends a model call; nothing is truncated, because a schema cut down to fit
+would leave a model calling a tool with arguments the far end never agreed to.
+Resume it after binding fewer tools or raising the segment — the failed attempt
+charged nothing, so it starts from the same place.
+
+**Every binding that could change something needs a decision at publish**
+(§16.3), and publishing fails without one. The three answers are:
+
+- *直接拒绝* — the call is refused at runtime and nobody is ever asked.
+- *已经预先批准* — a workspace administrator approved this narrow scope by
+  publishing the version, so the call runs. Only a workspace administrator may
+  publish one; a developer doing it would be granting themselves the approval.
+- *每次都问管理员* — each call stops and waits.
+
+For MCP the choice is required for *every* binding rather than only for ones
+that write: a server does not say which of its tools change something, so the
+platform cannot tell, and guessing "this one only reads" is the guess that
+would be wrong quietly.
+
+A Run that stops enters `waiting_approval`. It holds no lease and no container
+while it waits, and it resumes only when somebody answers on the *审批* page —
+never on its own. That page shows the **normalized call**, exactly as it was
+hashed. Approving allows that call and no other: change any argument and the
+approval stops covering it, and the Run asks again. Rejecting requires a
+reason, because the person whose Run stopped is not the person who stopped it.
+An unanswered approval expires (24 hours by default, configurable per
+workspace between five minutes and seven days) and the Run pauses with
+`approval_expired`.
+
+Two rules the console cannot bend. Only the end user who started a Run may
+answer a `user_confirmation`; an administrator who thinks the action should
+happen opens a governance approval and writes down why, and never answers in
+the user's name. And a decided approval is never decided again — an override is
+a new record, not a rewrite of somebody else's.
+
+### What a Run cost, and what the platform will not claim
+
+Prices live on the model endpoint, as versions rather than as a current value.
+Only a platform administrator sets one:
+
+    POST /api/v1/model-endpoints/{id}/pricing
+    {"currency": "USD", "input_per_million": "3", "output_per_million": "15"}
+
+Amounts are **strings**, and they are parsed with `Decimal`. A JSON number
+would be a float before the server could object, and what got stored would not
+be what was typed.
+
+Entering a price never edits the old one. A Run fixes the version that was in
+force when it was created, so a correction entered tomorrow does not rewrite
+what today's Runs cost — which is the whole reason the old row has to survive.
+
+**No price is not a price of zero.** An endpoint an administrator priced at
+zero has a row saying so and reports a cost of `0`; an endpoint nobody has
+priced reports `unknown`, and the console says so in those words rather than
+showing a zero. The difference matters most when a workspace has a spending
+limit: a Run whose cost cannot be counted is **stopped** rather than allowed
+through on a total nobody is keeping. Set the limit on the workspace
+(`max_run_cost` and `cost_currency`); leave it null for no limit, in which case
+an unpriced endpoint costs the Run nothing.
+
+Every model call is checked before it is made, against the estimated input and
+the *largest* output the endpoint may produce. There is one honest gap, and it
+is worth knowing rather than discovering from a bill: a streaming provider only
+reports its final usage when the round ends, so **a single call may pass the
+limit before the platform can see that it did**. The limit stops the next one.
+
+An endpoint registered with `usage_quality=unavailable` reports no token counts
+at all. Its token and money ceilings are therefore disabled — there is nothing
+to count them against — while the elapsed-time limit, the model-call limit and
+the per-call maximum output stay enforced. Such an endpoint is not unlimited;
+it is limited by the three valves that do not depend on it reporting anything.
+
 ### Outbound safety
 
 Every model call and every endpoint check goes through `SafeOutboundClient`, and
@@ -695,6 +1076,117 @@ tool and the sandbox below. There is still no Token limit: `AgentLimits` has no
 such field, so §9.4's rule about strict Token ceilings has nothing to guard yet,
 and adding the field means teaching the platform to read more than one
 `schema_version`.
+
+## Delegating to child Agents
+
+An Agent can hand pieces of work to other Agents in the same workspace. They run
+as Runs of their own, at the same time as each other, and the Agent that
+delegated waits for them.
+
+### Configuring one
+
+Add a `delegation` document to the spec. It is absent unless you write one, and
+an Agent without it delegates to nobody:
+
+```json
+{
+  "tools": ["agent.delegate"],
+  "delegation": {
+    "max_parallel": 2,
+    "children": [
+      { "alias": "reader", "tools": ["shell.exec"] },
+      { "alias": "checker" }
+    ]
+  }
+}
+```
+
+Three things are checked when you publish, so you find out then rather than from
+a Run:
+
+- Every alias must be a published Agent in the same workspace.
+- A child may not be offered a permission the parent does not itself hold. The
+  refusal names which face was too wide — tools, network, skills or memory — so
+  you are not left guessing across six of them.
+- Binding `agent.delegate` is not enough on its own; without a `delegation`
+  document the tool is there and refuses every call.
+
+**What a child gets is an intersection, and only ever a narrowing.** A face you
+do not name grants nothing: `{ "alias": "checker" }` is a child with no tools,
+no network and no skills — **even where the child's own published Version binds
+them**. This is enforced while the child runs, not only when you publish: an
+unnamed tool is refused when called, an unnamed skill cannot be loaded, and an
+unnamed network face empties the outbound chain so the child reaches nothing.
+There is no way to write "everything the parent has", on purpose — a child
+should be given what it needs rather than what happens to be available.
+
+Two consequences worth knowing before you write one:
+
+- A child that needs `platform.wait`, `shell.exec` or any other tool has to be
+  handed it explicitly, and the **parent must hold it too** — publishing
+  refuses a delegation offering what the parent does not have.
+- HTTP and MCP tools cannot be delegated yet. The runtime narrowing is
+  fail-closed, so a delegated child calls none of them regardless of what its
+  own Version bound. Do the call in the parent and pass the result down.
+
+`max_parallel` lives here rather than in `limits` because it is the shape of
+this Agent's work: a batch reconciler wants five, a summary Agent wants one.
+
+### What `all` and `any` mean
+
+The model chooses when it calls the tool; `all` is the default.
+
+- **`all`** — the parent continues when every child has reached a terminal
+  state, whatever that state is. It is told about the failures too.
+- **`any`** — the parent continues as soon as one child *succeeds*, and **the
+  rest are cancelled**, including one that was a second away from finishing.
+  That is deliberate: the siblings are spending the same budget, and the parent
+  already has the answer it asked for. Use `any` when the children are
+  alternative routes to the same thing, not when each does a different piece.
+
+How long the parent waits is not the model's to choose. The deadline is
+whatever is left of the parent's own elapsed budget. If it passes, the parent
+becomes `paused(external_timeout)` and somebody has to resume it.
+
+### What the parent sees when a child fails
+
+It is **told**, not failed. Every child failing still puts the parent back in
+the queue with a summary naming each child, its status and its reason — it may
+well be able to do the work itself, and failing it would take that decision
+away.
+
+What the parent never sees is a child's conversation. It gets an outcome, a
+short summary in the child's own words, and the ids of any files the child
+produced. The child's transcript stays in the child's Session, where you can
+read it in the console: the parent's Run detail page lists its children and
+each one is a link.
+
+### Files
+
+There is no shared directory. A parent and a child have separate Sessions and
+therefore separate SessionWorkspaces, separate sandboxes and separate working
+files. Anything that has to cross moves as an **Artifact authorization**:
+
+- Downward: name artifact ids on the delegation
+  (`{"alias": "reader", "artifacts": ["<id>"]}`). You may only pass on files
+  you can read yourself, and naming one you cannot refuses the whole delegation
+  rather than dropping that file quietly.
+- Upward: a child's own artifacts are granted to the parent when its result is
+  delivered, and their ids are in the summary.
+
+Either way the receiving Run opens them with `artifact.read`, which takes an id
+and never a path. A grant belongs to one Run, so a later Run of the same Agent
+cannot open what was passed to this piece of work.
+
+### Limits worth knowing
+
+- **One level.** A child Agent cannot delegate. This is refused on the creation
+  path and by a database constraint, so it holds even for a child whose own
+  spec was published with a delegation policy.
+- **One budget for the tree.** Tokens, cost, execution time, tool calls and
+  retries all accumulate against the Run somebody originally asked for.
+  Delegating resets nothing, and a tree that runs out stops as a whole.
+- **Cancelling a parent cancels its children**, including ones still running.
 
 ## Sandbox and `shell.exec`
 

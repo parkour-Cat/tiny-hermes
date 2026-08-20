@@ -8,12 +8,14 @@ import { expect, test, beforeEach } from "vitest";
 import { RunDetailPage } from "./RunDetailPage";
 import { moment } from "../i18n/moment";
 import { t } from "../i18n/zh-CN";
+import { fill } from "../runs/explain";
 import { server } from "../test/server";
 import { TestTheme } from "../test/TestTheme";
 
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
 const RUN = "44444444-5555-4666-8777-888888888888";
 const OTHER_RUN = "55555555-6666-4777-8888-999999999999";
+const THIRD_RUN = "66666666-7777-4888-8999-aaaaaaaaaaaa";
 const SESSION = "33333333-4444-4555-8666-777777777777";
 const VERSION = "66666666-7777-4888-8999-aaaaaaaaaaaa";
 
@@ -30,6 +32,10 @@ const BUDGET = {
   consumed_tokens: 480,
   max_derived_retries: 2,
   derived_retry_count: 0,
+  max_cost: null,
+  cost_currency: "USD",
+  consumed_cost: "0.004500",
+  cost_quality: "provider",
 };
 
 function run(overrides: Record<string, unknown> = {}) {
@@ -46,12 +52,16 @@ function run(overrides: Record<string, unknown> = {}) {
     wait_deadline_at: null,
     retry_of_run_id: null,
     budget_root_run_id: RUN,
+    parent_run_id: null,
+    depth: 0,
+    children: [],
     last_event_sequence: 2,
     queue: { position: 1, status: "head" },
     budget: BUDGET,
     available_actions: ["pause", "cancel"],
     checkpoint_replay_safe: true,
     checkpoint_effect_status: "none",
+    goal: { round: null, outcome: null, unmet: [] },
     created_at: "2026-08-10T02:00:00Z",
     started_at: "2026-08-10T02:00:05Z",
     finished_at: null,
@@ -301,7 +311,9 @@ test("what the platform cannot produce is absent, not empty", async () => {
   await screen.findByText(t("summarySection"));
 
   // A pane that says "no data" reads as "nothing happened". These are M2/M3;
-  // the console does not stand in for them. 产物 is the Files card now.
+  // the console does not stand in for them. 产物 is the Files card now, and
+  // context and compaction are sentences on the timeline rather than a pane —
+  // a Run that trimmed nothing should say nothing, which is this case.
   for (const absent of ["父子任务树", "上下文和压缩事件", "Token 和费用"]) {
     expect(screen.queryByText(absent)).not.toBeInTheDocument();
   }
@@ -361,6 +373,38 @@ test("the session transcript and the run's files are listed", async () => {
   expect(screen.getAllByRole("button", { name: t("downloadArtifact") }).length).toBeGreaterThan(0);
 });
 
+test("a trimmed context is said in words, not left as a payload to decode", async () => {
+  // The one class of event that reports a decision nobody asked for: the round
+  // was sent something other than what the transcript holds. `context_trimmed`
+  // and a JSON blob leave a reader wondering what was lost — nothing was, and
+  // the sentence is where that is said.
+  server.use(http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run())));
+  stream([
+    `id: 3\nevent: context_trimmed\ndata: ${JSON.stringify({
+      sequence: 3,
+      event_type: "context_trimmed",
+      occurred_at: "2026-08-10T02:00:07Z",
+      payload: {
+        segment: "old_tool_results",
+        dropped: 2,
+        freed_estimate: 9000,
+        references: ["c1", "c2"],
+      },
+    })}\n\n`,
+  ]);
+
+  renderRun();
+  const timeline = within((await screen.findByText(t("timelineSection"))).closest(
+    ".ant-card",
+  ) as HTMLElement);
+
+  const said = fill(t("contextTrimmedOldToolResults"), { dropped: "2", freed: "9000" });
+  expect(await timeline.findByText(said)).toBeInTheDocument();
+  // Still folded underneath it: the sentence is the reading, the payload is the
+  // record, and neither replaces the other.
+  expect(timeline.getByText(t("eventPayload")).closest("details")).not.toHaveAttribute("open");
+});
+
 test("a timeline event keeps its payload folded", async () => {
   server.use(http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run())));
   stream([
@@ -378,4 +422,99 @@ test("a timeline event keeps its payload folded", async () => {
   const payload = screen.getByText(t("eventPayload")).closest("details");
   expect(payload).not.toBeNull();
   expect(payload).not.toHaveAttribute("open");
+});
+
+test("the cost is shown with where the number came from", async () => {
+  server.use(http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run())));
+  stream();
+
+  renderRun();
+
+  // The provenance is always shown, never only when it is bad: a figure whose
+  // origin appears sometimes is one a reader stops looking for.
+  expect(await screen.findByText("0.004500 USD / 不限")).toBeInTheDocument();
+  expect(screen.getByText("来自服务商")).toBeInTheDocument();
+});
+
+test("a Run whose endpoint has no price says unknown, never zero", async () => {
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () =>
+      HttpResponse.json(
+        run({
+          budget: { ...BUDGET, consumed_cost: null, cost_quality: "unknown" },
+        }),
+      ),
+    ),
+  );
+  stream();
+
+  renderRun();
+
+  // §12.4 as a person sees it. A console that showed `0` for both an unpriced
+  // endpoint and one priced at nothing would be where the distinction died.
+  expect(await screen.findByText("未知")).toBeInTheDocument();
+  expect(screen.getByText("未配置价格")).toBeInTheDocument();
+});
+
+test("a Run that delegated shows its children and each one is a link", async () => {
+  // The minimal task tree: the full one is a later milestone, so what this has
+  // to do is make it visible that this Run is one of several and let somebody
+  // get to the others. A status beside each, because "two children, one of
+  // which failed" is the shape of the question a person opens this page with.
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () =>
+      HttpResponse.json(
+        run({
+          status: "waiting_external",
+          wait_kind: "child_runs",
+          children: [
+            { id: OTHER_RUN, status: "completed" },
+            { id: THIRD_RUN, status: "running" },
+          ],
+        }),
+      ),
+    ),
+  );
+  stream();
+
+  renderRun();
+
+  const link = await screen.findByRole("link", { name: OTHER_RUN });
+  expect(link).toHaveAttribute("href", `/workspaces/${WORKSPACE}/runs/${OTHER_RUN}`);
+  expect(screen.getByRole("link", { name: THIRD_RUN })).toBeInTheDocument();
+  // And the note that says nobody is being held up by this.
+  expect(screen.getByText(t("waitingChildRunsNote"))).toBeInTheDocument();
+});
+
+test("a delegated Run says who delegated it", async () => {
+  // A child holds a Session of its own, so without this the page gives no
+  // indication at all that somebody else asked for this work.
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () =>
+      HttpResponse.json(run({ parent_run_id: OTHER_RUN, depth: 1 })),
+    ),
+  );
+  stream();
+
+  renderRun();
+  const card = within(await summary());
+
+  expect(card.getByText(t("runParent"))).toBeInTheDocument();
+  expect(card.getByRole("link", { name: OTHER_RUN })).toHaveAttribute(
+    "href",
+    `/workspaces/${WORKSPACE}/runs/${OTHER_RUN}`,
+  );
+});
+
+test("an ordinary Run shows no tree at all", async () => {
+  // Most Runs are not part of one, and a card saying "no children" on every
+  // Run detail page would be a permanent reminder of a feature nobody used.
+  server.use(http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run())));
+  stream();
+
+  renderRun();
+  await summary();
+
+  expect(screen.queryByText(t("childRunsSection"))).not.toBeInTheDocument();
+  expect(screen.queryByText(t("runParent"))).not.toBeInTheDocument();
 });

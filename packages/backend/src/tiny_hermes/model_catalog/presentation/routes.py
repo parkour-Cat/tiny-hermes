@@ -41,6 +41,11 @@ class EndpointSummary(BaseModel):
     context_window: int
     max_output_tokens: int
     usage_quality: str
+    #: Both of these are budget planning facts, and they are on the summary
+    #: rather than the detail because an Agent author choosing an endpoint is
+    #: choosing how much conversation it can hold.
+    context_accounting: str
+    tokenizer: str | None
     status: str
 
     @classmethod
@@ -52,6 +57,8 @@ class EndpointSummary(BaseModel):
             context_window=endpoint.spec.context_window,
             max_output_tokens=endpoint.spec.max_output_tokens,
             usage_quality=endpoint.spec.usage_quality.value,
+            context_accounting=endpoint.spec.context_accounting.value,
+            tokenizer=endpoint.spec.tokenizer,
             status=endpoint.status.value,
         )
 

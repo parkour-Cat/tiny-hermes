@@ -7,7 +7,9 @@ import uuid
 
 import uvicorn
 
-from tiny_hermes.outbound.client import SafeOutboundClient
+from tiny_hermes.memory.infrastructure.run_searches import SqlRunSessionSearches
+from tiny_hermes.memory.infrastructure.sql_candidates import SqlMemoryCandidates
+from tiny_hermes.outbound.client import EgressRoute, SafeOutboundClient
 from tiny_hermes.runs.application.model_router import ModelRouter
 from tiny_hermes.runs.application.scheduler import (
     SchedulerRuntime,
@@ -21,9 +23,17 @@ from tiny_hermes.runs.application.worker import (
 from tiny_hermes.runs.infrastructure.deterministic_model import (
     DeterministicModelProvider,
 )
+from tiny_hermes.runs.infrastructure.http_tool_sender import OutboundHttpToolSender
+from tiny_hermes.runs.infrastructure.mcp_gateway import OutboundMcpGateway
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 from tiny_hermes.runs.infrastructure.openai_model import RetryPolicy
 from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
+from tiny_hermes.runs.infrastructure.skill_library import SqlSkillLibrary
+from tiny_hermes.runs.infrastructure.skill_proposals import SqlSkillProposals
+from tiny_hermes.runs.infrastructure.sql_approvals import SqlApprovalGate
+from tiny_hermes.runs.infrastructure.sql_artifact_reads import SqlArtifactReads
+from tiny_hermes.runs.infrastructure.sql_children import SqlChildRuns
+from tiny_hermes.runs.ports.http_calls import EgressClaim
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
 from tiny_hermes.sandbox.transport.adapter import SandboxClient
 from tiny_hermes.sandbox.transport.client import ControllerClient
@@ -69,8 +79,14 @@ async def _worker() -> None:
         model=ModelRouter(
             deterministic=DeterministicModelProvider(settings.deterministic_model_delay_ms),
             session_factory=sessions,
+            # A model call belongs to the platform and names no workspace: the
+            # endpoint it reaches was approved by a platform administrator, and
+            # a Run cannot widen that by being in one workspace rather than
+            # another. Absent egress settings make this client refuse rather
+            # than connect, which is what stops a misconfigured Worker from
+            # quietly going direct.
             client_factory=lambda: SafeOutboundClient(
-                approved=settings.approved_networks,
+                egress=_egress(settings),
                 connect_timeout=settings.outbound_connect_timeout_seconds,
                 read_timeout=settings.outbound_read_timeout_seconds,
                 max_redirects=settings.outbound_max_redirects,
@@ -88,6 +104,60 @@ async def _worker() -> None:
         # running the command anywhere else.
         sandbox=_controller(settings),
         workspace=workspace,
+        # Skill text is read from the catalog the same database holds, so a
+        # deployment configures nothing extra to give an Agent skills.
+        skills=SqlSkillLibrary(sessions),
+        # The Agent's half of §15.3. It writes proposals and can approve
+        # none of them, which is the whole governance story in one field.
+        proposals=SqlSkillProposals(sessions),
+        # An Agent's calls to somebody else's API leave from here rather than
+        # from the sandbox, so the credential stays on this side and the
+        # request passes the same egress boundary as every other outbound
+        # call. Unconfigured egress makes this refuse, not connect.
+        # §16.3's gate. Absent, a write that would need a person is refused
+        # rather than run: a platform that cannot ask must not decide.
+        approvals=SqlApprovalGate(sessions),
+        # §16.2's revalidation and calls, out through the same boundary and
+        # with the same layers named.
+        mcp=OutboundMcpGateway(
+            sessions,
+            lambda claim: SafeOutboundClient(
+                egress=_egress(settings, claim),
+                connect_timeout=settings.outbound_connect_timeout_seconds,
+                read_timeout=settings.outbound_read_timeout_seconds,
+                max_redirects=settings.outbound_max_redirects,
+                max_response_bytes=settings.outbound_max_response_bytes,
+            ),
+            kek=optional_kek(settings.tiny_hermes_kek),
+        ),
+        http_sender=OutboundHttpToolSender(
+            sessions,
+            lambda claim: SafeOutboundClient(
+                # Unlike a model call, this one names its layers: the Agent's
+                # own `network.allow` is one of them, and a call that named
+                # nothing would be measured against the platform alone.
+                egress=_egress(settings, claim),
+                connect_timeout=settings.outbound_connect_timeout_seconds,
+                read_timeout=settings.outbound_read_timeout_seconds,
+                max_redirects=settings.outbound_max_redirects,
+                max_response_bytes=settings.outbound_max_response_bytes,
+            ),
+            kek=optional_kek(settings.tiny_hermes_kek),
+        ),
+        # §14.1's write path. Absent, `memory.remember` is refused rather
+        # than silently dropped; the same database holds the memories.
+        memories=SqlMemoryCandidates(sessions),
+        # §14.3's retrieval, scoped to the Run's own subject.
+        searches=SqlRunSessionSearches(sessions),
+        # §13's delegation. Absent, `agent.delegate` is refused rather than
+        # silently answered with nothing; the children live in the same
+        # database and share the parent's root budget.
+        children=SqlChildRuns(sessions),
+        # §13's eighth clause: files reach a Run as authorizations, and
+        # this is the only way one opens what it was passed.
+        artifacts=SqlArtifactReads(
+            sessions, None if workspace is None else workspace.objects
+        ),
         settings=WorkerSettings(
             worker_id=worker_id,
             lease_seconds=settings.worker_lease_seconds,
@@ -103,6 +173,28 @@ async def _worker() -> None:
     finally:
         await notifier.close()
     logger.info("worker stopped", extra={"worker_id": worker_id})
+
+
+def _egress(settings: Settings, claim: EgressClaim | None = None) -> EgressRoute | None:
+    """The route out, when this deployment has one.
+
+    `None` when either half is unset, and a client built with `None` refuses
+    every call. Failing closed here rather than falling back is the whole of
+    the stage's exit check: nothing in the code can reach the network without
+    passing the boundary, so nobody has to remember not to.
+    """
+    if not settings.egress_proxy_url or not settings.egress_proxy_token:
+        return None
+    return EgressRoute(
+        url=settings.egress_proxy_url,
+        token=settings.egress_proxy_token,
+        # Named only when a caller has layers to be measured against. Naming
+        # them can only narrow what the request may reach — the proxy looks
+        # each id up itself.
+        workspace_id=None if claim is None else claim.workspace_id,
+        agent_version_id=None if claim is None else claim.agent_version_id,
+        run_id=None if claim is None else claim.run_id,
+    )
 
 
 def _controller(settings: Settings) -> SandboxClient | None:

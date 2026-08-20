@@ -1,27 +1,24 @@
 """What SafeOutboundClient does with a connection, proven against a real one.
 
-The address policy itself is settled exhaustively in the unit tests. These tests
-are about the plumbing built to obey it: pinning, redirects, header stripping,
-and budgets. To reach a server on this machine at all they relax the policy in
-one named way — loopback becomes reachable — because a stand-in endpoint has
-nowhere else to live. The relaxation is explicit and local; `test_consults_the
-_real_policy` proves the client still asks, so a relaxed test cannot hide a
-client that skipped the question.
+Since M2C-1 the client cannot open a connection of its own: it goes through the
+egress proxy, and these tests start a real one. What is left here is what only
+a client can do — follow a redirect deliberately, drop a credential when the
+origin changes, cap a response, and refuse when there is no route at all.
+
+Where an address may be connected to is the proxy's question now, and the
+suite next door settles it. The two tests here that still name an address are
+the ones about the *client*: that a hop to a forbidden target is refused at
+that hop rather than only at the first, and that a refusal from the boundary
+comes back as a typed refusal rather than as somebody's 403.
+
+Loopback is relaxed on the proxy the same way it always was on the client, and
+`strict_proxy` keeps that honest.
 """
 
-from collections.abc import Sequence
-from ipaddress import ip_address, ip_network
-from urllib.parse import urlsplit
-
 import pytest
-from tiny_hermes.outbound.client import SafeOutboundClient
-from tiny_hermes.outbound.domain.address_policy import (
-    Address,
-    AddressVerdict,
-    Network,
-    RefusalReason,
-    verdict,
-)
+from tiny_hermes.outbound.client import EgressRoute, SafeOutboundClient
+from tiny_hermes.outbound.domain.address_policy import RefusalReason
+from tiny_hermes.outbound.domain.scope import OutboundScope
 from tiny_hermes.outbound.errors import (
     OutboundRefused,
     OutboundTooLarge,
@@ -29,24 +26,17 @@ from tiny_hermes.outbound.errors import (
     OutboundUnreachable,
 )
 
+from ..egress_support import PROXY_TOKEN, ProxyHandle
 from .conftest import StandIn
 
-LOOPBACK = [ip_network("127.0.0.0/8")]
 
-
-def loopback_is_reachable(
-    addresses: Sequence[Address], approved: Sequence[Network]
-) -> AddressVerdict:
-    """The real policy, with loopback permitted so a local stand-in is usable."""
-    if addresses and all(entry.is_loopback for entry in addresses):
-        return AddressVerdict(allowed=True, address=addresses[0])
-    return verdict(addresses, approved)
-
-
-def build(**overrides: object) -> SafeOutboundClient:
+def build(proxy: ProxyHandle | None, **overrides: object) -> SafeOutboundClient:
     settings: dict[str, object] = {
-        "approved": LOOPBACK,
-        "policy": loopback_is_reachable,
+        "egress": (
+            None
+            if proxy is None
+            else EgressRoute(url=proxy.url, token=PROXY_TOKEN)
+        ),
         "connect_timeout": 2.0,
         "read_timeout": 5.0,
         "max_redirects": 5,
@@ -57,17 +47,17 @@ def build(**overrides: object) -> SafeOutboundClient:
 
 
 async def test_an_ordinary_request_reaches_the_endpoint(
-    stand_in: tuple[StandIn, str],
+    stand_in: tuple[StandIn, str], proxy: ProxyHandle
 ) -> None:
     app, url = stand_in
-    async with build() as client:
+    async with build(proxy) as client:
         response = await client.post(f"{url}/ok", json={"say": "hello"})
     assert response.status_code == 200
     assert app.last().method == "POST"
 
 
-async def test_an_ambient_proxy_cannot_replace_the_vetted_connection(
-    stand_in: tuple[StandIn, str], monkeypatch: pytest.MonkeyPatch
+async def test_an_ambient_proxy_cannot_replace_the_platform_s(
+    stand_in: tuple[StandIn, str], proxy: ProxyHandle, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Address checks are meaningless if an inherited proxy makes the connection."""
     _, url = stand_in
@@ -76,20 +66,22 @@ async def test_an_ambient_proxy_cannot_replace_the_vetted_connection(
     for name in ("NO_PROXY", "no_proxy"):
         monkeypatch.delenv(name, raising=False)
 
-    async with build() as client:
+    async with build(proxy) as client:
         response = await client.post(f"{url}/ok", json={"say": "direct"})
 
     assert response.status_code == 200
 
 
-async def test_consults_the_real_policy(stand_in: tuple[StandIn, str]) -> None:
+async def test_consults_the_real_policy(
+    stand_in: tuple[StandIn, str], strict_proxy: ProxyHandle
+) -> None:
     """With nothing relaxed, the stand-in is unreachable and never contacted.
 
     The second assertion is the one that matters: a client that connected first
     and checked afterwards would still raise, and would still be wrong.
     """
     app, url = stand_in
-    async with build(policy=verdict) as client:
+    async with build(strict_proxy) as client:
         with pytest.raises(OutboundRefused) as refusal:
             await client.post(f"{url}/ok", json={})
     assert refusal.value.reason is RefusalReason.LOOPBACK
@@ -97,43 +89,52 @@ async def test_consults_the_real_policy(stand_in: tuple[StandIn, str]) -> None:
 
 
 async def test_plaintext_is_refused_outside_an_approved_range(
-    stand_in: tuple[StandIn, str],
+    stand_in: tuple[StandIn, str], plaintext_proxy: ProxyHandle
 ) -> None:
-    """`http` is an operator's deliberate choice on their own network, not a default."""
+    """`http` is an operator's deliberate choice on their own network, not a
+    default — and since M2C-1 the proxy is what enforces that, which is why the
+    refusal still arrives here with its own name."""
     app, url = stand_in
-    async with build(approved=[]) as client:
+    async with build(plaintext_proxy) as client:
         with pytest.raises(OutboundRefused) as refusal:
             await client.post(f"{url}/ok", json={})
     assert refusal.value.reason is RefusalReason.PLAINTEXT_NOT_APPROVED
     assert app.requests == []
 
 
-async def test_an_unsupported_scheme_is_refused() -> None:
-    async with build() as client:
+async def test_an_unsupported_scheme_is_refused(proxy: ProxyHandle) -> None:
+    async with build(proxy) as client:
         with pytest.raises(OutboundRefused) as refusal:
             await client.post("ftp://example.com/ok", json={})
     assert refusal.value.reason is RefusalReason.SCHEME_NOT_ALLOWED
 
 
-async def test_a_same_origin_redirect_is_followed(stand_in: tuple[StandIn, str]) -> None:
+async def test_a_same_origin_redirect_is_followed(
+    stand_in: tuple[StandIn, str], proxy: ProxyHandle
+) -> None:
     app, url = stand_in
-    async with build() as client:
+    async with build(proxy) as client:
         response = await client.post(f"{url}/redirect?to={url}/ok", json={})
     assert response.status_code == 200
     assert app.paths == ["/redirect", "/ok"]
 
 
 async def test_a_redirect_to_a_forbidden_address_is_refused_at_that_hop(
-    stand_in: tuple[StandIn, str],
+    stand_in: tuple[StandIn, str], proxy: ProxyHandle
 ) -> None:
     """The hop a library's own redirect follower takes without re-asking.
 
-    The relaxation covers loopback only, so the second hop meets the real policy
-    and the metadata address is refused there — which is the point: vetting the
-    first address of a request says nothing about where it ends up.
+    The metadata address is put *into* the approved scope first, so this test
+    is not merely watching an unapproved name be turned away: the second hop
+    is one somebody explicitly allowed, and the address policy refuses it
+    anyway. Vetting the first address of a request says nothing about where it
+    ends up, and approving a name says nothing about what it resolves to.
     """
     app, url = stand_in
-    async with build() as client:
+    proxy.directory.platform = OutboundScope.of(
+        ["127.0.0.1", "localhost", "169.254.169.254"]
+    )
+    async with build(proxy) as client:
         with pytest.raises(OutboundRefused) as refusal:
             await client.post(f"{url}/redirect?to=http://169.254.169.254/latest", json={})
     assert refusal.value.reason is RefusalReason.LINK_LOCAL
@@ -141,29 +142,33 @@ async def test_a_redirect_to_a_forbidden_address_is_refused_at_that_hop(
 
 
 async def test_a_temporary_redirect_replays_the_method_and_body(
-    stand_in: tuple[StandIn, str],
+    stand_in: tuple[StandIn, str], proxy: ProxyHandle
 ) -> None:
     """307 preserves the request; 302 does not, and the difference is not ours to blur."""
     app, url = stand_in
-    async with build() as client:
+    async with build(proxy) as client:
         await client.post(f"{url}/permanent?to={url}/ok", json={"say": "hello"})
     assert [entry.method for entry in app.requests] == ["POST", "POST"]
 
 
-async def test_an_ordinary_redirect_becomes_a_get(stand_in: tuple[StandIn, str]) -> None:
+async def test_an_ordinary_redirect_becomes_a_get(
+    stand_in: tuple[StandIn, str], proxy: ProxyHandle
+) -> None:
     app, url = stand_in
-    async with build() as client:
+    async with build(proxy) as client:
         await client.post(f"{url}/redirect?to={url}/ok", json={"say": "hello"})
     assert [entry.method for entry in app.requests] == ["POST", "GET"]
 
 
 async def test_a_cross_origin_redirect_drops_the_credential(
-    stand_in: tuple[StandIn, str], second_stand_in: tuple[StandIn, str]
+    stand_in: tuple[StandIn, str],
+    second_stand_in: tuple[StandIn, str],
+    proxy: ProxyHandle,
 ) -> None:
     """Asserted on what the second server received, not on what the client meant."""
     first, first_url = stand_in
     second, second_url = second_stand_in
-    async with build() as client:
+    async with build(proxy) as client:
         response = await client.post(
             f"{first_url}/redirect?to={second_url}/ok",
             json={},
@@ -175,10 +180,10 @@ async def test_a_cross_origin_redirect_drops_the_credential(
 
 
 async def test_a_same_origin_redirect_keeps_the_credential(
-    stand_in: tuple[StandIn, str],
+    stand_in: tuple[StandIn, str], proxy: ProxyHandle
 ) -> None:
     app, url = stand_in
-    async with build() as client:
+    async with build(proxy) as client:
         await client.post(
             f"{url}/redirect?to={url}/ok",
             json={},
@@ -188,9 +193,11 @@ async def test_a_same_origin_redirect_keeps_the_credential(
     assert app.last().headers["authorization"] == "Bearer a-credential"
 
 
-async def test_a_redirect_loop_ends(stand_in: tuple[StandIn, str]) -> None:
+async def test_a_redirect_loop_ends(
+    stand_in: tuple[StandIn, str], proxy: ProxyHandle
+) -> None:
     app, url = stand_in
-    async with build(max_redirects=3) as client:
+    async with build(proxy, max_redirects=3) as client:
         with pytest.raises(OutboundTooManyRedirects):
             await client.post(f"{url}/loop", json={})
     # The first request plus three hops, and then it stops rather than counting
@@ -199,81 +206,102 @@ async def test_a_redirect_loop_ends(stand_in: tuple[StandIn, str]) -> None:
 
 
 async def test_an_oversized_response_is_refused_rather_than_buffered(
-    stand_in: tuple[StandIn, str],
+    stand_in: tuple[StandIn, str], proxy: ProxyHandle
 ) -> None:
     _, url = stand_in
-    async with build(max_response_bytes=1024) as client:
+    async with build(proxy, max_response_bytes=1024) as client:
         with pytest.raises(OutboundTooLarge):
             await client.post(f"{url}/huge", json={})
 
 
 async def test_a_read_timeout_leaves_the_effect_unknown(
-    stand_in: tuple[StandIn, str],
+    stand_in: tuple[StandIn, str], proxy: ProxyHandle
 ) -> None:
     """The request was sent. The endpoint may have done the work and billed for it."""
     app, url = stand_in
     # Long enough to outlast the read budget, short enough that the server is
     # not still sleeping when the fixture tries to shut it down.
     app.slow_seconds = 1.0
-    async with build(read_timeout=0.2) as client:
+    async with build(proxy, read_timeout=0.2) as client:
         with pytest.raises(OutboundUnreachable) as failure:
             await client.post(f"{url}/slow", json={})
     assert failure.value.external_effect_unknown is True
 
 
-async def test_a_connect_failure_leaves_no_doubt() -> None:
+async def test_a_connect_failure_leaves_no_doubt(proxy: ProxyHandle) -> None:
     """Nothing was sent, so nothing happened at the other end."""
-    async with build(connect_timeout=0.5) as client:
+    async with build(proxy, connect_timeout=0.5) as client:
         with pytest.raises(OutboundUnreachable) as failure:
             # Port 1 on this machine, which nothing listens on.
             await client.post("http://127.0.0.1:1/ok", json={})
     assert failure.value.external_effect_unknown is False
 
 
-async def test_the_host_header_carries_the_name_not_the_pinned_address(
-    stand_in: tuple[StandIn, str],
+async def test_the_client_does_not_resolve_anything_itself(
+    stand_in: tuple[StandIn, str], proxy: ProxyHandle
 ) -> None:
-    """Pinning changes where the packet goes, never what the server is told.
+    """The name travels; the proxy is what turns it into an address.
 
-    A stub resolver rather than `localhost`, which answers with both `::1` and
-    `127.0.0.1` on some machines and would make this test depend on which one
-    came first.
+    Pinning and rebinding are settled in the egress suite, where they can be
+    settled — this client opens one socket, to the proxy, so an address it
+    vetted would not be an address anything connects to. Asserted from the
+    outside: the stand-in sees the host it was asked for.
     """
     app, url = stand_in
-    port = urlsplit(url).port
+    async with build(proxy) as client:
+        await client.post(f"{url}/ok", json={})
 
-    def always_loopback(host: str, port: int) -> list[Address]:
-        del host, port
-        return [ip_address("127.0.0.1")]
-
-    async with build(resolve=always_loopback) as client:
-        await client.post(f"http://model.invalid:{port}/ok", json={})
-    assert app.last().headers["host"] == f"model.invalid:{port}"
+    assert app.last().headers["host"] == url.removeprefix("http://")
 
 
-async def test_the_connection_goes_to_the_address_that_was_vetted(
+# -- the boundary is not optional -------------------------------------------
+
+
+async def test_without_a_route_nothing_is_sent_at_all(
     stand_in: tuple[StandIn, str],
 ) -> None:
-    """The rebinding case, which no other test can see.
+    """The stage's exit check, from the caller's side.
 
-    A resolver that answers with a permitted address while it is being checked
-    and a forbidden one by the time a socket opens is the whole reason the
-    client connects to a literal. Real DNS cannot be made to lie on demand, so
-    the resolver is a stub that changes its mind between calls.
+    There is no branch in the client that connects directly, so a deployment
+    that never configured a proxy sends nothing — and the refusal names the
+    missing setting rather than looking like an unreachable endpoint.
     """
     app, url = stand_in
-    port = urlsplit(url).port
-    answers = [[ip_address("127.0.0.1")], [ip_address("169.254.169.254")]]
+    async with build(None) as client:
+        with pytest.raises(OutboundRefused) as refusal:
+            await client.post(f"{url}/ok", json={})
 
-    def rebinding(host: str, port: int) -> list[Address]:
-        del host, port
-        return answers.pop(0) if answers else [ip_address("169.254.169.254")]
+    assert refusal.value.reason is RefusalReason.EGRESS_NOT_CONFIGURED
+    assert app.requests == []
 
-    async with build(resolve=rebinding) as client:
-        response = await client.post(f"http://model.invalid:{port}/ok", json={})
 
-    assert response.status_code == 200
-    assert app.last().path == "/ok"
-    # One resolution for this request, and the address it produced is the one
-    # that was used. A second call would mean the socket asked again.
-    assert len(answers) == 1
+async def test_a_boundary_that_is_not_answering_is_named_as_itself(
+    stand_in: tuple[StandIn, str],
+) -> None:
+    """An operator reading this should look at the proxy, not at the endpoint."""
+    _, url = stand_in
+    nowhere = EgressRoute(url="http://127.0.0.1:1", token=PROXY_TOKEN)
+    async with SafeOutboundClient(egress=nowhere, connect_timeout=1.0) as client:
+        with pytest.raises(OutboundRefused) as refusal:
+            await client.post(f"{url}/ok", json={})
+
+    assert refusal.value.reason is RefusalReason.EGRESS_UNAVAILABLE
+
+
+async def test_a_refusal_from_the_boundary_is_not_the_target_saying_no(
+    stand_in: tuple[StandIn, str], proxy: ProxyHandle
+) -> None:
+    """A 403 from the proxy and a 403 from the endpoint mean different things.
+
+    One is a decision that will not change on a retry and the other might, so
+    the client turns the first into a typed refusal naming the scope rather
+    than handing back a response nobody can tell apart.
+    """
+    app, url = stand_in
+    proxy.directory.platform = OutboundScope.of(["api.example.com"])
+    async with build(proxy) as client:
+        with pytest.raises(OutboundRefused) as refusal:
+            await client.post(f"{url}/ok", json={})
+
+    assert refusal.value.reason is RefusalReason.TARGET_NOT_IN_SCOPE
+    assert app.requests == []

@@ -4,6 +4,8 @@ from ipaddress import IPv4Network, IPv6Network, ip_network
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from tiny_hermes.egress.domain.decision import ALLOWED_PORTS
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -60,6 +62,46 @@ class Settings(BaseSettings):
     #: private and carrier-grade NAT ranges can be opened this way; loopback and
     #: link-local stay refused however wide the range is.
     outbound_allowed_cidrs: str = ""
+
+    #: The egress proxy (product design §16.5). Empty by default in both
+    #: fields, which means a deployment that has not stood one up sends
+    #: nothing: `EGRESS_PROXY_URL` unset makes every outbound call refuse
+    #: rather than connect directly, and `EGRESS_ALLOWED_HOSTS` unset makes the
+    #: platform layer approve nothing. Both are the same shape as an empty
+    #: `SANDBOX_IMAGE_DIGEST` — unconfigured fails closed and says so.
+    egress_proxy_url: str = ""
+    #: What a platform process presents to the proxy. It answers "is this one of
+    #: ours"; the scope still comes from the directory, so a leaked token widens
+    #: nothing by itself.
+    egress_proxy_token: str = ""
+    egress_proxy_port: int = Field(default=3128, ge=1, le=65_535)
+    #: Ports a target may listen on, comma separated. Empty means the shipped
+    #: pair, 80 and 443.
+    #:
+    #: Widening this is a platform administrator's decision and only theirs,
+    #: which is the shape §16.5 gives every widening. It is needed more often
+    #: than the default suggests: an enterprise's own API on 8443 is ordinary,
+    #: and without this an installation could bind only tools that happen to
+    #: live on the public web's two ports.
+    egress_allowed_ports: str = ""
+    #: The platform outbound scope, comma separated: hosts, one-level wildcards
+    #: and networks. §4 of the M2C-1 plan moves this into the database; a
+    #: single-tenant installation is served by the setting alone.
+    egress_allowed_hosts: str = ""
+    #: The Docker network a sandbox is attached to. Empty means a sandbox has
+    #: no network at all — §16.4's default — rather than one nobody guards.
+    #: The network itself must reach the proxy and nothing else; Compose
+    #: declares it `internal` so that is a property of the deployment rather
+    #: than of anybody's discipline.
+    sandbox_egress_network: str = ""
+
+    #: The most model rounds an Agent author may ask for (product design §12.3,
+    #: M2A design §4.7). 20 was a literal on `AgentLimits.max_model_calls`
+    #: chosen when a Run could not run long; a Goal loop that must finish inside
+    #: 20 calls cannot do much. Checked when a draft is saved and again when it
+    #: is published — never when a published version is read back, so lowering
+    #: this cannot break an Agent already published above it.
+    agent_max_model_calls: int = Field(default=20, ge=1, le=200)
 
     #: Attempts per model round, on the same endpoint. A workspace may lower
     #: this; nothing may raise it.
@@ -128,6 +170,30 @@ class Settings(BaseSettings):
             if entry:
                 ip_network(entry)
         return value
+
+    @field_validator("egress_allowed_ports")
+    @classmethod
+    def reject_unparseable_ports(cls, value: str) -> str:
+        for entry in (part.strip() for part in value.split(",")):
+            if not entry:
+                continue
+            port = int(entry)
+            if not 1 <= port <= 65_535:
+                raise ValueError(f"{port} is not a port")
+        return value
+
+    @property
+    def allowed_ports(self) -> frozenset[int]:
+        """What the proxy will connect to, or the shipped pair when unset.
+
+        Empty falls back rather than approving nothing: a port list is a
+        widening of a default that already works, unlike a scope, where empty
+        must mean "nothing" because the whole point is that it approves.
+        """
+        chosen = frozenset(
+            int(part.strip()) for part in self.egress_allowed_ports.split(",") if part.strip()
+        )
+        return chosen or ALLOWED_PORTS
 
     @property
     def approved_networks(self) -> tuple[IPv4Network | IPv6Network, ...]:

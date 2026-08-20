@@ -33,6 +33,18 @@ x-base-env: &base-env
   # deployment that has not chosen an image fails: no tool can run at all.
   SANDBOX_IMAGE_DIGEST: ${SANDBOX_IMAGE_DIGEST:-}
   SANDBOX_CONTROLLER_SOCKET: /run/tiny-hermes/controller.sock
+  # The outbound boundary (§16.5). Empty by default in every field, which is
+  # what makes an unconfigured deployment send nothing rather than everything:
+  # no proxy URL means every outbound call refuses instead of connecting
+  # directly, and no allowed hosts means the platform layer approves nothing.
+  EGRESS_PROXY_URL: ${EGRESS_PROXY_URL:-}
+  EGRESS_PROXY_TOKEN: ${EGRESS_PROXY_TOKEN:-}
+  EGRESS_ALLOWED_HOSTS: ${EGRESS_ALLOWED_HOSTS:-}
+  EGRESS_ALLOWED_PORTS: ${EGRESS_ALLOWED_PORTS:-}
+  # The network a sandbox is attached to. Empty leaves a sandbox with no
+  # network at all, which is §16.4's default and what a deployment running no
+  # proxy gets.
+  SANDBOX_EGRESS_NETWORK: ${SANDBOX_EGRESS_NETWORK:-}
   SANDBOX_IDLE_TTL_SECONDS: ${SANDBOX_IDLE_TTL_SECONDS:-300}
   # Present-but-empty for the controller: Settings requires the fields so a
   # credentialless API deployment fails at startup, and empty is exactly what
@@ -225,6 +237,31 @@ services:
         condition: service_healthy
     healthcheck: *process-alive
 
+  # The outbound boundary, and the only process whose job is to say no to a
+  # packet. §16.5 requires it to be separate: a boundary enforced inside the
+  # process it bounds is not one. Like the controller it holds nothing else —
+  # no Docker socket, no object-store credentials, no model keys — because a
+  # process that decides where traffic may go must not also be worth attacking
+  # for what it is carrying.
+  egress-proxy:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    command: ["/app/.venv/bin/tiny-hermes-egress"]
+    environment: *app-env
+    # On both: the default network to reach the internet and the database, and
+    # the sandbox network to be reached *from* a container. A sandbox is on the
+    # second only, and that network is `internal` — so the proxy is the one
+    # thing a sandbox can send a packet to, and that is a property of this file
+    # rather than of anybody's discipline.
+    networks:
+      - default
+      - sandbox-egress
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck: *process-alive
+
   web:
     build:
       context: ../..
@@ -238,6 +275,14 @@ services:
       timeout: 3s
       retries: 20
     ports: ["3000:3000"]
+
+networks:
+  # Nothing on this network can route anywhere: `internal` is Docker's way of
+  # saying a bridge has no gateway. A sandbox attached to it can reach the
+  # proxy and nothing else — not the internet, not PostgreSQL, not MinIO, not
+  # another Run's container.
+  sandbox-egress:
+    internal: true
 
 volumes:
   postgres-data:

@@ -51,6 +51,143 @@ function loadedAgent(revision = 3): void {
     http.get(`/api/v1/agents/${AGENT}/draft`, () => HttpResponse.json(draftBody(revision))),
     http.get(`/api/v1/agents/${AGENT}/versions`, () => HttpResponse.json([])),
     http.get("/api/v1/model-endpoints", () => HttpResponse.json([])),
+    // The skill picker reads the catalog. Empty by default: an Agent with no
+    // skills is the ordinary case and every other test in this file is about
+    // something else.
+    http.get("/api/v1/skills", () => HttpResponse.json([])),
+    // The network picker reads what the workspace approved. Empty by default,
+    // which is what an Agent that asks for no network is measured against.
+    http.get("/api/v1/outbound-scopes/workspace", () => HttpResponse.json([])),
+    // The two tool catalogs, empty for the same reason the skills are.
+    http.get("/api/v1/http-tools", () => HttpResponse.json([])),
+    http.get("/api/v1/mcp-servers", () => HttpResponse.json([])),
+  );
+}
+
+const HTTP_VERSION = "55555555-6666-4777-8888-999999999999";
+const MCP_VERSION = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+
+/** One registered HTTP tool with a read and a write, and one MCP server. */
+function loadedToolCatalogs(): void {
+  server.use(
+    http.get("/api/v1/http-tools", () =>
+      HttpResponse.json([
+        {
+          id: "t1",
+          workspace_id: WORKSPACE,
+          name: "orders",
+          base_url: "https://api.example.com/v2",
+          credential_ref: null,
+          current_version_id: HTTP_VERSION,
+          created_at: "2026-08-18T00:00:00Z",
+          updated_at: "2026-08-18T00:00:00Z",
+        },
+      ]),
+    ),
+    http.get("/api/v1/http-tools/t1/versions", () =>
+      HttpResponse.json([
+        {
+          id: HTTP_VERSION,
+          http_tool_id: "t1",
+          version_number: 1,
+          content_hash: "abc",
+          title: "Orders",
+          document_version: "1",
+          operations: [
+            {
+              operation_id: "listOrders",
+              method: "GET",
+              path: "/orders",
+              summary: null,
+              read_only: true,
+            },
+            {
+              operation_id: "createOrder",
+              method: "POST",
+              path: "/orders",
+              summary: null,
+              read_only: false,
+            },
+          ],
+          status: "active",
+          bindable: true,
+          created_at: "2026-08-18T00:00:00Z",
+        },
+      ]),
+    ),
+    http.get("/api/v1/mcp-servers", () =>
+      HttpResponse.json([
+        {
+          id: "s1",
+          workspace_id: WORKSPACE,
+          name: "docs",
+          url: "https://mcp.example.com",
+          credential_ref: null,
+          current_version_id: MCP_VERSION,
+          last_validated_at: "2026-08-18T00:00:00Z",
+          created_at: "2026-08-18T00:00:00Z",
+          updated_at: "2026-08-18T00:00:00Z",
+        },
+      ]),
+    ),
+    http.get("/api/v1/mcp-servers/s1/versions", () =>
+      HttpResponse.json([
+        {
+          id: MCP_VERSION,
+          mcp_server_id: "s1",
+          version_number: 1,
+          content_hash: "abc",
+          tools: [
+            { name: "search", description: null, input_schema: {} },
+            { name: "purge", description: null, input_schema: {} },
+          ],
+          status: "active",
+          bindable: true,
+          created_at: "2026-08-18T00:00:00Z",
+        },
+      ]),
+    ),
+  );
+}
+
+const SKILL = "33333333-4444-4555-8666-777777777777";
+const SKILL_VERSION = "44444444-5555-4666-8777-888888888888";
+
+/** A catalog with one skill in it, and one bindable version of that skill. */
+function loadedCatalog(): void {
+  server.use(
+    http.get("/api/v1/skills", () =>
+      HttpResponse.json([
+        {
+          id: SKILL,
+          scope: "workspace",
+          workspace_id: WORKSPACE,
+          name: "rollout",
+          current_version_id: SKILL_VERSION,
+          created_at: "2026-08-18T00:00:00Z",
+          updated_at: "2026-08-18T00:00:00Z",
+        },
+      ]),
+    ),
+    http.get(`/api/v1/skills/${SKILL}/versions`, () =>
+      HttpResponse.json([
+        {
+          id: SKILL_VERSION,
+          skill_id: SKILL,
+          version_number: 1,
+          content_hash: "c".repeat(64),
+          name: "rollout",
+          description: "How to drain a machine.",
+          findings: [],
+          source: "upload",
+          source_url: null,
+          source_ref: null,
+          status: "active",
+          bindable: true,
+          created_at: "2026-08-18T00:00:00Z",
+        },
+      ]),
+    ),
   );
 }
 
@@ -467,4 +604,210 @@ test("rollback asks first, then names the version it restored", async () => {
   await userEvent.click(screen.getByRole("button", { name: "确定" }));
   await waitFor(() => expect(body).toEqual({ version_id: first.id }));
   expect(await screen.findByText("当前版本 v1")).toBeInTheDocument();
+});
+
+
+test("binding a skill puts its version id on the draft, never its name", async () => {
+  loadedAgent(3);
+  loadedCatalog();
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByLabelText("技能"));
+  await userEvent.click(await screen.findByTitle("rollout v1"));
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  // A version id, so publishing a new version of this skill changes nothing
+  // about this Agent. Switching is another edit and another publish.
+  expect(sent).toEqual([
+    {
+      expected_revision: 3,
+      spec: { ...SPEC, skills: [{ skill_version_id: SKILL_VERSION }] },
+    },
+  ]);
+});
+
+test("a publish refused for summary budget names what each summary costs", async () => {
+  loadedAgent(3);
+  loadedCatalog();
+  server.use(
+    http.post(`/api/v1/agents/${AGENT}/publish`, () =>
+      HttpResponse.json(
+        {
+          code: "skill_summary_budget_exceeded",
+          title: "Skill summaries do not fit",
+          detail: "The bound summaries estimate 1800 tokens and the segment holds 1536.",
+          context: {
+            summaries: [
+              { skill: "rollout", estimated_tokens: 1200 },
+              { skill: "postmortem", estimated_tokens: 600 },
+            ],
+          },
+        },
+        { status: 422 },
+      ),
+    ),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByRole("button", { name: "发布" }));
+  await userEvent.click(await screen.findByRole("button", { name: "确定" }));
+
+  // Per summary rather than as one total: the author has to be able to see
+  // which description is the expensive one.
+  expect(await screen.findByText("rollout：约 1200 token")).toBeInTheDocument();
+  expect(screen.getByText("postmortem：约 600 token")).toBeInTheDocument();
+});
+
+
+test("the network picker offers what the workspace approved and nothing else", async () => {
+  loadedAgent(3);
+  server.use(
+    http.get("/api/v1/outbound-scopes/workspace", () =>
+      HttpResponse.json([
+        {
+          id: "s1",
+          level: "workspace",
+          workspace_id: WORKSPACE,
+          entry: "api.example.com",
+          note: null,
+          managed: false,
+          created_at: "2026-08-18T00:00:00Z",
+        },
+      ]),
+    ),
+  );
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByLabelText("网络"));
+  await userEvent.click(await screen.findByTitle("api.example.com"));
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  // Chosen, never typed: an entry outside the workspace's range is refused at
+  // publish, and a free-text field would teach an author to publish and see.
+  await waitFor(() => expect(sent).toHaveLength(1));
+  expect(sent).toEqual([
+    {
+      expected_revision: 3,
+      spec: { ...SPEC, network: { allow: ["api.example.com"] } },
+    },
+  ]);
+});
+
+test("an agent that asks for no network publishes the document it always did", async () => {
+  loadedAgent(3);
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  expect(sent).toEqual([{ expected_revision: 3, spec: SPEC }]);
+});
+
+test("binding an HTTP operation stores the version id and the operation, and the write policy", async () => {
+  loadedAgent(3);
+  loadedToolCatalogs();
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByLabelText("HTTP 操作"));
+  await userEvent.click(await screen.findByTitle("POST createOrder · 会改数据"));
+  // §16.3's choice, made in the builder rather than discovered at publish.
+  await userEvent.click(screen.getByLabelText("HTTP 写操作怎么办"));
+  await userEvent.click(await screen.findByTitle("每次都问管理员"));
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  expect(sent).toEqual([
+    {
+      expected_revision: 3,
+      spec: {
+        ...SPEC,
+        http_tools: [
+          {
+            http_tool_version_id: HTTP_VERSION,
+            operations: ["createOrder"],
+            write_policy: "governance",
+          },
+        ],
+      },
+    },
+  ]);
+});
+
+test("an MCP binding names every tool, because there is no way to say all", async () => {
+  loadedAgent(3);
+  loadedToolCatalogs();
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByLabelText("MCP 工具"));
+  await userEvent.click(await screen.findByTitle("search"));
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  // `purge` was advertised and is not in the binding: a server's discovery is
+  // not a permission.
+  expect(sent).toEqual([
+    {
+      expected_revision: 3,
+      spec: {
+        ...SPEC,
+        mcp_tools: [
+          { mcp_server_version_id: MCP_VERSION, tools: ["search"], write_policy: null },
+        ],
+      },
+    },
+  ]);
+});
+
+test("an agent that binds no tool publishes the document it always did", async () => {
+  loadedAgent(3);
+  loadedToolCatalogs();
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  expect(sent).toEqual([{ expected_revision: 3, spec: SPEC }]);
 });

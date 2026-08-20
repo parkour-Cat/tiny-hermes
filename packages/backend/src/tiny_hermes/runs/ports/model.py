@@ -53,6 +53,24 @@ class ModelRequest:
     #: The tools this AgentVersion bound, as provider schemas. §10.2's first
     #: step: an Agent that bound none advertises none.
     tools: tuple[dict[str, Any], ...] = ()
+    #: One line per bound skill: what it is called and what it is for, the
+    #: whole of what the model is told before it asks for any of the text.
+    #:
+    #: Its own field rather than something the caller glued onto
+    #: ``personality``. Glued on, the two would be one string on the budget
+    #: table, and neither the planner nor a person reading a Run could say
+    #: which of them cost what — or trim one without touching the other.
+    skill_summaries: tuple[str, ...] = ()
+    #: What this Run's subject and this Agent's workspace decided is worth
+    #: remembering, oldest first within each. Its own field for the reason
+    #: `skill_summaries` is one: glued onto the persona they would be one
+    #: string on the budget table, and neither the planner nor a person
+    #: reading a Run could say which of them cost what.
+    #:
+    #: Never a raw user message. §14.2 forbids it for shared memory and this
+    #: platform extends it to private: every line here is something somebody
+    #: proposed and something a policy admitted.
+    memories: tuple[str, ...] = ()
     #: Set when this slice began on a fresh writable layer. The provider places
     #: it with the platform's own rules rather than in the conversation, so a
     #: later turn cannot talk over it.

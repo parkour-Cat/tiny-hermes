@@ -62,6 +62,9 @@ function runSnapshot(finished: boolean) {
     wait_deadline_at: null,
     retry_of_run_id: null,
     budget_root_run_id: RUN,
+    parent_run_id: null,
+    depth: 0,
+    children: [],
     last_event_sequence: 2,
     queue: { position: 1, status: finished ? "terminal" : "head" },
     budget: {
@@ -81,6 +84,7 @@ function runSnapshot(finished: boolean) {
     available_actions: [],
     checkpoint_replay_safe: true,
     checkpoint_effect_status: "none",
+    goal: { round: null, outcome: null, unmet: [] },
     created_at: "2026-08-10T02:00:00Z",
     started_at: "2026-08-10T02:00:05Z",
     finished_at: finished ? "2026-08-10T02:01:00Z" : null,

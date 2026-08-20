@@ -9,6 +9,10 @@ from tiny_hermes.agents.application.service import (
     AgentAliasAlreadyUsed,
     AgentCatalog,
     AgentCatalogError,
+    AgentNetworkOutsideWorkspace,
+    AgentNetworkUnavailable,
+    ContextBudgetUnsatisfied,
+    ContextWindowTooSmall,
     DraftRevisionConflict,
     ForbiddenAgentAction,
     InvalidAgentAlias,
@@ -16,6 +20,10 @@ from tiny_hermes.agents.application.service import (
     InvalidAgentSpec,
     ModelEndpointUnavailable,
     ModelOutputLimitTooHigh,
+    RoundCeilingExceeded,
+    SkillBindingUnavailable,
+    SkillBoundTwice,
+    SkillSummaryBudgetExceeded,
     UnknownAgent,
 )
 from tiny_hermes.agents.domain.models import Agent, AgentDraft, AgentVersion
@@ -441,6 +449,118 @@ def _as_app_error(error: AgentCatalogError) -> AppError:
             detail=(
                 "The agent asks for more output than the selected endpoint "
                 "produces. Lower it rather than relying on the endpoint to."
+            ),
+        )
+    if isinstance(error, ContextWindowTooSmall):
+        return AppError(
+            code="context_window_too_small",
+            title="Context window too small",
+            status=422,
+            detail=(
+                f"This endpoint leaves {error.allowance} tokens for input and "
+                f"{error.floor} are kept no matter what. Choose an endpoint "
+                "with a larger window, or lower the reserved output."
+            ),
+        )
+    if isinstance(error, ContextBudgetUnsatisfied):
+        return AppError(
+            code="context_budget_unsatisfied",
+            title="Context budget does not fit this endpoint",
+            status=422,
+            # The advice travels with the refusal and is applied by nobody:
+            # §7.4.2 requires the author accept or change it themselves.
+            detail=(
+                f"The context budget asks for {error.fit.asked} tokens and this "
+                f"endpoint leaves {error.fit.allowance}. Suggested targets: "
+                + ", ".join(
+                    f"{advice.segment.value} {advice.asked} to {advice.suggested}"
+                    for advice in error.fit.advice
+                )
+                + ". Nothing is changed until you publish these."
+            ),
+        )
+    if isinstance(error, AgentNetworkOutsideWorkspace):
+        return AppError(
+            code="agent_network_outside_workspace",
+            title="Targets outside the workspace scope",
+            status=422,
+            detail=(
+                "This agent names targets its workspace has not approved: "
+                + ", ".join(error.entries)
+                + ". A workspace administrator can approve them, or the agent "
+                "can name something already inside."
+            ),
+            # Every one of them, so an author fixes the list once rather than
+            # publishing until the messages run out.
+            context={"entries": list(error.entries)},
+        )
+    if isinstance(error, AgentNetworkUnavailable):
+        return AppError(
+            code="agent_network_unavailable",
+            title="Outbound scopes are not configured",
+            status=422,
+            detail=(
+                "This deployment cannot check what an agent may reach, so it "
+                "will not publish one that asks for the network."
+            ),
+        )
+    if isinstance(error, SkillBindingUnavailable):
+        return AppError(
+            code="skill_binding_unavailable",
+            title="A bound skill cannot be used",
+            status=422,
+            detail="; ".join(
+                f"{version_id}: {reason}"
+                for version_id, reason in error.reasons.items()
+            ),
+            # Every failing binding, not the first one: an author with four
+            # bound skills should not learn about them one publish at a time.
+            context={
+                "bindings": [
+                    {"skill_version_id": str(version_id), "reason": reason}
+                    for version_id, reason in error.reasons.items()
+                ]
+            },
+        )
+    if isinstance(error, SkillBoundTwice):
+        return AppError(
+            code="skill_bound_twice",
+            title="One skill, two versions",
+            status=422,
+            detail=(
+                f"This agent binds two versions of {error.name}. Keep the one "
+                "it should load from."
+            ),
+        )
+    if isinstance(error, SkillSummaryBudgetExceeded):
+        return AppError(
+            code="skill_summary_budget_exceeded",
+            title="Skill summaries do not fit",
+            status=422,
+            detail=(
+                f"The bound summaries estimate {sum(error.estimates.values())} "
+                f"tokens and the skill_summaries segment holds {error.allowance}. "
+                "Bind fewer skills or shorten their descriptions."
+            ),
+            # Per summary, so the author can see which description is the
+            # expensive one rather than shortening all of them.
+            context={
+                "summaries": [
+                    {"skill": name, "estimated_tokens": tokens}
+                    for name, tokens in error.estimates.items()
+                ]
+            },
+        )
+    if isinstance(error, RoundCeilingExceeded):
+        return AppError(
+            code="round_ceiling_exceeded",
+            title="Too many model rounds",
+            status=422,
+            # Both numbers, so the author can act on this without asking an
+            # administrator what the ceiling happens to be today.
+            detail=(
+                f"The agent asks for {error.asked} model calls and this "
+                f"platform allows {error.allowed}."
             ),
         )
     if isinstance(error, InvalidAgentSpec):

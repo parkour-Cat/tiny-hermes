@@ -46,6 +46,34 @@ const ModelEndpointsPage = lazy(() =>
 const SecretsPage = lazy(() =>
   import("./pages/SecretsPage").then((module) => ({ default: module.SecretsPage })),
 );
+const ApprovalsPage = lazy(() =>
+  import("./pages/ApprovalsPage").then((module) => ({
+    default: module.ApprovalsPage,
+  })),
+);
+const HttpToolsPage = lazy(() =>
+  import("./pages/HttpToolsPage").then((module) => ({
+    default: module.HttpToolsPage,
+  })),
+);
+const McpServersPage = lazy(() =>
+  import("./pages/McpServersPage").then((module) => ({
+    default: module.McpServersPage,
+  })),
+);
+const OutboundScopePage = lazy(() =>
+  import("./pages/OutboundScopePage").then((module) => ({
+    default: module.OutboundScopePage,
+  })),
+);
+const SkillsPage = lazy(() =>
+  import("./pages/SkillsPage").then((module) => ({ default: module.SkillsPage })),
+);
+const SkillProposalsPage = lazy(() =>
+  import("./pages/SkillProposalsPage").then((module) => ({
+    default: module.SkillProposalsPage,
+  })),
+);
 
 function AppRoutes() {
   const t = useT();
@@ -94,6 +122,12 @@ function AppRoutes() {
           <Route path="api-keys" element={<ApiKeysPage />} />
           <Route path="model-endpoints" element={<ModelEndpointsPage />} />
           <Route path="secrets" element={<SecretsPage />} />
+          <Route path="outbound" element={<OutboundScopePage />} />
+          <Route path="skills" element={<SkillsPage />} />
+          <Route path="skill-proposals" element={<SkillProposalsPage />} />
+          <Route path="approvals" element={<ApprovalsPage />} />
+          <Route path="http-tools" element={<HttpToolsPage />} />
+          <Route path="mcp-servers" element={<McpServersPage />} />
         </Route>
         <Route
           path="*"

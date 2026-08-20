@@ -1,7 +1,7 @@
 [project]
 name = "tiny-hermes"
 version = "0.0.0"
-description = "单 Agent 安全运行骨架"
+description = "轻量 Hermes 内核预览"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "alembic>=1.19.1",
@@ -28,6 +28,7 @@ tiny-hermes-api = "tiny_hermes.api.cli:main"
 tiny-hermes-worker = "tiny_hermes.api.cli:worker_main"
 tiny-hermes-scheduler = "tiny_hermes.api.cli:scheduler_main"
 tiny-hermes-controller = "tiny_hermes.sandbox.cli:main"
+tiny-hermes-egress = "tiny_hermes.egress.cli:main"
 
 [build-system]
 requires = ["hatchling"]

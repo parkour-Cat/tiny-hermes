@@ -16,6 +16,7 @@ from tiny_hermes.runs.domain.models import (
     RunState,
     WorkspaceCleanupTarget,
 )
+from tiny_hermes.runs.domain.slice_policy import WAIT_TIMER
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.infrastructure.tables import RunRow
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
@@ -33,6 +34,9 @@ LEASES = "leases"
 RECOVERY = "recovery"
 HEADS = "heads"
 WAITS = "waits"
+APPROVALS = "approval_expiry"
+CHILDREN = "child_waits"
+CASCADE = "child_cascade"
 COMPAT = "compat_timeouts"
 RETENTION = "retention"
 UPLOADS = "workspace_uploads"
@@ -98,7 +102,10 @@ class SchedulerRuntime:
         await self._reclaim_sandboxes(now)
         await self._recover_interrupted()
         await self._repair_session_heads()
-        await self._time_out_waits(now)
+        await self._settle_due_waits(now)
+        await self._settle_child_waits()
+        await self._cascade_cancel_children()
+        await self._expire_approvals(now)
         await self._cancel_aged_compat_timeouts(now)
         await self._collect_expired_records(now)
         await self._collect_upload_garbage(now)
@@ -275,19 +282,101 @@ class SchedulerRuntime:
             ):
                 await store.repair_session_head(session_id, "scheduler-head-repair")
 
-    async def _time_out_waits(self, now: datetime) -> None:
-        """Dormant until phase 3.
+    async def _settle_due_waits(self, now: datetime) -> None:
+        """What a passed deadline means, which depends on who owned it.
 
-        Phase 2B never produces a ``waiting_external`` Run, so this scan is
-        written and tested through the signal seam but has nothing to find in
-        normal operation.
+        A ``timer`` is the platform's own deadline: reaching it *is* the wake,
+        so the Run goes back to the queue. Every other kind waits on something
+        outside — an approval, a child Run — and a deadline reached without one
+        means nobody answered, which is ``paused(external_timeout)``.
         """
+        woken: list[UUID] = []
         async with self._sessions.begin() as session:
             store = SqlRunStore(session)
             if not await store.try_scan_lock(WAITS):
                 return
-            for run_id in await store.expired_wait_runs(now, self._settings.batch_size):
-                await store.time_out_external_wait(run_id, "scheduler-wait-timeout")
+            due = await store.expired_wait_runs(now, self._settings.batch_size)
+            for run_id, wait_kind in due:
+                if wait_kind == WAIT_TIMER:
+                    if await store.wake_external_wait(run_id, "scheduler-wait-wake"):
+                        woken.append(run_id)
+                else:
+                    await store.time_out_external_wait(run_id, "scheduler-wait-timeout")
+        for run_id in woken:
+            # Announced after the transaction commits, like every other requeue
+            # here: a Worker told to look before the row is visible finds a Run
+            # that is still waiting and goes back to sleep.
+            await self._announce(run_id)
+
+    async def _settle_child_waits(self) -> None:
+        """Hand finished children over to the parents waiting on them (§13).
+
+        Here rather than in the child's own terminal transition, and that is the
+        tenth clause rather than a convenience. A child very often finishes
+        while its parent is unavailable — held by another Worker, or still
+        waiting on a sibling — and a delivery attempted at that moment would
+        have to either fail or block. The child writes its result where it
+        cannot be lost, and this picks it up on a tick when the parent can take
+        it. A parent that is busy costs a few seconds, never an answer.
+
+        Exactly once is `result_delivered_at`, stamped inside the same
+        transaction that appends the turn.
+        """
+        woken: list[UUID] = []
+        async with self._sessions.begin() as session:
+            store = SqlRunStore(session)
+            if not await store.try_scan_lock(CHILDREN):
+                return
+            for run_id in await store.parents_awaiting_children(
+                self._settings.batch_size
+            ):
+                if await store.settle_child_wait(run_id, "scheduler-child-settle"):
+                    woken.append(run_id)
+        for run_id in woken:
+            # After the commit, like every other requeue here: a Worker told to
+            # look before the row is visible finds a Run that is still waiting.
+            await self._announce(run_id)
+
+    async def _cascade_cancel_children(self) -> None:
+        """§13's eleventh clause: no child outlives the parent that wanted it.
+
+        A sweep rather than something hung off the cancel path, because a
+        parent reaches a terminal state down several routes — a person
+        cancelling it, a failure, a deadline — and a cascade attached to one of
+        them is a cascade the other routes do not get. A child still running
+        for a parent that has gone is spending the root budget on work nobody
+        will read.
+        """
+        async with self._sessions.begin() as session:
+            store = SqlRunStore(session)
+            if not await store.try_scan_lock(CASCADE):
+                return
+            for run_id in await store.cancelled_parents_with_children(
+                self._settings.batch_size
+            ):
+                await store.cascade_cancel_children(run_id, "scheduler-child-cascade")
+
+    async def _expire_approvals(self, now: datetime) -> None:
+        """§16.3's deadline, enforced by the only process that can.
+
+        A Run in `waiting_approval` holds no lease and no container, so nothing
+        else is watching its clock. Without this sweep a question nobody
+        answered would keep a Session's head forever.
+
+        Not announced afterwards, unlike a timer that came due: an expired
+        approval pauses the Run rather than requeueing it, and there is nothing
+        for a Worker to pick up.
+        """
+        async with self._sessions.begin() as session:
+            store = SqlRunStore(session)
+            if not await store.try_scan_lock(APPROVALS):
+                return
+            for approval_id, run_id in await store.expired_approvals(
+                now, self._settings.batch_size
+            ):
+                await store.expire_approval(
+                    approval_id, run_id, "scheduler-approval-expiry", now
+                )
 
     async def _cancel_aged_compat_timeouts(self, now: datetime) -> None:
         async with self._sessions.begin() as session:

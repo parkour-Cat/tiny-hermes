@@ -19,6 +19,8 @@ const SUMMARY = {
   context_window: 128000,
   max_output_tokens: 4096,
   usage_quality: "provider",
+  context_accounting: "shared",
+  tokenizer: null,
   status: "active",
 };
 
@@ -74,6 +76,22 @@ test("a platform administrator sees the base url and whether a credential exists
   expect(screen.getByText("凭证已配置")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "接入模型服务" })).toBeInTheDocument();
   await waitFor(() => expect(details).toBe(1));
+});
+
+test("the window is listed with how it is counted, not just how big it is", async () => {
+  // Two endpoints of the same declared window hold different amounts of
+  // conversation depending on this one word, so the number alone would be a
+  // half-truth to whoever is choosing between them.
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(user(false))),
+    http.get("/api/v1/model-endpoints", () =>
+      HttpResponse.json([{ ...SUMMARY, context_accounting: "separate" }]),
+    ),
+  );
+
+  renderEndpoints();
+
+  expect(await screen.findByText(/128000 token/)).toHaveTextContent("输入与输出分别计算");
 });
 
 test("everyone else lists the summary and never the base url", async () => {

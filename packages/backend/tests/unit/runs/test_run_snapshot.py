@@ -44,6 +44,8 @@ def _snapshot(**overrides: object) -> RunSnapshot:
         "wait_deadline_at": None,
         "retry_of_run_id": None,
         "budget_root_run_id": uuid4(),
+        "parent_run_id": None,
+        "depth": 0,
         "last_event_sequence": 1,
         "queue_position": 1,
         "queue_status": QueueStatus.HEAD,
@@ -132,3 +134,47 @@ def test_a_failed_run_says_why_in_its_own_document() -> None:
 
 def test_a_run_that_has_not_failed_reports_no_reason() -> None:
     assert _snapshot().document()["failure_reason"] is None
+
+
+def test_a_running_run_says_which_round_it_is_on_and_why_it_continued() -> None:
+    """The status of a Run in its fifth round is the same word as in its first.
+
+    Whoever is watching wants the other two facts: how far along, and what the
+    platform decided the last time it looked.
+    """
+    document = _snapshot(
+        state=RunState.RUNNING,
+        current_round=5,
+        goal_outcome="continue",
+        goal_unmet=("/workspace/data/report.md", "pytest -q"),
+    ).document()
+
+    assert document["goal"] == {
+        "round": 5,
+        "outcome": "continue",
+        "unmet": ["/workspace/data/report.md", "pytest -q"],
+    }
+
+
+def test_the_goal_is_reported_before_any_round_has_been_judged() -> None:
+    """Present and empty rather than absent: a caller that has to branch on
+    whether the key exists learns nothing the null values do not already say."""
+    assert _snapshot().document()["goal"] == {
+        "round": None,
+        "outcome": None,
+        "unmet": [],
+    }
+
+
+def test_a_run_that_met_every_declared_condition_reports_none_unmet() -> None:
+    """`done` with an empty list is not the same fact as no verdict at all, so
+    the outcome is what tells a reader which one this is."""
+    document = _snapshot(
+        state=RunState.COMPLETED,
+        queue_position=0,
+        queue_status=QueueStatus.TERMINAL,
+        current_round=3,
+        goal_outcome="done",
+    ).document()
+
+    assert document["goal"] == {"round": 3, "outcome": "done", "unmet": []}

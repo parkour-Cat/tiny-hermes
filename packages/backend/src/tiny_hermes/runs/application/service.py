@@ -29,12 +29,18 @@ from tiny_hermes.runs.ports.store import (
     RunEventRecord,
     RunEventWindow,
     RunStore,
+    WidenBudgetCommand,
 )
 from tiny_hermes.shared.errors import AuditedDenial
 from tiny_hermes.tenancy.domain.models import Actor, Role
 
 WRITERS = {Role.WORKSPACE_ADMIN, Role.DEVELOPER}
 READERS = {Role.WORKSPACE_ADMIN, Role.DEVELOPER, Role.VIEWER}
+#: Product design §12.3 wants an *authorized* subject for a budget widening,
+#: which is a narrower question than who may run work. A developer starts and
+#: pauses Runs; deciding that this workspace will spend more than it agreed to
+#: is the workspace administrator's.
+BUDGET_HOLDERS = {Role.WORKSPACE_ADMIN}
 
 RUNS_ENDPOINT = "POST /api/v1/runs"
 RETRY_ENDPOINT = "POST /api/v1/runs/{run_id}/retry"
@@ -114,6 +120,15 @@ class RetryBudgetExhausted(RunCoordinationError):
 
 class RetryLimitReached(RunCoordinationError):
     pass
+
+
+class BudgetNotWidened(RunCoordinationError):
+    """The value asked for is not above the ceiling already in force.
+
+    Refused rather than accepted as a no-op: an operator who meant to raise a
+    ceiling and typed the number already there should find that out now, not
+    when the Run stops at the same place a second time.
+    """
 
 
 class RunCoordination:
@@ -285,6 +300,28 @@ class RunCoordination:
                 capabilities=_capabilities(role),
                 signal=signal,
                 expected_state_version=expected_state_version,
+                request_id=request_id,
+            )
+        )
+
+    async def widen_budget(
+        self,
+        workspace_id: UUID,
+        actor: Actor,
+        run_id: UUID,
+        expected_state_version: int,
+        max_model_calls: int,
+        request_id: str,
+    ) -> RunSnapshot:
+        role = await self._require_role(workspace_id, actor, BUDGET_HOLDERS)
+        return await self._store.widen_budget(
+            WidenBudgetCommand(
+                workspace_id=workspace_id,
+                run_id=run_id,
+                caller=_caller(actor),
+                capabilities=_capabilities(role),
+                expected_state_version=expected_state_version,
+                max_model_calls=max_model_calls,
                 request_id=request_id,
             )
         )

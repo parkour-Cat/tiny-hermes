@@ -30,12 +30,12 @@ from tiny_hermes.sandbox.application.controller import (
     SandboxRefused,
 )
 from tiny_hermes.sandbox.domain.command import SandboxCommand
-from tiny_hermes.sandbox.domain.container_policy import DEFAULT_PROFILE
+from tiny_hermes.sandbox.domain.container_policy import DEFAULT_PROFILE, EgressNetwork
 from tiny_hermes.sandbox.infrastructure.docker_engine import DockerEngine
 from tiny_hermes.sandbox.infrastructure.lease_authority import SqlLeaseAuthority
 from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
 from tiny_hermes.sandbox.transport.server import ControllerServer, ServerStream
-from tiny_hermes.shared.config import get_settings
+from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.database import build_session_factory
 from tiny_hermes.shared.logging import configure_logging
 
@@ -45,6 +45,21 @@ logger = logging.getLogger(__name__)
 #: Design §5.3: tools cap 900s plus a 30-second drain grace. The library
 #: default of 60s is why a quiet large commit could die mid-write.
 _DOCKER_CALL_TIMEOUT_SECONDS = 930
+
+
+def _egress(settings: Settings) -> EgressNetwork | None:
+    """The network a sandbox may be attached to, when there is one.
+
+    Both halves are required. A network name without a proxy URL would attach
+    containers to a network with nothing on it, and a URL without a network
+    would set variables pointing at something unreachable — either way a Run
+    would fail confusingly rather than be offline plainly.
+    """
+    if not settings.sandbox_egress_network or not settings.egress_proxy_url:
+        return None
+    return EgressNetwork(
+        name=settings.sandbox_egress_network, proxy_url=settings.egress_proxy_url
+    )
 
 
 def main() -> None:
@@ -79,6 +94,7 @@ async def _serve() -> None:
                 leases=SqlLeaseAuthority(session),
                 audit=_AuditSink(session),
                 ceiling=ceiling,
+                egress=_egress(settings),
             )
             try:
                 answer = await _invoke(controller, action, payload)
@@ -104,6 +120,7 @@ async def _serve() -> None:
                 leases=SqlLeaseAuthority(session),
                 audit=_AuditSink(session),
                 ceiling=ceiling,
+                egress=_egress(settings),
             )
             try:
                 answer = await _invoke_stream(controller, action, payload, channel, settings)
