@@ -742,6 +742,12 @@ class SqlRunStore:
                 if run.delegation_scope is None
                 else DelegationScope.from_document(run.delegation_scope)
             ),
+            # Read off the same Session `_remembered` already reads for the
+            # memory subject, and for the same reason: who may confirm a
+            # write is who started the conversation, not `runs.end_user_id`
+            # (see `_remembered`'s own docstring for why those are kept
+            # apart).
+            caller_type=None if owning is None else CallerType(owning.caller_type),
         )
 
     async def _bound_skills(self, spec: AgentSpec) -> tuple[BoundSkill, ...]:

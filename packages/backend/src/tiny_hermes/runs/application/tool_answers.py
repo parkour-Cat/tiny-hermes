@@ -25,6 +25,7 @@ from tiny_hermes.memory.domain.policy import CandidateOutcome
 from tiny_hermes.memory.domain.search import SearchRefused, request_for
 from tiny_hermes.runs.domain.approval import ApprovalType, normalize_call
 from tiny_hermes.runs.domain.models import (
+    CallerType,
     RunEventType,
     ToolCallBlock,
     ToolResultBlock,
@@ -652,7 +653,7 @@ async def _cleared_to_write(
     )
     checked = await gate.check(
         run_id=context.run_id,
-        approval_type=ApprovalType.GOVERNANCE_APPROVAL,
+        approval_type=_write_approval_type(context),
         tool=call.name,
         call_id=call.call_id,
         call=normalized,
@@ -677,6 +678,21 @@ def _write_policy(
         None,
     )
     return None if binding is None else binding.write_policy
+
+
+def _write_approval_type(context: ExecutionContext) -> ApprovalType:
+    """§16.3's `governance` write policy asks a person; end-user entry design
+    §5 says which one. A `caller_type=end_user` Run is that end user's own
+    conversation, so a write it triggers is their own write — the platform
+    asks them, not the workspace, and the row it opens is a
+    `USER_CONFIRMATION`. Every other caller (a platform member, a Service
+    Account) still gets the `GOVERNANCE_APPROVAL` a workspace administrator
+    answers, which is everything this function returned before end users
+    existed.
+    """
+    if context.caller_type is CallerType.END_USER:
+        return ApprovalType.USER_CONFIRMATION
+    return ApprovalType.GOVERNANCE_APPROVAL
 
 
 def _refused_event(
@@ -757,7 +773,7 @@ async def answer_mcp_call(
         )
         checked = await approvals.check(
             run_id=context.run_id,
-            approval_type=ApprovalType.GOVERNANCE_APPROVAL,
+            approval_type=_write_approval_type(context),
             tool=call.name,
             call_id=call.call_id,
             call=normalized,
