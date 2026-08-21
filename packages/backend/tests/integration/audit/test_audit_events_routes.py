@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
+from tiny_hermes.audit.domain.query import MAX_PAGE_SIZE
 
 from ..conftest import PASSWORD
 
@@ -266,3 +267,30 @@ async def test_filters_and_pagination_are_honoured(
     assert second.status_code == 200, second.text
     assert len(second.json()["items"]) == 1
     assert second.json()["has_more"] is False
+
+
+async def test_a_limit_above_the_ceiling_is_clamped_rather_than_refused(
+    client: TestClient, scope: dict[str, str], workspace_id: str, engine: AsyncEngine
+) -> None:
+    """The HTTP half of `test_limit_is_clamped_not_refused`.
+
+    `filter_for` clamps an oversized limit instead of rejecting it, but a
+    `Query(le=MAX_PAGE_SIZE)` on the route would have turned exactly those
+    requests into a 422 before the domain rule ever ran — the same shape as
+    a response model that drops fields the service returns: the rule is
+    right, tested, and unreachable. So this asserts the boundary, not the
+    function that sits behind it.
+    """
+    await _seed_audit_row(
+        engine,
+        workspace_id=workspace_id,
+        actor_id=uuid4(),
+        action="agent.published",
+        resource_type="agent",
+        context={},
+    )
+
+    listed = client.get("/api/v1/audit-events?limit=100000", headers=scope)
+
+    assert listed.status_code == 200, listed.text
+    assert len(listed.json()["items"]) <= MAX_PAGE_SIZE
