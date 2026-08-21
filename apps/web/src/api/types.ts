@@ -581,3 +581,34 @@ export type PricingVersionResponse = {
   created_by: string;
   created_at: string;
 };
+
+/**
+ * One row of the audit trail, as this reader is allowed to see it.
+ *
+ * `context` is the only field redaction touches (§2) — every other column is
+ * an identifier or fixed vocabulary. For a 查看者 it arrives `{}`, which is
+ * why `visibility` on the page below is not optional decoration: `{}` is
+ * also what an unredacted row with no detail looks like.
+ */
+export type AuditEventResponse = {
+  id: string;
+  workspace_id: string | null;
+  actor_type: string;
+  actor_id: string | null;
+  action: string;
+  resource_type: string;
+  resource_id: string | null;
+  result: string;
+  request_id: string;
+  context: Record<string, unknown>;
+  created_at: string;
+};
+
+export type AuditVisibility = "full" | "own_resources" | "redacted";
+
+export type AuditEventsPageResponse = {
+  items: AuditEventResponse[];
+  has_more: boolean;
+  /** Which of §4.6's ranges produced this page. See AuditEventResponse. */
+  visibility: AuditVisibility;
+};

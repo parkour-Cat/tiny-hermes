@@ -398,6 +398,22 @@ export const enUS: Record<MessageKey, string> = {
 
   // -- approvals --------------------------------------------------------------
   approvals: "Approvals",
+  audit: "Audit trail",
+  auditIntro: "Who did what, in this workspace. Newest first.",
+  auditRedacted: "You are seeing a redacted view",
+  auditRedactedHint: "Your role may read that an action happened, but not the details recorded with it. Rows are complete; the detail column is not.",
+  auditActor: "Actor",
+  auditAction: "Action",
+  auditResource: "Resource",
+  auditResult: "Result",
+  auditContext: "Detail",
+  auditWhen: "When",
+  auditFilterAction: "Filter by action",
+  auditFilterResource: "Filter by resource type",
+  auditEmpty: "Nothing recorded yet",
+  auditMore: "Load more",
+  auditScopeOwn: "You are seeing only rows you are named in",
+  auditScopeOwnHint: "Your role reads audit entries related to your own resources and actions, not the whole workspace.",
   approvalsTitle: "Waiting for a decision",
   approvalsIntro:
     "A Run stops here rather than acting. Approving sends it back to the queue; rejecting stops it and tells whoever submitted it why.",
