@@ -1,19 +1,10 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 
-import { api, ApiError } from "../api/client";
+import { ApiError } from "../api/client";
+import { fetchCurrentUser, signIn as requestSignIn, signOut as requestSignOut } from "../api/session";
+import type { LoginInput, User } from "../api/session";
 
-export type User = {
-  id: string;
-  subject: string;
-  display_name: string;
-  status: string;
-  is_platform_admin: boolean;
-};
-
-type LoginInput = {
-  subject: string;
-  password: string;
-};
+export type { User };
 
 type AuthValue = {
   user: User | null;
@@ -36,7 +27,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setLoading(true);
     setError(null);
     try {
-      setUser(await api<User>("/api/v1/auth/me"));
+      setUser(await fetchCurrentUser());
     } catch (caught) {
       if (caught instanceof ApiError && caught.status === 401) {
         setUser(null);
@@ -53,16 +44,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   async function login(input: LoginInput): Promise<void> {
-    const authenticated = await api<User>("/api/v1/auth/sessions", {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
+    const authenticated = await requestSignIn(input);
     setUser(authenticated);
     setError(null);
   }
 
   async function logout(): Promise<void> {
-    await api<void>("/api/v1/auth/sessions/current", { method: "DELETE" });
+    await requestSignOut();
     setUser(null);
   }
 
