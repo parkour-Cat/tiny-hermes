@@ -203,6 +203,22 @@ result. `tests/integration/runs/test_end_user_subject_self_service.py` covers
 export (`test_an_end_user_can_export_their_own_memory`) and erasure
 (`test_erasure_removes_what_export_could_see`).
 
+> **补正（全分支评审之后）。** 这两条测试当时都过了，但**都没测到产品里那条路**，
+> 而这一节据此声称导出与抹除可用，是过度声称：
+>
+> - 导出那条显式传了 `agent_id`。界面上的按钮**不传**，而不传时服务端直接返回
+>   `memories=[]`。也就是说 §348 的导出，从终端用户唯一的那扇门走进去，拿到的是空的。
+> - 抹除那条先把 Run 跑到终态才抹。而 `head_run_id` 只在终态转换时释放，所以真实
+>   情况——Run 停在 `waiting_approval`——会撞外键并 500；停在那儿的人**永远抹不掉**
+>   自己的数据。
+>
+> 两条都已修（`6056df0..6d74b35`），并各自补了走产品那条路的测试：抹除针对停在
+> `waiting_approval` 的 Run，导出走不带 `agent_id` 的那次调用。修的过程中还发现评审
+> 没点到的第二个外键 `fk_approvals_run`——停在 `waiting_approval` 的 Run 同时被它挡住。
+>
+> 教训是同一个：**测试传了调用方不会传的参数，就不是在覆盖调用方**；把 Run 跑到
+> 终态再测抹除，测的是最不需要测的那个状态。
+
 The plan-gap review found mid-task — `USER_CONFIRMATION` had a producer with
 nowhere for its own subject to answer it, because the approval route was
 `_CONSOLE_ONLY` — is closed by
@@ -215,6 +231,19 @@ consumer), and two refusals that keep the door narrow —
 `test_a_governance_approval_is_refused_to_an_end_user_regardless`, the second
 one the "no exceptions" half: an end user can never answer a governance
 approval, ever, even one attached to their own Run.
+
+> **补正（全分支评审之后）。** 上面这段说这个缺口「已关闭」，**只对后端成立**，对产品
+> 不成立。后端确实有 `POST /end-user/approvals/{approval_id}/decision`，也确实测到了；
+> 但**没有列表接口**，没有任何终端用户响应带得出 `approval_id`，`apps/chat-web` 里
+> 「approval」出现 0 次。上面那些测试之所以能过，是因为它们直接从数据库里取出
+> `approval_id` ——一个在产品里没有人能拿到的东西。
+>
+> 所以真实状态是：**生产者有了，消费者有了，路走不通。** §27.2 场景 6 在有列表接口
+> 并且聊天界面能显示待答确认之前，不该被记成绿的；那正是这次「绿得不对」的同一种
+> 错误，只是换了一层。补的计划见实施计划 §10。
+>
+> 这条记录当时写「已关闭」是我的过度声称：我拿后端测试的绿，去替一条我没有走过的
+> 产品路径背书。
 
 **§6 — reading a session's content writes an audit row naming both parties;
 listing does not; correct/delete/forget stay closed to a developer.**
@@ -408,6 +437,25 @@ everyone out right now" are two different admin actions with two different
 endpoints on purpose, because folding session revocation into the
 issuer-status check would mean every ordinary request pays the cost of
 re-checking issuer state rather than just every credential exchange.
+
+**§4.6 给终端用户的两格，这个分支没有兑现。**（全分支评审补记。）产品设计 v2.5 §4.6
+的矩阵给终端用户 `Run 暂停、继续与取消 = 本人`、`用户确认审批 = 仅发起人本人`。实际：
+
+- **取消 Run：没有任何路由。** 控制台的 Run 控制接口对终端用户一律 403，而终端用户
+  这一侧没有对应的入口。终端用户开始一件事之后就没法叫停它。
+- **答自己的确认：有路由，但拿不到 id。** `POST /end-user/approvals/{approval_id}/decision`
+  存在且有测试，但没有列表接口，没有任何终端用户响应带得出 `approval_id`，
+  `apps/chat-web` 里「approval」出现 0 次。
+
+两格缺的是同一样东西：**Run 停下来之后，本人没有能碰它的入口。** 这不是某一节做漏了，
+是**计划里没有任何一节被指派去做它**——所以八个任务各自都「完成」并通过了各自的评审，
+而这两格从头到尾没有落点。单节评审在结构上看不见它：缺的东西不在任何一节的范围里。
+全分支评审是第一个能看见的位置，这也正是它值得跑的理由。
+
+补的计划见实施计划 §10。在那之前，§27.2 场景 6 不该被记成绿的。
+
+**这一节的三处过度声称已在上文逐条补正。** 都是同一个形状：拿后端测试的绿，去替一条
+没有走过的产品路径背书。写记录的时候，「测试过了」和「这条路走得通」是两句话。
 
 **HTTP and MCP tools still cannot be delegated to a child Agent.** Unchanged
 from M2E: the `tools` face `AgentCatalog._check_delegation` matches is built

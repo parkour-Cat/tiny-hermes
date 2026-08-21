@@ -554,6 +554,26 @@ Bearer <credential>`, `X-Workspace-Id` set), which exchanges it for a
 default 8 hours). Everything after that rides the cookie; the credential
 itself is never held onto or replayed.
 
+**Embedding is refused until you allow the embedding origin.** The surface
+ships `Content-Security-Policy: frame-ancestors 'none'`, so a browser will
+render an empty frame — with a CSP violation in its console and nothing in
+nginx's log, because the refusal happens in the browser and the request
+succeeded. Set `CHAT_WEB_FRAME_ANCESTORS` on the `chat-web` container to the
+enterprise origins that may embed it:
+
+```
+CHAT_WEB_FRAME_ANCESTORS="https://oa.mingyuan-logistics.example"
+```
+
+Space-separate several. It is deliberately not read from
+`channel_issuers.allowed_origins`, which serves a different purpose: that list
+is checked server-side on state-changing requests, and it cannot defend against
+framing, because a request made from inside a frame carries this app's own
+origin — one that is always on the list. Two attacks, two controls; see design
+§7. The default is closed rather than open because an unset value that meant
+"anyone may frame this" would make clickjacking the out-of-the-box behaviour of
+a surface with an erase button on it.
+
 The enterprise's page embeds `apps/chat-web` with the credential carried in
 the **URL fragment**, never the query string:
 
