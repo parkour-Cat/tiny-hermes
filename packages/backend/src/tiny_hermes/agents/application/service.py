@@ -496,6 +496,49 @@ class AgentCatalog:
         alias that happens to exist in a workspace it was never issued for.
         """
         found = await self._find_published_alias(workspace_id, alias)
+        return self._end_user_gate_check(alias, found, credential_agents)
+
+    async def resolve_end_user_agent_by_id(
+        self, workspace_id: UUID, agent_id: UUID, credential_agents: Sequence[str]
+    ) -> tuple[Agent, AgentVersion]:
+        """Task-9 review finding A: the same two gates `resolve_end_user_agent`
+        evaluates at Session-creation time, evaluated again at Run-submission
+        time — keyed by the Session's own `agent_id` rather than an alias,
+        because a Run submission hands this route no alias to resolve, only
+        the Session it already opened. Sharing `_end_user_gate_check` with
+        `resolve_end_user_agent` (instead of a second copy of the
+        enabled/listed logic) is what makes "the two cannot drift" true
+        structurally rather than true only until somebody edits one and
+        forgets the other.
+
+        Calling this on every submission, not only at Session creation, is
+        the actual fix: before this task, closing `AgentSpec.end_user_access`
+        or letting an Agent's last published version go away had no effect
+        on a Session that already held a cookie, for as long as its own TTL
+        (up to 8 hours) allowed it to keep submitting — the platform's own
+        data, silently stale for a working day. `credential_agents` is the
+        other half of the check and is a different kind of stale on purpose:
+        it is `end_user_sessions.agents`, a snapshot of the credential's own
+        `agents` claim taken once at exchange time, because the credential
+        itself no longer exists to ask again (design's own red line — see
+        that column's docstring). That half's staleness is bounded by the
+        session TTL and cannot be tightened further without asking the end
+        user to re-present a credential on every message, which nothing
+        about this product's channel model supports; re-running this check
+        on every submission is what makes the platform half not share that
+        bound for no reason.
+        """
+        agent = await self._store.get_agent(workspace_id, agent_id)
+        found = None if agent is None else await self._published_version_of(workspace_id, agent)
+        alias = agent.alias if agent is not None else str(agent_id)
+        return self._end_user_gate_check(alias, found, credential_agents)
+
+    def _end_user_gate_check(
+        self,
+        alias: str,
+        found: tuple[Agent, AgentVersion] | None,
+        credential_agents: Sequence[str],
+    ) -> tuple[Agent, AgentVersion]:
         listed = alias in credential_agents
         if found is not None and listed and _end_user_access_enabled(found[1]):
             return found
@@ -512,12 +555,18 @@ class AgentCatalog:
         for agent in await self._store.list_agents(workspace_id):
             if agent.alias != alias:
                 continue
-            if agent.current_version_id is None:
-                return None
-            for version in await self._store.list_versions(workspace_id, agent.id):
-                if version.id == agent.current_version_id:
-                    return agent, version
+            return await self._published_version_of(workspace_id, agent)
+        return None
+
+    async def _published_version_of(
+        self, workspace_id: UUID, agent: Agent
+    ) -> tuple[Agent, AgentVersion] | None:
+        if agent.current_version_id is None:
             return None
+        for version in await self._store.list_versions(workspace_id, agent.id):
+            if version.id == agent.current_version_id:
+                return agent, version
+        return None
         return None
 
     async def replace_draft(

@@ -201,13 +201,50 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
         identity: Annotated[
             EndUserIdentityService, Depends(identity_dependency, scope="function")
         ],
+        catalog: Annotated[AgentCatalog, Depends(catalog_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         idempotency_key: IdempotencyHeader = None,
         end_user_session: EndUserSessionCookie = None,
     ) -> EndUserRunResponse:
+        """Task-9 review finding A. The honest boundary this route enforces:
+
+        The **platform half** of §5's two gates — `AgentSpec.end_user_access`
+        and the Agent still having a published version at all — is re-checked
+        on *every* submission, not only when the Session was created. That
+        half is our own data; there is no reason a workspace admin closing it
+        should take up to the Session's own TTL to matter, so it does not.
+
+        The **enterprise half** cannot be made live the same way. The
+        credential that named this end user's `agents` is gone the moment
+        the exchange finished (design's own red line — see
+        `EndUserSessionRow.agents`'s docstring), so `caller.agents` below is
+        a snapshot as of that exchange, not a current read of the
+        enterprise's roster. Its staleness is bounded by the session TTL and
+        cannot be tightened without asking the end user to re-present a
+        credential on every message — nothing about this product's channel
+        model (a credential exchanged once, a cookie carried after) supports
+        that. `resolve_end_user_agent_by_id` still re-evaluates it against
+        *this* Session's own snapshot on every submission rather than only at
+        creation, which is the cheap half of the fix: it catches an
+        entitlement a *newer* credential exchange narrowed, even though it
+        cannot catch one the standing credential itself no longer exists to
+        re-check.
+        """
         caller = await resolve_end_user_caller_for_write(
             identity, end_user_session, request.headers
         )
+        try:
+            session = await runs.get_end_user_session(
+                caller.workspace_id, caller.end_user_id, session_id
+            )
+        except RunCoordinationError as error:
+            raise as_app_error(error) from error
+        try:
+            await catalog.resolve_end_user_agent_by_id(
+                caller.workspace_id, session.agent_id, caller.agents
+            )
+        except (EndUserAccessGateClosed, EndUserAccessNotAssigned) as error:
+            raise _gate_error(error) from error
         try:
             accepted = await runs.submit_end_user_run(
                 caller.workspace_id,
@@ -272,20 +309,30 @@ async def _resolve_agent(
 ) -> tuple[Agent, AgentVersion]:
     try:
         return await catalog.resolve_end_user_agent(caller.workspace_id, alias, caller.agents)
-    except EndUserAccessGateClosed as error:
-        raise AppError(
+    except (EndUserAccessGateClosed, EndUserAccessNotAssigned) as error:
+        raise _gate_error(error) from error
+
+
+def _gate_error(error: EndUserAccessGateClosed | EndUserAccessNotAssigned) -> AppError:
+    """Shared by `_resolve_agent` (Session creation, keyed by alias) and
+    `create_run`'s own re-check (Run submission, keyed by the Session's
+    `agent_id` — task-9 review finding A) so the two HTTP shapes these
+    refusals get can never drift apart the way the two *checks* used to.
+    """
+    if isinstance(error, EndUserAccessGateClosed):
+        return AppError(
             code="end_user_access_gate_closed",
             title="Agent not available",
             status=403,
             detail=f"end-user access is not enabled for {error.alias}",
-        ) from error
-    except EndUserAccessNotAssigned as error:
-        # The exception's own message embeds the alias (see its docstring);
-        # this detail deliberately does not, matching design §8: an end user
-        # calling an Agent nobody assigned them learns nothing past "no".
-        raise AppError(
-            code="end_user_agent_not_found",
-            title="Agent not found",
-            status=403,
-            detail="No Agent by that name is available to you.",
-        ) from error
+        )
+    # EndUserAccessNotAssigned. The exception's own message embeds the alias
+    # (see its docstring); this detail deliberately does not, matching
+    # design §8: an end user calling an Agent nobody assigned them learns
+    # nothing past "no".
+    return AppError(
+        code="end_user_agent_not_found",
+        title="Agent not found",
+        status=403,
+        detail="No Agent by that name is available to you.",
+    )
