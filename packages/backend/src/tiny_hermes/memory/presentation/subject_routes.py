@@ -201,8 +201,12 @@ def _subject(subject_id: UUID) -> CallerIdentity:
     """A path id read as a person.
 
     `user` rather than a parameter: §4.6's row is about people, and a service
-    account has no "本人" to be. When §4.5's end-user identity lands it becomes
-    the third `CallerType` and this is where it is chosen.
+    account has no "本人" to be. §4.5's end-user identity landed as a third
+    `CallerType`, but not here — this router is `_CONSOLE_ONLY`
+    (`api/app.py`), and an end user never reaches it. Their own "本人" row is
+    `memory/presentation/end_user_subject_routes.py`, which never reads a
+    `subject_id` at all: the caller's own session is the only subject that
+    door can ever mean.
     """
     return CallerIdentity(caller_type=CallerType.USER, caller_id=subject_id)
 

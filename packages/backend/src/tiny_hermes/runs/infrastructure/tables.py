@@ -246,13 +246,21 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
     #: lease across ordinary slice boundaries until ``sync_timeout_seconds``.
     delivery_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
     #: Who may answer a `user_confirmation` for this Run, and nobody else
-    #: (§16.3). Set to the caller for a `caller_type=user` Run and left null
-    #: for a ServiceAccount's, which therefore has no EndUser to confirm
-    #: anything — that is the section's requirement rather than a gap in it.
-    end_user_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("users.id", ondelete="RESTRICT", name="fk_runs_end_user"),
-        nullable=True,
-    )
+    #: (§16.3). Set to the caller for a `caller_type=user` Run and to the real
+    #: `end_users.id` for a `caller_type=end_user` one; left null for a
+    #: ServiceAccount's, which therefore has no EndUser to confirm anything —
+    #: that is the section's requirement rather than a gap in it.
+    #:
+    #: No FK, unlike its first version (migration 0032 drops
+    #: `fk_runs_end_user`). It used to point at `users.id` alone, which was
+    #: correct while only `caller_type=user` ever set it; a `caller_type=
+    #: end_user` Run needs the same column to hold an `end_users.id` instead,
+    #: and one column cannot satisfy two foreign keys chosen by a row it
+    #: cannot see. `sessions.caller_id` already answers this exact shape with
+    #: no FK at all — a polymorphic subject reference is a `CallerType` check
+    #: in code, not a constraint the schema can express — and this column
+    #: follows that precedent instead of inventing a second one.
+    end_user_id: Mapped[UUID | None] = mapped_column(nullable=True)
     #: The price this Run is measured at, fixed when it was created (§12.4).
     #: An administrator correcting a price afterwards does not rewrite what
     #: this Run cost, and a Run started before anybody entered one carries
@@ -358,9 +366,20 @@ class ApprovalRow(IdMixin, CreatedAtMixin, Base):
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
     document: Mapped[dict[str, Any]] = mapped_column(JSON)
     required_permission: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    requested_by: Mapped[UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="RESTRICT", name="fk_approvals_requested_by")
-    )
+    #: Who may decide this (§16.3): the workspace member asked for a
+    #: `governance_approval`, the real `end_users.id` for a
+    #: `user_confirmation` (`SqlApprovalGate._subject`).
+    #:
+    #: No FK, unlike its first version (migration 0033 drops
+    #: `fk_approvals_requested_by`). It used to point at `users.id` alone,
+    #: correct while only a workspace member's own id was ever written here;
+    #: `runs.end_user_id`'s own id space took the same fix one migration
+    #: earlier and for the same reason — one column cannot satisfy two
+    #: foreign keys chosen by a row it cannot see. `sessions.caller_id`
+    #: remains the precedent: a polymorphic subject reference is a
+    #: `CallerType`/`ApprovalType` check in code, not a constraint the schema
+    #: can express.
+    requested_by: Mapped[UUID] = mapped_column()
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     decided_by: Mapped[UUID | None] = mapped_column(nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(

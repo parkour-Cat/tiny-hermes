@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from tiny_hermes.api.app import create_app
 from tiny_hermes.artifacts.infrastructure import tables as artifact_tables
+from tiny_hermes.identity.infrastructure import end_user_session_tables, end_user_tables
 from tiny_hermes.sandbox.infrastructure import tables as sandbox_tables
 from tiny_hermes.secrets.infrastructure import tables as secret_tables
 from tiny_hermes.session_workspace.infrastructure import tables as workspace_tables
@@ -30,6 +31,8 @@ assert workspace_tables.ObjectUploadRow.__tablename__
 assert artifact_tables.ArtifactRow.__tablename__
 assert secret_tables.SecretRow.__tablename__
 assert skill_tables.SkillRow.__tablename__
+assert end_user_tables.EndUserRow.__tablename__
+assert end_user_session_tables.EndUserSessionRow.__tablename__
 
 STREAM_TIMEOUT = 20
 

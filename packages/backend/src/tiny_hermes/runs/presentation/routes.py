@@ -259,6 +259,7 @@ def session_router(resources: ApplicationResources) -> APIRouter:
     @router.get("/{session_id}/messages", response_model=list[SessionMessageResponse])
     async def list_session_messages(  # pyright: ignore[reportUnusedFunction]
         session_id: UUID,
+        request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
         machines: Annotated[
             MachineIdentityService, Depends(machines_dependency, scope="function")
@@ -279,8 +280,8 @@ def session_router(resources: ApplicationResources) -> APIRouter:
             required_scope="runs.read",
         )
         try:
-            messages = await runs.list_session_messages(
-                caller.workspace_id, caller.actor, session_id
+            messages = await runs.read_session_messages(
+                caller.workspace_id, caller.actor, session_id, request.state.request_id
             )
         except RunCoordinationError as error:
             raise as_app_error(error) from error

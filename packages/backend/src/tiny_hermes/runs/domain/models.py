@@ -80,6 +80,10 @@ class DeliveryMode(StrEnum):
 class CallerType(StrEnum):
     USER = "user"
     SERVICE_ACCOUNT = "service_account"
+    #: A person the platform does not authenticate — the enterprise does
+    #: (end-user entry design §3, §4.5.1). `CallerIdentity.caller_id` points
+    #: at `end_users.id` rather than `users.id` for this member.
+    END_USER = "end_user"
 
 
 class CheckpointEffectStatus(StrEnum):

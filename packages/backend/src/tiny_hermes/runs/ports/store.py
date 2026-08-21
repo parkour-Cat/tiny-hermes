@@ -280,6 +280,15 @@ class ExecutionContext:
     #: `None` for a Run nobody delegated, which is not the same as one granted
     #: nothing: an empty scope is a child that may do nothing at all.
     delegated_scope: DelegationScope | None = None
+    #: Who started the Session this Run belongs to (`_remembered`'s own
+    #: subject, read at the same moment). §16.3's `governance` write policy
+    #: asks a person; which person is a fact about who is running the Agent,
+    #: not about the tool. A `caller_type=end_user` Run asks that end user for
+    #: a `user_confirmation` — it is their own write, on their own behalf —
+    #: and every other Run still asks the workspace for a `governance_
+    #: approval`. `None` only for a Session already gone, the same edge
+    #: `_remembered` reads as "no subject" rather than "everybody's".
+    caller_type: CallerType | None = None
 
     @property
     def messages(self) -> tuple[CanonicalMessage, ...]:
@@ -489,6 +498,21 @@ class RunStore(Protocol):
     async def list_session_messages(
         self, workspace_id: UUID, session_id: UUID
     ) -> Sequence[CanonicalMessage]: ...
+
+    async def record_end_user_session_read(
+        self,
+        workspace_id: UUID,
+        reader: CallerIdentity,
+        end_user_id: UUID,
+        session_id: UUID,
+        request_id: str,
+    ) -> None:
+        """Design §6: a console read of an end user's message content. Both
+        identities go in — the reader and whose conversation it was — because
+        "who read X's conversation" is the question this row exists to
+        answer, and half the pair can't answer it.
+        """
+        ...
 
     async def claim_idempotency(
         self,

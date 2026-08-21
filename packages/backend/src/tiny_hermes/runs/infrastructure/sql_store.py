@@ -283,13 +283,15 @@ class SqlRunStore:
             checkpoint_workspace_revision_id=session.workspace_revision_id,
             delivery_mode=command.delivery_mode,
             # §16.3's `user_confirmation` may only be answered by the EndUser
-            # who started the Run. Through M2 that is the logged-in caller;
-            # a ServiceAccount's Run gets none, which is why such an Agent has
-            # to have chosen a pre-authorization or a governance approval at
-            # publish rather than relying on somebody being there.
+            # who started the Run. Through M2 that was only ever the logged-in
+            # caller; end-user entry design §5 adds the real subject a
+            # `caller_type=end_user` Run confirms to. A ServiceAccount's Run
+            # gets none either way, which is why such an Agent has to have
+            # chosen a pre-authorization or a governance approval at publish
+            # rather than relying on somebody being there.
             end_user_id=(
                 command.caller.caller_id
-                if command.caller.caller_type is CallerType.USER
+                if command.caller.caller_type in (CallerType.USER, CallerType.END_USER)
                 else None
             ),
             model_pricing_version_id=pricing_version_id,
@@ -740,6 +742,12 @@ class SqlRunStore:
                 if run.delegation_scope is None
                 else DelegationScope.from_document(run.delegation_scope)
             ),
+            # Read off the same Session `_remembered` already reads for the
+            # memory subject, and for the same reason: who may confirm a
+            # write is who started the conversation, not `runs.end_user_id`
+            # (see `_remembered`'s own docstring for why those are kept
+            # apart).
+            caller_type=None if owning is None else CallerType(owning.caller_type),
         )
 
     async def _bound_skills(self, spec: AgentSpec) -> tuple[BoundSkill, ...]:
@@ -2465,6 +2473,25 @@ class SqlRunStore:
             )
         ).all()
         return [_to_message(row) for row in rows]
+
+    async def record_end_user_session_read(
+        self,
+        workspace_id: UUID,
+        reader: CallerIdentity,
+        end_user_id: UUID,
+        session_id: UUID,
+        request_id: str,
+    ) -> None:
+        self._audit(
+            workspace_id,
+            reader.caller_id,
+            "end_user_session.read",
+            "session",
+            session_id,
+            request_id,
+            context={"end_user_id": str(end_user_id)},
+            actor_type=reader.caller_type.value,
+        )
 
     async def claim_idempotency(
         self,

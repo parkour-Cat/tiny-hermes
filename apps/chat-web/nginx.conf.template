@@ -1,0 +1,66 @@
+server {
+    listen 3001;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    add_header X-Content-Type-Options "nosniff" always;
+    # No X-Frame-Options, deliberately, unlike apps/web/nginx.conf's "DENY".
+    # Design §7: this surface is meant to be embedded in an enterprise's own
+    # page, and a framing block here would refuse the one thing this app
+    # exists to do.
+    #
+    # Task-9 review finding B: a comment used to stand here claiming the
+    # origin allowlist (`channel_issuers.allowed_origins`, enforced by
+    # `resolve_end_user_caller_for_write` on every state-changing end-user
+    # request) "stands in for the protection X-Frame-Options would
+    # otherwise give up". That was false, and it was the load-bearing
+    # sentence: a request issued from *inside* an attacker's frame carries
+    # this chat app's own origin as its `Origin` header, which is on the
+    # allowlist precisely because it is this app's own real origin — the
+    # origin check is structurally blind to who put the frame there. Two
+    # different attacks, two different controls, and neither substitutes
+    # for the other: the origin allowlist defends a state-changing request
+    # against being forged from a *different* page (where `Origin` really
+    # would be the attacker's own), and it is `frame-ancestors` below —
+    # nothing else on this surface — that defends against being framed by
+    # one at all. Erase, and once wired, an approval decision, would both
+    # have been reachable through a click on an invisible iframe without it.
+    #
+    # `$CHAT_WEB_FRAME_ANCESTORS` is deploy-time configuration, not
+    # workspace configuration: nginx serves one document for every
+    # workspace here and does not know which `channel_issuers` row (if any)
+    # is about to authenticate this visitor until a credential is
+    # exchanged well after the page has already loaded, so this can never
+    # be sourced from `allowed_origins` the way the runtime origin check
+    # is. It defaults closed — envsubst leaves the variable's own default
+    # from the Dockerfile in place when the deployment sets nothing, so an
+    # operator who never configures this gets `'none'`, not an open frame.
+    add_header Content-Security-Policy "frame-ancestors $CHAT_WEB_FRAME_ANCESTORS" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    location /api/ {
+        proxy_pass http://api:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Request-Id $request_id;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+    }
+
+    location /health/ {
+        proxy_pass http://api:8000;
+        proxy_set_header Host $host;
+    }
+
+    location /assets/ {
+        try_files $uri =404;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    location / {
+        try_files $uri /index.html;
+    }
+}

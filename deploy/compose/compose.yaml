@@ -276,6 +276,25 @@ services:
       retries: 20
     ports: ["3000:3000"]
 
+  # Design §7's entry point: the end-user chat surface, deliberately its own
+  # service and its own port rather than a second `location` block on `web`'s
+  # nginx — the two apps carry two different identity systems (design §3),
+  # and console.spec.ts's own walk must not become reachable through this
+  # one's origin or vice versa.
+  chat-web:
+    build:
+      context: ../..
+      dockerfile: apps/chat-web/Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3001/"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports: ["3001:3001"]
+
 networks:
   # Nothing on this network can route anywhere: `internal` is Docker's way of
   # saying a bridge has no gateway. A sandbox attached to it can reach the

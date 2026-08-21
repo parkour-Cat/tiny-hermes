@@ -69,6 +69,10 @@ class ApprovalStore(Protocol):
         *,
         workspace_id: UUID,
         actor_id: UUID,
+        # Task-9 review finding C: no default, matching
+        # `SubjectStore.append_audit`'s own reasoning — a caller that omits
+        # this is a caller that has not decided who acted.
+        actor_type: str,
         action: str,
         resource_id: UUID,
         request_id: str,
@@ -174,6 +178,12 @@ class ApprovalService:
         await self.store.append_audit(
             workspace_id=workspace_id,
             actor_id=actor.id,
+            # Task-9 review finding C: this used to hardcode "user" no
+            # matter who decided. `end_user_approval_routes.py` builds a
+            # console-shaped `Actor` around an end user's own id specifically
+            # so this method needs no separate code path — `actor.is_end_user`
+            # is how that route says which subject it actually authenticated.
+            actor_type="end_user" if actor.is_end_user else "user",
             action=f"approval.{decision.value}d",
             resource_id=approval.id,
             request_id=request_id,
@@ -194,6 +204,15 @@ class ApprovalService:
         assumed from the approval's `requested_by`: a row could have been
         written for somebody who has since stopped being that Run's user, and
         the Run is where that fact lives.
+
+        Task-9 review finding D: `end_user == actor.id` alone used to be the
+        whole check — an id match with no type attached. `actor.is_end_user`
+        is required alongside it now, so a console `Actor` (a service account
+        or a workspace member, `is_end_user` always `False`) can never be
+        credited with being the Run's own end user merely because its id
+        happens to equal one — the shape of bug finding D calls out: fine
+        while ids are random, wrong in principle, and silently exploitable
+        the day they are not.
         """
         role = await self.store.user_role(workspace_id, actor.id)
         end_user = await self.store.end_user_of(approval.run_id)
@@ -201,5 +220,7 @@ class ApprovalService:
             user_id=actor.id,
             is_workspace_admin=role is Role.WORKSPACE_ADMIN,
             is_platform_admin=actor.is_platform_admin,
-            is_run_end_user=end_user is not None and end_user == actor.id,
+            is_run_end_user=(
+                actor.is_end_user and end_user is not None and end_user == actor.id
+            ),
         )

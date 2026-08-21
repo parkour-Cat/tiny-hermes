@@ -44,6 +44,12 @@ BUDGET_HOLDERS = {Role.WORKSPACE_ADMIN}
 
 RUNS_ENDPOINT = "POST /api/v1/runs"
 RETRY_ENDPOINT = "POST /api/v1/runs/{run_id}/retry"
+#: A separate idempotency/fingerprint namespace from `RUNS_ENDPOINT`, on
+#: purpose (§5). The two are reached by different subjects through different
+#: authorization — a workspace Role for one, the two-gate Agent check for the
+#: other — and collapsing them into one endpoint string would let a replayed
+#: request from one path be satisfied by a row the other path wrote.
+END_USER_RUNS_ENDPOINT = "POST /api/v1/end-user/sessions/{session_id}/runs"
 
 
 class RunCoordinationError(Exception):
@@ -169,6 +175,34 @@ class RunCoordination:
             raise UnknownSession
         return session
 
+    async def create_end_user_session(
+        self,
+        workspace_id: UUID,
+        end_user_id: UUID,
+        agent_id: UUID,
+        session_mode: SessionMode,
+        request_id: str,
+    ) -> SessionSnapshot:
+        """§5's Session half, for a subject with no workspace Role at all.
+
+        No `_require_role`: an end user is never a member, so that check has
+        nothing to look up. Authorization already happened one layer up —
+        the caller reaches `agent_id` only by resolving an alias through
+        `AgentCatalog.resolve_end_user_agent`'s two gates — so this only
+        writes what that resolution already approved. `caller_type=end_user`
+        here is what makes this Session's private memory the end user's own
+        (`_remembered`'s own docstring) rather than nobody's.
+        """
+        return await self._store.create_session(
+            CreateSessionCommand(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                caller=CallerIdentity(CallerType.END_USER, end_user_id),
+                session_mode=session_mode,
+                request_id=request_id,
+            )
+        )
+
     async def list_sessions(
         self, workspace_id: UUID, actor: Actor
     ) -> Sequence[SessionSnapshot]:
@@ -204,6 +238,110 @@ class RunCoordination:
                 delivery_mode=None if delivery_mode is None else delivery_mode.value,
             )
         )
+
+    async def submit_end_user_run(
+        self,
+        workspace_id: UUID,
+        end_user_id: UUID,
+        session_id: UUID,
+        text: str,
+        idempotency_key: str | None,
+        request_id: str,
+    ) -> AcceptedRun:
+        """§5's Run half.
+
+        `session_id` must be a Session this same end user started. Checked
+        by `get_end_user_session` rather than left implicit: a Session's
+        private-memory subject is read off *its own* `caller_type`/
+        `caller_id`, never off whoever is submitting a Run against it
+        (`_remembered`'s own docstring), so an end user who guessed another
+        end user's `session_id` would otherwise be able to speak into that
+        other subject's conversation — and have it remembered as theirs.
+        The same check gates the read side (`get_end_user_run`,
+        `read_end_user_session_messages`), which is why it lives in its own
+        method rather than staying inline here.
+
+        `RunCapabilities` is `can_control=True, can_retry=True`
+        unconditionally: there is no workspace Role to read one off, and both
+        capabilities are about this Run and nobody else's — the same reason
+        `_require_role`'s WRITERS/READERS split does not apply here at all.
+        """
+        session = await self.get_end_user_session(workspace_id, end_user_id, session_id)
+        key = _require_idempotency_key(idempotency_key)
+        message = CanonicalMessage("user", (TextBlock(text=text),))
+        return await self._store.accept_run(
+            AcceptRunCommand(
+                workspace_id=workspace_id,
+                session_id=session.id,
+                caller=CallerIdentity(CallerType.END_USER, end_user_id),
+                capabilities=RunCapabilities(can_control=True, can_retry=True),
+                endpoint=END_USER_RUNS_ENDPOINT,
+                idempotency_key=key,
+                request_fingerprint=fingerprint_request(
+                    "POST", END_USER_RUNS_ENDPOINT, workspace_id, session_id, message, None
+                ),
+                message=message,
+                request_id=request_id,
+                delivery_mode=None,
+            )
+        )
+
+    async def get_end_user_session(
+        self, workspace_id: UUID, end_user_id: UUID, session_id: UUID
+    ) -> SessionSnapshot:
+        """The read half of `submit_end_user_run`'s own ownership check,
+        pulled out so both share it rather than keeping two copies of "does
+        this Session belong to this end user" in step. A Session's subject
+        is read off its own `caller`, never off whoever is asking — the same
+        reasoning `submit_end_user_run`'s docstring gives for why a guessed
+        `session_id` must not work.
+        """
+        session = await self._store.get_session(workspace_id, session_id)
+        if session is None:
+            raise UnknownSession
+        if (
+            session.caller.caller_type is not CallerType.END_USER
+            or session.caller.caller_id != end_user_id
+        ):
+            raise ForbiddenRunAction
+        return session
+
+    async def read_end_user_session_messages(
+        self, workspace_id: UUID, end_user_id: UUID, session_id: UUID
+    ) -> Sequence[CanonicalMessage]:
+        """An end user's own read of their own conversation.
+
+        No audit row, unlike `read_session_messages`: §6's audit is the
+        price of a *developer* reading somebody else's content (§4.6), and
+        an owner reading their own words was never the read that price was
+        for.
+        """
+        await self.get_end_user_session(workspace_id, end_user_id, session_id)
+        return await self._store.list_session_messages(workspace_id, session_id)
+
+    async def get_end_user_run(
+        self, workspace_id: UUID, end_user_id: UUID, run_id: UUID
+    ) -> RunSnapshot:
+        """`can_control=True, can_retry=True` unconditionally, matching the
+        capabilities `submit_end_user_run` already grants this Run — there
+        is no workspace Role to read one off, and `available_actions` on a
+        Run this end user is reading should reflect what they were actually
+        given, not a Role that does not apply to them.
+
+        Ownership is checked through the Run's own Session rather than a
+        column on the Run itself: `RunSnapshot` carries no caller of its
+        own (a Run belongs to the Session it was submitted through), so
+        `get_end_user_session` is the one place that already knows how to
+        answer "does this belong to this end user" and is asked again here
+        rather than re-derived.
+        """
+        run = await self._store.get_run(
+            workspace_id, run_id, RunCapabilities(can_control=True, can_retry=True)
+        )
+        if run is None:
+            raise UnknownRun
+        await self.get_end_user_session(workspace_id, end_user_id, run.session_id)
+        return run
 
     async def retry_run(
         self,
@@ -343,10 +481,39 @@ class RunCoordination:
     async def list_session_messages(
         self, workspace_id: UUID, actor: Actor, session_id: UUID
     ) -> Sequence[CanonicalMessage]:
-        await self._require_role(workspace_id, actor, READERS)
-        if await self._store.get_session(workspace_id, session_id) is None:
-            raise UnknownSession
+        await self._load_readable_session(workspace_id, actor, session_id)
         return await self._store.list_session_messages(workspace_id, session_id)
+
+    async def read_session_messages(
+        self, workspace_id: UUID, actor: Actor, session_id: UUID, request_id: str
+    ) -> Sequence[CanonicalMessage]:
+        """§6: the console's read of message content.
+
+        §4.6 opened "查看" for a developer at the price of this audit row —
+        written only when the session belongs to an end user, and only here.
+        `list_sessions` returns titles and never calls this: a page of forty
+        of them must not turn into forty rows that bury the read that
+        actually matters.
+        """
+        session = await self._load_readable_session(workspace_id, actor, session_id)
+        if session.caller.caller_type is CallerType.END_USER:
+            await self._store.record_end_user_session_read(
+                workspace_id,
+                _caller(actor),
+                session.caller.caller_id,
+                session_id,
+                request_id,
+            )
+        return await self._store.list_session_messages(workspace_id, session_id)
+
+    async def _load_readable_session(
+        self, workspace_id: UUID, actor: Actor, session_id: UUID
+    ) -> SessionSnapshot:
+        await self._require_role(workspace_id, actor, READERS)
+        session = await self._store.get_session(workspace_id, session_id)
+        if session is None:
+            raise UnknownSession
+        return session
 
     async def claim_idempotency(
         self,

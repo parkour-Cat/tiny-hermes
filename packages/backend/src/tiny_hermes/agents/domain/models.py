@@ -506,6 +506,22 @@ class AgentNetwork(BaseModel):
         return tuple(seen)
 
 
+class EndUserAccess(BaseModel):
+    """§5's platform-side gate for the end-user entry point (design §4.5.2).
+
+    Two independent layers decide whether an end user may reach an Agent: this
+    one, an Agent author's own opt-in, and the enterprise's `agents` claim on
+    the credential it signs. Both must agree — an author who never wrote this
+    document has not exposed their Agent to anyone's end users, whatever an
+    enterprise's credential later claims, and an enterprise that never lists
+    an alias has not granted it, however wide the author left this open.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+
+
 class AgentSpec(BaseModel):
     """A published Agent's whole configuration.
 
@@ -577,6 +593,12 @@ class AgentSpec(BaseModel):
     #: carrying no key — the eighth widening to leave every earlier content
     #: hash exactly as it was.
     delegation: DelegationPolicy | None = None
+    #: §5's platform-side gate for the end-user entry point. Absent means
+    #: closed, the same default every Agent had before this key existed, so a
+    #: published version's content hash is undisturbed unless its author opts
+    #: in. Omitted from the normalized document when absent, the ninth
+    #: widening to leave every earlier content hash exactly as it was.
+    end_user_access: EndUserAccess | None = None
 
     @field_validator("mcp_tools")
     @classmethod
@@ -741,6 +763,10 @@ def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
         # and is serialized into every spec, so putting it there would have
         # rewritten every hash. This key is absent unless an author wrote one.
         normalized.pop("delegation", None)
+    if normalized.get("end_user_access") is None:
+        # The ninth widening, same promise: an Agent that never opted into the
+        # end-user entry point carries no key for it.
+        normalized.pop("end_user_access", None)
     if not normalized.get("mcp_tools"):
         # Same promise as `http_tools`, one field later.
         normalized.pop("mcp_tools", None)

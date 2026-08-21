@@ -277,6 +277,35 @@ class SkillSummaryBudgetExceeded(AgentCatalogError):
         self.allowance = allowance
 
 
+class EndUserAccessGateClosed(AgentCatalogError):
+    """A credential named this alias, but its own Agent never opened §5's
+    platform-side gate (or does not exist / is not published in this
+    workspace at all — indistinguishable from "closed" on purpose, so a
+    credential cannot be used to probe which aliases exist here).
+
+    The workspace admin's problem, not the enterprise's: they are the one who
+    can open `AgentSpec.end_user_access`, so the refusal names which alias.
+    """
+
+    def __init__(self, alias: str) -> None:
+        super().__init__(f"end-user access is not enabled for {alias}")
+        self.alias = alias
+
+
+class EndUserAccessNotAssigned(AgentCatalogError):
+    """This end user's own credential never named this alias.
+
+    The enterprise's problem, not the platform's: whatever
+    `AgentSpec.end_user_access` says, an alias the credential's `agents` claim
+    does not list was simply never delegated to this person, and the fix is a
+    decision only their employer can make.
+    """
+
+    def __init__(self, alias: str) -> None:
+        super().__init__(f"this end user was not assigned {alias}")
+        self.alias = alias
+
+
 class RoundCeilingExceeded(AgentCatalogError):
     """The draft asks for more model rounds than this platform allows.
 
@@ -441,17 +470,104 @@ class AgentCatalog:
         """The published version a Chat Completions `model` field names."""
         await self._require_role(workspace_id, actor, READERS)
         del request_id
+        found = await self._find_published_alias(workspace_id, alias)
+        if found is None:
+            raise UnknownAgent
+        return found
+
+    async def resolve_end_user_agent(
+        self, workspace_id: UUID, alias: str, credential_agents: Sequence[str]
+    ) -> tuple[Agent, AgentVersion]:
+        """§5's two-gate check for one end-user request naming one alias.
+
+        Deliberately not `published_alias`: that method authorizes a platform
+        `Actor` — a workspace member or a service account — and audits the
+        read accordingly. An end user is neither, and folding this in would
+        mean either demanding a membership no end user has or teaching that
+        method to recognize a third kind of caller it was never written for
+        (the same reasoning `resolve_end_user_caller` gave for staying out of
+        `resolve_workspace_caller`).
+
+        `credential_agents` is always measured against *this* `workspace_id`
+        — the one the credential's own `aud` was verified against — so an
+        alias naming another workspace's Agent can never resolve here, even
+        if the credential lists it. That is what closes the gap the brief
+        calls out: without this scoping, a signed credential could name an
+        alias that happens to exist in a workspace it was never issued for.
+        """
+        found = await self._find_published_alias(workspace_id, alias)
+        return self._end_user_gate_check(alias, found, credential_agents)
+
+    async def resolve_end_user_agent_by_id(
+        self, workspace_id: UUID, agent_id: UUID, credential_agents: Sequence[str]
+    ) -> tuple[Agent, AgentVersion]:
+        """Task-9 review finding A: the same two gates `resolve_end_user_agent`
+        evaluates at Session-creation time, evaluated again at Run-submission
+        time — keyed by the Session's own `agent_id` rather than an alias,
+        because a Run submission hands this route no alias to resolve, only
+        the Session it already opened. Sharing `_end_user_gate_check` with
+        `resolve_end_user_agent` (instead of a second copy of the
+        enabled/listed logic) is what makes "the two cannot drift" true
+        structurally rather than true only until somebody edits one and
+        forgets the other.
+
+        Calling this on every submission, not only at Session creation, is
+        the actual fix: before this task, closing `AgentSpec.end_user_access`
+        or letting an Agent's last published version go away had no effect
+        on a Session that already held a cookie, for as long as its own TTL
+        (up to 8 hours) allowed it to keep submitting — the platform's own
+        data, silently stale for a working day. `credential_agents` is the
+        other half of the check and is a different kind of stale on purpose:
+        it is `end_user_sessions.agents`, a snapshot of the credential's own
+        `agents` claim taken once at exchange time, because the credential
+        itself no longer exists to ask again (design's own red line — see
+        that column's docstring). That half's staleness is bounded by the
+        session TTL and cannot be tightened further without asking the end
+        user to re-present a credential on every message, which nothing
+        about this product's channel model supports; re-running this check
+        on every submission is what makes the platform half not share that
+        bound for no reason.
+        """
+        agent = await self._store.get_agent(workspace_id, agent_id)
+        found = None if agent is None else await self._published_version_of(workspace_id, agent)
+        alias = agent.alias if agent is not None else str(agent_id)
+        return self._end_user_gate_check(alias, found, credential_agents)
+
+    def _end_user_gate_check(
+        self,
+        alias: str,
+        found: tuple[Agent, AgentVersion] | None,
+        credential_agents: Sequence[str],
+    ) -> tuple[Agent, AgentVersion]:
+        listed = alias in credential_agents
+        if found is not None and listed and _end_user_access_enabled(found[1]):
+            return found
+        if listed:
+            raise EndUserAccessGateClosed(alias)
+        # Not listed, whether the gate is open or not: the enterprise never
+        # delegated this alias to this end user, and which way the platform
+        # switch sits would not have changed that.
+        raise EndUserAccessNotAssigned(alias)
+
+    async def _find_published_alias(
+        self, workspace_id: UUID, alias: str
+    ) -> tuple[Agent, AgentVersion] | None:
         for agent in await self._store.list_agents(workspace_id):
             if agent.alias != alias:
                 continue
-            if agent.current_version_id is None:
-                raise UnknownAgent
-            versions = await self._store.list_versions(workspace_id, agent.id)
-            for version in versions:
-                if version.id == agent.current_version_id:
-                    return agent, version
-            raise UnknownAgent
-        raise UnknownAgent
+            return await self._published_version_of(workspace_id, agent)
+        return None
+
+    async def _published_version_of(
+        self, workspace_id: UUID, agent: Agent
+    ) -> tuple[Agent, AgentVersion] | None:
+        if agent.current_version_id is None:
+            return None
+        for version in await self._store.list_versions(workspace_id, agent.id):
+            if version.id == agent.current_version_id:
+                return agent, version
+        return None
+        return None
 
     async def replace_draft(
         self,
@@ -881,6 +997,16 @@ class AgentCatalog:
             resource_id,
             request_id,
         )
+
+
+def _end_user_access_enabled(version: AgentVersion) -> bool:
+    """§5's platform-side gate, read off a published version's own document.
+
+    Absent means closed (`AgentSpec.end_user_access` docstring) — the same
+    default every Agent published before this task existed always had.
+    """
+    spec = AgentSpec.model_validate(version.spec)
+    return spec.end_user_access is not None and spec.end_user_access.enabled
 
 
 def _valid_name(value: str) -> str:

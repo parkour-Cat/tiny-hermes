@@ -16,6 +16,10 @@ dependencies = [
     "minio>=7.2.20",
     "pwdlib[argon2]>=0.3.0",
     "pydantic-settings>=2.15.0",
+    # End-user credential verification only (identity/domain/end_user_credential.py).
+    # The algorithm allow-list is enforced at every call site, never left to
+    # this library's defaults — see that module for why.
+    "pyjwt>=2.10",
     "python-multipart>=0.0.32",
     "redis>=6.4.0",
     "sqlalchemy>=2.0.51",

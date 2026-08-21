@@ -467,6 +467,129 @@ membership gets. Completions and the Runs API both use
 `Authorization: Bearer <token>`; they do not accept the browser session cookie
 as a substitute on `POST /v1/chat/completions`.
 
+## End users
+
+An end user is somebody the platform never authenticates — no password, no
+email, no recovery flow (§4.5.1). The platform trusts a JWT the *enterprise*
+signed, mapping it to a stable `EndUser` row it keeps no name or email on.
+Three steps get an enterprise's own employee into a chat surface: register the
+issuer, sign a credential per person per session, and embed the surface with
+that credential.
+
+### Registering an issuer
+
+A workspace admin registers one `channel_issuers` row per channel per signing
+identity, the same session cookie and `X-CSRF-Token` flow as every other
+console write:
+
+```powershell
+$issuer = Invoke-RestMethod -Uri "$api/channel-issuers" -Method Post `
+  -WebSession $browser -ContentType "application/json" -Headers $headers `
+  -Body (@{
+    channel = "web"
+    issuer = "https://oa.mingyuan-logistics.example"
+    public_key = $pem  # or jwks_url instead
+    allowed_origins = @("https://oa.mingyuan-logistics.example")
+  } | ConvertTo-Json)
+```
+
+Give it exactly one key source: a PEM `public_key` for a fixed signing key, or
+a `jwks_url` for one that rotates. A row needs at least one (the database
+enforces that much), but the registration endpoint is stricter than the
+database and refuses a row carrying both — with two key sources on one row,
+which one a given exchange actually trusts stops being obvious from the row
+itself. A `jwks_url` is resolved through the egress proxy like every other
+outbound call this platform makes; there is no shortcut that skips it just
+because the request is "only" fetching a public key.
+
+`allowed_origins` is not a display setting. It is read on every state-changing
+end-user request (see "Embedding the surface" below) and is the only thing
+standing between a hostile page and this issuer's sessions, because those
+sessions carry no CSRF token. Disabling an issuer (`POST
+/channel-issuers/{id}/disable`) refuses that issuer's *new* credentials
+immediately; it does not end sessions already exchanged from it — that needs
+`DELETE /end-user/sessions/{end_user_id}` against a specific end user, called
+separately so an ordinary request never pays the cost of re-checking issuer
+status on every call.
+
+### Signing a credential
+
+Per person, per session, the enterprise's own signing service issues a short
+JWT with `RS256` or `ES256` — no other algorithm, and no `alg: none`:
+
+```json
+{
+  "iss": "https://oa.mingyuan-logistics.example",
+  "aud": "<workspace UUID>",
+  "sub": "employee-4471",
+  "exp": 1776600900,
+  "agents": ["analyst"]
+}
+```
+
+`sub` is whatever stable identifier the enterprise's own directory uses; the
+platform never sees a name or an email unless the enterprise chooses to put
+one in the credential, and even then it lands on the `external_identities` row
+that scopes to one channel, never on the `EndUser` itself. `agents` is the
+enterprise's own half of a two-gate check — the Agent aliases this specific
+employee may reach — and the platform's own `end_user_access.enabled` gate on
+that Agent's published spec is the other half; both have to agree, and each
+refusal names which side closed the door.
+
+**`exp` may not be more than 15 minutes past the moment the platform verifies
+it**, enforced by the platform regardless of what the credential's own `iat`
+claims. This is not a suggestion an enterprise can configure around: a
+credential is meant to prove "this person, right now", and the only Refusal
+in this whole check that ever gets its own distinguishable error (rather than
+one flat 401) is this one — because it is the enterprise's own misconfiguration
+and worth telling them, where every other failure (bad signature, wrong `iss`,
+wrong `aud`, expired, disabled issuer) answers identically on purpose so a
+probe cannot map the difference.
+
+### Embedding the surface
+
+The credential is spent once, at `POST /api/v1/end-user/sessions` (`Authorization:
+Bearer <credential>`, `X-Workspace-Id` set), which exchanges it for a
+`tiny_hermes_end_user_session` cookie (`HttpOnly`, `SameSite=None`, `Secure`,
+default 8 hours). Everything after that rides the cookie; the credential
+itself is never held onto or replayed.
+
+**Embedding is refused until you allow the embedding origin.** The surface
+ships `Content-Security-Policy: frame-ancestors 'none'`, so a browser will
+render an empty frame — with a CSP violation in its console and nothing in
+nginx's log, because the refusal happens in the browser and the request
+succeeded. Set `CHAT_WEB_FRAME_ANCESTORS` on the `chat-web` container to the
+enterprise origins that may embed it:
+
+```
+CHAT_WEB_FRAME_ANCESTORS="https://oa.mingyuan-logistics.example"
+```
+
+Space-separate several. It is deliberately not read from
+`channel_issuers.allowed_origins`, which serves a different purpose: that list
+is checked server-side on state-changing requests, and it cannot defend against
+framing, because a request made from inside a frame carries this app's own
+origin — one that is always on the list. Two attacks, two controls; see design
+§7. The default is closed rather than open because an unset value that meant
+"anyone may frame this" would make clickjacking the out-of-the-box behaviour of
+a surface with an erase button on it.
+
+The enterprise's page embeds `apps/chat-web` with the credential carried in
+the **URL fragment**, never the query string:
+
+```
+https://chat.<workspace-host>/?workspace=<workspace-id>&agent=analyst#credential=<jwt>
+```
+
+The one sentence why: a fragment is never sent in the HTTP request line, so it
+never reaches nginx's access log, any proxy in between, or the API's own
+request logging — a query string would put a 15-minute bearer credential in
+every layer that happens to log a URL. `chat-web` reads `#credential=...` once
+on load, exchanges it, and scrubs it from the address bar and history
+immediately whether the exchange succeeds or is refused — a refused credential
+is still a validly signed, unexpired one, so it gets the same treatment as a
+spent one.
+
 ## Chat Completions
 
 Enable delivery on the Agent spec before publishing (`delivery.enabled = true`,
