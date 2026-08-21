@@ -29,6 +29,10 @@ from tiny_hermes.runs.infrastructure.deterministic_model import (
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 from tiny_hermes.runs.ports.model import ModelRequest, ModelResponse
 
+from ..conftest import VALID_SPEC
+from ..egress_support import ProxyHandle
+from .http_tool_support import StandIn, approve_host, ask, register_tool, worker as http_worker
+
 
 class Recorder:
     def __init__(self) -> None:
@@ -121,6 +125,88 @@ def rememberer(agent_with_scenario: Callable[..., str]) -> str:
     return agent_with_scenario(
         "remember_once", alias="eraser", tools=["memory.remember"]
     )
+
+
+async def _head_run_id(engine: AsyncEngine, session_id: str) -> UUID | None:
+    async with engine.connect() as connection:
+        found = await connection.execute(
+            text("SELECT head_run_id FROM sessions WHERE id = :s"),
+            {"s": UUID(session_id)},
+        )
+        value = found.scalar()
+        return None if value is None else UUID(str(value))
+
+
+def _governance_agent(client: TestClient, scope: dict[str, str], version_id: str) -> str:
+    """An Agent whose one write stops for a person rather than running — the
+    same shape `test_approvals.py`'s `_agent` builds, kept local here rather
+    than imported because this suite only needs the one `write_policy`."""
+    agent_id = str(
+        client.post(
+            "/api/v1/agents", headers=scope, json={"name": "Blocker", "alias": "blocker"}
+        ).json()["id"]
+    )
+    spec = {
+        **VALID_SPEC,
+        "model_policy": {"provider": "deterministic", "scenario": "http_once"},
+        "network": {"allow": ["127.0.0.1"]},
+        "http_tools": [
+            {
+                "http_tool_version_id": version_id,
+                "operations": ["listOrders", "createOrder"],
+                "write_policy": "governance",
+            }
+        ],
+    }
+    draft = client.put(
+        f"/api/v1/agents/{agent_id}/draft",
+        headers=scope,
+        json={"expected_revision": 1, "spec": spec},
+    )
+    assert draft.status_code == 200, draft.text
+    published = client.post(
+        f"/api/v1/agents/{agent_id}/publish",
+        headers=scope,
+        json={"expected_revision": draft.json()["revision"]},
+    )
+    assert published.status_code == 201, published.text
+    return agent_id
+
+
+async def test_erasure_reaches_a_subject_parked_on_an_unanswered_approval(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    api: tuple[StandIn, str],
+    proxy: ProxyHandle,
+) -> None:
+    """Finding 1: a Run only releases its Session's head on a *terminal*
+    transition (`_terminalize`, `runs/infrastructure/sql_store.py`).
+    `waiting_approval` is not terminal, so a subject parked on a confirmation
+    nobody has answered yet is exactly the case `sessions.head_run_id` still
+    points at a live Run when `erase` runs. The fix has to null that pointer
+    before the Run row goes, not rely on the Run having already finished."""
+    stand_in, url = api
+    approve_host(client, scope, "127.0.0.1")
+    version_id = register_tool(client, scope, url)
+    session_id = session_for(_governance_agent(client, scope, version_id))
+    run = ask(client, scope, session_id, "http.orders.createOrder")
+    await http_worker(engine, scope["X-Workspace-Id"], proxy).run_once()
+    status = client.get(f"/api/v1/runs/{run['id']}", headers=scope).json()["status"]
+    assert status == "waiting_approval"
+    assert await _head_run_id(engine, session_id) == UUID(run["id"])
+    subject = await _subject_id(engine, session_id)
+
+    erased = client.post(f"/api/v1/subjects/{subject}/erase", headers=scope)
+
+    assert erased.status_code == 200, erased.text
+    assert erased.json()["sessions"] == 1
+    async with engine.connect() as connection:
+        remaining = await connection.scalar(
+            text("SELECT count(*) FROM sessions WHERE id = :s"), {"s": UUID(session_id)}
+        )
+    assert remaining == 0
 
 
 async def test_a_subject_exports_what_is_held_about_them(
