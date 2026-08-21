@@ -6,7 +6,11 @@
     "web:dev": "pnpm --filter @tiny-hermes/web dev",
     "web:test": "pnpm --filter @tiny-hermes/web test",
     "web:build": "pnpm --filter @tiny-hermes/web build",
-    "web:lint": "pnpm --filter @tiny-hermes/web lint"
+    "web:lint": "pnpm --filter @tiny-hermes/web lint",
+    "chat:dev": "pnpm --filter @tiny-hermes/chat-web dev",
+    "chat:test": "pnpm --filter @tiny-hermes/chat-web test",
+    "chat:build": "pnpm --filter @tiny-hermes/chat-web build",
+    "chat:lint": "pnpm --filter @tiny-hermes/chat-web lint"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1"
