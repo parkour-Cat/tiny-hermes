@@ -175,7 +175,12 @@ test("an enterprise credential opens a conversation that survives closing the ta
   // console cookie anywhere in it, the same as a real visitor would.
   const context = await browser.newContext();
   let chatPage = await context.newPage();
-  const url = `${CHAT_ORIGIN}/?credential=${encodeURIComponent(credential)}&workspace=${workspaceId}&agent=${alias}`;
+  // The credential rides the URL fragment, not the query string (task-7
+  // review finding 1): a fragment is never sent in the HTTP request, so
+  // apps/chat-web/nginx.conf's access log — which does record the query
+  // string — never sees it. workspace/agent stay in the query; neither is
+  // a secret.
+  const url = `${CHAT_ORIGIN}/?workspace=${workspaceId}&agent=${alias}#credential=${encodeURIComponent(credential)}`;
   await chatPage.goto(url);
 
   // The credential exchanged and the app landed on the clean, alias-only
