@@ -66,6 +66,12 @@ test("a refused credential explains itself instead of offering a form to retry i
   expect(await screen.findByText("The credential could not be verified.")).toBeInTheDocument();
   expect(screen.queryByLabelText("邮箱")).toBeNull();
   expect(screen.queryByLabelText("密码")).toBeNull();
+  // A refusal still involves a validly signed, unexpired credential — it
+  // must not sit in the address bar or browser history for the rest of
+  // its 15-minute window just because the exchange failed, the same as
+  // the success path already clears it.
+  expect(window.location.search).toBe("");
+  expect(window.location.hash).toBe("");
 });
 
 test("no credential and no known address waits to be opened from the host page", async () => {
