@@ -17,11 +17,12 @@ Run — and a control test that an untouched entitlement is unaffected by any
 of this.
 """
 
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+import httpx2 as httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -96,7 +97,7 @@ def registered_issuer(client: TestClient, scope: dict[str, str]) -> None:
 
 
 @contextmanager
-def _as_admin(client: TestClient) -> Iterator[None]:
+def _as_admin(client: TestClient) -> Generator[None]:
     """Every console call in this suite happens *after* `_sign_in`, unlike
     every other end-user suite's fixture ordering — this one is specifically
     about an admin acting on a Session that already exists. One browser
@@ -170,7 +171,7 @@ def _start_session(client: TestClient) -> str:
     return str(created.json()["id"])
 
 
-def _submit(client: TestClient, session_id: str, key: str) -> None:
+def _submit(client: TestClient, session_id: str, key: str) -> httpx.Response:
     return client.post(
         f"/api/v1/end-user/sessions/{session_id}/runs",
         headers={"Idempotency-Key": key},
