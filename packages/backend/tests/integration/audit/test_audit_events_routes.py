@@ -1,0 +1,268 @@
+"""§4, exercised as real HTTP: `GET /api/v1/audit-events` for four of §4.6's
+five subjects, and a firm 403 for the fifth.
+
+Each test seeds rows directly with SQL (the same trick
+`test_end_user_session_audit.py` uses for memories) so a row's `actor_id`,
+`resource_id` and `context` are exactly what the assertion needs, rather
+than depending on which actions some other route happens to emit today.
+"""
+
+import json
+from typing import Any
+from uuid import UUID, uuid4
+
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from ..conftest import PASSWORD
+
+CROSS_WORKSPACE_READ = "audit.cross_workspace_read"
+
+
+async def _seed_audit_row(
+    engine: AsyncEngine,
+    *,
+    workspace_id: str,
+    actor_id: UUID,
+    action: str,
+    resource_type: str = "agent",
+    resource_id: UUID | None = None,
+    context: dict[str, Any] | None = None,
+) -> UUID:
+    row_id = uuid4()
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO audit_events (id, workspace_id, actor_type, actor_id, "
+                "action, resource_type, resource_id, result, request_id, context, "
+                "created_at) VALUES (:id, :workspace_id, 'user', :actor_id, :action, "
+                ":resource_type, :resource_id, 'succeeded', :request_id, "
+                "CAST(:context AS JSON), now())"
+            ),
+            {
+                "id": row_id,
+                "workspace_id": UUID(workspace_id),
+                "actor_id": actor_id,
+                "action": action,
+                "resource_type": resource_type,
+                "resource_id": resource_id or uuid4(),
+                "request_id": f"seed-{row_id}",
+                "context": json.dumps(context or {}),
+            },
+        )
+    return row_id
+
+
+async def _seed_user(
+    engine: AsyncEngine, display_name: str, subject: str, *, is_platform_admin: bool = False
+) -> UUID:
+    user_id = uuid4()
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO users (id, status, display_name, is_platform_admin, created_at) "
+                "VALUES (:id, 'active', :name, :platform, now())"
+            ),
+            {"id": user_id, "name": display_name, "platform": is_platform_admin},
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO auth_identities "
+                "(id, user_id, provider, subject, password_hash, created_at) "
+                "SELECT gen_random_uuid(), :id, 'local', :subject, "
+                "  (SELECT password_hash FROM auth_identities LIMIT 1), now()"
+            ),
+            {"id": user_id, "subject": subject},
+        )
+    return user_id
+
+
+def _login(client: TestClient, subject: str) -> dict[str, str]:
+    login = client.post(
+        "/api/v1/auth/sessions", json={"subject": subject, "password": PASSWORD}
+    )
+    assert login.status_code == 201, login.text
+    return {"X-CSRF-Token": login.cookies["tiny_hermes_csrf"]}
+
+
+async def _audit_rows(engine: AsyncEngine, action: str) -> list[dict[str, Any]]:
+    async with engine.connect() as connection:
+        rows = await connection.execute(
+            text(
+                "SELECT workspace_id, actor_id, resource_id, context FROM audit_events "
+                "WHERE action = :a"
+            ),
+            {"a": action},
+        )
+        return [dict(row) for row in rows.mappings()]
+
+
+async def test_workspace_admin_reads_full_trail_of_their_own_workspace(
+    client: TestClient, scope: dict[str, str], workspace_id: str, engine: AsyncEngine
+) -> None:
+    """The bootstrap admin created this workspace, which makes them its
+    `WORKSPACE_ADMIN` member (`WorkspaceService.create_workspace`) — §4.6's
+    本空间只读, not the platform-admin cross-workspace branch."""
+    listed = client.get("/api/v1/audit-events", headers=scope)
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert any(item["action"] == "workspace.created" for item in body["items"])
+
+    assert await _audit_rows(engine, CROSS_WORKSPACE_READ) == []
+
+
+async def test_platform_admin_with_no_membership_reads_cross_workspace_and_it_is_logged(
+    client: TestClient, scope: dict[str, str], workspace_id: str, engine: AsyncEngine
+) -> None:
+    other_admin_id = await _seed_user(
+        engine, "Other Admin", "other-admin@example.com", is_platform_admin=True
+    )
+    headers = {**_login(client, "other-admin@example.com"), "X-Workspace-Id": workspace_id}
+
+    listed = client.get("/api/v1/audit-events", headers=headers)
+    assert listed.status_code == 200, listed.text
+    assert any(item["action"] == "workspace.created" for item in listed.json()["items"])
+
+    logged = await _audit_rows(engine, CROSS_WORKSPACE_READ)
+    assert len(logged) == 1
+    assert logged[0]["actor_id"] == other_admin_id
+    assert logged[0]["resource_id"] == UUID(workspace_id)
+    assert logged[0]["workspace_id"] == UUID(workspace_id)
+
+
+async def test_developer_sees_own_actions_and_resources_they_touched_only(
+    client: TestClient, scope: dict[str, str], workspace_id: str, engine: AsyncEngine
+) -> None:
+    developer_id = await _seed_user(engine, "Dev", "dev@example.com")
+    invited = client.post(
+        f"/api/v1/workspaces/{workspace_id}/members",
+        headers=scope,
+        json={"email": "dev@example.com", "role": "developer"},
+    )
+    assert invited.status_code == 201, invited.text
+
+    touched_resource = uuid4()
+    own_row = await _seed_audit_row(
+        engine,
+        workspace_id=workspace_id,
+        actor_id=developer_id,
+        action="agent.published",
+        resource_id=touched_resource,
+    )
+    # Somebody else acted on the *same* resource afterwards — still visible.
+    followed_up = await _seed_audit_row(
+        engine,
+        workspace_id=workspace_id,
+        actor_id=uuid4(),
+        action="agent.rolled_back",
+        resource_id=touched_resource,
+    )
+    # A resource this developer never touched at all.
+    unrelated = await _seed_audit_row(
+        engine, workspace_id=workspace_id, actor_id=uuid4(), action="agent.published"
+    )
+
+    headers = {**_login(client, "dev@example.com"), "X-Workspace-Id": workspace_id}
+    listed = client.get("/api/v1/audit-events", headers=headers)
+    assert listed.status_code == 200, listed.text
+    ids = {UUID(item["id"]) for item in listed.json()["items"]}
+
+    assert own_row in ids
+    assert followed_up in ids
+    assert unrelated not in ids
+
+
+async def test_viewer_context_is_stripped_of_every_unregistered_key(
+    client: TestClient, scope: dict[str, str], workspace_id: str, engine: AsyncEngine
+) -> None:
+    await _seed_user(engine, "View", "view@example.com")
+    invited = client.post(
+        f"/api/v1/workspaces/{workspace_id}/members",
+        headers=scope,
+        json={"email": "view@example.com", "role": "viewer"},
+    )
+    assert invited.status_code == 201, invited.text
+
+    row_id = await _seed_audit_row(
+        engine,
+        workspace_id=workspace_id,
+        actor_id=uuid4(),
+        action="run.paused",
+        resource_type="run",
+        context={"session_summary": "the customer is upset about pricing"},
+    )
+
+    headers = {**_login(client, "view@example.com"), "X-Workspace-Id": workspace_id}
+    listed = client.get("/api/v1/audit-events", headers=headers)
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    item = next(entry for entry in body["items"] if entry["id"] == str(row_id))
+
+    assert item["context"] == {}
+    assert "session_summary" not in str(body)
+    assert "the customer is upset" not in str(body)
+
+
+async def test_end_user_cookie_gets_403_with_no_exceptions(
+    client: TestClient, scope: dict[str, str], workspace_id: str, engine: AsyncEngine
+) -> None:
+    """§4.6: 否. `_CONSOLE_ONLY` refuses this before the route's own code
+    runs — proven here rather than assumed, matching every other §4.6 "否"
+    cell this codebase has pinned with its own test.
+
+    The console session cookie the `client`/`scope` fixtures already left
+    in the jar has to go first: `reject_end_user_caller`'s own finding-G
+    fix (`identity/presentation/end_user_dependencies.py`) only refuses a
+    request that carries *no* console credential alongside the end-user
+    cookie, so a jar holding both would pass this check on the console
+    session alone and never exercise the refusal this test is for.
+    """
+    del scope
+    await _seed_user(engine, "irrelevant", "irrelevant@example.com")
+    client.cookies.clear()
+    client.cookies.set("tiny_hermes_end_user_session", "whatever-a-cookie-looks-like")
+
+    listed = client.get(
+        "/api/v1/audit-events", headers={"X-Workspace-Id": workspace_id}
+    )
+    assert listed.status_code == 403, listed.text
+
+
+async def test_a_stranger_with_no_membership_and_no_platform_role_is_refused(
+    client: TestClient, scope: dict[str, str], workspace_id: str, engine: AsyncEngine
+) -> None:
+    await _seed_user(engine, "Stranger", "stranger@example.com")
+    headers = {**_login(client, "stranger@example.com"), "X-Workspace-Id": workspace_id}
+
+    listed = client.get("/api/v1/audit-events", headers=headers)
+    assert listed.status_code == 403, listed.text
+
+
+async def test_filters_and_pagination_are_honoured(
+    client: TestClient, scope: dict[str, str], workspace_id: str, engine: AsyncEngine
+) -> None:
+    for _ in range(3):
+        await _seed_audit_row(
+            engine, workspace_id=workspace_id, actor_id=uuid4(), action="probe.tick"
+        )
+
+    first = client.get(
+        "/api/v1/audit-events",
+        headers=scope,
+        params={"action": "probe.tick", "limit": 2},
+    )
+    assert first.status_code == 200, first.text
+    body = first.json()
+    assert len(body["items"]) == 2
+    assert body["has_more"] is True
+    assert all(item["action"] == "probe.tick" for item in body["items"])
+
+    second = client.get(
+        "/api/v1/audit-events",
+        headers=scope,
+        params={"action": "probe.tick", "limit": 2, "offset": 2},
+    )
+    assert second.status_code == 200, second.text
+    assert len(second.json()["items"]) == 1
+    assert second.json()["has_more"] is False
