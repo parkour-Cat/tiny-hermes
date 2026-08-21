@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import Select, delete, func, select
+from sqlalchemy import Select, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.artifacts.infrastructure.tables import ArtifactRow
@@ -27,6 +27,7 @@ from tiny_hermes.memory.infrastructure.sql_service_store import record_of
 from tiny_hermes.memory.infrastructure.tables import MemoryRow
 from tiny_hermes.runs.domain.models import CallerIdentity, CallerType
 from tiny_hermes.runs.infrastructure.tables import (
+    ApprovalRow,
     RunRow,
     SessionMessageRow,
     SessionRow,
@@ -191,8 +192,31 @@ class SqlSubjectStore:
                     SessionMessageRow.session_id.in_(sessions)
                 )
             )
-            # The Session's head points at a Run and the Runs point back, so
-            # both pointers are cleared before either table is touched.
+            # `fk_sessions_head_run` means a Session whose head still points
+            # at one of these Runs blocks the delete below — and the head is
+            # only ever released on a *terminal* transition (`_terminalize`,
+            # `runs/infrastructure/sql_store.py`). `waiting_approval`,
+            # `paused` and `waiting_external` are not terminal, so a subject
+            # parked on an unanswered confirmation would otherwise be
+            # unerasable for as long as nobody answers it. Null the pointer
+            # here, unconditionally, rather than leaning on the Run having
+            # already finished.
+            await self._session.execute(
+                update(SessionRow)
+                .where(SessionRow.id.in_(sessions))
+                .values(head_run_id=None)
+            )
+            # A Run stopped on `waiting_approval` is exactly a Run with a
+            # pending row here (`fk_approvals_run`, no cascade) — the same
+            # non-terminal state that leaves the head pointer set. Gone
+            # before the Runs are, for the same reason.
+            await self._session.execute(
+                delete(ApprovalRow).where(
+                    ApprovalRow.run_id.in_(
+                        select(RunRow.id).where(RunRow.session_id.in_(sessions))
+                    )
+                )
+            )
             await self._session.execute(
                 delete(RunRow).where(RunRow.session_id.in_(sessions))
             )
