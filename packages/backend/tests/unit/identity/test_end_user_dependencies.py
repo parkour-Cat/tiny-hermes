@@ -55,7 +55,7 @@ async def test_an_unknown_token_is_unauthenticated() -> None:
 
 async def test_a_valid_session_resolves_to_the_end_user_who_owns_it() -> None:
     store = FakeEndUserStore()
-    store.register(workspace_id=WORKSPACE_ID)
+    registered = store.register(workspace_id=WORKSPACE_ID)
     service = EndUserIdentityService(store, FakeKeySource(), session_ttl=timedelta(hours=8))
     now = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
     token = rs256(claims(aud=str(WORKSPACE_ID)))
@@ -63,7 +63,9 @@ async def test_a_valid_session_resolves_to_the_end_user_who_owns_it() -> None:
 
     caller = await resolve_end_user_caller(service, exchanged.session_token)
 
-    assert caller == EndUserCaller(exchanged.end_user_id, WORKSPACE_ID, ("support-bot",))
+    assert caller == EndUserCaller(
+        exchanged.end_user_id, WORKSPACE_ID, ("support-bot",), registered.id
+    )
 
 
 def test_no_end_user_cookie_passes_through() -> None:
@@ -96,16 +98,18 @@ async def test_a_write_with_no_origin_or_referer_is_not_refused_for_its_origin()
         FakeEndUserStore(), FakeKeySource(), session_ttl=timedelta(hours=8)
     )
 
-    await enforce_end_user_origin(service, WORKSPACE_ID, Headers({}))
+    await enforce_end_user_origin(service, WORKSPACE_ID, None, Headers({}))
 
 
 async def test_a_write_from_a_registered_origin_is_allowed() -> None:
     store = FakeEndUserStore()
-    store.register(workspace_id=WORKSPACE_ID, allowed_origins=("https://acme.example",))
+    registered = store.register(
+        workspace_id=WORKSPACE_ID, allowed_origins=("https://acme.example",)
+    )
     service = EndUserIdentityService(store, FakeKeySource(), session_ttl=timedelta(hours=8))
 
     await enforce_end_user_origin(
-        service, WORKSPACE_ID, Headers({"origin": "https://acme.example"})
+        service, WORKSPACE_ID, registered.id, Headers({"origin": "https://acme.example"})
     )
 
 
@@ -114,12 +118,14 @@ async def test_a_write_from_an_unregistered_origin_is_refused() -> None:
     Run, answer a confirmation, or erase an end user's data just because it
     can make the browser attach the `SameSite=None` cookie."""
     store = FakeEndUserStore()
-    store.register(workspace_id=WORKSPACE_ID, allowed_origins=("https://acme.example",))
+    registered = store.register(
+        workspace_id=WORKSPACE_ID, allowed_origins=("https://acme.example",)
+    )
     service = EndUserIdentityService(store, FakeKeySource(), session_ttl=timedelta(hours=8))
 
     with pytest.raises(AppError) as excinfo:
         await enforce_end_user_origin(
-            service, WORKSPACE_ID, Headers({"origin": "https://evil.example"})
+            service, WORKSPACE_ID, registered.id, Headers({"origin": "https://evil.example"})
         )
 
     assert excinfo.value.status == 403
@@ -130,13 +136,16 @@ async def test_referer_is_read_when_origin_is_absent() -> None:
     """A cross-origin form POST from an older client carries `Referer` and
     no `Origin` — design §7 names both headers, not just the first."""
     store = FakeEndUserStore()
-    store.register(workspace_id=WORKSPACE_ID, allowed_origins=("https://acme.example",))
+    registered = store.register(
+        workspace_id=WORKSPACE_ID, allowed_origins=("https://acme.example",)
+    )
     service = EndUserIdentityService(store, FakeKeySource(), session_ttl=timedelta(hours=8))
 
     with pytest.raises(AppError) as excinfo:
         await enforce_end_user_origin(
             service,
             WORKSPACE_ID,
+            registered.id,
             Headers({"referer": "https://evil.example/attack.html"}),
         )
 
@@ -151,7 +160,7 @@ async def test_a_disabled_issuers_origins_no_longer_count() -> None:
     from tiny_hermes.identity.domain.models import ChannelIssuerStatus
 
     store = FakeEndUserStore()
-    store.register(
+    registered = store.register(
         workspace_id=WORKSPACE_ID,
         allowed_origins=("https://acme.example",),
         status=ChannelIssuerStatus.DISABLED,
@@ -160,10 +169,65 @@ async def test_a_disabled_issuers_origins_no_longer_count() -> None:
 
     with pytest.raises(AppError) as excinfo:
         await enforce_end_user_origin(
-            service, WORKSPACE_ID, Headers({"origin": "https://acme.example"})
+            service, WORKSPACE_ID, registered.id, Headers({"origin": "https://acme.example"})
         )
 
     assert excinfo.value.status == 403
+
+
+async def test_a_write_is_checked_against_only_the_signing_issuers_origins() -> None:
+    """Task-7 review finding 3: the old check unioned `allowed_origins`
+    across every active issuer in the workspace. Two issuers registering
+    different origins made a page served from issuer B's origin able to act
+    on a session minted through issuer A's credential — this is the
+    scenario that closes. A session's `channel_issuer_id` (set at exchange
+    time) is now what the check is scoped to, not the workspace as a
+    whole."""
+    store = FakeEndUserStore()
+    issuer_a = store.register(
+        workspace_id=WORKSPACE_ID,
+        issuer="https://idp.a.example",
+        allowed_origins=("https://a.example",),
+    )
+    store.register(
+        workspace_id=WORKSPACE_ID,
+        issuer="https://idp.b.example",
+        allowed_origins=("https://b.example",),
+    )
+    service = EndUserIdentityService(store, FakeKeySource(), session_ttl=timedelta(hours=8))
+
+    # A session minted through issuer A must not honor issuer B's origin,
+    # even though issuer B is active in the same workspace.
+    with pytest.raises(AppError) as excinfo:
+        await enforce_end_user_origin(
+            service, WORKSPACE_ID, issuer_a.id, Headers({"origin": "https://b.example"})
+        )
+    assert excinfo.value.status == 403
+
+    # Its own origin still works.
+    await enforce_end_user_origin(
+        service, WORKSPACE_ID, issuer_a.id, Headers({"origin": "https://a.example"})
+    )
+
+
+async def test_a_session_with_no_recorded_issuer_refuses_every_cross_origin_write() -> None:
+    """A session minted before `channel_issuer_id` existed (or whose issuer
+    row was later removed) has no narrower set of origins to check against.
+    Finding 3's fix treats that as unverifiable and refuses, rather than
+    falling back to the old workspace-wide union — the whole point of the
+    fix is that the union was too permissive, so a missing issuer must not
+    quietly become "trust everything the workspace ever registered"."""
+    store = FakeEndUserStore()
+    store.register(workspace_id=WORKSPACE_ID, allowed_origins=("https://acme.example",))
+    service = EndUserIdentityService(store, FakeKeySource(), session_ttl=timedelta(hours=8))
+
+    with pytest.raises(AppError) as excinfo:
+        await enforce_end_user_origin(
+            service, WORKSPACE_ID, None, Headers({"origin": "https://acme.example"})
+        )
+
+    assert excinfo.value.status == 403
+    assert excinfo.value.code == cross_origin_forbidden().code
 
 
 async def test_resolve_for_write_checks_origin_only_after_the_session_is_proven() -> None:

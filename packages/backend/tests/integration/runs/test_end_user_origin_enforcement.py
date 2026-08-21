@@ -26,8 +26,15 @@ from tiny_hermes.shared.config import Settings
 from ..conftest import VALID_SPEC
 
 ISSUER = "https://idp.acme.example"
+#: A second issuer in the same workspace, used only by
+#: `test_a_write_from_a_different_issuers_origin_in_the_same_workspace_is_refused`
+#: to prove finding 3's fix: the origin check is scoped to the issuer that
+#: minted *this* session, not unioned across every active issuer the
+#: workspace has registered.
+ISSUER_B = "https://idp-b.acme.example"
 CHANNEL = "web"
 ALLOWED_ORIGIN = "https://acme.example"
+ALLOWED_ORIGIN_B = "https://acme-b.example"
 ALIAS = "support-bot"
 
 
@@ -46,19 +53,22 @@ def _rsa_keypair() -> tuple[str, str]:
 
 
 RSA_PRIVATE_PEM, RSA_PUBLIC_PEM = _rsa_keypair()
+RSA_PRIVATE_PEM_B, RSA_PUBLIC_PEM_B = _rsa_keypair()
 
 
-def _credential(*, workspace_id: str, sub: str) -> str:
+def _credential(
+    *, workspace_id: str, sub: str, iss: str = ISSUER, key: str = RSA_PRIVATE_PEM
+) -> str:
     now = datetime.now(UTC)
     payload = {
-        "iss": ISSUER,
+        "iss": iss,
         "sub": sub,
         "aud": workspace_id,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=10)).timestamp()),
         "agents": [ALIAS],
     }
-    return jwt.encode(payload, RSA_PRIVATE_PEM, algorithm="RS256")
+    return jwt.encode(payload, key, algorithm="RS256")
 
 
 @pytest.fixture
@@ -87,6 +97,24 @@ def registered_issuer(client: TestClient, scope: dict[str, str]) -> None:
 
 
 @pytest.fixture
+def second_registered_issuer(client: TestClient, scope: dict[str, str]) -> None:
+    """A second, independent issuer in the *same* workspace, registering a
+    *different* origin — the shape finding 3's fix has to tell apart from
+    `registered_issuer`."""
+    created = client.post(
+        "/api/v1/channel-issuers",
+        headers=scope,
+        json={
+            "channel": CHANNEL,
+            "issuer": ISSUER_B,
+            "public_key": RSA_PUBLIC_PEM_B,
+            "allowed_origins": [ALLOWED_ORIGIN_B],
+        },
+    )
+    assert created.status_code == 201, created.text
+
+
+@pytest.fixture
 def open_agent(client: TestClient, scope: dict[str, str]) -> None:
     spec = {**VALID_SPEC, "end_user_access": {"enabled": True}}
     created = client.post(
@@ -108,8 +136,15 @@ def open_agent(client: TestClient, scope: dict[str, str]) -> None:
     assert published.status_code == 201, published.text
 
 
-def _sign_in(client: TestClient, workspace_id: str, sub: str = "zhang") -> None:
-    credential = _credential(workspace_id=workspace_id, sub=sub)
+def _sign_in(
+    client: TestClient,
+    workspace_id: str,
+    sub: str = "zhang",
+    *,
+    iss: str = ISSUER,
+    key: str = RSA_PRIVATE_PEM,
+) -> None:
+    credential = _credential(workspace_id=workspace_id, sub=sub, iss=iss, key=key)
     exchanged = client.post(
         "/api/v1/end-user/sessions",
         headers={
@@ -179,3 +214,38 @@ async def test_a_write_with_no_origin_or_referer_still_succeeds(
     created = client.post(f"/api/v1/end-user/agents/{ALIAS}/sessions", json={})
 
     assert created.status_code == 201, created.text
+
+
+async def test_a_write_from_a_different_issuers_origin_in_the_same_workspace_is_refused(
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+    registered_issuer: None,
+    second_registered_issuer: None,
+    open_agent: None,
+) -> None:
+    """Task-7 review finding 3, over real HTTP: two active issuers in one
+    workspace, each registering a different origin. A session minted
+    through issuer A's credential must not be usable from a page served at
+    issuer B's origin, even though issuer B is perfectly legitimate in this
+    same workspace — the old union-across-the-workspace check would have
+    let this through."""
+    del registered_issuer, second_registered_issuer, open_agent
+    _sign_in(client, workspace_id, "zhang", iss=ISSUER, key=RSA_PRIVATE_PEM)
+
+    refused = client.post(
+        f"/api/v1/end-user/agents/{ALIAS}/sessions",
+        json={},
+        headers={"Origin": ALLOWED_ORIGIN_B},
+    )
+
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["code"] == "end_user_origin_not_allowed"
+
+    # Sanity: this end user's own issuer's origin still works.
+    allowed = client.post(
+        f"/api/v1/end-user/agents/{ALIAS}/sessions",
+        json={},
+        headers={"Origin": ALLOWED_ORIGIN},
+    )
+    assert allowed.status_code == 201, allowed.text

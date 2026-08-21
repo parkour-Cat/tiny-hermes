@@ -132,12 +132,17 @@ class FakeEndUserStore:
     async def user_role(self, workspace_id: UUID, user_id: UUID) -> Role | None:
         return self.memberships.get((workspace_id, user_id))
 
-    async def active_allowed_origins(self, workspace_id: UUID) -> frozenset[str]:
-        origins: set[str] = set()
+    async def allowed_origins_for_issuer(
+        self, workspace_id: UUID, channel_issuer_id: UUID
+    ) -> frozenset[str]:
         for (w, _), record in self.issuers.items():
-            if w == workspace_id and record.status is ChannelIssuerStatus.ACTIVE:
-                origins.update(record.allowed_origins)
-        return frozenset(origins)
+            if (
+                w == workspace_id
+                and record.id == channel_issuer_id
+                and record.status is ChannelIssuerStatus.ACTIVE
+            ):
+                return frozenset(record.allowed_origins)
+        return frozenset()
 
     async def create_issuer(
         self,
@@ -193,9 +198,10 @@ class FakeEndUserStore:
         token_digest: str,
         expires_at: datetime,
         agents: Sequence[str],
+        channel_issuer_id: UUID,
     ) -> None:
         self.sessions[token_digest] = StoredEndUserSession(
-            end_user_id, workspace_id, tuple(agents)
+            end_user_id, workspace_id, tuple(agents), channel_issuer_id
         )
 
     async def find_session(
@@ -419,15 +425,31 @@ async def test_an_unregistered_issuer_still_pays_for_a_real_signature_check(
 
 async def test_authenticate_resolves_a_stored_session() -> None:
     store = FakeEndUserStore()
-    store.register()
+    registered = store.register()
     svc, _ = service(store)
     exchanged = await svc.exchange(rs256(claims()), WORKSPACE_ID, NOW, "req-1")
 
     result = await svc.authenticate(exchanged.session_token, NOW)
 
     assert result == EndUserSession(
-        exchanged.end_user_id, WORKSPACE_ID, ("support-bot",)
+        exchanged.end_user_id, WORKSPACE_ID, ("support-bot",), registered.id
     )
+
+
+async def test_exchanging_records_which_issuer_minted_the_session() -> None:
+    """Task-7 review finding 3: an origin check scoped to "the workspace's
+    whole union" instead of "this session's own issuer" was too permissive.
+    The fix starts here — the row `find_issuer` matched is the one recorded
+    on the session, not discarded the moment verification succeeds."""
+    store = FakeEndUserStore()
+    registered = store.register()
+    svc, _ = service(store)
+
+    exchanged = await svc.exchange(rs256(claims()), WORKSPACE_ID, NOW, "req-1")
+    result = await svc.authenticate(exchanged.session_token, NOW)
+
+    assert result is not None
+    assert result.channel_issuer_id == registered.id
 
 
 async def test_authenticate_rejects_an_unknown_token() -> None:
@@ -450,6 +472,38 @@ async def test_authenticate_rejects_a_revoked_session() -> None:
     result = await svc.authenticate(exchanged.session_token, NOW)
 
     assert result is None
+
+
+# -- origin enforcement, design §7, task-7 review finding 3 ---------------
+
+
+async def test_allowed_origins_for_issuer_is_scoped_to_that_issuer_alone() -> None:
+    """The fix: two issuers in one workspace no longer get unioned. A write
+    checked against issuer A's id must never see issuer B's origins, even
+    though both are active in the same workspace."""
+    store = FakeEndUserStore()
+    issuer_a = store.register(issuer="https://idp.a.example", allowed_origins=("https://a.example",))
+    issuer_b = store.register(issuer="https://idp.b.example", allowed_origins=("https://b.example",))
+    svc, _ = service(store)
+
+    assert await svc.allowed_origins_for_issuer(WORKSPACE_ID, issuer_a.id) == frozenset(
+        {"https://a.example"}
+    )
+    assert await svc.allowed_origins_for_issuer(WORKSPACE_ID, issuer_b.id) == frozenset(
+        {"https://b.example"}
+    )
+
+
+async def test_allowed_origins_for_issuer_is_empty_without_a_recorded_issuer() -> None:
+    """A session minted before `channel_issuer_id` existed carries `None`.
+    That comes back as no verifiable origins at all — not the old
+    workspace-wide union — so every cross-origin write on it is refused
+    until the end user exchanges a fresh credential."""
+    store = FakeEndUserStore()
+    store.register(allowed_origins=("https://acme.example",))
+    svc, _ = service(store)
+
+    assert await svc.allowed_origins_for_issuer(WORKSPACE_ID, None) == frozenset()
 
 
 # -- revocation, design §4.3 -----------------------------------------------
@@ -477,7 +531,7 @@ async def test_disabling_an_issuer_does_not_revoke_an_already_exchanged_session(
     """Design §4.3's stated trade-off: disabling stops *new* credentials, not
     live sessions. That is the one asserted here — not a bug to fix."""
     store = FakeEndUserStore()
-    store.register()
+    registered = store.register()
     svc, _ = service(store)
     exchanged = await svc.exchange(rs256(claims()), WORKSPACE_ID, NOW, "req-1")
 
@@ -485,7 +539,7 @@ async def test_disabling_an_issuer_does_not_revoke_an_already_exchanged_session(
         store.issuers[key] = replace(record, status=ChannelIssuerStatus.DISABLED)
 
     assert await svc.authenticate(exchanged.session_token, NOW) == EndUserSession(
-        exchanged.end_user_id, WORKSPACE_ID, ("support-bot",)
+        exchanged.end_user_id, WORKSPACE_ID, ("support-bot",), registered.id
     )
 
 
