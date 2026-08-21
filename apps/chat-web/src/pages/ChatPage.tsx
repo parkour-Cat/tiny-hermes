@@ -158,7 +158,7 @@ export function ChatPage() {
     },
     onError: (caught) => {
       setOptimistic(null);
-      setError(problemMessage(caught));
+      setError(problemMessage(caught, t));
     },
   });
 
@@ -172,7 +172,7 @@ export function ChatPage() {
     },
     onError: (caught) => {
       setConfirmingCancel(false);
-      setError(problemMessage(caught));
+      setError(problemMessage(caught, t));
     },
   });
 

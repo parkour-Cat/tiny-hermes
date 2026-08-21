@@ -34,7 +34,7 @@ export function ApprovalBanner({ approval }: { approval: ApprovalResponse }) {
       void queryClient.invalidateQueries({ queryKey: ["end-user-approvals"] });
       void queryClient.invalidateQueries({ queryKey: ["end-user-run"] });
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   return (
