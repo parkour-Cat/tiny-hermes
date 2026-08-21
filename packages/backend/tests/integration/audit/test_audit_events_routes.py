@@ -294,3 +294,48 @@ async def test_a_limit_above_the_ceiling_is_clamped_rather_than_refused(
 
     assert listed.status_code == 200, listed.text
     assert len(listed.json()["items"]) <= MAX_PAGE_SIZE
+
+
+async def test_a_redacted_page_says_so_rather_than_looking_like_a_full_one(
+    client: TestClient, scope: dict[str, str], workspace_id: str, engine: AsyncEngine
+) -> None:
+    """§5: the reader has to be able to tell that something was removed.
+
+    A redacted `context` comes back `{}` — and so does a row that never had
+    a `context` to begin with. Without the page saying which it is, the two
+    are the same bytes, and a viewer reading an incident trail cannot tell
+    "nothing was recorded here" from "you are not allowed to see what was
+    recorded here". Those lead to opposite conclusions, and the second one
+    is the one that makes somebody close an investigation early.
+    """
+    await _seed_user(engine, "View2", "view2@example.com")
+    invited = client.post(
+        f"/api/v1/workspaces/{workspace_id}/members",
+        headers=scope,
+        json={"email": "view2@example.com", "role": "viewer"},
+    )
+    assert invited.status_code == 201, invited.text
+    await _seed_audit_row(
+        engine,
+        workspace_id=workspace_id,
+        actor_id=uuid4(),
+        action="run.paused",
+        resource_type="run",
+        context={"reason": "held for review"},
+    )
+
+    # The admin's read goes first, deliberately: `_login` puts the viewer's
+    # session cookie into this client's *shared* jar, and a cookie outranks
+    # the `scope` headers — the same trap `_invite_and_login_developer`
+    # documents in this file. Asking as the admin afterwards would silently
+    # be asking as the viewer again, and the test would agree with itself.
+    admin = client.get("/api/v1/audit-events", headers=scope).json()
+    headers = {**_login(client, "view2@example.com"), "X-Workspace-Id": workspace_id}
+    viewer = client.get("/api/v1/audit-events", headers=headers).json()
+
+    assert admin["visibility"] == "full"
+    assert viewer["visibility"] == "redacted"
+    # And the thing the field exists to distinguish: same row, both readers,
+    # one of them told that something was taken out.
+    assert admin["items"][0]["context"] == {"reason": "held for review"}
+    assert viewer["items"][0]["context"] == {}
