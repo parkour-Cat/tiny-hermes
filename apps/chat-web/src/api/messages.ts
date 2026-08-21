@@ -8,6 +8,9 @@ const NAMED: Partial<Record<string, MessageKey>> = {
   state_version_conflict: "stateVersionConflict",
   forbidden: "forbidden",
   workspace_scope_mismatch: "forbidden",
+  approval_reason_required: "approvalReasonRequired",
+  approval_expired: "approvalExpired",
+  approval_already_decided: "approvalAlreadyDecided",
 };
 
 export function problemMessage(error: unknown): string {

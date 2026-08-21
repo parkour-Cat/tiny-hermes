@@ -86,6 +86,46 @@ export type RunResponse = {
   finished_at: string | null;
 };
 
+/**
+ * Plan §10: the end-user shape a chat surface reads for its own Run —
+ * `EndUserRunResponse` in `runs/presentation/end_user_routes.py`, narrower
+ * than the console's `RunResponse` above for the same reason task-7 review
+ * finding 4 records there. `state_version` is the one addition §10 made to
+ * that model: the number `cancelEndUserRun` (`runs/useEndUserRun.ts`) has
+ * to echo back as `expected_state_version`.
+ */
+export type EndUserRunResponse = {
+  id: string;
+  session_id: string;
+  status: string;
+  state_version: number;
+  finished_at: string | null;
+  queue: QueueResponse;
+};
+
+/**
+ * §10's other missing door: `ApprovalResponse` in
+ * `runs/presentation/approval_routes.py`, reused as-is by
+ * `GET /api/v1/end-user/approvals` and
+ * `POST /api/v1/end-user/approvals/{id}/decision` — the backend found
+ * nothing console-operational in it worth hiding from the end user an
+ * approval already belongs to (see that route's own docstring).
+ */
+export type ApprovalResponse = {
+  id: string;
+  run_id: string;
+  approval_type: string;
+  status: string;
+  tool: string;
+  document: Record<string, unknown>;
+  required_permission: string | null;
+  requested_by: string;
+  expires_at: string;
+  decided_by?: string | null;
+  decided_at?: string | null;
+  decision_reason?: string | null;
+};
+
 export type RunEventFrame = {
   sequence: number;
   event_type: string;

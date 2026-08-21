@@ -797,6 +797,24 @@ button:disabled {
   background: #f3e0d2;
 }
 
+.approval-banner .approval-tool {
+  font-weight: 600;
+  margin: 4px 0 8px;
+}
+
+.approval-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.approval-reject textarea {
+  width: 100%;
+  min-height: 60px;
+  margin-top: 6px;
+  resize: vertical;
+}
+
 .chat-scroll {
   flex: 1;
   min-height: 0;
