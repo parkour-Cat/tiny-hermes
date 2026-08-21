@@ -194,12 +194,17 @@ async def test_erasure_removes_what_export_could_see(
     assert erased.status_code == 200, erased.text
     assert erased.json()["memories"] == 1
 
-    exported = client.get(
-        "/api/v1/end-user/subjects/me/export",
-        params={"agent_id": published_end_user_agent},
-    )
-    assert exported.status_code == 200, exported.text
-    assert exported.json()["memories"] == []
+    # Not a second export: finding 2 means the cookie that just erased itself
+    # is revoked in the same call, so reusing it here would prove nothing
+    # about the memory — it would just prove the cookie is dead (which the
+    # self-service suite's own erasure test already covers). What "removed"
+    # means for the memory is asked of the table directly.
+    async with engine.connect() as connection:
+        remaining = await connection.scalar(
+            text("SELECT count(*) FROM memories WHERE subject_id = :id"),
+            {"id": end_user_id},
+        )
+    assert remaining == 0
 
 
 async def test_erasure_reaches_the_identifying_row_the_session_and_a_returning_credential(
@@ -259,9 +264,7 @@ async def test_erasure_reaches_the_identifying_row_the_session_and_a_returning_c
     assert live_sessions == 0
 
     # The cookie the erasing end user is still holding no longer works.
-    still_holding_the_cookie = client.get(
-        "/api/v1/end-user/subjects/me/export", params={"agent_id": None}
-    )
+    still_holding_the_cookie = client.get("/api/v1/end-user/subjects/me/export")
     assert still_holding_the_cookie.status_code == 401
 
     # And the same enterprise `sub` is refused, not resurrected as a new

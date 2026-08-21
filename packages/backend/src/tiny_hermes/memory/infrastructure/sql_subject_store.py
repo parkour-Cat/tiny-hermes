@@ -1,10 +1,21 @@
 """Reading, correcting and erasing what belongs to one subject.
 
-The erasure is the part worth reading. It deletes rather than marks, in one
-transaction, in the order the foreign keys allow: artifacts and messages before
-the sessions that own them, memories on their own. Nothing here is a flag —
-after this runs there is no row a later query could find, which is the whole
-difference between a deletion and a promise of one.
+The erasure is the part worth reading. Content deletes rather than marks, in
+one transaction, in the order the foreign keys allow: approvals before the
+Runs they answer, artifacts and messages before the sessions that own them,
+memories on their own, the Session's own head pointer cleared before any of
+it — a Run in `waiting_approval` or `paused` never releases that pointer on
+its own, so erasure cannot wait for one to. After this runs there is no
+content row a later query could find, which is the whole difference between
+a deletion and a promise of one.
+
+An end user's own *identity* is the one exception, and by design (§3) rather
+than by omission: `end_users` carries no identifying data to begin with, so
+erasing one is `erased_at` on that row and `profile` cleared on the
+`external_identities` row mapped to it — see `_erase_end_user` for why that
+row is updated rather than deleted. `end_user_sessions` does delete in
+effect — every live row is revoked — because a cookie that outlived its own
+erasure would be the one place this promise leaked.
 
 A correction writes a second row and rejects the first, so a reviewer can see
 that a memory was changed and what it used to say. The audit trail carries the
@@ -20,6 +31,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.artifacts.infrastructure.tables import ArtifactRow
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
+from tiny_hermes.identity.infrastructure.end_user_session_tables import EndUserSessionRow
+from tiny_hermes.identity.infrastructure.end_user_tables import (
+    EndUserRow,
+    ExternalIdentityRow,
+)
 from tiny_hermes.memory.application.service import MemoryRecord
 from tiny_hermes.memory.application.subject_service import ErasureReport
 from tiny_hermes.memory.domain.scope import MemoryKind, MemoryScope, MemoryStatus
@@ -146,13 +162,15 @@ class SqlSubjectStore:
     async def erase(
         self, workspace_id: UUID, subject: CallerIdentity
     ) -> ErasureReport:
-        """Delete this subject's memories, sessions, messages and files.
+        """Delete this subject's memories, sessions, messages, Runs and files.
 
         In the order the foreign keys allow, and counted before each delete so
-        the audit line can say what went. Runs are left: a Run is the platform's
-        record that work happened and is referenced by budgets and leases, while
-        the *content* — what was said, and the files it produced — is what this
-        removes. Their session pointer goes with the session.
+        the audit line can say what went. A Run belongs to exactly one
+        Session and carries no content of its own once its messages and
+        artifacts are gone, so nothing is left behind by leaving it out of
+        this deletion — see the module docstring for why its Session's head
+        pointer and its own `approvals` row have to go first rather than
+        being assumed already clear.
         """
         sessions = list(await self.sessions_of(workspace_id, subject))
         memories = await self._count(
@@ -223,12 +241,65 @@ class SqlSubjectStore:
             await self._session.execute(
                 delete(SessionRow).where(SessionRow.id.in_(sessions))
             )
+        if subject.caller_type is CallerType.END_USER:
+            await self._erase_end_user(workspace_id, subject.caller_id)
         await self._session.flush()
         return ErasureReport(
             memories=memories,
             sessions=len(sessions),
             messages=messages,
             artifacts=artifacts,
+        )
+
+    async def _erase_end_user(self, workspace_id: UUID, end_user_id: UUID) -> None:
+        """The third subject's own erasure, design §3's own promise made
+        good: `end_users` carries no identifying data by default, so what
+        this reaches is `erased_at` on the one row and `profile` on the
+        `external_identities` row that maps to it — "the erasure only needs
+        to clear one column of one table, not chase the subject everywhere"
+        (design §3). Nothing else here holds a subject's identity to begin
+        with.
+
+        `external_identities` is **updated, not deleted**. That is the
+        decision the review asked this module to make explicit: a subject
+        who returns with the same enterprise credential after being erased
+        is *refused*, never handed a fresh `EndUser` — and refusing them
+        depends on `upsert_external_identity` finding this same row again,
+        now carrying `erased_at`, so `EndUserIdentityService.exchange`'s
+        guard has something to check against. Deleting the row would make
+        that guard permanently unreachable and the next credential exchange
+        would silently mint a new subject instead — the resurrection this
+        finding exists to close. `profile` is the field design §3 names as
+        where identifying detail actually lands, so it is what gets cleared;
+        `external_user_id` and `channel` are the mapping itself, and have to
+        survive for the refusal to have anything to refuse.
+
+        `end_user_sessions` is revoked outright: an erased subject's own
+        cookie must stop working in the same request that erases them, not
+        keep authenticating until it expires on its own.
+        """
+        now = datetime.now(UTC)
+        await self._session.execute(
+            update(EndUserRow)
+            .where(EndUserRow.id == end_user_id, EndUserRow.workspace_id == workspace_id)
+            .values(erased_at=now)
+        )
+        await self._session.execute(
+            update(ExternalIdentityRow)
+            .where(
+                ExternalIdentityRow.end_user_id == end_user_id,
+                ExternalIdentityRow.workspace_id == workspace_id,
+            )
+            .values(profile=None)
+        )
+        await self._session.execute(
+            update(EndUserSessionRow)
+            .where(
+                EndUserSessionRow.end_user_id == end_user_id,
+                EndUserSessionRow.workspace_id == workspace_id,
+                EndUserSessionRow.revoked_at.is_(None),
+            )
+            .values(revoked_at=now)
         )
 
     async def _count(self, query: Select[tuple[int]]) -> int:
