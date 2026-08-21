@@ -48,7 +48,8 @@ state-changing requests, and a read that only ever returns this end user's
 own data to them is not the shape that check defends against.
 """
 
-from typing import Annotated
+from datetime import datetime
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Cookie, Depends, Header, Request, Response, status
@@ -69,14 +70,9 @@ from tiny_hermes.identity.presentation.end_user_dependencies import (
     resolve_end_user_caller_for_write,
 )
 from tiny_hermes.runs.application.service import RunCoordination, RunCoordinationError
-from tiny_hermes.runs.domain.models import SessionMode
+from tiny_hermes.runs.domain.models import CanonicalMessage, RunSnapshot, SessionMode
 from tiny_hermes.runs.presentation.errors import as_app_error
-from tiny_hermes.runs.presentation.routes import (
-    REPLAYED_HEADER,
-    RunResponse,
-    SessionMessageResponse,
-    SessionResponse,
-)
+from tiny_hermes.runs.presentation.routes import REPLAYED_HEADER, QueueResponse, SessionResponse
 from tiny_hermes.shared.errors import AppError
 
 EndUserSessionCookie = Annotated[str | None, Cookie(alias=END_USER_SESSION_COOKIE)]
@@ -89,6 +85,50 @@ class CreateEndUserSessionRequest(BaseModel):
 
 class CreateEndUserRunRequest(BaseModel):
     input: str = Field(min_length=1, max_length=32_768)
+
+
+class EndUserRunResponse(BaseModel):
+    """Task-7 review finding 4: the console's own `RunResponse` carries the
+    platform's operational document for a Run — budget consumption,
+    checkpoint replay/effect/usage internals, a goal round's outcome — none
+    of which is this surface's business to hand over. An end user is
+    somebody else's employee, not a console operator, and reusing the
+    console's shape verbatim leaked those fields to them by omission of a
+    decision, not because anyone chose to share them.
+
+    This carries only what `ChatPage.tsx` actually reads: which Run this
+    is, which Session it belongs to, whether it is still going, and where
+    it sits in the queue (`queue.status === "session_blocked"` is what
+    drives the composer's "still busy" banner).
+    """
+
+    id: UUID
+    session_id: UUID
+    status: str
+    finished_at: datetime | None
+    queue: QueueResponse
+
+    @classmethod
+    def from_domain(cls, run: RunSnapshot) -> "EndUserRunResponse":
+        return cls.model_validate(run.document())
+
+
+class EndUserSessionMessageResponse(BaseModel):
+    """Kept apart from the console's `SessionMessageResponse`, even though
+    the two carry the same fields today (finding 4 of the task-7 review):
+    a console-only field added to that model later — the way `author`
+    itself was added to it — should need a deliberate decision to widen
+    this one too, not reach an end user by simply being on the model this
+    route happened to import.
+    """
+
+    role: str
+    parts: list[dict[str, Any]]
+    author: str | None = None
+
+    @classmethod
+    def from_domain(cls, message: CanonicalMessage) -> "EndUserSessionMessageResponse":
+        return cls.model_validate(message.document())
 
 
 def end_user_run_router(resources: ApplicationResources) -> APIRouter:
@@ -128,7 +168,7 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
 
     @router.post(
         "/sessions/{session_id}/runs",
-        response_model=RunResponse,
+        response_model=EndUserRunResponse,
         status_code=status.HTTP_201_CREATED,
     )
     async def create_run(  # pyright: ignore[reportUnusedFunction]
@@ -142,7 +182,7 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         idempotency_key: IdempotencyHeader = None,
         end_user_session: EndUserSessionCookie = None,
-    ) -> RunResponse:
+    ) -> EndUserRunResponse:
         caller = await resolve_end_user_caller_for_write(
             identity, end_user_session, request.headers
         )
@@ -163,11 +203,11 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
         else:
             response.status_code = status.HTTP_201_CREATED
             await resources.wake_up_notifier().publish(caller.workspace_id, accepted.run_id)
-        return RunResponse.model_validate(accepted.document)
+        return EndUserRunResponse.model_validate(accepted.document)
 
     @router.get(
         "/sessions/{session_id}/messages",
-        response_model=list[SessionMessageResponse],
+        response_model=list[EndUserSessionMessageResponse],
     )
     async def list_session_messages(  # pyright: ignore[reportUnusedFunction]
         session_id: UUID,
@@ -176,7 +216,7 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
         ],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         end_user_session: EndUserSessionCookie = None,
-    ) -> list[SessionMessageResponse]:
+    ) -> list[EndUserSessionMessageResponse]:
         caller = await resolve_end_user_caller(identity, end_user_session)
         try:
             messages = await runs.read_end_user_session_messages(
@@ -184,9 +224,9 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
             )
         except RunCoordinationError as error:
             raise as_app_error(error) from error
-        return [SessionMessageResponse.from_domain(item) for item in messages]
+        return [EndUserSessionMessageResponse.from_domain(item) for item in messages]
 
-    @router.get("/runs/{run_id}", response_model=RunResponse)
+    @router.get("/runs/{run_id}", response_model=EndUserRunResponse)
     async def get_run(  # pyright: ignore[reportUnusedFunction]
         run_id: UUID,
         identity: Annotated[
@@ -194,13 +234,13 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
         ],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         end_user_session: EndUserSessionCookie = None,
-    ) -> RunResponse:
+    ) -> EndUserRunResponse:
         caller = await resolve_end_user_caller(identity, end_user_session)
         try:
             found = await runs.get_end_user_run(caller.workspace_id, caller.end_user_id, run_id)
         except RunCoordinationError as error:
             raise as_app_error(error) from error
-        return RunResponse.from_domain(found)
+        return EndUserRunResponse.from_domain(found)
 
     return router
 
