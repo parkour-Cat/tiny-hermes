@@ -30,7 +30,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [lost, setLost] = useState(false);
 
   useEffect(() => {
-    const credential = params.get("credential");
+    // The credential lives in the URL fragment (`#credential=...`), never
+    // the query string: a fragment is part of the URL the browser keeps to
+    // itself — it is never sent in the HTTP request line, so nginx's
+    // access log (or any proxy in between) has nothing to record. `?
+    // workspace=&agent=` stay in the query because neither is a secret an
+    // enterprise-signed 15-minute bearer credential is.
+    const fragment = window.location.hash;
+    const credential = fragment.startsWith("#")
+      ? new URLSearchParams(fragment.slice(1)).get("credential")
+      : null;
     const workspace = params.get("workspace");
     const agent = params.get("agent");
     if (credential === null || workspace === null || agent === null) {
