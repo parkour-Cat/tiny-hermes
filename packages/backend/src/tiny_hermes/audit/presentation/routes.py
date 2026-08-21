@@ -122,11 +122,24 @@ class RedactedAuditEventResponse(BaseModel):
 class AuditEventsPage(BaseModel):
     items: list[AuditEventResponse]
     has_more: bool
+    #: Which of §4.6's five ranges produced this page. It is on the wire
+    #: because the two page shapes are otherwise indistinguishable as JSON —
+    #: both are `{items, has_more}`, and a redacted `context` is `{}`, which
+    #: is exactly what a row that never carried one looks like. Without this
+    #: field a reader cannot tell "nothing was recorded" from "you may not
+    #: see what was recorded", and those two lead to opposite conclusions.
+    #: A console that redacted silently would be handing someone incomplete
+    #: evidence with no sign that it was incomplete.
+    visibility: AuditVisibility
 
 
 class RedactedAuditEventsPage(BaseModel):
     items: list[RedactedAuditEventResponse]
     has_more: bool
+    #: See `AuditEventsPage.visibility`. Always `REDACTED` here — carried
+    #: rather than assumed so that one client-side check works against
+    #: either shape.
+    visibility: AuditVisibility
 
 
 def audit_router(resources: ApplicationResources) -> APIRouter:
@@ -184,10 +197,12 @@ def audit_router(resources: ApplicationResources) -> APIRouter:
             return RedactedAuditEventsPage(
                 items=[RedactedAuditEventResponse.from_domain(item) for item in result.items],
                 has_more=result.has_more,
+                visibility=result.visibility,
             )
         return AuditEventsPage(
             items=[AuditEventResponse.from_domain(item) for item in result.items],
             has_more=result.has_more,
+            visibility=result.visibility,
         )
 
     return router
