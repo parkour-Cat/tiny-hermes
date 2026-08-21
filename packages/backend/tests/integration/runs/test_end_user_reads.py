@@ -178,6 +178,41 @@ async def test_an_end_user_reads_their_own_run(
     assert read.json()["session_id"] == session_id
 
 
+#: Task-9 review finding F: `POST /end-user/agents/{alias}/sessions` returned
+#: the console's own `SessionResponse` verbatim — `caller_type`, `caller_id`,
+#: `head_run_id`, `next_run_sequence`, `next_message_sequence` are the
+#: platform's own Session bookkeeping, the same kind of leak task-7 review
+#: finding 4 already named for a Run and this task's own `EndUserRunResponse`
+#: was narrowed to fix. `ChatPage.tsx` reads exactly one field off this
+#: response — `created.id`, to start talking through it — so that is what
+#: the narrowed model must carry and nothing past it.
+_CONSOLE_ONLY_SESSION_FIELDS = {
+    "caller_type",
+    "caller_id",
+    "head_run_id",
+    "next_run_sequence",
+    "next_message_sequence",
+}
+
+
+async def test_starting_a_session_does_not_leak_the_consoles_own_bookkeeping(
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+    registered_issuer: None,
+    published_agent: None,
+) -> None:
+    del registered_issuer, published_agent
+    _sign_in(client, workspace_id, "zhang")
+
+    created = client.post(f"/api/v1/end-user/agents/{ALIAS}/sessions", json={})
+
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert not (_CONSOLE_ONLY_SESSION_FIELDS & set(body))
+    assert "id" in body
+
+
 #: Task-7 review finding 4: the console's `RunResponse` is the platform's
 #: own operational document — budget consumption, checkpoint replay/
 #: effect/usage internals, a goal round's outcome — none of which belongs
