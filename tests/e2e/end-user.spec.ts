@@ -382,7 +382,14 @@ test("an end user hits a Run that stops for their own confirmation, sees it, and
   await expect(chatPage.getByText("这次运行需要你确认才能继续")).toBeVisible({
     timeout: 120_000,
   });
-  await expect(chatPage.getByText("http.health.pokeLiveness")).toBeVisible();
+  // Scoped to the banner, not the page: the Run input *is* the operation
+  // name, so it is also sitting in this person's own message bubble a few
+  // lines up. An unscoped match finds both and proves neither — what is
+  // worth asserting is that the banner itself says which write is waiting,
+  // since that is the only thing telling them what they are agreeing to.
+  await expect(
+    chatPage.locator(".approval-banner .approval-tool"),
+  ).toHaveText("http.health.pokeLiveness");
 
   await chatPage.getByRole("button", { name: "同意", exact: true }).click();
 
