@@ -30,7 +30,7 @@ from uuid import UUID
 
 from tiny_hermes.memory.application.service import MemoryRecord, cleaned_body
 from tiny_hermes.memory.domain.scope import MemoryScope, MemoryStatus
-from tiny_hermes.runs.domain.models import CallerIdentity
+from tiny_hermes.runs.domain.models import CallerIdentity, CallerType
 from tiny_hermes.tenancy.domain.models import Actor, Role
 
 #: Who may act on somebody else's behalf, and only with an audit line.
@@ -116,6 +116,11 @@ class SubjectStore(Protocol):
         *,
         workspace_id: UUID,
         actor_id: UUID,
+        # Task-9 review finding C: no default. A caller that forgets to pass
+        # this is a caller that has not decided who acted, and the fix for
+        # that is a type error here, not a silent "user" the way the old
+        # hardcoded value was.
+        actor_type: str,
         action: str,
         resource_id: UUID,
         request_id: str,
@@ -192,12 +197,12 @@ class SubjectService:
         The old row is rejected rather than overwritten — see the module
         docstring. What comes back is the new one.
         """
-        owner = await self._owned(actor, workspace_id, memory_id, request_id)
-        del owner
+        _owner, actor_type = await self._owned(actor, workspace_id, memory_id, request_id)
         corrected = await self.store.replace(memory_id, cleaned_body(body), _now())
         await self.store.append_audit(
             workspace_id=workspace_id,
             actor_id=actor.id,
+            actor_type=actor_type.value,
             action="memory.corrected",
             resource_id=memory_id,
             request_id=request_id,
@@ -208,7 +213,7 @@ class SubjectService:
         self, actor: Actor, workspace_id: UUID, memory_id: UUID, request_id: str
     ) -> MemoryRecord:
         """Take one memory out of use, on the subject's say-so."""
-        await self._owned(actor, workspace_id, memory_id, request_id)
+        _owner, actor_type = await self._owned(actor, workspace_id, memory_id, request_id)
         removed = await self.store.set_status(
             memory_id, MemoryStatus.REJECTED, _now()
         )
@@ -217,6 +222,7 @@ class SubjectService:
         await self.store.append_audit(
             workspace_id=workspace_id,
             actor_id=actor.id,
+            actor_type=actor_type.value,
             action="memory.forgotten",
             resource_id=memory_id,
             request_id=request_id,
@@ -236,11 +242,14 @@ class SubjectService:
         only. It is the whole reason an erasure is distinguishable from an
         erasure that never happened.
         """
-        await self._require_self_or_steward(actor, workspace_id, subject, request_id)
+        actor_type = await self._require_self_or_steward(
+            actor, workspace_id, subject, request_id
+        )
         report = await self.store.erase(workspace_id, subject)
         await self.store.append_audit(
             workspace_id=workspace_id,
             actor_id=actor.id,
+            actor_type=actor_type.value,
             action="subject.erased",
             resource_id=subject.caller_id,
             request_id=request_id,
@@ -256,7 +265,7 @@ class SubjectService:
 
     async def _owned(
         self, actor: Actor, workspace_id: UUID, memory_id: UUID, request_id: str
-    ) -> CallerIdentity:
+    ) -> tuple[CallerIdentity, CallerType]:
         record = await self.store.get(memory_id)
         if record is None or record.workspace_id != workspace_id:
             raise UnknownSubjectMemory
@@ -265,8 +274,8 @@ class SubjectService:
             # Shared memory is the Agent's, not anybody's. §14.2 gives it two
             # doors and neither of them is a subject correcting their own.
             raise ForbiddenSubjectAction
-        await self._require_self_or_steward(actor, workspace_id, owner, request_id)
-        return owner
+        actor_type = await self._require_self_or_steward(actor, workspace_id, owner, request_id)
+        return owner, actor_type
 
     async def _require_self_or_steward(
         self,
@@ -274,25 +283,51 @@ class SubjectService:
         workspace_id: UUID,
         subject: CallerIdentity,
         request_id: str,
-    ) -> None:
+    ) -> CallerType:
+        """Approves the action and returns the type the caller actually
+        acted as — `end_user` or `user` — for the action's own audit line to
+        carry (task-9 review finding C).
+
+        Task-9 review finding D: "self" used to mean `actor.id ==
+        subject.caller_id` alone, a bare id comparison that happens to be
+        safe today only because `end_user_subject_routes.py` never hands
+        this an end-user-typed `Actor` next to a `CallerType.USER` subject
+        or vice versa — not because the comparison itself rules that out.
+        `actor.is_end_user` (mirroring `is_service_account`, both facts
+        about which kind of subject an `Actor` stands in for) is compared
+        alongside the id now, so agreement on type is required, not assumed.
+        A steward can never take the self branch by construction: an end
+        user's id never resolves a workspace `Role` (`end_users` and
+        `memberships.user_id` are different namespaces), so `role` below is
+        always `None` for one, and `actor.is_platform_admin` is always
+        `False` — the steward branch stays exactly as unreachable for an end
+        user as it always should have been, now for a structural reason
+        instead of a coincidental one.
+        """
         if actor.is_service_account:
             # §4.6 gives this row to people. A key acting on somebody's private
             # data is what the row exists to prevent.
             raise ForbiddenSubjectAction
-        if actor.id == subject.caller_id:
-            return
+        caller_type = CallerType.END_USER if actor.is_end_user else CallerType.USER
+        if caller_type is subject.caller_type and actor.id == subject.caller_id:
+            return caller_type
         role = await self.store.user_role(workspace_id, actor.id)
         if role in STEWARDS or actor.is_platform_admin:
             # Acting for somebody else is allowed and recorded. The action's own
-            # audit line follows; this one says whose behalf it was on.
+            # audit line follows; this one says whose behalf it was on. Always
+            # `caller_type` here too: reaching this branch already proved the
+            # actor is not the subject, and a steward is always a real
+            # console user (see the docstring above), so this and the
+            # action's own line agree without needing a second computation.
             await self.store.append_audit(
                 workspace_id=workspace_id,
                 actor_id=actor.id,
+                actor_type=caller_type.value,
                 action="subject.acted_on_behalf",
                 resource_id=subject.caller_id,
                 request_id=request_id,
             )
-            return
+            return caller_type
         raise ForbiddenSubjectAction
 
 

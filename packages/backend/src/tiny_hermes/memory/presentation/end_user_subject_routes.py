@@ -192,13 +192,16 @@ def end_user_subject_router(resources: ApplicationResources) -> APIRouter:
 def _self(end_user_id: UUID) -> tuple[Actor, CallerIdentity]:
     """The one pair every route above needs: an `Actor` whose id is this end
     user's own, and the matching `CallerIdentity` subject. `SubjectService.
-    _require_self_or_steward` approves `actor.id == subject.caller_id` before
-    it ever asks about roles, so this alone is what makes every call here
-    "acting on my own data" rather than "acting on somebody else's" — there is
-    no steward path through this router because there is no path to give it
-    somebody else's id.
+    _require_self_or_steward` approves an actor acting on themselves before
+    it ever asks about roles — `is_end_user=True` paired with `caller_type=
+    CallerType.END_USER` below, both halves compared together (task-9
+    review finding D: an id match alone was never enough to mean "self",
+    only enough to coincide with it) — so this alone is what makes every
+    call here "acting on my own data" rather than "acting on somebody
+    else's" — there is no steward path through this router because there is
+    no path to give it somebody else's id.
     """
-    actor = Actor(end_user_id, is_platform_admin=False)
+    actor = Actor(end_user_id, is_platform_admin=False, is_end_user=True)
     subject = CallerIdentity(caller_type=CallerType.END_USER, caller_id=end_user_id)
     return actor, subject
 

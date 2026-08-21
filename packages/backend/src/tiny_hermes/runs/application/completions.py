@@ -33,6 +33,7 @@ from tiny_hermes.runs.application.service import (
     UnknownSession,
 )
 from tiny_hermes.runs.domain.models import (
+    CallerType,
     DeliveryMode,
     PauseReason,
     RunSnapshot,
@@ -325,9 +326,21 @@ async def _existing_or_none(
         raise CompletionsError(
             404, "session_not_found", "No such session exists."
         ) from error
+    # Task-9 review finding D: `found.caller.caller_id != actor.id` alone
+    # used to be the whole ownership check — an id match with no type
+    # attached. This caller can only ever be a service account or a
+    # workspace member (Chat Completions has no end-user entry point), so
+    # the type it must have created the Session as is exactly what
+    # `_caller` (`runs/application/service.py`) would compute for it; a
+    # Session whose own `caller_type` disagrees is not "this same caller
+    # continuing", even if its `caller_id` happens to match.
+    expected_caller_type = (
+        CallerType.SERVICE_ACCOUNT if actor.is_service_account else CallerType.USER
+    )
     if (
         found.session_mode is not SessionMode.PERSISTENT
         or found.agent_id != agent_id
+        or found.caller.caller_type is not expected_caller_type
         or found.caller.caller_id != actor.id
     ):
         raise CompletionsError(404, "session_not_found", "No such session exists.")

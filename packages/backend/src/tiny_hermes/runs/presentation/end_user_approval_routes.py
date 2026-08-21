@@ -84,7 +84,12 @@ def end_user_approval_router(resources: ApplicationResources) -> APIRouter:
                 # user's id can never appear in either. `may_decide` is what
                 # actually grants this identity a `user_confirmation` — by
                 # matching `requested_by`, not by anything asserted here.
-                Actor(caller.end_user_id, is_platform_admin=False),
+                # `is_end_user=True` (task-9 review finding D) is what lets
+                # `_decider` tell "this actor really is the Run's own end
+                # user" apart from "this actor's id merely equals it" — the
+                # latter used to be the whole check, which would have handed
+                # a console `Actor` the same confirmation on an id collision.
+                Actor(caller.end_user_id, is_platform_admin=False, is_end_user=True),
                 caller.workspace_id,
                 approval_id,
                 ApprovalDecision(payload.decision),

@@ -333,16 +333,25 @@ class SqlSubjectStore:
         *,
         workspace_id: UUID,
         actor_id: UUID,
+        actor_type: str,
         action: str,
         resource_id: UUID,
         request_id: str,
         context: dict[str, str] | None = None,
     ) -> None:
+        # Task-9 review finding C: this used to hardcode "user" regardless of
+        # who actually acted. For an end user erasing their own data,
+        # `actor_id` is a key into `end_users`, not `users` — a hardcoded
+        # "user" here pointed an auditor at the wrong table, or worse, a
+        # different subject that happens to share the id. `SubjectService`
+        # is now the one place that decides which type actually applies
+        # (`_require_self_or_steward`'s own docstring), and this store
+        # writes whatever it is told rather than re-deciding.
         self._session.add(
             AuditEventRow(
                 id=uuid4(),
                 workspace_id=workspace_id,
-                actor_type="user",
+                actor_type=actor_type,
                 actor_id=actor_id,
                 action=action,
                 resource_type="subject",
