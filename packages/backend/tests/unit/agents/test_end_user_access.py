@@ -140,3 +140,68 @@ async def test_an_alias_from_another_workspace_is_never_resolved() -> None:
 
     with pytest.raises(EndUserAccessGateClosed):
         await catalog.resolve_end_user_agent(other_workspace_id, alias, (alias,))
+
+
+# -- resolve_end_user_agent_by_id: the same two gates, keyed by the id a ----
+# -- Session already carries rather than an alias a client typed ------------
+#
+# Task-9 review finding A: `create_run` had no way to re-evaluate either gate
+# on submission, only `create_session` did, so closing `end_user_access` or
+# letting an Agent's published version go away had no effect on a Session
+# already holding a cookie for up to the 8-hour session TTL. The fix reuses
+# this exact two-gate evaluation on every submission — keyed by `agent_id`
+# because a Run submission has no alias to resolve, only the Session's own
+# `agent_id` — through the same `_gate_check` `resolve_end_user_agent` uses,
+# so the two can never drift apart.
+
+
+async def test_by_id_gate_open_and_listed_is_permitted() -> None:
+    catalog, store, workspace_id, alias = await _published(end_user_access_enabled=True)
+    agent = await store.get_agent(workspace_id, next(iter(store.agents)))
+    assert agent is not None
+
+    found_agent, found_version = await catalog.resolve_end_user_agent_by_id(
+        workspace_id, agent.id, (alias,)
+    )
+
+    assert found_agent.alias == alias
+    assert found_version.version_number == 1
+
+
+async def test_by_id_gate_closed_is_refused_and_names_the_alias() -> None:
+    catalog, store, workspace_id, alias = await _published(end_user_access_enabled=False)
+    agent = await store.get_agent(workspace_id, next(iter(store.agents)))
+    assert agent is not None
+
+    with pytest.raises(EndUserAccessGateClosed) as excinfo:
+        await catalog.resolve_end_user_agent_by_id(workspace_id, agent.id, (alias,))
+
+    assert excinfo.value.alias == alias
+
+
+async def test_by_id_no_longer_listed_is_refused_as_not_assigned() -> None:
+    """The session-snapshot half of the finding: the credential's own
+    `agents` claim no longer names this Agent's alias — the same as if the
+    enterprise had never delegated it, evaluated again rather than trusted
+    from the moment the Session was created."""
+    catalog, store, workspace_id, _alias = await _published(end_user_access_enabled=True)
+    agent = await store.get_agent(workspace_id, next(iter(store.agents)))
+    assert agent is not None
+
+    with pytest.raises(EndUserAccessNotAssigned):
+        await catalog.resolve_end_user_agent_by_id(workspace_id, agent.id, ())
+
+
+async def test_by_id_matches_by_alias_resolution_for_every_combination() -> None:
+    """The two entry points must never disagree: whatever
+    `resolve_end_user_agent` decides for an alias, `resolve_end_user_agent_by_id`
+    decides the same way for that alias's own Agent id — that agreement is
+    the whole point of routing both through one shared gate check."""
+    catalog, store, workspace_id, alias = await _published(end_user_access_enabled=True)
+    agent = await store.get_agent(workspace_id, next(iter(store.agents)))
+    assert agent is not None
+
+    by_alias = await catalog.resolve_end_user_agent(workspace_id, alias, (alias,))
+    by_id = await catalog.resolve_end_user_agent_by_id(workspace_id, agent.id, (alias,))
+
+    assert by_alias == by_id
