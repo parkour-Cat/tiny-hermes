@@ -238,6 +238,23 @@ flowchart LR
   写明这一点。等 M3 的终端用户入口把生产者接上，这一句才第一次被真正检验。
   **刻意没有为它补测试**：那个状态今天没有真实到达路径，要伪造一行审批记录
   才能让它发生，那样这一格会变绿而掩盖真问题。
+
+  **更新（2026-08-21，终端用户入口 §5）：上面这段现在描述的是历史，不是现状。**
+  `USER_CONFIRMATION` 有生产者了——终端用户发起的 Run 遇到需要本人确认的写
+  操作时，`dcd94be`（`runs: USER_CONFIRMATION gets its first producer`）开出
+  一个 `approval_type=user_confirmation` 而不是 `governance_approval`。光有
+  生产者比没有更危险：审批路由原本是 `_CONSOLE_ONLY`，会把终端用户的 cookie
+  一并 403 掉，那样这个确认属于谁、谁就永远答不了，Run 一路挂到过期。
+  `a23f748`（`runs: an end user's own door to answer a user_confirmation`）
+  补上了终端用户自己的应答端点，且只能答自己发起的、`approval_type=
+  user_confirmation` 的那一条；治理审批对终端用户依旧永远 403，没有例外。
+  两条一起，第四句才第一次被真正检验，而不再是「今天没人能碰到这条路径，
+  所以它没说谎」这种绿。测试见
+  `tests/integration/runs/test_end_user_approvals.py`（生产者开
+  `user_confirmation` 而非 `governance_approval`；终端用户答自己的确认；
+  治理审批对终端用户依旧 403）与
+  `tests/unit/runs/test_approval.py::test_an_administrator_may_not_answer_a_user_confirmation`。
+  验收记录：`docs/superpowers/verification/2026-08-21-end-user-entry.md`。
 - 全新 Linux Docker 主机可按文档启动，完成一次多轮 Goal 任务与一次并行子 Agent 委派。
   **状态（2026-08-20）：已完成。** 一台什么都没有的 Ubuntu 26.04，按
   `docs/development.md` 装依赖、克隆、`docker compose up -d --build --wait`，
