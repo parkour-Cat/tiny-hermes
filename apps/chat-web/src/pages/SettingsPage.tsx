@@ -1,114 +1,153 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 
+import { api } from "../api/client";
 import { problemMessage } from "../api/messages";
-import { useAuth } from "../auth/AuthProvider";
-import type { ListedAgent } from "../chat/published";
-import { usePublishedAgents } from "../chat/usePublishedAgents";
-import {
-  loadDefaultAgent,
-  sameDefaultAgent,
-  saveDefaultAgent,
-  type DefaultAgentRef,
-} from "../i18n/defaultAgent";
-import { useT } from "../i18n/locale";
+import type { ErasureResponse, SubjectExportResponse } from "../api/types";
+import { useLocale, useT } from "../i18n/locale";
+import { useChatTheme } from "../theme/ChatTheme";
 
-function groupByWorkspace(rows: ListedAgent[]): Array<{
-  workspaceId: string;
-  workspaceName: string;
-  rows: ListedAgent[];
-}> {
-  const groups: Array<{ workspaceId: string; workspaceName: string; rows: ListedAgent[] }> = [];
-  for (const row of rows) {
-    const current = groups.find((group) => group.workspaceId === row.workspace.id);
-    if (current === undefined) {
-      groups.push({
-        workspaceId: row.workspace.id,
-        workspaceName: row.workspace.name,
-        rows: [row],
-      });
-    } else {
-      current.rows.push(row);
-    }
-  }
-  return groups;
+function downloadJson(filename: string, value: unknown): void {
+  const blob = new Blob([JSON.stringify(value, null, 2)], {
+    type: "application/json;charset=utf-8",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
+/**
+ * Appearance, language, and design §4.6's "本人" row — export and erase,
+ * the two self-service actions an end user has over their own data and
+ * nothing else offers a door to. No account section: §4.5.1 means there is
+ * no name or email this app was ever given to show.
+ */
 export function SettingsPage() {
   const t = useT();
-  const auth = useAuth();
-  const listed = usePublishedAgents();
-  const [preferred, setPreferred] = useState(loadDefaultAgent);
+  const { locale, setLocale } = useLocale();
+  const theme = useChatTheme();
+  const navigate = useNavigate();
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [erasing, setErasing] = useState(false);
+  const [eraseError, setEraseError] = useState<string | null>(null);
+  const [erased, setErased] = useState<ErasureResponse | null>(null);
+  const [confirmingErase, setConfirmingErase] = useState(false);
+
+  async function exportData(): Promise<void> {
+    setExporting(true);
+    setExportError(null);
+    try {
+      const exported = await api<SubjectExportResponse>("/api/v1/end-user/subjects/me/export");
+      downloadJson("tiny-hermes-my-data.json", exported);
+    } catch (caught) {
+      setExportError(problemMessage(caught));
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  async function eraseData(): Promise<void> {
+    setErasing(true);
+    setEraseError(null);
+    try {
+      const report = await api<ErasureResponse>("/api/v1/end-user/subjects/me/erase", {
+        method: "POST",
+      });
+      setErased(report);
+      setConfirmingErase(false);
+    } catch (caught) {
+      setEraseError(problemMessage(caught));
+    } finally {
+      setErasing(false);
+    }
+  }
 
   return (
     <main className="settings">
-      <Link to="/" className="settings-back">
+      <button type="button" className="settings-back" onClick={() => navigate(-1)}>
         {t("backToChat")}
-      </Link>
+      </button>
       <h1>{t("settings")}</h1>
       <p className="settings-intro">{t("settingsIntro")}</p>
       <section>
-        <h2>{t("account")}</h2>
-        <dl className="settings-dl">
-          <div>
-            <dt>{t("displayName")}</dt>
-            <dd>{auth.user?.display_name ?? "—"}</dd>
-          </div>
-          <div>
-            <dt>{t("email")}</dt>
-            <dd>{auth.user?.subject ?? "—"}</dd>
-          </div>
-        </dl>
+        <h2>{t("appearance")}</h2>
+        <div className="choice-pills" role="group" aria-label={t("appearance")}>
+          <button
+            type="button"
+            className={theme.dark ? undefined : "is-on"}
+            aria-pressed={!theme.dark}
+            onClick={() => theme.setTheme("light")}
+          >
+            {t("themeLight")}
+          </button>
+          <button
+            type="button"
+            className={theme.dark ? "is-on" : undefined}
+            aria-pressed={theme.dark}
+            onClick={() => theme.setTheme("dark")}
+          >
+            {t("themeDark")}
+          </button>
+        </div>
       </section>
       <section>
-        <h2>{t("defaultAgent")}</h2>
-        <p className="settings-hint">{t("defaultAgentHint")}</p>
-        {listed.pending ? <p className="settings-hint">{t("loading")}</p> : null}
-        {listed.error !== undefined ? (
-          <p className="settings-hint">
-            {problemMessage(listed.error)}
-            <button type="button" onClick={listed.refetch}>
-              {t("retry")}
+        <h2>{t("language")}</h2>
+        <div className="choice-pills" role="group" aria-label={t("language")}>
+          <button
+            type="button"
+            className={locale === "zh-CN" ? "is-on" : undefined}
+            aria-pressed={locale === "zh-CN"}
+            onClick={() => setLocale("zh-CN")}
+          >
+            {t("localeZh")}
+          </button>
+          <button
+            type="button"
+            className={locale === "en-US" ? "is-on" : undefined}
+            aria-pressed={locale === "en-US"}
+            onClick={() => setLocale("en-US")}
+          >
+            {t("localeEn")}
+          </button>
+        </div>
+      </section>
+      <section>
+        <h2>{t("exportData")}</h2>
+        <p className="settings-hint">{t("exportDataHint")}</p>
+        {exportError === null ? null : <p className="auth-error">{exportError}</p>}
+        <button type="button" disabled={exporting} onClick={() => void exportData()}>
+          {t("exportDataButton")}
+        </button>
+      </section>
+      <section>
+        <h2>{t("eraseData")}</h2>
+        <p className="settings-hint">{t("eraseDataHint")}</p>
+        {eraseError === null ? null : <p className="auth-error">{eraseError}</p>}
+        {erased !== null ? <p className="settings-hint">{t("eraseDataDone")}</p> : null}
+        {confirmingErase ? (
+          <>
+            <p className="settings-hint">{t("eraseDataConfirm")}</p>
+            <button
+              type="button"
+              className="is-danger"
+              disabled={erasing}
+              onClick={() => void eraseData()}
+            >
+              {t("eraseDataButton")}
             </button>
-          </p>
-        ) : null}
-        {!listed.pending && listed.error === undefined && listed.rows.length === 0 ? (
-          <p className="settings-hint">{t("emptyAgents")}</p>
-        ) : null}
-        {listed.rows.length > 0 ? (
-          <div className="settings-agent-groups">
-            {groupByWorkspace(listed.rows).map((group) => (
-              <section key={group.workspaceId} className="settings-agent-group">
-                <h3>{group.workspaceName}</h3>
-                <ul className="settings-agent-list">
-                  {group.rows.map((row) => {
-                    const ref: DefaultAgentRef = {
-                      workspaceId: row.workspace.id,
-                      agentId: row.agent.id,
-                    };
-                    const selected = sameDefaultAgent(preferred, ref);
-                    return (
-                      <li key={`${row.workspace.id}:${row.agent.id}`}>
-                        <button
-                          type="button"
-                          className={selected ? "is-on" : undefined}
-                          aria-pressed={selected}
-                          onClick={() => {
-                            saveDefaultAgent(ref);
-                            setPreferred(ref);
-                          }}
-                        >
-                          <strong>{row.agent.name}</strong>
-                          <span>{row.agent.alias}</span>
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </section>
-            ))}
-          </div>
-        ) : null}
+            <button type="button" onClick={() => setConfirmingErase(false)}>
+              {t("cancel")}
+            </button>
+          </>
+        ) : (
+          <button type="button" className="is-danger" onClick={() => setConfirmingErase(true)}>
+            {t("eraseDataButton")}
+          </button>
+        )}
       </section>
       <section className="settings-about">
         <h2>{t("about")}</h2>

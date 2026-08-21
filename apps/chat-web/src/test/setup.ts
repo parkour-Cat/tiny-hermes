@@ -40,10 +40,17 @@ Object.defineProperty(window, "matchMedia", {
 
 afterEach(() => {
   mediaMatches.clear();
-  window.localStorage.removeItem("tiny-hermes-chat-default-agent");
   window.localStorage.removeItem("tiny-hermes-chat-theme");
   window.localStorage.removeItem("tiny-hermes-chat-locale");
   window.localStorage.removeItem("tiny-hermes-chat-session-prefs");
+  // Keyed per Agent alias (`localSessions.ts`), so there is no single fixed
+  // name to remove — clearing by prefix is what keeps one test's device
+  // memory from leaking into the next.
+  for (const key of Object.keys(window.localStorage)) {
+    if (key.startsWith("tiny-hermes-chat-end-user-sessions:")) {
+      window.localStorage.removeItem(key);
+    }
+  }
 });
 
 class ResizeObserverStub {

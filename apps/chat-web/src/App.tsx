@@ -3,56 +3,57 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { QueryProvider } from "./api/QueryProvider";
 import { useAuth, AuthProvider } from "./auth/AuthProvider";
 import { LocaleProvider, useT } from "./i18n/locale";
-import { ChatHome } from "./pages/ChatHome";
 import { ChatPage } from "./pages/ChatPage";
-import { LoginPage } from "./pages/LoginPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { ChatTheme } from "./theme/ChatTheme";
 
+/**
+ * No `/login` route. Design §4.5.1's red line — the platform is not an
+ * identity provider — means there is nothing here for a person to type: an
+ * end user proves who they are to the enterprise, never to this app, so
+ * `loading`/`error`/`lost` are the only three things this surface can ever
+ * show before a conversation, and none of them is a form.
+ */
 function AppRoutes() {
   const t = useT();
   const auth = useAuth();
+
   if (auth.loading) {
     return <p className="centered">{t("loading")}</p>;
   }
   if (auth.error !== null) {
     return (
-      <p className="centered">
-        {auth.error}
-        <button type="button" onClick={() => void auth.refresh()}>
-          {t("retry")}
-        </button>
-      </p>
+      <main className="auth">
+        <h1>{t("connectFailedTitle")}</h1>
+        <p className="auth-intro">{t("connectFailedHint")}</p>
+        <p className="auth-error">{auth.error}</p>
+      </main>
+    );
+  }
+  if (auth.lost) {
+    return (
+      <main className="auth">
+        <h1>{t("connectLostTitle")}</h1>
+        <p className="auth-intro">{t("connectLostHint")}</p>
+      </main>
     );
   }
 
   return (
     <Routes>
-      <Route
-        path="/login"
-        element={auth.user === null ? <LoginPage /> : <Navigate to="/" replace />}
-      />
+      <Route path="/settings" element={<SettingsPage />} />
+      <Route path="/:alias/:sessionRef" element={<ChatPage />} />
+      <Route path="/:alias" element={<ChatPage />} />
       <Route
         path="/"
-        element={auth.user === null ? <Navigate to="/login" replace /> : <ChatHome />}
+        element={
+          <main className="auth">
+            <h1>{t("connectWaitingTitle")}</h1>
+            <p className="auth-intro">{t("connectWaitingHint")}</p>
+          </main>
+        }
       />
-      <Route
-        path="/settings"
-        element={auth.user === null ? <Navigate to="/login" replace /> : <SettingsPage />}
-      />
-      <Route
-        path="/:left/:middle/:right"
-        element={auth.user === null ? <Navigate to="/login" replace /> : <ChatPage />}
-      />
-      <Route
-        path="/:left/:middle"
-        element={auth.user === null ? <Navigate to="/login" replace /> : <ChatPage />}
-      />
-      <Route
-        path="/:left"
-        element={auth.user === null ? <Navigate to="/login" replace /> : <ChatPage />}
-      />
-      <Route path="*" element={<Navigate to={auth.user === null ? "/login" : "/"} replace />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }

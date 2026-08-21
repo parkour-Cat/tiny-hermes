@@ -118,3 +118,33 @@ export type ArtifactResponse = {
   truncated: boolean;
   expires_at: string;
 };
+
+export type MemoryResponse = {
+  id: string;
+  workspace_id: string;
+  agent_id: string;
+  kind: string;
+  status: string;
+  body: string;
+  origin: string;
+  created_at: string;
+  updated_at: string;
+};
+
+/** Design §4.6's self-service export — an end user's own subject data, the
+ * same shape `subject_routes.py` returns a workspace member for their own
+ * `CallerIdentity`. */
+export type SubjectExportResponse = {
+  subject_type: string;
+  subject_id: string;
+  workspace_id: string;
+  memories: MemoryResponse[];
+  sessions: string[];
+};
+
+export type ErasureResponse = {
+  memories: number;
+  sessions: number;
+  messages: number;
+  artifacts: number;
+};

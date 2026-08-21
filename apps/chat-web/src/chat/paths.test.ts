@@ -1,52 +1,26 @@
 import { expect, test } from "vitest";
 
-import { agentRef, chatPath, matchSessionId, resolveAgentRef, resolveChatRoute } from "./paths";
-import type { ListedAgent } from "./published";
+import { chatPath, isAgentAlias, matchSessionId } from "./paths";
 
-const acme = { id: "11111111-2222-4333-8444-555555555555", name: "Acme", status: "active" };
-const other = { id: "99999999-aaaa-4bbb-8ccc-dddddddddddd", name: "Other", status: "active" };
-const darwin = {
-  id: "22222222-3333-4444-8555-666666666666",
-  name: "Darwin",
-  alias: "darwin",
-  status: "published",
-  current_version_id: "v1",
-  created_at: "2026-08-10T00:00:00Z",
-};
-
-function row(workspace: typeof acme, alias = "darwin"): ListedAgent {
-  return { workspace, agent: { ...darwin, alias, id: `${workspace.id.slice(0, 8)}-${alias}` } };
-}
-
-test("a unique alias is the whole path", () => {
-  const agents = [row(acme)];
-  expect(agentRef(agents[0]!, agents)).toBe("darwin");
-  expect(chatPath(agents[0]!, agents, "33333333-4444-4555-8666-777777777777")).toBe(
-    "/darwin/33333333",
-  );
+test("an alias alone is the whole path", () => {
+  expect(chatPath("darwin")).toBe("/darwin");
+  expect(chatPath("darwin", "33333333-4444-4555-8666-777777777777")).toBe("/darwin/33333333");
+  expect(chatPath("darwin", null)).toBe("/darwin");
 });
 
-test("a clashing alias keeps a short workspace mark", () => {
-  const agents = [row(acme), row(other)];
-  expect(agentRef(agents[0]!, agents)).toBe("darwin--11111111");
-  expect(resolveAgentRef("darwin--11111111", agents)?.workspace.id).toBe(acme.id);
-  expect(resolveAgentRef("darwin", agents)).toBeUndefined();
+test("alias grammar matches the platform's own", () => {
+  expect(isAgentAlias("support-bot")).toBe(true);
+  expect(isAgentAlias("a")).toBe(true);
+  expect(isAgentAlias("-leading-hyphen")).toBe(false);
+  expect(isAgentAlias("trailing-hyphen-")).toBe(false);
+  expect(isAgentAlias("Has-Caps")).toBe(false);
+  expect(isAgentAlias(undefined)).toBe(false);
 });
 
-test("uuid routes still resolve while alias routes wait for the list", () => {
-  expect(
-    resolveChatRoute(
-      { left: acme.id, middle: darwin.id, right: "33333333-4444-4555-8666-777777777777" },
-      [],
-    ),
-  ).toEqual({
-    kind: "ok",
-    workspaceId: acme.id,
-    agentId: darwin.id,
-    sessionRef: "33333333-4444-4555-8666-777777777777",
-  });
-  expect(resolveChatRoute({ left: "darwin" }, [])).toEqual({ kind: "pending" });
-  expect(matchSessionId(["33333333-4444-4555-8666-777777777777"], "33333333")).toBe(
-    "33333333-4444-4555-8666-777777777777",
-  );
+test("a short ref resolves against the known ids, exact match first", () => {
+  const ids = ["33333333-4444-4555-8666-777777777777", "99999999-4444-4555-8666-777777777777"];
+  expect(matchSessionId(ids, "33333333")).toBe(ids[0]);
+  expect(matchSessionId(ids, ids[0]!)).toBe(ids[0]);
+  expect(matchSessionId(ids, "unknown")).toBeNull();
+  expect(matchSessionId(ids, null)).toBeNull();
 });

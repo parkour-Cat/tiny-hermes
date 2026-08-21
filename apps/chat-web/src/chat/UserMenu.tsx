@@ -2,13 +2,20 @@ import { useCallback, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { useDismiss } from "./useDismiss";
-import { useAuth } from "../auth/AuthProvider";
 import { useLocale } from "../i18n/locale";
 import { useChatTheme } from "../theme/ChatTheme";
 import { ChevronDown } from "../ui/ChevronDown";
 
+/**
+ * Appearance and language, behind the same corner the console's user card
+ * used to occupy — but with no identity to show. Design §4.5.1: the
+ * platform holds no name, email, or anything else identifying about an end
+ * user by default, so there is nothing here a display name or subject line
+ * could read from. What used to be "sign out" is gone with it — ending a
+ * session on purpose is an admin's action (design §4.3), not a button this
+ * surface can offer its own visitor.
+ */
 export function UserMenu() {
-  const auth = useAuth();
   const { t, locale, setLocale } = useLocale();
   const theme = useChatTheme();
   const root = useRef<HTMLDivElement>(null);
@@ -16,41 +23,24 @@ export function UserMenu() {
   const close = useCallback(() => setOpen(false), []);
   useDismiss(open, close, root);
 
-  const name = auth.user?.display_name ?? "";
-  const subject = auth.user?.subject ?? "";
-  const initial = name.slice(0, 1).toUpperCase() || "?";
-
-  if (auth.user === null) {
-    return null;
-  }
-
   return (
     <div className="user-card-wrap" ref={root}>
       <button
         type="button"
         className="rail-user"
-        aria-label={name}
+        aria-label={t("settings")}
         aria-haspopup="dialog"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
         <span className="rail-avatar" aria-hidden>
-          {initial}
+          ⚙
         </span>
-        <span>{name}</span>
+        <span>{t("settings")}</span>
         <ChevronDown />
       </button>
       {open ? (
-        <div className="user-card" role="dialog" aria-label={name}>
-          <div className="user-card-head">
-            <span className="rail-avatar" aria-hidden>
-              {initial}
-            </span>
-            <div>
-              <strong>{name}</strong>
-              <p>{subject}</p>
-            </div>
-          </div>
+        <div className="user-card" role="dialog" aria-label={t("settings")}>
           <div className="user-card-row">
             <span>{t("appearance")}</span>
             <div className="choice-pills" role="group" aria-label={t("appearance")}>
@@ -97,9 +87,6 @@ export function UserMenu() {
             <Link to="/settings" onClick={close}>
               {t("settings")}
             </Link>
-            <button type="button" onClick={() => void auth.logout()}>
-              {t("logout")}
-            </button>
           </div>
         </div>
       ) : null}

@@ -1,152 +1,72 @@
-import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
+import { render, screen, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { expect, test } from "vitest";
 
 import { App } from "./App";
 import { server } from "./test/server";
 
-const USER = {
-  id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-  subject: "dev@example.com",
-  display_name: "Dev",
-  status: "active",
-  is_platform_admin: false,
-};
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
-const AGENT = "22222222-3333-4444-8555-666666666666";
+const ALIAS = "darwin";
+const CREDENTIAL = "header.payload.signature";
 
-test("sign-in opens a conversation surface", async () => {
-  let signedIn = false;
+test("a credential in the URL exchanges a session and opens the chat", async () => {
+  const exchanges: { authorization: string | null; workspace: string | null }[] = [];
   server.use(
-    http.get("/api/v1/auth/me", () =>
-      signedIn
-        ? HttpResponse.json(USER)
-        : HttpResponse.json({ code: "unauthenticated" }, { status: 401 }),
-    ),
-    http.post("/api/v1/auth/sessions", () => {
-      signedIn = true;
-      return HttpResponse.json(USER, { status: 201 });
+    http.post("/api/v1/end-user/sessions", ({ request }) => {
+      exchanges.push({
+        authorization: request.headers.get("Authorization"),
+        workspace: request.headers.get("X-Workspace-Id"),
+      });
+      return HttpResponse.json(
+        { end_user_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", expires_at: "2026-08-20T20:00:00Z" },
+        { status: 201 },
+      );
     }),
-    http.get("/api/v1/workspaces", () =>
-      HttpResponse.json([{ id: WORKSPACE, name: "Acme", status: "active" }]),
-    ),
-    http.get("/api/v1/agents", () =>
-      HttpResponse.json([
-        {
-          id: AGENT,
-          name: "Darwin",
-          alias: "darwin",
-          status: "published",
-          current_version_id: "v1",
-          created_at: "2026-08-10T00:00:00Z",
-        },
-      ]),
-    ),
-    http.get(`/api/v1/agents/${AGENT}`, () =>
-      HttpResponse.json({
-        id: AGENT,
-        name: "Darwin",
-        alias: "darwin",
-        status: "published",
-        current_version_id: "v1",
-        created_at: "2026-08-10T00:00:00Z",
-      }),
-    ),
-    http.get("/api/v1/sessions", () => HttpResponse.json([])),
+  );
+  window.history.pushState(
+    {},
+    "",
+    `/?credential=${CREDENTIAL}&workspace=${WORKSPACE}&agent=${ALIAS}`,
   );
 
   render(<App />);
-  await userEvent.type(await screen.findByLabelText("邮箱"), "dev@example.com");
-  await userEvent.type(screen.getByLabelText("密码"), "long-pass-123");
-  await userEvent.click(screen.getByRole("button", { name: "进入对话" }));
 
-  expect(await screen.findByRole("heading", { name: "Darwin" })).toBeInTheDocument();
-  expect(screen.getByLabelText("写给智能体")).toBeInTheDocument();
-  expect(screen.queryByText("新建工作空间")).toBeNull();
-  expect(screen.queryByText("试验场")).toBeNull();
+  await waitFor(() => expect(exchanges).toHaveLength(1));
+  expect(exchanges[0]).toEqual({ authorization: `Bearer ${CREDENTIAL}`, workspace: WORKSPACE });
+  expect(await screen.findByLabelText("写给智能体")).toBeInTheDocument();
+  // The credential is spent the moment it is exchanged and must not linger
+  // in the address bar (design §4.1's 15-minute ceiling is not a reason to
+  // also leave it sitting in browser history).
+  expect(window.location.search).toBe("");
+  expect(window.location.pathname).toBe(`/${ALIAS}`);
 });
 
-test("home opens the default agent stored on this device", async () => {
-  const newton = "99999999-aaaa-4bbb-8ccc-dddddddddddd";
-  window.localStorage.setItem(
-    "tiny-hermes-chat-default-agent",
-    JSON.stringify({ workspaceId: WORKSPACE, agentId: newton }),
-  );
+test("a refused credential explains itself instead of offering a form to retry in", async () => {
   server.use(
-    http.get("/api/v1/auth/me", () => HttpResponse.json(USER)),
-    http.get("/api/v1/workspaces", () =>
-      HttpResponse.json([{ id: WORKSPACE, name: "Acme", status: "active" }]),
+    http.post("/api/v1/end-user/sessions", () =>
+      HttpResponse.json(
+        { code: "end_user_credential_invalid", detail: "The credential could not be verified." },
+        { status: 401 },
+      ),
     ),
-    http.get("/api/v1/agents", () =>
-      HttpResponse.json([
-        {
-          id: AGENT,
-          name: "Darwin",
-          alias: "darwin",
-          status: "published",
-          current_version_id: "v1",
-          created_at: "2026-08-10T00:00:00Z",
-        },
-        {
-          id: newton,
-          name: "Newton",
-          alias: "newton",
-          status: "published",
-          current_version_id: "v1",
-          created_at: "2026-08-10T00:00:00Z",
-        },
-      ]),
-    ),
-    http.get(`/api/v1/agents/${AGENT}`, () =>
-      HttpResponse.json({
-        id: AGENT,
-        name: "Darwin",
-        alias: "darwin",
-        status: "published",
-        current_version_id: "v1",
-        created_at: "2026-08-10T00:00:00Z",
-      }),
-    ),
-    http.get(`/api/v1/agents/${newton}`, () =>
-      HttpResponse.json({
-        id: newton,
-        name: "Newton",
-        alias: "newton",
-        status: "published",
-        current_version_id: "v1",
-        created_at: "2026-08-10T00:00:00Z",
-      }),
-    ),
-    http.get("/api/v1/sessions", () => HttpResponse.json([])),
+  );
+  window.history.pushState(
+    {},
+    "",
+    `/?credential=${CREDENTIAL}&workspace=${WORKSPACE}&agent=${ALIAS}`,
   );
 
+  render(<App />);
+
+  expect(await screen.findByText("The credential could not be verified.")).toBeInTheDocument();
+  expect(screen.queryByLabelText("邮箱")).toBeNull();
+  expect(screen.queryByLabelText("密码")).toBeNull();
+});
+
+test("no credential and no known address waits to be opened from the host page", async () => {
   window.history.pushState({}, "", "/");
-  render(<App />);
-
-  expect(await screen.findByRole("heading", { name: "Newton" })).toBeInTheDocument();
-  expect(screen.queryByRole("heading", { name: "Darwin" })).toBeNull();
-});
-
-test("a session the platform has already ended returns the user to sign-in", async () => {
-  window.history.pushState({}, "", `/${WORKSPACE}/${AGENT}`);
-  server.use(
-    http.get("/api/v1/auth/me", () => HttpResponse.json(USER)),
-    http.get("/api/v1/workspaces", () =>
-      HttpResponse.json([{ id: WORKSPACE, name: "Acme", status: "active" }]),
-    ),
-    http.get("/api/v1/agents", () =>
-      HttpResponse.json({ code: "unauthenticated" }, { status: 401 }),
-    ),
-    http.get(`/api/v1/agents/${AGENT}`, () =>
-      HttpResponse.json({ code: "unauthenticated" }, { status: 401 }),
-    ),
-    http.get("/api/v1/sessions", () =>
-      HttpResponse.json({ code: "unauthenticated" }, { status: 401 }),
-    ),
-  );
 
   render(<App />);
 
-  expect(await screen.findByRole("button", { name: "进入对话" })).toBeInTheDocument();
+  expect(await screen.findByText("等待接入")).toBeInTheDocument();
 });

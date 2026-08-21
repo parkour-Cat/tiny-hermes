@@ -1,208 +1,144 @@
-import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueries, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
-import { downloadArtifact } from "../api/artifacts";
 import { api } from "../api/client";
 import { problemMessage } from "../api/messages";
-import type {
-  AgentResponse,
-  ArtifactResponse,
-  CanonicalMessage,
-  RunResponse,
-  SessionResponse,
-} from "../api/types";
-import { useAuth } from "../auth/AuthProvider";
-import { AgentPicker } from "../chat/AgentPicker";
+import type { CanonicalMessage, RunResponse, SessionResponse } from "../api/types";
 import { Composer } from "../chat/Composer";
 import { downloadMarkdown, exportFilename, transcriptMarkdown } from "../chat/exportTranscript";
-import { chatPath, matchSessionId, resolveChatRoute } from "../chat/paths";
-import { matchingSessions } from "../chat/published";
+import { chatPath, isAgentAlias, matchSessionId } from "../chat/paths";
+import { forgetSessionId, loadKnownSessionIds, rememberSessionId } from "../chat/localSessions";
 import { loadSessionPrefs, saveSessionPrefs } from "../chat/sessionPrefs";
 import { SessionRail } from "../chat/SessionRail";
-import { isBlankSession, sessionTitle } from "../chat/sessionTitle";
+import { sessionTitle } from "../chat/sessionTitle";
 import { Transcript } from "../chat/Transcript";
-import { usePublishedAgents } from "../chat/usePublishedAgents";
 import { useT } from "../i18n/locale";
-import { RUN_ACTIONS } from "../runs/actions";
-import { runQueryOptions, useRunEvents } from "../runs/useRunEvents";
+import { useEndUserRun } from "../runs/useEndUserRun";
 import { isLiveStatus, statusLabel } from "../status";
 
-const CHROME_ACTIONS = new Set(["pause", "resume", "cancel"]);
-
+/**
+ * The end-user chat surface. `runs/presentation/routes.py`'s `Console`
+ * cousin drives the same three visible pieces (rail, transcript, composer)
+ * off `/api/v1/{sessions,runs}` and a workspace a signed-in member chose
+ * from a list. This one drives them off `/api/v1/end-user/*`, an Agent
+ * alias the host page named at embed time, and a Session list this device
+ * remembers rather than one the platform lists (`localSessions.ts`'s own
+ * docstring says why there is no such list to ask for).
+ *
+ * No pause/resume/cancel/retry and no artifact download: none of those
+ * have an end-user route (design §5 never built one — see this task's
+ * report). The composer still queues a second message onto a busy Session
+ * exactly the way the console's does (`queue.status === "session_blocked"`
+ * is the same field either surface reads), because queuing was never a
+ * console-only capability to begin with.
+ */
 export function ChatPage() {
   const t = useT();
-  const auth = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
   const params = useParams();
-  const listed = usePublishedAgents();
-  const route = resolveChatRoute(params, listed.rows);
-  const workspaceId = route.kind === "ok" ? route.workspaceId : null;
-  const agentId = route.kind === "ok" ? route.agentId : null;
-  const sessionRef = route.kind === "ok" ? route.sessionRef : null;
+  const alias = isAgentAlias(params.alias) ? params.alias : null;
+  const sessionRef = params.sessionRef ?? null;
+
   const [runId, setRunId] = useState<string | null>(null);
   const [openedId, setOpenedId] = useState<string | null>(null);
   const [optimistic, setOptimistic] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
   const [prefs, setPrefs] = useState(loadSessionPrefs);
-  const scope = { workspace: workspaceId ?? "" };
-  const enabled = workspaceId !== null && agentId !== null && auth.user !== null;
 
-  function go(sessionId?: string | null): void {
-    const row = listed.rows.find(
-      (item) => item.workspace.id === workspaceId && item.agent.id === agentId,
-    );
-    if (row !== undefined) {
-      navigate(chatPath(row, listed.rows, sessionId));
-      return;
-    }
-    if (workspaceId !== null && agentId !== null) {
-      navigate(
-        sessionId === undefined || sessionId === null
-          ? `/${workspaceId}/${agentId}`
-          : `/${workspaceId}/${agentId}/${sessionId}`,
-      );
-    }
-  }
-
-  const agent = useQuery({
-    queryKey: ["agent", workspaceId, agentId] as const,
-    queryFn: () => api<AgentResponse>(`/api/v1/agents/${agentId ?? ""}`, scope),
-    enabled,
-  });
-  const sessions = useQuery({
-    queryKey: ["sessions", workspaceId, agentId, auth.user?.id] as const,
-    queryFn: () => api<SessionResponse[]>("/api/v1/sessions", scope),
-    enabled,
-  });
-  const mine = matchingSessions(sessions.data ?? [], agentId ?? "", auth.user?.id ?? "").filter(
-    (session) => !prefs.hidden.includes(session.id),
-  );
+  const known = alias === null ? [] : loadKnownSessionIds(alias);
   const routedSession =
-    matchSessionId(
-      [...mine.map((session) => session.id), openedId].filter((id): id is string => id !== null),
-      sessionRef,
-    ) ??
+    matchSessionId([...known, openedId].filter((id): id is string => id !== null), sessionRef) ??
     (openedId !== null && (sessionRef === null || openedId.startsWith(sessionRef))
       ? openedId
       : null);
-  const routedVisible =
+  const activeSessionId =
     routedSession !== null && !prefs.hidden.includes(routedSession) ? routedSession : null;
-  const activeSessionId = routedVisible ?? mine[0]?.id ?? null;
-  const active = mine.find((session) => session.id === activeSessionId) ?? null;
+
+  function go(sessionId?: string | null): void {
+    if (alias === null) {
+      return;
+    }
+    navigate(chatPath(alias, sessionId));
+  }
 
   const titleQueries = useQueries({
-    queries: mine.map((session) => ({
-      queryKey: ["session-messages", workspaceId, session.id] as const,
-      queryFn: () =>
-        api<CanonicalMessage[]>(`/api/v1/sessions/${session.id}/messages`, scope),
-    })),
+    queries: known
+      .filter((id) => !prefs.hidden.includes(id))
+      .map((id) => ({
+        queryKey: ["end-user-messages", id] as const,
+        queryFn: () => api<CanonicalMessage[]>(`/api/v1/end-user/sessions/${id}/messages`),
+      })),
   });
   const messages = useQuery({
-    queryKey: ["session-messages", workspaceId, activeSessionId] as const,
+    queryKey: ["end-user-messages", activeSessionId] as const,
     queryFn: () =>
-      api<CanonicalMessage[]>(`/api/v1/sessions/${activeSessionId ?? ""}/messages`, scope),
-    enabled: enabled && activeSessionId !== null,
+      api<CanonicalMessage[]>(`/api/v1/end-user/sessions/${activeSessionId ?? ""}/messages`),
+    enabled: activeSessionId !== null,
   });
 
-  const activeRunId = runId ?? active?.head_run_id ?? null;
-  const snapshot = useQuery({
-    ...runQueryOptions(workspaceId ?? "", activeRunId ?? ""),
-    enabled: enabled && activeRunId !== null,
-  });
-  const events = useRunEvents({
-    runId: enabled && activeRunId !== null ? activeRunId : null,
-    workspaceId,
-  });
-  const artifacts = useQuery({
-    queryKey: ["run-artifacts", workspaceId, activeRunId] as const,
-    queryFn: () =>
-      api<ArtifactResponse[]>(`/api/v1/runs/${activeRunId ?? ""}/artifacts`, scope),
-    enabled: enabled && activeRunId !== null,
-  });
+  const activeRunId = runId ?? null;
+  const snapshot = useEndUserRun(activeRunId);
 
   useEffect(() => {
     if (snapshot.data?.finished_at !== null && snapshot.data?.finished_at !== undefined) {
       void queryClient.invalidateQueries({
-        queryKey: ["session-messages", workspaceId, activeSessionId],
-      });
-      void queryClient.invalidateQueries({
-        queryKey: ["run-artifacts", workspaceId, activeRunId],
+        queryKey: ["end-user-messages", activeSessionId],
       });
     }
-  }, [snapshot.data?.finished_at, queryClient, workspaceId, activeSessionId, activeRunId]);
+  }, [snapshot.data?.finished_at, queryClient, activeSessionId]);
 
   useEffect(() => {
     if (optimistic === null || messages.data === undefined) {
       return;
     }
-    if (messages.data.some((message) => message.role === "user" && message.parts.some((part) => part.text === optimistic))) {
+    if (
+      messages.data.some(
+        (message) => message.role === "user" && message.parts.some((part) => part.text === optimistic),
+      )
+    ) {
       setOptimistic(null);
     }
   }, [messages.data, optimistic]);
 
   useEffect(() => {
-    if (workspaceId === null || agentId === null || listed.rows.length === 0) {
+    if (alias === null || activeSessionId === null) {
       return;
     }
-    const row = listed.rows.find(
-      (item) => item.workspace.id === workspaceId && item.agent.id === agentId,
-    );
-    if (row === undefined) {
-      return;
-    }
-    const next = chatPath(row, listed.rows, activeSessionId);
+    const next = chatPath(alias, activeSessionId);
     if (location.pathname !== next) {
       navigate(next, { replace: true });
     }
-  }, [workspaceId, agentId, listed.rows, activeSessionId, location.pathname, navigate]);
-
-  const openSession = useMutation({
-    mutationFn: () =>
-      api<SessionResponse>("/api/v1/sessions", {
-        ...scope,
-        method: "POST",
-        body: JSON.stringify({ agent_id: agentId, session_mode: "persistent" }),
-      }),
-    onSuccess: (created) => {
-      void queryClient.invalidateQueries({ queryKey: ["sessions", workspaceId, agentId] });
-      setOpenedId(created.id);
-      setRunId(null);
-      setOptimistic(null);
-      setError(null);
-      go(created.id);
-    },
-    onError: (caught) => setError(problemMessage(caught)),
-  });
+  }, [alias, activeSessionId, location.pathname, navigate]);
 
   const send = useMutation({
     mutationFn: async (text: string) => {
+      if (alias === null) {
+        throw new Error(t("invalidAddress"));
+      }
       let sessionId = activeSessionId;
       if (sessionId === null) {
-        const created = await api<SessionResponse>("/api/v1/sessions", {
-          ...scope,
+        const created = await api<SessionResponse>(`/api/v1/end-user/agents/${alias}/sessions`, {
           method: "POST",
-          body: JSON.stringify({ agent_id: agentId, session_mode: "persistent" }),
+          body: JSON.stringify({}),
         });
         sessionId = created.id;
+        rememberSessionId(alias, created.id);
         setOpenedId(created.id);
-        await queryClient.invalidateQueries({ queryKey: ["sessions", workspaceId, agentId] });
         go(created.id);
       }
-      return api<RunResponse>("/api/v1/runs", {
-        ...scope,
+      return api<RunResponse>(`/api/v1/end-user/sessions/${sessionId}/runs`, {
         method: "POST",
         headers: { "Idempotency-Key": crypto.randomUUID() },
-        body: JSON.stringify({ session_id: sessionId, input: text }),
+        body: JSON.stringify({ input: text }),
       });
     },
     onMutate: (text) => setOptimistic(text),
     onSuccess: (created) => {
       setRunId(created.id);
-      queryClient.setQueryData(runQueryOptions(workspaceId ?? "", created.id).queryKey, created);
+      queryClient.setQueryData(["end-user-run", created.id], created);
       setError(null);
     },
     onError: (caught) => {
@@ -211,75 +147,19 @@ export function ChatPage() {
     },
   });
 
-  const control = useMutation({
-    mutationFn: async ({ target, action }: { target: string; action: string }) => {
-      const current = await api<RunResponse>(`/api/v1/runs/${target}`, scope);
-      return api<RunResponse>(`/api/v1/runs/${target}/${action}`, {
-        ...scope,
-        method: "POST",
-        body: JSON.stringify({ expected_state_version: current.state_version }),
-      });
-    },
-    onSuccess: (updated, { action, target }) => {
-      queryClient.setQueryData(runQueryOptions(workspaceId ?? "", target).queryKey, updated);
-      if (target === activeRunId) {
-        setRunId(updated.id);
-      }
-      const done = RUN_ACTIONS[action]?.done;
-      setNote(done === undefined || done === null ? null : t(done));
-      setError(null);
-    },
-    onError: (caught) => {
-      setNote(null);
-      setError(problemMessage(caught));
-    },
-  });
-
-  function act(target: string, action: string): void {
-    const offer = RUN_ACTIONS[action];
-    if (offer === undefined) {
-      return;
-    }
-    if (offer.question !== null && !window.confirm(t(offer.question))) {
-      return;
-    }
-    void control.mutateAsync({ target, action }).catch(() => undefined);
-  }
-
-  if (route.kind === "pending") {
-    return <p className="centered">{t("loading")}</p>;
-  }
-  if (route.kind === "invalid" || workspaceId === null || agentId === null) {
+  if (alias === null) {
     return <p className="centered">{t("invalidAddress")}</p>;
-  }
-
-  const failed = [agent, sessions].find((query) => query.isError);
-  if (failed !== undefined) {
-    return (
-      <p className="centered">
-        {problemMessage(failed.error)}
-        <button type="button" onClick={() => void failed.refetch()}>
-          {t("retry")}
-        </button>
-      </p>
-    );
-  }
-  if (agent.data === undefined || sessions.data === undefined) {
-    return <p className="centered">{t("loading")}</p>;
-  }
-  if (agent.data.current_version_id === null) {
-    return <p className="centered">{t("agentNotPublished")}</p>;
   }
 
   const run = snapshot.data;
   const blocked = run?.queue.status === "session_blocked";
-  const headId = run?.queue.blocked_by_run_id ?? null;
-  const headActions = blocked ? (run.queue.available_actions ?? []) : [];
   const live = isLiveStatus(run?.status) && run?.finished_at === null;
-  const railSessions = mine.map((session, index) => ({
-    id: session.id,
-    title: sessionTitle(titleQueries[index]?.data ?? [], t("untitledChat")),
-  }));
+  const railSessions = known
+    .filter((id) => !prefs.hidden.includes(id))
+    .map((id, index) => ({
+      id,
+      title: sessionTitle(titleQueries[index]?.data ?? [], t("untitledChat")),
+    }));
 
   return (
     <div className="chat-app">
@@ -293,81 +173,47 @@ export function ChatPage() {
         }}
         onSession={(id) => go(id)}
         onNewChat={() => {
-          const unused = mine.find((session, index) => {
-            if (prefs.archived.includes(session.id)) {
-              return false;
-            }
-            return isBlankSession(session, titleQueries[index]?.data);
-          });
-          if (unused !== undefined) {
-            setRunId(null);
-            setOptimistic(null);
-            setError(null);
-            go(unused.id);
-            return;
-          }
-          openSession.mutate();
+          // A Session whose messages have loaded and come back empty is
+          // free to reuse, the same "don't mint a new one just to leave the
+          // last empty one orphaned" rule the console follows
+          // (`isBlankSession`) — restated here on messages alone, since
+          // there is no `SessionResponse` to read `head_run_id` off for a
+          // Session this device only knows the id of.
+          const unused = known.find(
+            (id, index) =>
+              !prefs.archived.includes(id) &&
+              titleQueries[index]?.data !== undefined &&
+              sessionTitle(titleQueries[index]?.data ?? [], "") === "",
+          );
+          setRunId(null);
+          setOptimistic(null);
+          setError(null);
+          go(unused ?? null);
         }}
         onHidden={(id) => {
+          forgetSessionId(alias, id);
           if (id === activeSessionId) {
             go(null);
           }
         }}
-        creating={openSession.isPending}
+        creating={false}
       />
       <section className="chat-main">
         <header className="chat-head">
           <div className="chat-identity">
-            <AgentPicker
-              agents={listed.rows}
-              agentKey={`${workspaceId}:${agentId}`}
-              fallback={agent.data.name}
-              onAgent={(key) => {
-                const [nextWorkspace, nextAgent] = key.split(":");
-                const next = listed.rows.find(
-                  (item) => item.workspace.id === nextWorkspace && item.agent.id === nextAgent,
-                );
-                if (next !== undefined) {
-                  navigate(chatPath(next, listed.rows));
-                }
-              }}
-            />
+            <h1>{alias}</h1>
             {run === undefined || run.finished_at !== null ? null : (
               <p className="chat-status">{statusLabel(run.status, t)}</p>
             )}
           </div>
-          <div className="chat-actions">
-            {(blocked ? headActions : live ? (run?.available_actions ?? []) : []).map((action) => {
-              if (!CHROME_ACTIONS.has(action)) {
-                return null;
-              }
-              const offer = RUN_ACTIONS[action];
-              const target = blocked ? headId : run?.id;
-              return offer === undefined || target === null || target === undefined ? null : (
-                <button
-                  type="button"
-                  key={action}
-                  disabled={control.isPending}
-                  onClick={() => act(target, action)}
-                >
-                  {t(offer.label)}
-                </button>
-              );
-            })}
-          </div>
         </header>
-        {note === null ? null : <p className="banner banner-info">{note}</p>}
         {error === null ? null : <p className="banner banner-warn">{error}</p>}
-        {events.error === null ? null : <p className="banner banner-warn">{events.error}</p>}
         {blocked ? (
           <p className="banner banner-warn">
             {t("sessionBlocked")}
             {run.queue.position > 0
               ? ` ${t("queuePositionPrefix")}${run.queue.position}${t("queuePositionSuffix")}`
               : ""}
-            {run.queue.head_status === undefined
-              ? ""
-              : ` · ${statusLabel(run.queue.head_status, t)}`}
             {` ${t("newChatHint")}`}
           </p>
         ) : null}
@@ -376,24 +222,16 @@ export function ChatPage() {
             turns={messages.data ?? []}
             optimistic={optimistic}
             live={Boolean(live)}
-            artifacts={artifacts.data ?? []}
-            canRetry={!live && (run?.available_actions ?? []).includes("retry")}
-            onDownload={(id, filename) => {
-              void downloadArtifact(id, filename, workspaceId).catch((caught) =>
-                setError(problemMessage(caught)),
-              );
-            }}
-            onRetry={() => {
-              if (run !== undefined) {
-                void control.mutateAsync({ target: run.id, action: "retry" }).catch(() => undefined);
-              }
-            }}
+            artifacts={[]}
+            canRetry={false}
+            onDownload={() => setError(t("artifactUnavailable"))}
+            onRetry={() => undefined}
           />
         </div>
         <Composer
           disabled={false}
           sending={send.isPending}
-          live={Boolean(live)}
+          live={false}
           canExport={(messages.data ?? []).length > 0}
           onSend={(text) => send.mutate(text)}
           onExport={() => {
@@ -402,26 +240,14 @@ export function ChatPage() {
               return;
             }
             downloadMarkdown(
-              exportFilename(agent.data.alias, activeSessionId),
-              transcriptMarkdown(agent.data.name, turns, {
+              exportFilename(alias, activeSessionId),
+              transcriptMarkdown(alias, turns, {
                 user: t("userRole"),
                 agent: t("agentRole"),
               }),
             );
           }}
-          onStop={() => {
-            if (run === undefined) {
-              return;
-            }
-            const action = (run.available_actions ?? []).includes("cancel")
-              ? "cancel"
-              : (run.available_actions ?? []).includes("pause")
-                ? "pause"
-                : null;
-            if (action !== null) {
-              void control.mutateAsync({ target: run.id, action }).catch(() => undefined);
-            }
-          }}
+          onStop={() => undefined}
         />
       </section>
     </div>
