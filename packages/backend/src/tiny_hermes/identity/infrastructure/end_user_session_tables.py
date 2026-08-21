@@ -61,3 +61,16 @@ class EndUserSessionRow(IdMixin, CreatedAtMixin, Base):
     #: end user's employer actually delegate" on the Run this session starts
     #: an hour, or a week, later.
     agents: Mapped[list[str]] = mapped_column(JSON, default=list)
+    #: Which `channel_issuers` row minted this session, set once at exchange
+    #: time and never touched again (migration 0034, task-7 review finding
+    #: 3). Design §7's origin check is against *this* issuer's own
+    #: `allowed_origins`, never the workspace's whole set — a session
+    #: written before this column existed carries `None`, which
+    #: `EndUserIdentityService.allowed_origins_for_issuer` treats as "cannot
+    #: verify this session's origin" rather than falling back to the old,
+    #: over-permissive union. `ON DELETE SET NULL`: nothing deletes a
+    #: `channel_issuers` row today, but a session should degrade to
+    #: unverifiable rather than block a future delete.
+    channel_issuer_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("channel_issuers.id", ondelete="SET NULL"), nullable=True, index=True
+    )

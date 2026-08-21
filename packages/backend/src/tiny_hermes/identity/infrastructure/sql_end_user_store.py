@@ -176,17 +176,17 @@ class SqlEndUserStore:
         )
         return value is not None
 
-    async def active_allowed_origins(self, workspace_id: UUID) -> frozenset[str]:
-        rows = await self._session.scalars(
+    async def allowed_origins_for_issuer(
+        self, workspace_id: UUID, channel_issuer_id: UUID
+    ) -> frozenset[str]:
+        row = await self._session.scalar(
             select(ChannelIssuerRow.allowed_origins).where(
+                ChannelIssuerRow.id == channel_issuer_id,
                 ChannelIssuerRow.workspace_id == workspace_id,
                 ChannelIssuerRow.status == ChannelIssuerStatus.ACTIVE.value,
             )
         )
-        origins: set[str] = set()
-        for row_origins in rows:
-            origins.update(row_origins)
-        return frozenset(origins)
+        return frozenset(row) if row is not None else frozenset()
 
     # -- end_user_sessions, design §4.2-4.3 --------------------------------
 
@@ -197,6 +197,7 @@ class SqlEndUserStore:
         token_digest: str,
         expires_at: datetime,
         agents: Sequence[str],
+        channel_issuer_id: UUID,
     ) -> None:
         self._session.add(
             EndUserSessionRow(
@@ -206,6 +207,7 @@ class SqlEndUserStore:
                 expires_at=expires_at,
                 revoked_at=None,
                 agents=list(agents),
+                channel_issuer_id=channel_issuer_id,
             )
         )
 
@@ -220,7 +222,9 @@ class SqlEndUserStore:
         )
         if row is None or row.revoked_at is not None:
             return None
-        return StoredEndUserSession(row.end_user_id, row.workspace_id, tuple(row.agents))
+        return StoredEndUserSession(
+            row.end_user_id, row.workspace_id, tuple(row.agents), row.channel_issuer_id
+        )
 
     async def revoke_sessions(self, end_user_id: UUID, workspace_id: UUID, now: datetime) -> None:
         await self._session.execute(

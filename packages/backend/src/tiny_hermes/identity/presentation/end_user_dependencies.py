@@ -47,6 +47,11 @@ class EndUserCaller:
     #: straight to `AgentCatalog.resolve_end_user_agent` rather than reading
     #: it off anything the caller asserts on this particular request.
     agents: tuple[str, ...] = ()
+    #: Which issuer minted this session (§7, task-7 review finding 3), or
+    #: `None` for a session that predates the column — see
+    #: `EndUserSession.channel_issuer_id`. `resolve_end_user_caller_for_write`
+    #: passes this straight to `enforce_end_user_origin`.
+    channel_issuer_id: UUID | None = None
 
 
 def end_user_unauthenticated() -> AppError:
@@ -75,7 +80,9 @@ async def resolve_end_user_caller(
     session = await service.authenticate(session_token, datetime.now(UTC))
     if session is None:
         raise end_user_unauthenticated()
-    return EndUserCaller(session.end_user_id, session.workspace_id, session.agents)
+    return EndUserCaller(
+        session.end_user_id, session.workspace_id, session.agents, session.channel_issuer_id
+    )
 
 
 def cross_origin_forbidden() -> AppError:
@@ -108,7 +115,10 @@ def _request_origin(headers: Headers) -> str | None:
 
 
 async def enforce_end_user_origin(
-    service: EndUserIdentityService, workspace_id: UUID, headers: Headers
+    service: EndUserIdentityService,
+    workspace_id: UUID,
+    channel_issuer_id: UUID | None,
+    headers: Headers,
 ) -> None:
     """Design §7's CSRF defence, and the reason it has to exist at all: the
     end-user session cookie is `SameSite=None; Secure` (§4.2, required for a
@@ -116,8 +126,12 @@ async def enforce_end_user_origin(
     design's own trade of that header away for "just carry the cookie". A
     hostile page can therefore make the browser send a state-changing
     request with the cookie attached; the only thing left to check is where
-    the request came from, against the origins this workspace itself
-    registered on `channel_issuers.allowed_origins`.
+    the request came from, against the origins registered on the issuer
+    that minted *this session's own credential* (`channel_issuer_id`) —
+    never the workspace's whole `channel_issuers` set (task-7 review
+    finding 3: that used to be a union across every active issuer, which let
+    a second issuer's registered origin act on a session the first issuer
+    minted).
 
     A request carrying neither header is let through rather than refused.
     That is not a loophole a forged cross-site request can use — a browser
@@ -132,7 +146,7 @@ async def enforce_end_user_origin(
     origin = _request_origin(headers)
     if origin is None:
         return
-    allowed = await service.active_allowed_origins(workspace_id)
+    allowed = await service.allowed_origins_for_issuer(workspace_id, channel_issuer_id)
     if origin not in allowed:
         raise cross_origin_forbidden()
 
@@ -148,7 +162,7 @@ async def resolve_end_user_caller_for_write(
     lookups.
     """
     caller = await resolve_end_user_caller(service, session_token)
-    await enforce_end_user_origin(service, caller.workspace_id, headers)
+    await enforce_end_user_origin(service, caller.workspace_id, caller.channel_issuer_id, headers)
     return caller
 
 

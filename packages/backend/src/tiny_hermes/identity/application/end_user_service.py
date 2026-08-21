@@ -121,6 +121,11 @@ class EndUserSession:
     #: was exchanged for — see `EndUserSessionRow.agents` for why it has to
     #: live here rather than be re-read from a credential that is long gone.
     agents: tuple[str, ...] = ()
+    #: Which `channel_issuers` row minted this session (§7, task-7 review
+    #: finding 3), or `None` for a session that predates the column. Design
+    #: §7's origin check is against this issuer's own `allowed_origins`
+    #: alone — see `allowed_origins_for_issuer`.
+    channel_issuer_id: UUID | None = None
 
 
 class EndUserIdentityService:
@@ -182,6 +187,7 @@ class EndUserIdentityService:
             self.digest_token(session_token),
             expires_at,
             result.agents,
+            issuer_row.id,
         )
         await self._store.append_audit(
             workspace_id=workspace_id,
@@ -199,18 +205,37 @@ class EndUserIdentityService:
         stored = await self._store.find_session(self.digest_token(session_token), now)
         if stored is None:
             return None
-        return EndUserSession(stored.end_user_id, stored.workspace_id, stored.agents)
+        return EndUserSession(
+            stored.end_user_id, stored.workspace_id, stored.agents, stored.channel_issuer_id
+        )
 
     # -- origin enforcement, design §7 -------------------------------------
 
-    async def active_allowed_origins(self, workspace_id: UUID) -> frozenset[str]:
+    async def allowed_origins_for_issuer(
+        self, workspace_id: UUID, channel_issuer_id: UUID | None
+    ) -> frozenset[str]:
         """No actor, unlike `list_issuers` — this is not a console read of
         the registry, it is the platform checking its own configuration
-        before honouring a state-changing end-user request (design §7). The
-        caller has already proved a live end-user session; what origins a
-        workspace allows is not something that session's own request is
-        asking to see, only something it is being measured against."""
-        return await self._store.active_allowed_origins(workspace_id)
+        before honouring a state-changing end-user request (design §7).
+
+        Task-7 review finding 3: scoped to *the one issuer that minted this
+        session*, never unioned across every active issuer the workspace
+        has registered — a workspace running two enterprises' web widgets
+        through two different issuers must not let issuer B's origin act on
+        a session issuer A minted.
+
+        `channel_issuer_id` is `None` for a session written before that
+        column existed (migration 0034). That comes back empty rather than
+        falling back to the old, over-permissive union — the whole point of
+        this fix is that the union was too wide, so a session this platform
+        cannot attribute to a specific issuer is one whose origin it cannot
+        verify at all, not one that gets to borrow every issuer's trust. A
+        user on such a session signs in again, once, and gets a session
+        that does carry an issuer.
+        """
+        if channel_issuer_id is None:
+            return frozenset()
+        return await self._store.allowed_origins_for_issuer(workspace_id, channel_issuer_id)
 
     # -- revocation, design §4.3 ------------------------------------------
 
