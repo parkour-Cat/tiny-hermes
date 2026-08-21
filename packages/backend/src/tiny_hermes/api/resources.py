@@ -24,7 +24,7 @@ from tiny_hermes.http_tools.infrastructure.sql_store import SqlHttpToolStore
 from tiny_hermes.identity.application.auth_service import AuthService
 from tiny_hermes.identity.application.end_user_service import EndUserIdentityService
 from tiny_hermes.identity.application.machine_service import MachineIdentityService
-from tiny_hermes.identity.infrastructure.jwks_key_source import OutboundJwksKeySource
+from tiny_hermes.identity.infrastructure.jwks_key_source import JwksCache, OutboundJwksKeySource
 from tiny_hermes.identity.infrastructure.sql_end_user_store import SqlEndUserStore
 from tiny_hermes.identity.infrastructure.sql_machine_store import SqlMachineIdentityStore
 from tiny_hermes.identity.infrastructure.sql_store import SqlAuthStore
@@ -76,6 +76,15 @@ class ApplicationResources:
         self._notifier: WakeUpNotifier | None = None
         self._object_store: MinioObjectStore | None = None
         self._event_hub: EventStreamHub | None = None
+        # Task-9 review finding E: one cache for the process's whole
+        # lifetime, not one per request. `end_user_identity_service` below
+        # builds a fresh `EndUserIdentityService`/`OutboundJwksKeySource`
+        # per request the same way it always has (a client that outlives one
+        # request is a client whose approved egress route was read at a
+        # different time than it is used — `outbound_client`'s own
+        # docstring) — only the cache itself needs to survive past that, so
+        # it is constructed once here rather than inside that generator.
+        self._jwks_cache: JwksCache | None = None
 
     @property
     def settings(self) -> Settings:
@@ -136,6 +145,11 @@ class ApplicationResources:
             else:
                 await session.commit()
 
+    def jwks_cache(self) -> JwksCache:
+        if self._jwks_cache is None:
+            self._jwks_cache = JwksCache()
+        return self._jwks_cache
+
     async def end_user_identity_service(self) -> AsyncGenerator[EndUserIdentityService]:
         async with self.session_factory()() as session:
             try:
@@ -144,8 +158,13 @@ class ApplicationResources:
                     # A JWKS fetch is outbound traffic (design §3), so it
                     # goes through the same egress route every other outbound
                     # call in this process does — never a client this
-                    # service builds for itself.
-                    OutboundJwksKeySource(self.outbound_client),
+                    # service builds for itself. The cache (task-9 review
+                    # finding E) is process-lifetime, shared across every
+                    # request's own `OutboundJwksKeySource` — a fetch that
+                    # already happened for one exchange still going through
+                    # `SafeOutboundClient` for the next would be exactly the
+                    # burst the finding is about.
+                    OutboundJwksKeySource(self.outbound_client, self.jwks_cache()),
                     timedelta(seconds=self.settings.end_user_session_ttl_seconds),
                 )
             except BaseException:
