@@ -43,6 +43,10 @@ class ApprovalStore(Protocol):
 
     async def list_pending(self, workspace_id: UUID) -> Sequence[Approval]: ...
 
+    async def list_pending_for_end_user(
+        self, workspace_id: UUID, end_user_id: UUID
+    ) -> Sequence[Approval]: ...
+
     async def get(self, approval_id: UUID) -> Approval | None: ...
 
     async def end_user_of(self, run_id: UUID) -> UUID | None: ...
@@ -133,6 +137,26 @@ class ApprovalService:
         if role is None and not actor.is_platform_admin:
             raise ForbiddenApprovalAction
         return await self.store.list_pending(workspace_id)
+
+    async def list_pending_for_end_user(
+        self, end_user_id: UUID, workspace_id: UUID, request_id: str
+    ) -> Sequence[Approval]:
+        """Plan §10's missing consumer-side list: what this end user can
+        answer, and nothing else.
+
+        No `_require_role` / workspace-membership check, matching
+        `RunCoordination.create_end_user_session`'s own reasoning — an end
+        user is never a workspace member, so there is no Role to look up.
+        The scoping that matters happens one layer down, in the store's own
+        query: `requested_by == end_user_id` already can't match a
+        `governance_approval` (its `requested_by` is a workspace
+        administrator's `users.id`, never an `end_users.id`), but the store
+        still filters `approval_type` explicitly rather than leaning on that
+        as the only guarantee — the same belt-and-suspenders `may_decide`
+        applies on the decide side, kept here rather than assumed.
+        """
+        del request_id
+        return await self.store.list_pending_for_end_user(workspace_id, end_user_id)
 
     async def decide(
         self,

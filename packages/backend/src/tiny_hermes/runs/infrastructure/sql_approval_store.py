@@ -66,6 +66,31 @@ class SqlApprovalStore:
         ).all()
         return [_approval(row) for row in rows]
 
+    async def list_pending_for_end_user(
+        self, workspace_id: UUID, end_user_id: UUID
+    ) -> Sequence[Approval]:
+        """Plan §10. `approval_type` is filtered explicitly rather than left
+        to `requested_by` alone to carry the whole guarantee: `requested_by`
+        for a `governance_approval` is a workspace administrator's
+        `users.id`, which cannot equal this `end_users.id` in practice, but
+        an explicit filter is what `runs/domain/approval.py::may_decide`
+        also does on the decide side, and this list should refuse the same
+        way the decision it lists would.
+        """
+        rows = (
+            await self._session.scalars(
+                select(ApprovalRow)
+                .where(
+                    ApprovalRow.workspace_id == workspace_id,
+                    ApprovalRow.approval_type == ApprovalType.USER_CONFIRMATION.value,
+                    ApprovalRow.requested_by == end_user_id,
+                    ApprovalRow.status == ApprovalStatus.PENDING.value,
+                )
+                .order_by(ApprovalRow.created_at)
+            )
+        ).all()
+        return [_approval(row) for row in rows]
+
     async def get(self, approval_id: UUID) -> Approval | None:
         row = await self._session.get(ApprovalRow, approval_id)
         return None if row is None else _approval(row)

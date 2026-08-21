@@ -1,5 +1,11 @@
 """§5's missing door: the end user who owns a `user_confirmation` answers it.
 
+Plan §10 adds the door in front of it: `GET ""` lists what this end user may
+answer, so `POST /{approval_id}/decision` below has an `approval_id` to be
+given at all. Until this task, nothing produced one — no list route, no id
+on any end-user response, `apps/chat-web` never once saying "approval" — so
+the decide route existed and stayed permanently out of reach.
+
 `ApprovalType.USER_CONFIRMATION` has had a producer since 0032
 (`SqlApprovalGate._subject` returns `run.end_user_id`) and design v2.5 §4.6's
 matrix is explicit that this approval type is 仅发起人本人 — only the Run's
@@ -37,6 +43,7 @@ from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.identity.application.end_user_service import EndUserIdentityService
 from tiny_hermes.identity.presentation.end_user_dependencies import (
     END_USER_SESSION_COOKIE,
+    resolve_end_user_caller,
     resolve_end_user_caller_for_write,
 )
 from tiny_hermes.runs.application.approvals import (
@@ -59,6 +66,32 @@ def end_user_approval_router(resources: ApplicationResources) -> APIRouter:
     router = APIRouter(prefix="/api/v1/end-user/approvals", tags=["end-user-approvals"])
     identity_dependency = resources.end_user_identity_service
     service_dependency = resources.approval_service
+
+    # `ApprovalResponse` (imported from the console's own `approval_routes.py`
+    # above, and already what `decide` below returns) is reused rather than
+    # narrowed the way `EndUserRunResponse`/`EndUserSessionResponse` were:
+    # unlike those, none of its fields are console operational state. For a
+    # `user_confirmation` `required_permission` is always `None` (the
+    # caller's own docstring on `Approval`), `document` is exactly what this
+    # end user is being asked to decide, and `requested_by`/`decided_by` can
+    # only ever be this end user's own id. There is nothing here to hide from
+    # the person the approval belongs to.
+    @router.get("", response_model=list[ApprovalResponse])
+    async def list_pending(  # pyright: ignore[reportUnusedFunction]
+        request: Request,
+        identity: Annotated[
+            EndUserIdentityService, Depends(identity_dependency, scope="function")
+        ],
+        service: Annotated[
+            ApprovalService, Depends(service_dependency, scope="function")
+        ],
+        end_user_session: EndUserSessionCookie = None,
+    ) -> list[ApprovalResponse]:
+        caller = await resolve_end_user_caller(identity, end_user_session)
+        listed = await service.list_pending_for_end_user(
+            caller.end_user_id, caller.workspace_id, request.state.request_id
+        )
+        return [ApprovalResponse.from_domain(item) for item in listed]
 
     @router.post("/{approval_id}/decision", response_model=ApprovalResponse)
     async def decide(  # pyright: ignore[reportUnusedFunction]

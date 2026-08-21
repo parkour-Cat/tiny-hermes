@@ -27,6 +27,7 @@ has no Role for that check to read.
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 import jwt
@@ -153,7 +154,7 @@ def _submit_run(client: TestClient, session_id: str, key: str, text: str = "hell
     return str(created.json()["id"])
 
 
-def _cancel(client: TestClient, run_id: str, expected_state_version: int) -> object:
+def _cancel(client: TestClient, run_id: str, expected_state_version: int) -> Any:
     return client.post(
         f"/api/v1/end-user/runs/{run_id}/cancel",
         json={"expected_state_version": expected_state_version},
