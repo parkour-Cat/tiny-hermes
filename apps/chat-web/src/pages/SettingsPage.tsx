@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { api } from "../api/client";
+import { forgetAllSessionIds } from "../chat/localSessions";
 import { problemMessage } from "../api/messages";
 import type { ErasureResponse, SubjectExportResponse } from "../api/types";
 import { useLocale, useT } from "../i18n/locale";
@@ -24,6 +25,12 @@ function downloadJson(filename: string, value: unknown): void {
  * the two self-service actions an end user has over their own data and
  * nothing else offers a door to. No account section: §4.5.1 means there is
  * no name or email this app was ever given to show.
+ *
+ * Sign-out sits alongside them but is not one of them: it clears what this
+ * *device* remembers, and touches nothing the platform holds. It is here
+ * because §4.5.1 makes this device the only place that list could live, so
+ * this page is the only place it could be cleared from — a shared or
+ * borrowed browser otherwise keeps the rail forever.
  */
 export function SettingsPage() {
   const t = useT();
@@ -36,6 +43,7 @@ export function SettingsPage() {
   const [eraseError, setEraseError] = useState<string | null>(null);
   const [erased, setErased] = useState<ErasureResponse | null>(null);
   const [confirmingErase, setConfirmingErase] = useState(false);
+  const [signedOut, setSignedOut] = useState(false);
 
   async function exportData(): Promise<void> {
     setExporting(true);
@@ -59,6 +67,11 @@ export function SettingsPage() {
       });
       setErased(report);
       setConfirmingErase(false);
+      // The rail is this device's memory of Sessions that no longer exist —
+      // every id it holds would now resolve to a 404. Erasure that left them
+      // listed would show the user a set of chats they were just told were
+      // deleted.
+      forgetAllSessionIds();
     } catch (caught) {
       setEraseError(problemMessage(caught));
     } finally {
@@ -148,6 +161,20 @@ export function SettingsPage() {
             {t("eraseDataButton")}
           </button>
         )}
+      </section>
+      <section>
+        <h2>{t("signOut")}</h2>
+        <p className="settings-hint">{t("signOutHint")}</p>
+        {signedOut ? <p className="settings-hint">{t("signOutDone")}</p> : null}
+        <button
+          type="button"
+          onClick={() => {
+            forgetAllSessionIds();
+            setSignedOut(true);
+          }}
+        >
+          {t("signOutButton")}
+        </button>
       </section>
       <section className="settings-about">
         <h2>{t("about")}</h2>

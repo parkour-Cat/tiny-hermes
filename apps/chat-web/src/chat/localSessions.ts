@@ -53,3 +53,32 @@ export function forgetSessionId(alias: string, sessionId: string): void {
     // Best-effort, same as rememberSessionId.
   }
 }
+
+/**
+ * Task-9 review finding H: every other action here is scoped to one Agent
+ * alias, which is right for `forgetSessionId` (a device forgetting a
+ * conversation with one Agent has no reason to touch its memory of any
+ * other) but leaves nothing a caller can use as a plain "sign out of this
+ * device" — that would mean already knowing every alias this device ever
+ * talked to, which nothing here tracks. This walks every key this module
+ * itself ever wrote (`KEY_PREFIX`, never a bare guess at `localStorage`'s
+ * own key list) and clears them all, alias by alias, the same best-effort
+ * shape every other write here already has: a blocked store loses the
+ * rail's memory, not the chat.
+ */
+export function forgetAllSessionIds(): void {
+  try {
+    const keys: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i += 1) {
+      const stored = window.localStorage.key(i);
+      if (stored !== null && stored.startsWith(KEY_PREFIX)) {
+        keys.push(stored);
+      }
+    }
+    for (const stored of keys) {
+      window.localStorage.removeItem(stored);
+    }
+  } catch {
+    // Best-effort, same as every other write in this module.
+  }
+}
