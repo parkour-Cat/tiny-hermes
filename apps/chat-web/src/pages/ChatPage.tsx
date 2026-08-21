@@ -4,7 +4,7 @@ import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { api } from "../api/client";
 import { problemMessage } from "../api/messages";
-import type { CanonicalMessage, RunResponse, SessionResponse } from "../api/types";
+import type { CanonicalMessage, EndUserSessionResponse, RunResponse } from "../api/types";
 import { Composer } from "../chat/Composer";
 import { downloadMarkdown, exportFilename, transcriptMarkdown } from "../chat/exportTranscript";
 import { chatPath, isAgentAlias, matchSessionId } from "../chat/paths";
@@ -120,7 +120,7 @@ export function ChatPage() {
       }
       let sessionId = activeSessionId;
       if (sessionId === null) {
-        const created = await api<SessionResponse>(`/api/v1/end-user/agents/${alias}/sessions`, {
+        const created = await api<EndUserSessionResponse>(`/api/v1/end-user/agents/${alias}/sessions`, {
           method: "POST",
           body: JSON.stringify({}),
         });
@@ -177,8 +177,9 @@ export function ChatPage() {
           // free to reuse, the same "don't mint a new one just to leave the
           // last empty one orphaned" rule the console follows
           // (`isBlankSession`) — restated here on messages alone, since
-          // there is no `SessionResponse` to read `head_run_id` off for a
-          // Session this device only knows the id of.
+          // `EndUserSessionResponse` carries no `head_run_id` to read for a
+          // Session this device only knows the id of (task-9 review
+          // finding F narrowed it down to just `id`).
           const unused = known.find(
             (id, index) =>
               !prefs.archived.includes(id) &&

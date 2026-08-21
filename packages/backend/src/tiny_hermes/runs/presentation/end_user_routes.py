@@ -70,9 +70,14 @@ from tiny_hermes.identity.presentation.end_user_dependencies import (
     resolve_end_user_caller_for_write,
 )
 from tiny_hermes.runs.application.service import RunCoordination, RunCoordinationError
-from tiny_hermes.runs.domain.models import CanonicalMessage, RunSnapshot, SessionMode
+from tiny_hermes.runs.domain.models import (
+    CanonicalMessage,
+    RunSnapshot,
+    SessionMode,
+    SessionSnapshot,
+)
 from tiny_hermes.runs.presentation.errors import as_app_error
-from tiny_hermes.runs.presentation.routes import REPLAYED_HEADER, SessionResponse
+from tiny_hermes.runs.presentation.routes import REPLAYED_HEADER
 from tiny_hermes.shared.errors import AppError
 
 EndUserSessionCookie = Annotated[str | None, Cookie(alias=END_USER_SESSION_COOKIE)]
@@ -107,6 +112,27 @@ class EndUserQueueResponse(BaseModel):
 
     position: int
     status: str
+
+
+class EndUserSessionResponse(BaseModel):
+    """Task-9 review finding F: `create_session` returned the console's own
+    `SessionResponse` verbatim — `caller_type`, `caller_id`, `head_run_id`,
+    `next_run_sequence`, `next_message_sequence` are the platform's own
+    Session bookkeeping, no more this audience's business than the fields
+    `EndUserRunResponse`'s own docstring already declined to hand an end
+    user for a Run, and for the same reason: reusing the console's shape
+    leaked them by omission of a decision, not because anyone chose to.
+
+    `ChatPage.tsx` reads exactly one field off this response —
+    `created.id`, to start talking through it — so that is all this
+    carries.
+    """
+
+    id: UUID
+
+    @classmethod
+    def from_domain(cls, session: SessionSnapshot) -> "EndUserSessionResponse":
+        return cls.model_validate(session.document())
 
 
 class EndUserRunResponse(BaseModel):
@@ -161,7 +187,7 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
 
     @router.post(
         "/agents/{alias}/sessions",
-        response_model=SessionResponse,
+        response_model=EndUserSessionResponse,
         status_code=status.HTTP_201_CREATED,
     )
     async def create_session(  # pyright: ignore[reportUnusedFunction]
@@ -174,7 +200,7 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
         catalog: Annotated[AgentCatalog, Depends(catalog_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         end_user_session: EndUserSessionCookie = None,
-    ) -> SessionResponse:
+    ) -> EndUserSessionResponse:
         caller = await resolve_end_user_caller_for_write(
             identity, end_user_session, request.headers
         )
@@ -186,7 +212,7 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
             payload.session_mode,
             request.state.request_id,
         )
-        return SessionResponse.from_domain(created)
+        return EndUserSessionResponse.from_domain(created)
 
     @router.post(
         "/sessions/{session_id}/runs",

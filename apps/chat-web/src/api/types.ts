@@ -20,16 +20,18 @@ export type WorkspaceResponse = {
   status: string;
 };
 
-export type SessionResponse = {
+/**
+ * Task-9 review finding F: the end-user `POST .../sessions` route used to
+ * return the console's own `SessionResponse` shape verbatim —
+ * `caller_type`/`caller_id`/`head_run_id`/`next_run_sequence`/
+ * `next_message_sequence` are the platform's own Session bookkeeping, no
+ * more this app's business than the fields already trimmed off
+ * `RunResponse` below. The backend narrowed its response model to match
+ * (`EndUserSessionResponse` in `runs/presentation/end_user_routes.py`); this
+ * type is that model, not the console's.
+ */
+export type EndUserSessionResponse = {
   id: string;
-  agent_id: string;
-  session_mode: string;
-  caller_type: string;
-  caller_id: string;
-  head_run_id: string | null;
-  next_run_sequence: number;
-  next_message_sequence: number;
-  created_at: string;
 };
 
 export type QueueResponse = {
