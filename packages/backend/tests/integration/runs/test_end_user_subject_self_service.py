@@ -8,6 +8,7 @@ platform-member path); this suite is only about the second door
 for a caller who was never a workspace member.
 """
 
+import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -199,3 +200,79 @@ async def test_erasure_removes_what_export_could_see(
     )
     assert exported.status_code == 200, exported.text
     assert exported.json()["memories"] == []
+
+
+async def test_erasure_reaches_the_identifying_row_the_session_and_a_returning_credential(
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+    engine: AsyncEngine,
+    registered_issuer: dict[str, object],
+) -> None:
+    """Finding 2: a "successful" erasure that leaves `end_users.erased_at`
+    unset, `external_identities` carrying whatever identifying detail a
+    credential put there, and the cookie the erasing end user is *still
+    holding* live, is not an erasure at all — it is a count that ran.
+
+    The decision this pins: an erased subject who comes back with the same
+    enterprise credential is **refused**, not handed a fresh `EndUser`. That
+    is only possible because the `external_identities` row survives with its
+    `(channel, external_user_id)` mapping intact — `upsert_external_identity`
+    has to find *this* end user again, now carrying `erased_at`, for
+    `EndUserIdentityService.exchange`'s guard to have anything to refuse.
+    `profile` is what actually gets cleared: design §3's own words are that
+    it is "the row ... that can be cleared without touching the subject the
+    rest of the platform points at" — the mapping stays, the identifying
+    fields on it do not.
+    """
+    del scope
+    end_user_id = _sign_in(client, workspace_id, "zhang")
+    # No producer writes `profile` yet (nothing in this credential shape
+    # does), so this stands in for the day one does — the erasure has to
+    # clear it regardless of who fills it in.
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE external_identities SET profile = :p WHERE end_user_id = :id"),
+            {"p": json.dumps({"name": "Zhang Wei"}), "id": end_user_id},
+        )
+
+    erased = client.post("/api/v1/end-user/subjects/me/erase")
+    assert erased.status_code == 200, erased.text
+
+    async with engine.connect() as connection:
+        erased_at = await connection.scalar(
+            text("SELECT erased_at FROM end_users WHERE id = :id"), {"id": end_user_id}
+        )
+        profile = await connection.scalar(
+            text("SELECT profile FROM external_identities WHERE end_user_id = :id"),
+            {"id": end_user_id},
+        )
+        live_sessions = await connection.scalar(
+            text(
+                "SELECT count(*) FROM end_user_sessions "
+                "WHERE end_user_id = :id AND revoked_at IS NULL"
+            ),
+            {"id": end_user_id},
+        )
+    assert erased_at is not None
+    assert profile is None
+    assert live_sessions == 0
+
+    # The cookie the erasing end user is still holding no longer works.
+    still_holding_the_cookie = client.get(
+        "/api/v1/end-user/subjects/me/export", params={"agent_id": None}
+    )
+    assert still_holding_the_cookie.status_code == 401
+
+    # And the same enterprise `sub` is refused, not resurrected as a new
+    # `EndUser` — the same generic refusal every other credential problem
+    # gets (design §8), never a distinguishing error.
+    resurrection = client.post(
+        "/api/v1/end-user/sessions",
+        headers={
+            "Authorization": f"Bearer {_credential(workspace_id=workspace_id, sub='zhang')}",
+            "X-Workspace-Id": workspace_id,
+        },
+    )
+    assert resurrection.status_code == 401
+    assert resurrection.json()["code"] == "end_user_credential_invalid"
