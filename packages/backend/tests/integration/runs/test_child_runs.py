@@ -920,3 +920,70 @@ async def test_retrying_a_child_keeps_it_on_the_trees_budget(
         ids=[UUID(parent_run), failed.id, UUID(str(derived.json()["id"]))],
     )
     assert len(scopes) == 1, "a retried child must not get a budget row of its own"
+
+
+async def test_erasing_a_subject_whose_run_delegated_takes_the_whole_tree(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    coordinator: str,
+) -> None:
+    """Task-9 finding I: erasure has to survive a Run that delegated.
+
+    `SqlSubjectStore.erase` deletes Runs by Session, and delegation is the
+    one thing that puts a subject's Runs in more than one Session. Three
+    no-cascade foreign keys point into `runs` from inside a tree —
+    `fk_runs_parent`, plus `budget_root_run_id` and `blocked_by_run_id` —
+    so "which Sessions does this subject own" and "which Runs does deleting
+    them take" have to be the same question, or the delete fails halfway.
+
+    They are the same question for a reason worth pinning rather than
+    trusting: a child Session inherits `caller_type`/`caller_id` from the
+    parent's (§13's fourth clause, `delegate_children`), so every Run in
+    the tree is in a Session belonging to this subject and one `sessions_of`
+    finds all of them. If a later change gave children a caller of their
+    own — a service identity, say — this test is what would catch it, and
+    what would break is erasure rather than delegation, which is why the
+    test lives on this side.
+
+    The reasoning above says it should already pass. It is here because the
+    same reasoning said `fk_sessions_head_run` was fine, and it was not.
+    """
+    workspace_id = scope["X-Workspace-Id"]
+    session_id = session_for(coordinator)
+    client.post(
+        "/api/v1/runs",
+        headers={**scope, "Idempotency-Key": "delegate-then-erase"},
+        json={"session_id": session_id, "input": "reader,checker"},
+    )
+    await _drain(engine, workspace_id)
+
+    tree = await _rows(
+        engine,
+        "SELECT r.id FROM runs r JOIN sessions s ON s.id = r.session_id"
+        " WHERE s.caller_id = (SELECT caller_id FROM sessions WHERE id = :s)",
+        s=UUID(session_id),
+    )
+    # A parent and two children, in three Sessions — otherwise this test
+    # would pass without ever exercising the cross-Session case.
+    assert len(tree) == 3
+    sessions = await _rows(
+        engine,
+        "SELECT id FROM sessions WHERE caller_id ="
+        " (SELECT caller_id FROM sessions WHERE id = :s)",
+        s=UUID(session_id),
+    )
+    assert len(sessions) == 3
+    subject = (
+        await _rows(engine, "SELECT caller_id FROM sessions WHERE id = :s", s=UUID(session_id))
+    )[0].caller_id
+
+    erased = client.post(f"/api/v1/subjects/{subject}/erase", headers=scope)
+
+    assert erased.status_code == 200, erased.text
+    assert erased.json()["sessions"] == 3
+    left = await _rows(
+        engine, "SELECT id FROM runs WHERE session_id IN (SELECT id FROM sessions)"
+    )
+    assert [row for row in left if row.id in {r.id for r in tree}] == []
