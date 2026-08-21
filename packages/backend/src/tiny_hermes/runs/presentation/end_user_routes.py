@@ -72,7 +72,7 @@ from tiny_hermes.identity.presentation.end_user_dependencies import (
 from tiny_hermes.runs.application.service import RunCoordination, RunCoordinationError
 from tiny_hermes.runs.domain.models import CanonicalMessage, RunSnapshot, SessionMode
 from tiny_hermes.runs.presentation.errors import as_app_error
-from tiny_hermes.runs.presentation.routes import REPLAYED_HEADER, QueueResponse, SessionResponse
+from tiny_hermes.runs.presentation.routes import REPLAYED_HEADER, SessionResponse
 from tiny_hermes.shared.errors import AppError
 
 EndUserSessionCookie = Annotated[str | None, Cookie(alias=END_USER_SESSION_COOKIE)]
@@ -85,6 +85,28 @@ class CreateEndUserSessionRequest(BaseModel):
 
 class CreateEndUserRunRequest(BaseModel):
     input: str = Field(min_length=1, max_length=32_768)
+
+
+class EndUserQueueResponse(BaseModel):
+    """Task-7 review finding 4 missed this nesting level: `EndUserRunResponse`
+    dropped the console's operational fields at its own top level but still
+    carried the console's `QueueResponse` verbatim for `queue`, and that class
+    keeps `available_actions` — console-style action names computed with
+    `can_control=True` — plus `blocked_by_run_id`/`head_status`/`head_reason`.
+    None of that is dormant for this audience: an end user's own Run sitting
+    in `PAUSED`, `WAITING_APPROVAL` or `WAITING_EXTERNAL` blocks its Session's
+    head exactly as a console Run does, `WAITING_APPROVAL` is reachable
+    through the end user's own approval route, and a second Run or a read on
+    the same Session then gets a `session_blocked` queue carrying all of it.
+
+    This carries only what `ChatPage.tsx` actually reads:
+    `queue.status === "session_blocked"` is what drives the composer's
+    "still busy" banner, and `position` is the only other fact a chat surface
+    has any use for.
+    """
+
+    position: int
+    status: str
 
 
 class EndUserRunResponse(BaseModel):
@@ -106,7 +128,7 @@ class EndUserRunResponse(BaseModel):
     session_id: UUID
     status: str
     finished_at: datetime | None
-    queue: QueueResponse
+    queue: EndUserQueueResponse
 
     @classmethod
     def from_domain(cls, run: RunSnapshot) -> "EndUserRunResponse":
