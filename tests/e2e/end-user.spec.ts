@@ -148,6 +148,112 @@ async function registerIssuer(
   expect(registered.status).toBe(201);
 }
 
+/**
+ * Plan §10's own walk: a Run that stops for the end user's own confirmation,
+ * seen and answered from `apps/chat-web` rather than read out of the
+ * database the way `test_end_user_approvals.py` (necessarily) does — this
+ * is the assertion that suite's own docstring says the previous stage could
+ * not make.
+ *
+ * The stand-in is the platform's own API, the same choice `tools.spec.ts`
+ * makes and for the same reason: `GET /health/live` needs no credential and
+ * a real egress hop out through the proxy is what is under test, not the far
+ * end. `TOOL_HOST = "api"` is the compose service name, reachable from the
+ * Worker container once both outbound-scope levels approve it.
+ */
+const TOOL_HOST = "api";
+const TOOL_BASE = `http://${TOOL_HOST}:8000`;
+const TOOL_DOCUMENT = JSON.stringify({
+  openapi: "3.0.3",
+  info: { title: "Platform health", version: "1" },
+  paths: {
+    "/health/live": {
+      get: { operationId: "readLiveness", summary: "Is the API alive." },
+      post: { operationId: "pokeLiveness", summary: "Pretend to change it." },
+    },
+  },
+});
+
+async function approveEgressHost(page: Page, workspaceId: string, entry: string): Promise<void> {
+  const platform = await api(page, workspaceId, "POST", "/api/v1/outbound-scopes/platform", {
+    entry,
+    note: "plan §10's confirmation walk",
+  });
+  expect(platform.status).toBe(201);
+  const workspace = await api(page, workspaceId, "POST", "/api/v1/outbound-scopes/workspace", {
+    entry,
+    note: "plan §10's confirmation walk",
+  });
+  expect(workspace.status).toBe(201);
+}
+
+async function registerHttpTool(page: Page, workspaceId: string): Promise<string> {
+  const created = await api(page, workspaceId, "POST", "/api/v1/http-tools", {
+    name: "health",
+    base_url: TOOL_BASE,
+    document: TOOL_DOCUMENT,
+    credential_ref: null,
+  });
+  expect(created.status).toBe(201);
+  const versions = await api(
+    page,
+    workspaceId,
+    "GET",
+    `/api/v1/http-tools/${created.json.id}/versions`,
+  );
+  expect(versions.status).toBe(200);
+  return versions.json[0].id as string;
+}
+
+/**
+ * An end-user-enabled Agent whose one bound write is `write_policy:
+ * "governance"` — on a `caller_type=end_user` Run that opens a
+ * `user_confirmation` rather than a `governance_approval` (plan §5's
+ * producer), which is the state plan §10's routes and this walk exist for.
+ */
+async function publishConfirmableAgent(
+  page: Page,
+  workspaceId: string,
+  httpToolVersionId: string,
+): Promise<{ agentId: string; alias: string }> {
+  const name = unique("writer");
+  const alias = name.toLowerCase().replace(/_/g, "-");
+  const created = await api(page, workspaceId, "POST", "/api/v1/agents", { name, alias });
+  expect(created.status).toBe(201);
+  const agentId = created.json.id as string;
+  const draft = await api(page, workspaceId, "PUT", `/api/v1/agents/${agentId}/draft`, {
+    expected_revision: 1,
+    spec: {
+      schema_version: 1,
+      personality: "A concierge that writes on the enterprise's own behalf.",
+      model_policy: { provider: "deterministic", scenario: "http_once" },
+      tools: [],
+      network: { allow: [TOOL_HOST] },
+      http_tools: [
+        {
+          http_tool_version_id: httpToolVersionId,
+          operations: ["pokeLiveness"],
+          write_policy: "governance",
+        },
+      ],
+      limits: {
+        max_execution_seconds: 900,
+        max_elapsed_seconds: 86_400,
+        max_model_calls: 20,
+        max_tool_calls: 50,
+        max_derived_retries: 3,
+      },
+      end_user_access: { enabled: true },
+    },
+  });
+  expect(draft.status).toBe(200);
+  const published = await api(page, workspaceId, "POST", `/api/v1/agents/${agentId}/publish`, {
+    expected_revision: draft.json.revision,
+  });
+  expect(published.status).toBe(201);
+  return { agentId, alias };
+}
+
 test("an enterprise credential opens a conversation that survives closing the tab, and the end user exports their own data", async ({
   page,
   browser,
@@ -227,6 +333,68 @@ test("an enterprise credential opens a conversation that survives closing the ta
   expect(exported.workspace_id).toBe(workspaceId);
   expect(Array.isArray(exported.sessions)).toBe(true);
   expect(exported.sessions.length).toBeGreaterThan(0);
+
+  await context.close();
+});
+
+test("an end user hits a Run that stops for their own confirmation, sees it, and answers it", async ({
+  page,
+  browser,
+}) => {
+  test.setTimeout(180_000);
+  const workspaceId = await openWorkspace(page);
+  await approveEgressHost(page, workspaceId, TOOL_HOST);
+  const httpToolVersionId = await registerHttpTool(page, workspaceId);
+  const { alias } = await publishConfirmableAgent(page, workspaceId, httpToolVersionId);
+  const { publicKey, privateKey } = rsaKeyPair();
+  await registerIssuer(page, workspaceId, publicKey);
+
+  const now = Math.floor(Date.now() / 1000);
+  const credential = signCredential(
+    {
+      iss: ISSUER,
+      sub: "e2e-confirming-user",
+      aud: workspaceId,
+      iat: now,
+      exp: now + 600,
+      agents: [alias],
+    },
+    privateKey,
+  );
+
+  // A fresh context, same reasoning as the walk above: this end user's
+  // identity has never touched the console's own session.
+  const context = await browser.newContext();
+  const chatPage = await context.newPage();
+  const url = `${CHAT_ORIGIN}/?workspace=${workspaceId}&agent=${alias}#credential=${encodeURIComponent(credential)}`;
+  await chatPage.goto(url);
+  await expect(chatPage).toHaveURL(new RegExp(`^${CHAT_ORIGIN}/${alias}$`));
+
+  // `http.health.pokeLiveness` is the deterministic model's own drill
+  // vocabulary (`_tool_call_name` in `deterministic_model.py`): the Run
+  // input names exactly the bound write operation to call.
+  await chatPage.getByLabel("写给智能体").fill("http.health.pokeLiveness");
+  await chatPage.getByRole("button", { name: "发送" }).click();
+
+  // The write stopped, and this end user's own page — not the console, not
+  // a database query — is where that becomes visible. Before this task
+  // there was no route that could produce this text at all.
+  await expect(chatPage.getByText("这次运行需要你确认才能继续")).toBeVisible({
+    timeout: 120_000,
+  });
+  await expect(chatPage.getByText("http.health.pokeLiveness")).toBeVisible();
+
+  await chatPage.getByRole("button", { name: "同意", exact: true }).click();
+
+  // The confirmation cleared and the Run went on to do the write it had
+  // stopped for — the half of the walk `test_end_user_approvals.py` proves
+  // over HTTP but no browser-driven test could show until this task.
+  await expect(chatPage.getByText("这次运行需要你确认才能继续")).toBeHidden({
+    timeout: 30_000,
+  });
+  await expect
+    .poll(async () => chatPage.locator(".turn-agent").count(), { timeout: 60_000 })
+    .toBeGreaterThan(0);
 
   await context.close();
 });
