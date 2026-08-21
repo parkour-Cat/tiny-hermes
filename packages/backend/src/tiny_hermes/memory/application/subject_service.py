@@ -69,6 +69,22 @@ class SubjectStore(Protocol):
         self, scope: MemoryScope
     ) -> Sequence[MemoryRecord]: ...
 
+    async def memories_of_subject(
+        self, workspace_id: UUID, subject: CallerIdentity
+    ) -> Sequence[MemoryRecord]:
+        """Every private memory this subject has, under any Agent.
+
+        `memories_of` needs a scope, and a scope needs one Agent (`MemoryScope`'s
+        own docstring: "no way to express every subject's memory" — but that
+        refusal is about widening *across subjects*, not about one subject's
+        own export reaching past whichever single Agent a caller happened to
+        name). §348's export is the subject's data, not one Agent's slice of
+        it — this is what `export` calls when its caller passed no `agent_id`,
+        which is what every real caller does; nothing in this codebase has an
+        Agent picker for a subject to choose from.
+        """
+        ...
+
     async def get(self, memory_id: UUID) -> MemoryRecord | None: ...
 
     async def subject_of(self, memory_id: UUID) -> CallerIdentity | None:
@@ -133,12 +149,19 @@ class SubjectService:
     ) -> SubjectExport:
         """Everything held about this subject, for them to take away.
 
+        `agent_id` narrows to one Agent's memory when a caller names one — the
+        console's own export route accepts it for exactly that reason. `None`
+        is not "no memory" (it used to return that, review finding 3); it is
+        "every Agent this subject has used", which is what the door's only
+        real caller — `apps/chat-web`'s settings page, no Agent picker in
+        sight — always asks for, and the only sensible default for "everything
+        held about this subject" to begin with.
+
         An already-erased subject exports empty rather than failing: "there is
         nothing" is the honest answer, and an error would read as "something
         went wrong" to somebody who had just asked for their data to be gone.
         """
         await self._require_self_or_steward(actor, workspace_id, subject, request_id)
-        memories: list[MemoryRecord] = []
         if agent_id is not None:
             memories = list(
                 await self.store.memories_of(
@@ -147,6 +170,8 @@ class SubjectService:
                     )
                 )
             )
+        else:
+            memories = list(await self.store.memories_of_subject(workspace_id, subject))
         return SubjectExport(
             subject=subject,
             workspace_id=workspace_id,

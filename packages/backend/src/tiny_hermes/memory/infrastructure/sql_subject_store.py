@@ -90,6 +90,28 @@ class SqlSubjectStore:
         ).all()
         return [record_of(row) for row in rows]
 
+    async def memories_of_subject(
+        self, workspace_id: UUID, subject: CallerIdentity
+    ) -> Sequence[MemoryRecord]:
+        """This subject's private memory, across every Agent — no `agent_id`
+        in the query at all, unlike `memories_of`. `erase`'s own count query
+        a few methods down already reads this same shape (workspace, subject
+        type, subject id, no Agent) for the same reason: what belongs to a
+        subject was never scoped to one Agent, only ever read that way when a
+        caller happened to name one.
+        """
+        rows = await self._session.scalars(
+            select(MemoryRow)
+            .where(
+                MemoryRow.workspace_id == workspace_id,
+                MemoryRow.kind == MemoryKind.PRIVATE.value,
+                MemoryRow.subject_type == subject.caller_type.value,
+                MemoryRow.subject_id == subject.caller_id,
+            )
+            .order_by(MemoryRow.created_at)
+        )
+        return [record_of(row) for row in rows.all()]
+
     async def get(self, memory_id: UUID) -> MemoryRecord | None:
         row = await self._session.get(MemoryRow, memory_id)
         return None if row is None else record_of(row)
