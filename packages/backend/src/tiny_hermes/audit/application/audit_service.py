@@ -90,12 +90,30 @@ class ForbiddenAuditRead(AuditError):
 
 
 @dataclass(frozen=True)
+class AuditReadResult:
+    """`AuditPage` plus the one fact §4's HTTP layer cannot re-derive
+    cheaply: which visibility actually produced these rows.
+
+    `apps`/`presentation/routes.py` picks between a full response model and
+    a viewer's narrowed one (commits `19b91e3`/`b97ddb3`'s own precedent),
+    and it has to pick correctly without asking the store a second
+    `user_role` question this method already asked and already acted on —
+    a second, independent role lookup is also a second place that
+    resolution could silently drift from this one.
+    """
+
+    items: tuple[AuditRecord, ...]
+    has_more: bool
+    visibility: AuditVisibility
+
+
+@dataclass(frozen=True)
 class AuditService:
     store: AuditStore
 
     async def list_events(
         self, actor: Actor, workspace_id: UUID, filters: AuditFilter, request_id: str
-    ) -> AuditPage:
+    ) -> AuditReadResult:
         if actor.is_service_account or actor.is_end_user:
             raise ForbiddenAuditRead
         role = await self.store.user_role(workspace_id, actor.id)
@@ -106,12 +124,14 @@ class AuditService:
         if cross_workspace:
             await self._log_cross_workspace_read(actor, workspace_id, filters, request_id)
         page = await self.store.query(scope, filters)
+        items = page.items
         if scope.visibility is AuditVisibility.REDACTED:
-            page = AuditPage(
-                items=tuple(_redacted(item) for item in page.items),
-                has_more=page.has_more,
-            )
-        return page
+            items = tuple(_redacted(item) for item in items)
+        # `visibility` travels with the result — see `AuditReadResult`'s own
+        # docstring for why §4's HTTP layer needs it and must not re-derive
+        # it by asking the store a second question this method already
+        # answered.
+        return AuditReadResult(items=items, has_more=page.has_more, visibility=scope.visibility)
 
     async def _log_cross_workspace_read(
         self, actor: Actor, workspace_id: UUID, filters: AuditFilter, request_id: str

@@ -16,6 +16,7 @@ from tiny_hermes.api.health import (
 from tiny_hermes.api.request_context import RequestIdMiddleware
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.artifacts.presentation.routes import artifact_router
+from tiny_hermes.audit.presentation.routes import audit_router
 from tiny_hermes.http_tools.presentation.routes import http_tool_router
 from tiny_hermes.identity.presentation.end_user_dependencies import reject_end_user_caller
 from tiny_hermes.identity.presentation.end_user_routes import (
@@ -111,6 +112,7 @@ def create_app(
     app.include_router(skill_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(http_tool_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(approval_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(audit_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(memory_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(subject_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(mcp_router(resources), dependencies=_CONSOLE_ONLY)
