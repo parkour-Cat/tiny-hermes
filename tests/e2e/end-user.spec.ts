@@ -230,3 +230,26 @@ test("an enterprise credential opens a conversation that survives closing the ta
 
   await context.close();
 });
+
+// Task-9 review finding B: `apps/chat-web/nginx.conf` dropped
+// `X-Frame-Options` deliberately — this surface is meant to be embedded in
+// an enterprise's own page — but the comment defending that claimed the
+// origin allowlist (design §7's `resolve_end_user_caller_for_write`) "stands
+// in for the protection X-Frame-Options would otherwise give up". It does
+// not: a request issued from *inside* an attacker's frame carries the chat
+// app's own origin, which is on the allowlist, so the origin check is
+// structurally blind to clickjacking. `Content-Security-Policy:
+// frame-ancestors` is the actual replacement, deploy-time configured and
+// defaulting to `'none'` when nothing is set — this test is what the served
+// document actually carries against a real nginx, not a claim about what
+// the config file says.
+test("the served document carries a frame-ancestors CSP, closed by default", async ({
+  request,
+}) => {
+  const response = await request.get(`${CHAT_ORIGIN}/`);
+  expect(response.ok()).toBe(true);
+  const csp = response.headers()["content-security-policy"];
+  expect(csp).toBeDefined();
+  expect(csp).toContain("frame-ancestors");
+  expect(csp).toContain("'none'");
+});
