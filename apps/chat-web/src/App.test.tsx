@@ -23,10 +23,14 @@ test("a credential in the URL exchanges a session and opens the chat", async () 
       );
     }),
   );
+  // The credential lives in the URL fragment, never the query string: a
+  // fragment is never sent in the HTTP request, so nginx's access log (or
+  // any proxy in between) cannot record it, while `?workspace=&agent=`
+  // stay in the query because neither is a secret.
   window.history.pushState(
     {},
     "",
-    `/?credential=${CREDENTIAL}&workspace=${WORKSPACE}&agent=${ALIAS}`,
+    `/?workspace=${WORKSPACE}&agent=${ALIAS}#credential=${CREDENTIAL}`,
   );
 
   render(<App />);
@@ -38,6 +42,7 @@ test("a credential in the URL exchanges a session and opens the chat", async () 
   // in the address bar (design §4.1's 15-minute ceiling is not a reason to
   // also leave it sitting in browser history).
   expect(window.location.search).toBe("");
+  expect(window.location.hash).toBe("");
   expect(window.location.pathname).toBe(`/${ALIAS}`);
 });
 
@@ -53,7 +58,7 @@ test("a refused credential explains itself instead of offering a form to retry i
   window.history.pushState(
     {},
     "",
-    `/?credential=${CREDENTIAL}&workspace=${WORKSPACE}&agent=${ALIAS}`,
+    `/?workspace=${WORKSPACE}&agent=${ALIAS}#credential=${CREDENTIAL}`,
   );
 
   render(<App />);
