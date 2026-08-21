@@ -26,7 +26,7 @@ from pydantic import BaseModel
 
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.audit.application.audit_service import AuditService, ForbiddenAuditRead
-from tiny_hermes.audit.domain.query import MAX_PAGE_SIZE, InvalidAuditFilter, filter_for
+from tiny_hermes.audit.domain.query import InvalidAuditFilter, filter_for
 from tiny_hermes.audit.domain.record import AuditRecord
 from tiny_hermes.audit.domain.scope import AuditVisibility
 from tiny_hermes.identity.application.auth_service import AuthService
@@ -146,7 +146,13 @@ def audit_router(resources: ApplicationResources) -> APIRouter:
         actor_id: UUID | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
-        limit: Annotated[int | None, Query(ge=1, le=MAX_PAGE_SIZE)] = None,
+        # No `le=` here on purpose: `filter_for` clamps a limit above
+        # `MAX_PAGE_SIZE` rather than refusing it (§1's own domain rule,
+        # mirroring `memory/domain/search.py::request_for`) — an HTTP-level
+        # ceiling would 422 exactly the requests that rule means to just
+        # cap, which is a different, harsher behaviour than the one this
+        # module documents and tests.
+        limit: Annotated[int | None, Query(ge=1)] = None,
         offset: Annotated[int, Query(ge=0)] = 0,
     ) -> AuditEventsPage | RedactedAuditEventsPage:
         user = await authenticate_browser_user(auth, session_token)

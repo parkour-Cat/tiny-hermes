@@ -19,6 +19,7 @@ from tiny_hermes.audit.application.audit_service import (
 )
 from tiny_hermes.audit.domain.query import filter_for
 from tiny_hermes.audit.domain.record import AuditRecord
+from tiny_hermes.audit.domain.scope import AuditVisibility
 from tiny_hermes.audit.infrastructure.memory_store import MemoryAuditStore
 from tiny_hermes.tenancy.domain.models import Actor, Role
 
@@ -100,6 +101,36 @@ async def test_platform_admin_who_is_also_a_member_reads_as_that_member_unlogged
 
     await service.list_events(platform_admin, WORKSPACE, filter_for(), "req-3")
 
+    assert store.rows_with_action(CROSS_WORKSPACE_READ) == []
+
+
+async def test_platform_admin_holding_a_lesser_role_reads_as_that_lesser_role() -> None:
+    """The precedence above, at the point where it actually bites.
+
+    The `WORKSPACE_ADMIN` case cannot discriminate: that role resolves to
+    `FULL`, which is what a platform administrator would get either way, so
+    it passes whether membership wins or the bypass does. `VIEWER` is where
+    the two answers differ — and the answer is that membership wins, which
+    means a platform administrator sees *less* in a workspace they hold a
+    viewer role in than in one they hold nothing in.
+
+    That reads backwards until you say it the other way round: holding a
+    role here means acting here as that member, and `_require_member`
+    (`tenancy/application/workspace_service.py`) already decided this for
+    the whole codebase. Pinned rather than left implicit because the next
+    person to read `_scope_for` will wonder whether the ordering was
+    deliberate, and this is the answer.
+    """
+    store = MemoryAuditStore()
+    platform_admin = Actor.new(is_platform_admin=True)
+    store.set_role(WORKSPACE, platform_admin.id, Role.VIEWER)
+    store.seed(_row(context={"reason": "not for a viewer"}))
+    service = AuditService(store)
+
+    page = await service.list_events(platform_admin, WORKSPACE, filter_for(), "req-4")
+
+    assert page.visibility is AuditVisibility.REDACTED
+    assert page.items[0].context == {}
     assert store.rows_with_action(CROSS_WORKSPACE_READ) == []
 
 
