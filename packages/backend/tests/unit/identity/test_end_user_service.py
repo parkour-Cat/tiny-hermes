@@ -112,6 +112,7 @@ class FakeEndUserStore:
         public_key: str | None = RSA_PUBLIC_PEM,
         jwks_url: str | None = None,
         status: ChannelIssuerStatus = ChannelIssuerStatus.ACTIVE,
+        allowed_origins: tuple[str, ...] = (),
     ) -> ChannelIssuerRecord:
         record = ChannelIssuerRecord(
             id=uuid4(),
@@ -120,7 +121,7 @@ class FakeEndUserStore:
             issuer=issuer,
             public_key=public_key,
             jwks_url=jwks_url,
-            allowed_origins=(),
+            allowed_origins=allowed_origins,
             status=status,
             created_by=uuid4(),
             created_at=NOW,
@@ -131,6 +132,13 @@ class FakeEndUserStore:
     async def user_role(self, workspace_id: UUID, user_id: UUID) -> Role | None:
         return self.memberships.get((workspace_id, user_id))
 
+    async def active_allowed_origins(self, workspace_id: UUID) -> frozenset[str]:
+        origins: set[str] = set()
+        for (w, _), record in self.issuers.items():
+            if w == workspace_id and record.status is ChannelIssuerStatus.ACTIVE:
+                origins.update(record.allowed_origins)
+        return frozenset(origins)
+
     async def create_issuer(
         self,
         *,
@@ -139,7 +147,7 @@ class FakeEndUserStore:
         issuer: str,
         public_key: str | None,
         jwks_url: str | None,
-        allowed_origins: object,
+        allowed_origins: tuple[str, ...],
         created_by: UUID,
     ) -> ChannelIssuerRecord:
         return self.register(
@@ -148,6 +156,7 @@ class FakeEndUserStore:
             issuer=issuer,
             public_key=public_key,
             jwks_url=jwks_url,
+            allowed_origins=allowed_origins,
         )
 
     async def list_issuers(self, workspace_id: UUID) -> list[ChannelIssuerRecord]:
