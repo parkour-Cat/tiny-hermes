@@ -175,6 +175,72 @@ async def test_an_end_user_reads_their_own_run(
     assert read.json()["session_id"] == session_id
 
 
+#: Task-7 review finding 4: the console's `RunResponse` is the platform's
+#: own operational document — budget consumption, checkpoint replay/
+#: effect/usage internals, a goal round's outcome — none of which belongs
+#: to another company's own employee just because this route happened to
+#: reuse the console's response model. Named here so both routes below can
+#: assert the same list of fields must never appear.
+_CONSOLE_ONLY_RUN_FIELDS = {
+    "budget",
+    "checkpoint_replay_safe",
+    "checkpoint_effect_status",
+    "checkpoint_usage_quality",
+    "goal",
+    "available_actions",
+}
+
+
+async def test_reading_a_run_does_not_leak_the_consoles_operational_fields(
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+    registered_issuer: None,
+    published_agent: None,
+) -> None:
+    del registered_issuer, published_agent
+    _sign_in(client, workspace_id, "zhang")
+    session_id = _start_session(client)
+    run_id = _submit_run(client, session_id, "reads-4")
+
+    read = client.get(f"/api/v1/end-user/runs/{run_id}")
+
+    assert read.status_code == 200, read.text
+    body = read.json()
+    assert not (_CONSOLE_ONLY_RUN_FIELDS & set(body))
+    # Still carries what a chat surface actually needs.
+    assert body["id"] == run_id
+    assert body["session_id"] == session_id
+    assert "status" in body
+    assert "finished_at" in body
+    assert "queue" in body
+
+
+async def test_submitting_a_run_does_not_leak_the_consoles_operational_fields(
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+    registered_issuer: None,
+    published_agent: None,
+) -> None:
+    """The same leak on the write path — `create_run` returns the freshly
+    submitted Run's own document, reusing the same console response model
+    `get_run` did."""
+    del registered_issuer, published_agent
+    _sign_in(client, workspace_id, "zhang")
+    session_id = _start_session(client)
+
+    submitted = client.post(
+        f"/api/v1/end-user/sessions/{session_id}/runs",
+        headers={"Idempotency-Key": "reads-5"},
+        json={"input": "hello there"},
+    )
+
+    assert submitted.status_code == 201, submitted.text
+    body = submitted.json()
+    assert not (_CONSOLE_ONLY_RUN_FIELDS & set(body))
+
+
 async def test_an_end_user_cannot_read_another_end_users_session(
     client: TestClient,
     scope: dict[str, str],
