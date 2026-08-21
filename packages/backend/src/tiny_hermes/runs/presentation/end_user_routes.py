@@ -1,4 +1,5 @@
-"""§5, wired to real HTTP: the one door an end user reaches to run an Agent.
+"""§5, wired to real HTTP: the doors an end user reaches to run an Agent and
+watch it work.
 
 Everything upstream of this module — the credential exchange
 (`identity/presentation/end_user_routes.py`), the two-gate resolution
@@ -31,6 +32,20 @@ the alias for whoever reads server-side logs, and design §8's refusal table
 is explicit that an end user calling an unassigned Agent must not learn
 anything past "no". Passing `str(error)` here would undo that on the first
 edit to the exception's wording.
+
+**The two GET routes are not in design §5.** They fill a gap the design left
+open: an end user could start a Session and submit a Run, but nothing built
+for them could read either one back — `session_router`/`run_router` are
+`_CONSOLE_ONLY`, same as every other console router. Without some door back
+onto a Run's outcome, a chat surface has nothing to show after "sent". Both
+routes reuse `RunCoordination.get_end_user_session`/`get_end_user_run`,
+which enforce the exact ownership rule `submit_end_user_run` already
+enforces on the write — a guessed id opens nobody's conversation but the
+asker's own — so this is the write path's existing rule, read twice more,
+not a second rule invented for reads. Both are GETs, so neither uses
+`resolve_end_user_caller_for_write`: design §7's origin check exists for
+state-changing requests, and a read that only ever returns this end user's
+own data to them is not the shape that check defends against.
 """
 
 from typing import Annotated
@@ -50,12 +65,18 @@ from tiny_hermes.identity.application.end_user_service import EndUserIdentitySer
 from tiny_hermes.identity.presentation.end_user_dependencies import (
     END_USER_SESSION_COOKIE,
     EndUserCaller,
+    resolve_end_user_caller,
     resolve_end_user_caller_for_write,
 )
 from tiny_hermes.runs.application.service import RunCoordination, RunCoordinationError
 from tiny_hermes.runs.domain.models import SessionMode
 from tiny_hermes.runs.presentation.errors import as_app_error
-from tiny_hermes.runs.presentation.routes import REPLAYED_HEADER, RunResponse, SessionResponse
+from tiny_hermes.runs.presentation.routes import (
+    REPLAYED_HEADER,
+    RunResponse,
+    SessionMessageResponse,
+    SessionResponse,
+)
 from tiny_hermes.shared.errors import AppError
 
 EndUserSessionCookie = Annotated[str | None, Cookie(alias=END_USER_SESSION_COOKIE)]
@@ -143,6 +164,43 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
             response.status_code = status.HTTP_201_CREATED
             await resources.wake_up_notifier().publish(caller.workspace_id, accepted.run_id)
         return RunResponse.model_validate(accepted.document)
+
+    @router.get(
+        "/sessions/{session_id}/messages",
+        response_model=list[SessionMessageResponse],
+    )
+    async def list_session_messages(  # pyright: ignore[reportUnusedFunction]
+        session_id: UUID,
+        identity: Annotated[
+            EndUserIdentityService, Depends(identity_dependency, scope="function")
+        ],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
+        end_user_session: EndUserSessionCookie = None,
+    ) -> list[SessionMessageResponse]:
+        caller = await resolve_end_user_caller(identity, end_user_session)
+        try:
+            messages = await runs.read_end_user_session_messages(
+                caller.workspace_id, caller.end_user_id, session_id
+            )
+        except RunCoordinationError as error:
+            raise as_app_error(error) from error
+        return [SessionMessageResponse.from_domain(item) for item in messages]
+
+    @router.get("/runs/{run_id}", response_model=RunResponse)
+    async def get_run(  # pyright: ignore[reportUnusedFunction]
+        run_id: UUID,
+        identity: Annotated[
+            EndUserIdentityService, Depends(identity_dependency, scope="function")
+        ],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
+        end_user_session: EndUserSessionCookie = None,
+    ) -> RunResponse:
+        caller = await resolve_end_user_caller(identity, end_user_session)
+        try:
+            found = await runs.get_end_user_run(caller.workspace_id, caller.end_user_id, run_id)
+        except RunCoordinationError as error:
+            raise as_app_error(error) from error
+        return RunResponse.from_domain(found)
 
     return router
 

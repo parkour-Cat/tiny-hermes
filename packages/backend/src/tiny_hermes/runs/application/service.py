@@ -251,32 +251,28 @@ class RunCoordination:
         """§5's Run half.
 
         `session_id` must be a Session this same end user started. Checked
-        here rather than left implicit: a Session's private-memory subject is
-        read off *its own* `caller_type`/`caller_id`, never off whoever is
-        submitting a Run against it (`_remembered`'s own docstring), so an end
-        user who guessed another end user's `session_id` would otherwise be
-        able to speak into that other subject's conversation — and have it
-        remembered as theirs.
+        by `get_end_user_session` rather than left implicit: a Session's
+        private-memory subject is read off *its own* `caller_type`/
+        `caller_id`, never off whoever is submitting a Run against it
+        (`_remembered`'s own docstring), so an end user who guessed another
+        end user's `session_id` would otherwise be able to speak into that
+        other subject's conversation — and have it remembered as theirs.
+        The same check gates the read side (`get_end_user_run`,
+        `read_end_user_session_messages`), which is why it lives in its own
+        method rather than staying inline here.
 
         `RunCapabilities` is `can_control=True, can_retry=True`
         unconditionally: there is no workspace Role to read one off, and both
         capabilities are about this Run and nobody else's — the same reason
         `_require_role`'s WRITERS/READERS split does not apply here at all.
         """
-        session = await self._store.get_session(workspace_id, session_id)
-        if session is None:
-            raise UnknownSession
-        if (
-            session.caller.caller_type is not CallerType.END_USER
-            or session.caller.caller_id != end_user_id
-        ):
-            raise ForbiddenRunAction
+        session = await self.get_end_user_session(workspace_id, end_user_id, session_id)
         key = _require_idempotency_key(idempotency_key)
         message = CanonicalMessage("user", (TextBlock(text=text),))
         return await self._store.accept_run(
             AcceptRunCommand(
                 workspace_id=workspace_id,
-                session_id=session_id,
+                session_id=session.id,
                 caller=CallerIdentity(CallerType.END_USER, end_user_id),
                 capabilities=RunCapabilities(can_control=True, can_retry=True),
                 endpoint=END_USER_RUNS_ENDPOINT,
@@ -289,6 +285,63 @@ class RunCoordination:
                 delivery_mode=None,
             )
         )
+
+    async def get_end_user_session(
+        self, workspace_id: UUID, end_user_id: UUID, session_id: UUID
+    ) -> SessionSnapshot:
+        """The read half of `submit_end_user_run`'s own ownership check,
+        pulled out so both share it rather than keeping two copies of "does
+        this Session belong to this end user" in step. A Session's subject
+        is read off its own `caller`, never off whoever is asking — the same
+        reasoning `submit_end_user_run`'s docstring gives for why a guessed
+        `session_id` must not work.
+        """
+        session = await self._store.get_session(workspace_id, session_id)
+        if session is None:
+            raise UnknownSession
+        if (
+            session.caller.caller_type is not CallerType.END_USER
+            or session.caller.caller_id != end_user_id
+        ):
+            raise ForbiddenRunAction
+        return session
+
+    async def read_end_user_session_messages(
+        self, workspace_id: UUID, end_user_id: UUID, session_id: UUID
+    ) -> Sequence[CanonicalMessage]:
+        """An end user's own read of their own conversation.
+
+        No audit row, unlike `read_session_messages`: §6's audit is the
+        price of a *developer* reading somebody else's content (§4.6), and
+        an owner reading their own words was never the read that price was
+        for.
+        """
+        await self.get_end_user_session(workspace_id, end_user_id, session_id)
+        return await self._store.list_session_messages(workspace_id, session_id)
+
+    async def get_end_user_run(
+        self, workspace_id: UUID, end_user_id: UUID, run_id: UUID
+    ) -> RunSnapshot:
+        """`can_control=True, can_retry=True` unconditionally, matching the
+        capabilities `submit_end_user_run` already grants this Run — there
+        is no workspace Role to read one off, and `available_actions` on a
+        Run this end user is reading should reflect what they were actually
+        given, not a Role that does not apply to them.
+
+        Ownership is checked through the Run's own Session rather than a
+        column on the Run itself: `RunSnapshot` carries no caller of its
+        own (a Run belongs to the Session it was submitted through), so
+        `get_end_user_session` is the one place that already knows how to
+        answer "does this belong to this end user" and is asked again here
+        rather than re-derived.
+        """
+        run = await self._store.get_run(
+            workspace_id, run_id, RunCapabilities(can_control=True, can_retry=True)
+        )
+        if run is None:
+            raise UnknownRun
+        await self.get_end_user_session(workspace_id, end_user_id, run.session_id)
+        return run
 
     async def retry_run(
         self,
