@@ -499,6 +499,21 @@ class RunStore(Protocol):
         self, workspace_id: UUID, session_id: UUID
     ) -> Sequence[CanonicalMessage]: ...
 
+    async def record_end_user_session_read(
+        self,
+        workspace_id: UUID,
+        reader: CallerIdentity,
+        end_user_id: UUID,
+        session_id: UUID,
+        request_id: str,
+    ) -> None:
+        """Design §6: a console read of an end user's message content. Both
+        identities go in — the reader and whose conversation it was — because
+        "who read X's conversation" is the question this row exists to
+        answer, and half the pair can't answer it.
+        """
+        ...
+
     async def claim_idempotency(
         self,
         workspace_id: UUID,

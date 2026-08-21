@@ -2474,6 +2474,25 @@ class SqlRunStore:
         ).all()
         return [_to_message(row) for row in rows]
 
+    async def record_end_user_session_read(
+        self,
+        workspace_id: UUID,
+        reader: CallerIdentity,
+        end_user_id: UUID,
+        session_id: UUID,
+        request_id: str,
+    ) -> None:
+        self._audit(
+            workspace_id,
+            reader.caller_id,
+            "end_user_session.read",
+            "session",
+            session_id,
+            request_id,
+            context={"end_user_id": str(end_user_id)},
+            actor_type=reader.caller_type.value,
+        )
+
     async def claim_idempotency(
         self,
         workspace_id: UUID,

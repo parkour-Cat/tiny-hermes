@@ -428,10 +428,39 @@ class RunCoordination:
     async def list_session_messages(
         self, workspace_id: UUID, actor: Actor, session_id: UUID
     ) -> Sequence[CanonicalMessage]:
-        await self._require_role(workspace_id, actor, READERS)
-        if await self._store.get_session(workspace_id, session_id) is None:
-            raise UnknownSession
+        await self._load_readable_session(workspace_id, actor, session_id)
         return await self._store.list_session_messages(workspace_id, session_id)
+
+    async def read_session_messages(
+        self, workspace_id: UUID, actor: Actor, session_id: UUID, request_id: str
+    ) -> Sequence[CanonicalMessage]:
+        """§6: the console's read of message content.
+
+        §4.6 opened "查看" for a developer at the price of this audit row —
+        written only when the session belongs to an end user, and only here.
+        `list_sessions` returns titles and never calls this: a page of forty
+        of them must not turn into forty rows that bury the read that
+        actually matters.
+        """
+        session = await self._load_readable_session(workspace_id, actor, session_id)
+        if session.caller.caller_type is CallerType.END_USER:
+            await self._store.record_end_user_session_read(
+                workspace_id,
+                _caller(actor),
+                session.caller.caller_id,
+                session_id,
+                request_id,
+            )
+        return await self._store.list_session_messages(workspace_id, session_id)
+
+    async def _load_readable_session(
+        self, workspace_id: UUID, actor: Actor, session_id: UUID
+    ) -> SessionSnapshot:
+        await self._require_role(workspace_id, actor, READERS)
+        session = await self._store.get_session(workspace_id, session_id)
+        if session is None:
+            raise UnknownSession
+        return session
 
     async def claim_idempotency(
         self,
