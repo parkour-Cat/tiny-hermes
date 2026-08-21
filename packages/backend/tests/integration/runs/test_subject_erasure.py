@@ -31,7 +31,8 @@ from tiny_hermes.runs.ports.model import ModelRequest, ModelResponse
 
 from ..conftest import VALID_SPEC
 from ..egress_support import ProxyHandle
-from .http_tool_support import StandIn, approve_host, ask, register_tool, worker as http_worker
+from .http_tool_support import StandIn, approve_host, ask, register_tool
+from .http_tool_support import worker as http_worker
 
 
 class Recorder:
@@ -187,7 +188,7 @@ async def test_erasure_reaches_a_subject_parked_on_an_unanswered_approval(
     nobody has answered yet is exactly the case `sessions.head_run_id` still
     points at a live Run when `erase` runs. The fix has to null that pointer
     before the Run row goes, not rely on the Run having already finished."""
-    stand_in, url = api
+    _stand_in, url = api
     approve_host(client, scope, "127.0.0.1")
     version_id = register_tool(client, scope, url)
     session_id = session_for(_governance_agent(client, scope, version_id))
