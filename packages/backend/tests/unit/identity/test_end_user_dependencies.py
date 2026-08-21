@@ -72,17 +72,45 @@ def test_no_end_user_cookie_passes_through() -> None:
     reject_end_user_caller(None)
 
 
-def test_an_end_user_cookie_is_forbidden_regardless_of_validity() -> None:
+def test_an_end_user_cookie_alone_is_forbidden_regardless_of_validity() -> None:
     """Presence alone is enough (module docstring): a console route must
-    refuse an end user who is holding this cookie at all, not only one whose
-    session happens to still be live — checking liveness would need a
-    database round trip on every console request just to decide whether to
-    say no."""
+    refuse an end user who is holding this cookie at all and nothing that
+    looks like a console credential, not only one whose session happens to
+    still be live — checking liveness would need a database round trip on
+    every console request just to decide whether to say no."""
     with pytest.raises(AppError) as excinfo:
         reject_end_user_caller("garbage-not-a-real-session-token")
 
     assert excinfo.value.status == 403
     assert excinfo.value.code == console_forbidden().code
+
+
+# -- task-9 review finding G: co-presence, not just presence ----------------
+#
+# A user who is both a workspace member and an end user on one domain has
+# both cookies in the same jar on every console request their browser makes
+# — the end-user cookie's mere presence used to 403 them out of the console
+# regardless. The fix: only *no console credential at all, alongside the
+# end-user cookie* still means "an end user, and nothing else, is asking" —
+# a request that also carries a console session cookie or an Authorization
+# bearer is not disqualified by the end-user cookie's presence and is left
+# for `resolve_workspace_caller` to actually validate. Presence, not
+# validity, is still the standard on both sides: this function still costs
+# no database round trip either way.
+
+
+def test_an_end_user_cookie_alongside_a_console_session_cookie_passes_through() -> None:
+    reject_end_user_caller(
+        end_user_session="garbage-not-a-real-session-token",
+        session_token="also-not-checked-here",
+    )
+
+
+def test_an_end_user_cookie_alongside_a_bearer_header_passes_through() -> None:
+    reject_end_user_caller(
+        end_user_session="garbage-not-a-real-session-token",
+        authorization="Bearer sk-also-not-checked-here",
+    )
 
 
 # -- design §7: origin enforcement for state-changing end-user requests -----

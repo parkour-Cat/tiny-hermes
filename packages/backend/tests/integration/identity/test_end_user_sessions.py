@@ -341,10 +341,14 @@ async def test_a_workspace_viewer_cannot_revoke_end_user_sessions(
     )
     assert login.status_code == 201
     csrf = login.cookies["tiny_hermes_csrf"]
-    # Put back deliberately, right before the guarded call: the console
-    # guard (design §8's last row) refuses on the end-user cookie's
-    # presence alone, regardless of who else is signed in — this proves
-    # that fires here rather than assuming it would.
+    # Put back deliberately, right before the guarded call. Task-9 review
+    # finding G means the console guard no longer fires here on its own —
+    # the viewer's own valid session cookie sits right next to the
+    # end-user cookie now, so the request reaches the real route. The 403
+    # below is `EndUserIdentityService.revoke_sessions`'s own role check
+    # refusing a viewer, same as it always would with no end-user cookie in
+    # the jar at all; this still proves a workspace viewer cannot revoke,
+    # just no longer by way of the console guard.
     client.cookies.set(END_USER_SESSION_COOKIE, end_user_cookie)
 
     response = client.delete(
@@ -366,13 +370,58 @@ async def test_a_workspace_viewer_cannot_revoke_end_user_sessions(
         ("GET", "/api/v1/memories/pending"),
     ],
 )
-def test_an_end_user_session_cookie_cannot_reach_console_endpoints(
+def test_an_end_user_session_cookie_alone_cannot_reach_console_endpoints(
     client: TestClient,
     workspace_id: str,
     registered_issuer: Callable[..., dict[str, object]],
     method: str,
     path: str,
 ) -> None:
+    """"Alone" is the operative word after task-9 review finding G: `client`
+    already carries the bootstrap admin's own console session cookie
+    (`workspace_id`'s own fixture chain logs them in), so it has to be
+    cleared here for this to test what its name says — an end user with no
+    console credential of their own, not an admin who happens to be
+    carrying this cookie too. `test_an_end_user_with_valid_console_
+    credentials_reaches_console_endpoints`, right below, is the other half:
+    the same three routes, the same end-user cookie, the admin's console
+    cookie left in place.
+    """
+    registered_issuer()
+    exchanged = _exchange(client, workspace_id, _credential(workspace_id=workspace_id))
+    assert exchanged.status_code == 201
+    del client.cookies["tiny_hermes_session"]
+
+    response = client.request(
+        method, path, headers={"X-Workspace-Id": workspace_id}
+    )
+
+    assert response.status_code == 403, response.text
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("GET", "/api/v1/agents"),
+        ("GET", "/api/v1/sessions"),
+        ("GET", "/api/v1/memories/pending"),
+    ],
+)
+def test_an_end_user_with_valid_console_credentials_reaches_console_endpoints(
+    client: TestClient,
+    workspace_id: str,
+    registered_issuer: Callable[..., dict[str, object]],
+    method: str,
+    path: str,
+) -> None:
+    """Task-9 review finding G: a browser that is both a workspace member
+    and an end user on one domain carries both cookies on every console
+    request, and the end-user cookie's mere presence used to 403 it out of
+    the console regardless. `client` already carries the bootstrap admin's
+    own valid console session (untouched, unlike the test above); exchanging
+    an end-user credential on top of it must not take the console away from
+    them.
+    """
     registered_issuer()
     exchanged = _exchange(client, workspace_id, _credential(workspace_id=workspace_id))
     assert exchanged.status_code == 201
@@ -381,7 +430,7 @@ def test_an_end_user_session_cookie_cannot_reach_console_endpoints(
         method, path, headers={"X-Workspace-Id": workspace_id}
     )
 
-    assert response.status_code == 403, response.text
+    assert response.status_code == 200, response.text
 
 
 @pytest.mark.parametrize(
@@ -402,7 +451,7 @@ def test_an_end_user_session_cookie_cannot_reach_console_endpoints(
         ("DELETE", f"/api/v1/end-user/sessions/{uuid4()}", None),
     ],
 )
-def test_an_end_user_session_cookie_cannot_reach_this_tasks_own_admin_routes(
+def test_an_end_user_session_cookie_alone_cannot_reach_this_tasks_own_admin_routes(
     client: TestClient,
     workspace_id: str,
     scope: dict[str, str],
@@ -414,10 +463,62 @@ def test_an_end_user_session_cookie_cannot_reach_this_tasks_own_admin_routes(
     """These four routes are this task's own — `channel_issuers` CRUD and
     session revocation — and reaching 403 here must come from the console
     guard, not incidentally from something else that would also refuse.
-    `scope` carries a *valid* CSRF token and the platform admin's own
-    session cookie, both of which are enough on their own to get each of
-    these calls past everything except the guard — which is exactly what
-    makes this prove the guard fired rather than some unrelated check.
+    `scope` carries a *valid* CSRF token, but the platform admin's own
+    session cookie is cleared right below: task-9 review finding G means
+    that cookie is no longer enough on its own to make the guard fire
+    alongside the end-user cookie, so this test needs the console session
+    genuinely absent to prove what its name says — an end user with no
+    console credential of their own reaching for these routes.
+    `test_an_end_user_with_valid_console_credentials_reaches_this_tasks_
+    own_admin_routes`, right below, is the other half.
+    """
+    registered_issuer()
+    exchanged = _exchange(client, workspace_id, _credential(workspace_id=workspace_id))
+    assert exchanged.status_code == 201
+    del client.cookies["tiny_hermes_session"]
+
+    response = client.request(method, path, headers=scope, json=json_body)
+
+    assert response.status_code == 403, response.text
+
+
+@pytest.mark.parametrize(
+    "method,path,json_body,expected_status",
+    [
+        (
+            "POST",
+            "/api/v1/channel-issuers",
+            {
+                "channel": "web",
+                "issuer": "https://other.example",
+                "public_key": RSA_PUBLIC_PEM,
+                "allowed_origins": [],
+            },
+            201,
+        ),
+        ("GET", "/api/v1/channel-issuers", None, 200),
+        # A random id, so "reached the real route" shows up as 404 rather
+        # than a body match — the guard letting the request through is what
+        # this proves, not that these particular ids exist.
+        ("POST", f"/api/v1/channel-issuers/{uuid4()}/disable", None, 404),
+        ("DELETE", f"/api/v1/end-user/sessions/{uuid4()}", None, 404),
+    ],
+)
+def test_an_end_user_with_valid_console_credentials_reaches_this_tasks_own_admin_routes(
+    client: TestClient,
+    workspace_id: str,
+    scope: dict[str, str],
+    registered_issuer: Callable[..., dict[str, object]],
+    method: str,
+    path: str,
+    json_body: dict[str, object] | None,
+    expected_status: int,
+) -> None:
+    """Task-9 review finding G, on this task's own admin routes specifically:
+    an admin who is also (on this same domain) an end user must keep
+    console access to `channel_issuers` CRUD and session revocation — the
+    very capabilities this task added — rather than being locked out of
+    managing them the moment they also exchange an end-user credential.
     """
     registered_issuer()
     exchanged = _exchange(client, workspace_id, _credential(workspace_id=workspace_id))
@@ -425,7 +526,7 @@ def test_an_end_user_session_cookie_cannot_reach_this_tasks_own_admin_routes(
 
     response = client.request(method, path, headers=scope, json=json_body)
 
-    assert response.status_code == 403, response.text
+    assert response.status_code == expected_status, response.text
 
 
 # -- the race: two tabs open the assistant on the same subject at once ------

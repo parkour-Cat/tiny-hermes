@@ -173,13 +173,17 @@ async def _invite_and_login_developer(
 ) -> tuple[str, str]:
     """Returns `(developer_user_id, developer_csrf_token)`.
 
-    Every console router refuses outright whenever the end-user session
-    cookie is present at all (`reject_end_user_caller`, "no exceptions") —
-    so the jar has to lose that cookie before the admin can invite anyone,
-    even though the admin's own cookie is still sitting right next to it.
-    Logging the developer in then replaces the admin's session cookie in the
-    shared jar — the same trade `test_workspace_members.py` makes — so every
-    call after this one is the developer's, not the admin's.
+    The end-user cookie is dropped before the invite purely for hygiene —
+    since task-9 review finding G, a console router no longer refuses a
+    request over the end-user cookie's presence alone when a valid console
+    session sits next to it (the admin's own does here), so this call would
+    succeed either way. Clearing it anyway keeps this helper correct
+    regardless of that guard's own logic, and keeps the jar from carrying a
+    stale end-user cookie into calls later in the test that have no business
+    seeing it. Logging the developer in then replaces the admin's session
+    cookie in the shared jar — the same trade `test_workspace_members.py`
+    makes — so every call after this one is the developer's, not the
+    admin's.
     """
     await _seed_user(engine, "Dev", "dev@example.com")
     if END_USER_SESSION_COOKIE in client.cookies:
