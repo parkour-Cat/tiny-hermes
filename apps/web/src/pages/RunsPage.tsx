@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Form, Input, Modal, Select, Table, Tag, Typography } from "antd";
+import { Alert, Button, Card, Empty, Form, Input, Modal, Select, Space, Table, Tag, Typography } from "antd";
 import { useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
@@ -121,7 +121,20 @@ export function RunsPage() {
       key: "status",
       // The state machine's own name for the state. Translating it would put a
       // second vocabulary between the user and the events they are reading.
-      render: (_: unknown, run: RunResponse) => <Tag>{run.status}</Tag>,
+      //
+      // The reason rides along with the status rather than getting a column
+      // of its own: it is only ever present on a failure, and an empty
+      // column on every healthy row would cost every reader something to
+      // find the few rows that have anything in it. Untranslated for the
+      // same reason as the status itself.
+      render: (_: unknown, run: RunResponse) => (
+        <Space direction="vertical" size={0}>
+          <Tag>{run.status}</Tag>
+          {run.failure_reason === null ? null : (
+            <Typography.Text type="danger">{run.failure_reason}</Typography.Text>
+          )}
+        </Space>
+      ),
     },
     {
       title: t("runQueue"),

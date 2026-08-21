@@ -208,6 +208,12 @@ export type RunResponse = {
   session_id: string;
   agent_version_id: string;
   status: string;
+  /**
+   * Why a `failed` Run failed, null otherwise. Extracted from the Run's
+   * checkpoint server-side (`_failure_reason`) rather than stored as a
+   * column, so it is a short machine name and not a sentence.
+   */
+  failure_reason: string | null;
   state_version: number;
   session_sequence: number;
   blocked_by_run_id: string | null;
