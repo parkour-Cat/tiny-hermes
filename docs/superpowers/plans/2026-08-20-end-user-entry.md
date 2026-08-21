@@ -164,8 +164,15 @@ React/Vite），新增 PyJWT。
       （`src/api/session.ts` 之类），先不改行为、测试全绿、提交。研究文档说这是
       「一个文件而不是七十个」的改动——前提正是先有这个接缝。
 - [ ] 换掉认证：凭证换会话一次，之后携带 end-user 会话 cookie。
-- [ ] 跨域：`SameSite=None; Secure`；`X-Frame-Options` 不能是 `DENY`；允许嵌入的
-      来源从 `channel_issuers.allowed_origins` 读。
+- [ ] 跨域，**这是安全要求不是排版**：`SameSite=None; Secure` 是嵌入所必需的，
+      而它恰恰是让跨站 POST 也能带上 cookie 的那个组合。终端用户的写路由**没有**
+      CSRF token（设计 §7 用「带着 cookie 就行」换掉了 `X-CSRF-Token`），所以
+      **`channel_issuers.allowed_origins` 必须真的被强制**——它现在只是存着，
+      没有任何代码读它。第三方页面能对终端用户的写接口发请求，包括提交 Run、
+      答确认、以及抹除本人数据。
+      落地：对终端用户的**状态变更**请求校验 `Origin`／`Referer` 是否在该签发方
+      登记的来源里，不在就拒。`X-Frame-Options` 同时不能是 `DENY`。
+      一条测试直接钉住：来源不在名单里的写请求被拒。
 - [ ] `tests/e2e/end-user.spec.ts`：企业签凭证 → 打开聊天 → 对话 → 关闭重开仍是
       同一个人 → 自助导出拿到自己的数据。
 
