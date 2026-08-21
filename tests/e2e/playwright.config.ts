@@ -74,5 +74,18 @@ export default defineConfig({
       dependencies: ["setup"],
       use: { storageState: CONSOLE_STATE },
     },
+    // Design §7's walk. `page` starts signed in as the console admin — this
+    // is what registers the issuer and publishes the Agent, since the
+    // builder has no UI for either yet — but the conversation itself runs
+    // in a fresh context the test opens for itself, with no console cookie
+    // in it. Needs the chat-web service on TINY_HERMES_E2E_CHAT_URL
+    // (default http://127.0.0.1:3001, deploy/compose/compose.yaml's own
+    // port for it) in addition to the console this stack already needs.
+    {
+      name: "end-user",
+      testMatch: /end-user\.spec\.ts$/,
+      dependencies: ["setup"],
+      use: { storageState: CONSOLE_STATE },
+    },
   ],
 });
