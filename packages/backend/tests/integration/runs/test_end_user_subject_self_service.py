@@ -142,6 +142,31 @@ async def _remember(
         )
 
 
+def _published_agent(client: TestClient, scope: dict[str, str], alias: str) -> str:
+    """A second end-user-enabled Agent, alongside `published_end_user_agent`
+    — same recipe, different alias, so a subject can have memory under two
+    Agents rather than the one the fixture already covers."""
+    spec = {**VALID_SPEC, "end_user_access": {"enabled": True}}
+    created = client.post(
+        "/api/v1/agents", headers=scope, json={"name": alias.title(), "alias": alias}
+    )
+    assert created.status_code == 201, created.text
+    agent_id = str(created.json()["id"])
+    draft = client.put(
+        f"/api/v1/agents/{agent_id}/draft",
+        headers=scope,
+        json={"expected_revision": 1, "spec": spec},
+    )
+    assert draft.status_code == 200, draft.text
+    published = client.post(
+        f"/api/v1/agents/{agent_id}/publish",
+        headers=scope,
+        json={"expected_revision": draft.json()["revision"]},
+    )
+    assert published.status_code == 201, published.text
+    return agent_id
+
+
 async def test_an_end_user_can_export_their_own_memory(
     client: TestClient,
     scope: dict[str, str],
@@ -150,7 +175,14 @@ async def test_an_end_user_can_export_their_own_memory(
     registered_issuer: dict[str, object],
     published_end_user_agent: str,
 ) -> None:
+    """Finding 3: the shipped call (`SettingsPage.tsx`'s `exportData`) never
+    sends `agent_id` — there is no Agent picker in the settings page, and no
+    reason for one, since a subject's export is supposed to be *their* data,
+    not one Agent's slice of it. This calls the door exactly as the UI does
+    — no `agent_id` — and expects memory from two different Agents back in
+    one answer, which is what "across every Agent they have used" means."""
     del registered_issuer
+    second_agent = _published_agent(client, scope, "concierge")
     end_user_id = _sign_in(client, workspace_id, "zhang")
     await _remember(
         engine,
@@ -159,17 +191,23 @@ async def test_an_end_user_can_export_their_own_memory(
         body="Prefers tea over coffee.",
         end_user_id=end_user_id,
     )
-
-    exported = client.get(
-        "/api/v1/end-user/subjects/me/export",
-        params={"agent_id": published_end_user_agent},
+    await _remember(
+        engine,
+        workspace_id=workspace_id,
+        agent_id=second_agent,
+        body="Travels for work twice a month.",
+        end_user_id=end_user_id,
     )
+
+    exported = client.get("/api/v1/end-user/subjects/me/export")
 
     assert exported.status_code == 200, exported.text
     body = exported.json()
     assert body["subject_id"] == str(end_user_id)
     assert body["subject_type"] == "end_user"
-    assert any(m["body"] == "Prefers tea over coffee." for m in body["memories"])
+    bodies = {m["body"] for m in body["memories"]}
+    assert "Prefers tea over coffee." in bodies
+    assert "Travels for work twice a month." in bodies
 
 
 async def test_erasure_removes_what_export_could_see(
