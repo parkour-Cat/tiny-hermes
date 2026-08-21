@@ -147,7 +147,7 @@ class FakeEndUserStore:
         issuer: str,
         public_key: str | None,
         jwks_url: str | None,
-        allowed_origins: tuple[str, ...],
+        allowed_origins: Sequence[str],
         created_by: UUID,
     ) -> ChannelIssuerRecord:
         return self.register(
@@ -156,7 +156,7 @@ class FakeEndUserStore:
             issuer=issuer,
             public_key=public_key,
             jwks_url=jwks_url,
-            allowed_origins=allowed_origins,
+            allowed_origins=tuple(allowed_origins),
         )
 
     async def list_issuers(self, workspace_id: UUID) -> list[ChannelIssuerRecord]:

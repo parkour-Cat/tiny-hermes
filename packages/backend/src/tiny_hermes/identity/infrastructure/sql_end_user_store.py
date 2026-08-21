@@ -176,6 +176,18 @@ class SqlEndUserStore:
         )
         return value is not None
 
+    async def active_allowed_origins(self, workspace_id: UUID) -> frozenset[str]:
+        rows = await self._session.scalars(
+            select(ChannelIssuerRow.allowed_origins).where(
+                ChannelIssuerRow.workspace_id == workspace_id,
+                ChannelIssuerRow.status == ChannelIssuerStatus.ACTIVE.value,
+            )
+        )
+        origins: set[str] = set()
+        for row_origins in rows:
+            origins.update(row_origins)
+        return frozenset(origins)
+
     # -- end_user_sessions, design §4.2-4.3 --------------------------------
 
     async def create_session(

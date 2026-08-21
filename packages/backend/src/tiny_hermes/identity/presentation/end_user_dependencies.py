@@ -20,9 +20,11 @@ exceptions" true for routers this task never has to open and edit one by one.
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from fastapi import Cookie
+from starlette.datastructures import Headers
 
 from tiny_hermes.identity.application.end_user_service import EndUserIdentityService
 from tiny_hermes.shared.errors import AppError
@@ -74,6 +76,80 @@ async def resolve_end_user_caller(
     if session is None:
         raise end_user_unauthenticated()
     return EndUserCaller(session.end_user_id, session.workspace_id, session.agents)
+
+
+def cross_origin_forbidden() -> AppError:
+    return AppError(
+        code="end_user_origin_not_allowed",
+        title="Origin not allowed",
+        status=403,
+        detail="This origin is not registered to embed this workspace's chat.",
+    )
+
+
+def _request_origin(headers: Headers) -> str | None:
+    """`Origin` first, `Referer` as the fallback a form-style cross-site POST
+    would still carry — design §7's own wording is "Origin／Referer", not
+    just the first of the two. Neither header is trustworthy in the sense of
+    proving who is asking; both are trustworthy in the sense that a browser
+    sets them itself and a script cannot override them, which is the only
+    property a same-origin check needs (the CSRF literature's usual
+    argument for this exact pair)."""
+    origin = headers.get("origin")
+    if origin:
+        return origin
+    referer = headers.get("referer")
+    if not referer:
+        return None
+    parsed = urlsplit(referer)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+async def enforce_end_user_origin(
+    service: EndUserIdentityService, workspace_id: UUID, headers: Headers
+) -> None:
+    """Design §7's CSRF defence, and the reason it has to exist at all: the
+    end-user session cookie is `SameSite=None; Secure` (§4.2, required for a
+    cross-site embed) and end-user write routes carry no `X-CSRF-Token` — the
+    design's own trade of that header away for "just carry the cookie". A
+    hostile page can therefore make the browser send a state-changing
+    request with the cookie attached; the only thing left to check is where
+    the request came from, against the origins this workspace itself
+    registered on `channel_issuers.allowed_origins`.
+
+    A request carrying neither header is let through rather than refused.
+    That is not a loophole a forged cross-site request can use — a browser
+    sends `Origin` on every cross-site `fetch`/`XHR`, regardless of
+    `Referrer-Policy`, which is precisely the CSRF shape this check exists
+    to close — it is what lets a same-origin request from a client that
+    omits both (an older browser's simple form GET-turned-POST, a
+    same-origin call under a strict `Referrer-Policy`) through unexamined,
+    the same way a missing `X-CSRF-Token` never needed inventing evidence
+    for on this codebase's console side either.
+    """
+    origin = _request_origin(headers)
+    if origin is None:
+        return
+    allowed = await service.active_allowed_origins(workspace_id)
+    if origin not in allowed:
+        raise cross_origin_forbidden()
+
+
+async def resolve_end_user_caller_for_write(
+    service: EndUserIdentityService, session_token: str | None, headers: Headers
+) -> EndUserCaller:
+    """Every state-changing end-user route's front door. Authentication
+    first, origin second — refusing an unauthenticated request for its
+    origin before its cookie is even checked would let a probe learn which
+    origins a workspace has registered without ever holding a valid session,
+    the same enumeration risk design §8 already rules out for issuer
+    lookups.
+    """
+    caller = await resolve_end_user_caller(service, session_token)
+    await enforce_end_user_origin(service, caller.workspace_id, headers)
+    return caller
 
 
 def reject_end_user_caller(end_user_session: EndUserSessionCookie = None) -> None:

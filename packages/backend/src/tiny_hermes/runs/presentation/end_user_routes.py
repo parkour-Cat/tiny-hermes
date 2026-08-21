@@ -14,7 +14,12 @@ that guard for these two routes or teaching `resolve_workspace_caller` a
 third kind of caller it was never written for (the same reasoning
 `resolve_end_user_caller`'s own docstring gives for staying out of that
 function). So this router is never given `_CONSOLE_ONLY`, and every route in
-it authenticates with `resolve_end_user_caller` and nothing else.
+it authenticates with `resolve_end_user_caller` and nothing else — both
+routes here are state-changing, so in practice that means `resolve_end_user_
+caller_for_write`, which adds design §7's origin check on top: the cookie
+that authenticates these routes is `SameSite=None; Secure` and there is no
+`X-CSRF-Token` to fall back on, so the request's own `Origin`/`Referer` is
+what stands in for one.
 
 **The two refusals stay distinguishable here, not just in the domain.** A
 credential that named an alias the workspace never turned on (`EndUser
@@ -45,7 +50,7 @@ from tiny_hermes.identity.application.end_user_service import EndUserIdentitySer
 from tiny_hermes.identity.presentation.end_user_dependencies import (
     END_USER_SESSION_COOKIE,
     EndUserCaller,
-    resolve_end_user_caller,
+    resolve_end_user_caller_for_write,
 )
 from tiny_hermes.runs.application.service import RunCoordination, RunCoordinationError
 from tiny_hermes.runs.domain.models import SessionMode
@@ -87,7 +92,9 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         end_user_session: EndUserSessionCookie = None,
     ) -> SessionResponse:
-        caller = await resolve_end_user_caller(identity, end_user_session)
+        caller = await resolve_end_user_caller_for_write(
+            identity, end_user_session, request.headers
+        )
         agent, _version = await _resolve_agent(catalog, caller, alias)
         created = await runs.create_end_user_session(
             caller.workspace_id,
@@ -115,7 +122,9 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
         idempotency_key: IdempotencyHeader = None,
         end_user_session: EndUserSessionCookie = None,
     ) -> RunResponse:
-        caller = await resolve_end_user_caller(identity, end_user_session)
+        caller = await resolve_end_user_caller_for_write(
+            identity, end_user_session, request.headers
+        )
         try:
             accepted = await runs.submit_end_user_run(
                 caller.workspace_id,

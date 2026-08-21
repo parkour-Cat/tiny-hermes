@@ -120,6 +120,22 @@ class EndUserStore(Protocol):
 
     async def end_user_exists(self, workspace_id: UUID, end_user_id: UUID) -> bool: ...
 
+    async def active_allowed_origins(self, workspace_id: UUID) -> frozenset[str]:
+        """The union of `allowed_origins` across every *active* `channel_
+        issuers` row this workspace has (design §7). Not scoped to the one
+        issuer a session's credential happened to name — a session carries no
+        record of which issuer it was exchanged through (`EndUserSessionRow`
+        has no such column, design §4.2's own "exchanged for a session and
+        never held onto" red line means the credential itself is gone by the
+        time a write is being checked), so this answers the only question
+        that is still askable after the fact: which origins does *this
+        workspace* trust to embed its chat surface at all. A disabled issuer
+        drops out immediately, same as it does for new credential exchanges
+        (`find_issuer`) — an origin only a disabled row still names is not
+        one this workspace currently vouches for.
+        """
+        ...
+
     async def append_audit(
         self,
         *,

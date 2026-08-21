@@ -201,6 +201,17 @@ class EndUserIdentityService:
             return None
         return EndUserSession(stored.end_user_id, stored.workspace_id, stored.agents)
 
+    # -- origin enforcement, design §7 -------------------------------------
+
+    async def active_allowed_origins(self, workspace_id: UUID) -> frozenset[str]:
+        """No actor, unlike `list_issuers` — this is not a console read of
+        the registry, it is the platform checking its own configuration
+        before honouring a state-changing end-user request (design §7). The
+        caller has already proved a live end-user session; what origins a
+        workspace allows is not something that session's own request is
+        asking to see, only something it is being measured against."""
+        return await self._store.active_allowed_origins(workspace_id)
+
     # -- revocation, design §4.3 ------------------------------------------
 
     async def revoke_sessions(

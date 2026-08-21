@@ -17,6 +17,13 @@ the same four methods `subject_routes.py` calls. What changes is only how the
 caller is authenticated and that there is no `subject_id` to read from a
 path — an end user's own id is the only one this door will ever act on, so
 there is nothing here for a `subject_id` parameter to mean.
+
+`correct`, `forget`, and `erase` authenticate with `resolve_end_user_caller_
+for_write` rather than `resolve_end_user_caller` — design §7's origin check,
+because these three change state and this cookie is `SameSite=None` with no
+`X-CSRF-Token` to fall back on. `export` stays on the plain read path: a GET
+that only returns this end user's own data to them is not the request shape
+that check exists for.
 """
 
 from typing import Annotated
@@ -30,6 +37,7 @@ from tiny_hermes.identity.application.end_user_service import EndUserIdentitySer
 from tiny_hermes.identity.presentation.end_user_dependencies import (
     END_USER_SESSION_COOKIE,
     resolve_end_user_caller,
+    resolve_end_user_caller_for_write,
 )
 from tiny_hermes.memory.application.service import InvalidMemoryBody
 from tiny_hermes.memory.application.subject_service import (
@@ -107,7 +115,9 @@ def end_user_subject_router(resources: ApplicationResources) -> APIRouter:
         service: Annotated[SubjectService, Depends(service_dependency, scope="function")],
         end_user_session: EndUserSessionCookie = None,
     ) -> MemoryResponse:
-        caller = await resolve_end_user_caller(identity, end_user_session)
+        caller = await resolve_end_user_caller_for_write(
+            identity, end_user_session, request.headers
+        )
         actor, _subject = _self(caller.end_user_id)
         try:
             corrected = await service.correct(
@@ -136,7 +146,9 @@ def end_user_subject_router(resources: ApplicationResources) -> APIRouter:
         service: Annotated[SubjectService, Depends(service_dependency, scope="function")],
         end_user_session: EndUserSessionCookie = None,
     ) -> MemoryResponse:
-        caller = await resolve_end_user_caller(identity, end_user_session)
+        caller = await resolve_end_user_caller_for_write(
+            identity, end_user_session, request.headers
+        )
         actor, _subject = _self(caller.end_user_id)
         try:
             removed = await service.forget(
@@ -157,7 +169,9 @@ def end_user_subject_router(resources: ApplicationResources) -> APIRouter:
         service: Annotated[SubjectService, Depends(service_dependency, scope="function")],
         end_user_session: EndUserSessionCookie = None,
     ) -> ErasureResponse:
-        caller = await resolve_end_user_caller(identity, end_user_session)
+        caller = await resolve_end_user_caller_for_write(
+            identity, end_user_session, request.headers
+        )
         actor, subject = _self(caller.end_user_id)
         try:
             report = await service.erase(

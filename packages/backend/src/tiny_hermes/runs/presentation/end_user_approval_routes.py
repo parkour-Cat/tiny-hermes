@@ -22,7 +22,10 @@ because none needs to be.
 Never `_CONSOLE_ONLY`, for the reason `end_user_run_router` gives its own
 module docstring: every route here authenticates with
 `resolve_end_user_caller`, not a workspace Role, so there is no console
-session for that guard to reject in the first place.
+session for that guard to reject in the first place. Deciding is a write, so
+this route uses `resolve_end_user_caller_for_write` — design §7's origin
+check, for the same `SameSite=None`-cookie-with-no-CSRF-token reason
+`end_user_run_router`'s writes need it.
 """
 
 from typing import Annotated
@@ -34,7 +37,7 @@ from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.identity.application.end_user_service import EndUserIdentityService
 from tiny_hermes.identity.presentation.end_user_dependencies import (
     END_USER_SESSION_COOKIE,
-    resolve_end_user_caller,
+    resolve_end_user_caller_for_write,
 )
 from tiny_hermes.runs.application.approvals import (
     ApprovalAlreadyDecided,
@@ -70,7 +73,9 @@ def end_user_approval_router(resources: ApplicationResources) -> APIRouter:
         ],
         end_user_session: EndUserSessionCookie = None,
     ) -> ApprovalResponse:
-        caller = await resolve_end_user_caller(identity, end_user_session)
+        caller = await resolve_end_user_caller_for_write(
+            identity, end_user_session, request.headers
+        )
         try:
             decided = await service.decide(
                 # `is_platform_admin=False`, always: an end user is never a
