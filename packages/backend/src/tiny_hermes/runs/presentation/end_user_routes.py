@@ -6,9 +6,11 @@ Everything upstream of this module — the credential exchange
 (`AgentCatalog.resolve_end_user_agent`), the widened `CallerType` — existed
 before this task and was reachable by nothing. This is where it gets called.
 
-Deliberately its own router and its own two endpoints, never
-`session_router`/`run_router` (`runs/presentation/routes.py`) with a second
-auth branch bolted on. Those are `_CONSOLE_ONLY` in `api/app.py`, and design
+Deliberately its own router, never `session_router`/`run_router`
+(`runs/presentation/routes.py`) with a second auth branch bolted on
+(plan §10 adds `POST /runs/{id}/cancel` here for the same reason — reusing
+the console's own `/runs/{id}/cancel` would have meant teaching that route's
+auth a third caller kind). Those are `_CONSOLE_ONLY` in `api/app.py`, and design
 §4.5's first sentence is that an end user gets 403 from every console
 endpoint with no exceptions — a shared router would mean either weakening
 that guard for these two routes or teaching `resolve_workspace_caller` a
@@ -92,6 +94,15 @@ class CreateEndUserRunRequest(BaseModel):
     input: str = Field(min_length=1, max_length=32_768)
 
 
+class CancelEndUserRunRequest(BaseModel):
+    #: Same optimistic-concurrency contract as the console's own
+    #: `ControlRunRequest` (`runs/presentation/routes.py`) — the version this
+    #: end user last read, echoed back so a cancel aimed at a Run that has
+    #: since moved on gets `state_version_conflict` rather than silently
+    #: cancelling a different moment than the one this client saw.
+    expected_state_version: int = Field(ge=1)
+
+
 class EndUserQueueResponse(BaseModel):
     """Task-7 review finding 4 missed this nesting level: `EndUserRunResponse`
     dropped the console's operational fields at its own top level but still
@@ -153,6 +164,12 @@ class EndUserRunResponse(BaseModel):
     id: UUID
     session_id: UUID
     status: str
+    #: Plan §10. Not console operational state — it is the number `cancel`
+    #: below needs back as `expected_state_version`, the same optimistic-
+    #: concurrency value the console's own `RunResponse` carries for its
+    #: `/cancel`. Without it on this narrowed model, an end-user client
+    #: would have no honest way to cancel its own Run at all.
+    state_version: int
     finished_at: datetime | None
     queue: EndUserQueueResponse
 
@@ -326,6 +343,36 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
         except RunCoordinationError as error:
             raise as_app_error(error) from error
         return EndUserRunResponse.from_domain(found)
+
+    @router.post("/runs/{run_id}/cancel", response_model=EndUserRunResponse)
+    async def cancel_run(  # pyright: ignore[reportUnusedFunction]
+        run_id: UUID,
+        payload: CancelEndUserRunRequest,
+        request: Request,
+        identity: Annotated[
+            EndUserIdentityService, Depends(identity_dependency, scope="function")
+        ],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
+        end_user_session: EndUserSessionCookie = None,
+    ) -> EndUserRunResponse:
+        """Plan §10's Run half: 本人 only, and only cancel — see this
+        module's own docstring and `RunCoordination.cancel_end_user_run`'s
+        for why pause/resume have no route beside this one.
+        """
+        caller = await resolve_end_user_caller_for_write(
+            identity, end_user_session, request.headers
+        )
+        try:
+            cancelled = await runs.cancel_end_user_run(
+                caller.workspace_id,
+                caller.end_user_id,
+                run_id,
+                payload.expected_state_version,
+                request.state.request_id,
+            )
+        except RunCoordinationError as error:
+            raise as_app_error(error) from error
+        return EndUserRunResponse.from_domain(cancelled)
 
     return router
 

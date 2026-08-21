@@ -52,7 +52,7 @@ export function SettingsPage() {
       const exported = await api<SubjectExportResponse>("/api/v1/end-user/subjects/me/export");
       downloadJson("tiny-hermes-my-data.json", exported);
     } catch (caught) {
-      setExportError(problemMessage(caught));
+      setExportError(problemMessage(caught, t));
     } finally {
       setExporting(false);
     }
@@ -73,7 +73,7 @@ export function SettingsPage() {
       // deleted.
       forgetAllSessionIds();
     } catch (caught) {
-      setEraseError(problemMessage(caught));
+      setEraseError(problemMessage(caught, t));
     } finally {
       setErasing(false);
     }

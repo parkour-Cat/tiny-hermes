@@ -4,7 +4,8 @@ import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { api } from "../api/client";
 import { problemMessage } from "../api/messages";
-import type { CanonicalMessage, EndUserSessionResponse, RunResponse } from "../api/types";
+import type { CanonicalMessage, EndUserRunResponse, EndUserSessionResponse } from "../api/types";
+import { ApprovalBanner } from "../chat/ApprovalBanner";
 import { Composer } from "../chat/Composer";
 import { downloadMarkdown, exportFilename, transcriptMarkdown } from "../chat/exportTranscript";
 import { chatPath, isAgentAlias, matchSessionId } from "../chat/paths";
@@ -14,7 +15,8 @@ import { SessionRail } from "../chat/SessionRail";
 import { sessionTitle } from "../chat/sessionTitle";
 import { Transcript } from "../chat/Transcript";
 import { useT } from "../i18n/locale";
-import { useEndUserRun } from "../runs/useEndUserRun";
+import { cancelEndUserRun, useEndUserRun } from "../runs/useEndUserRun";
+import { useEndUserApprovals } from "../runs/useEndUserApprovals";
 import { isLiveStatus, statusLabel } from "../status";
 
 /**
@@ -26,12 +28,21 @@ import { isLiveStatus, statusLabel } from "../status";
  * remembers rather than one the platform lists (`localSessions.ts`'s own
  * docstring says why there is no such list to ask for).
  *
- * No pause/resume/cancel/retry and no artifact download: none of those
- * have an end-user route (design §5 never built one — see this task's
- * report). The composer still queues a second message onto a busy Session
- * exactly the way the console's does (`queue.status === "session_blocked"`
- * is the same field either surface reads), because queuing was never a
- * console-only capability to begin with.
+ * No pause/resume/retry and no artifact download: none of those have an
+ * end-user route, and plan §10 built cancel but deliberately not the other
+ * two — this chat surface has no place in its UI for "pause" (there is
+ * nothing here shaped like the console's pause button), and cancel is the
+ * one action both erasure and "I don't want this any more" need. The
+ * composer's existing "stop" affordance is what §10 wires cancel through
+ * (below), asking for confirmation first because unlike a token stream this
+ * one cannot be un-stopped. A Run that stopped for its own `user_confirmation`
+ * is answered through `ApprovalBanner`, §10's other door — before this task
+ * a Run in that state had a producer and no way for its own end user to
+ * reach it at all (see `useEndUserApprovals`'s own docstring). The composer
+ * still queues a second message onto a busy Session exactly the way the
+ * console's does (`queue.status === "session_blocked"` is the same field
+ * either surface reads), because queuing was never a console-only
+ * capability to begin with.
  */
 export function ChatPage() {
   const t = useT();
@@ -47,6 +58,7 @@ export function ChatPage() {
   const [optimistic, setOptimistic] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [prefs, setPrefs] = useState(loadSessionPrefs);
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
 
   const known = alias === null ? [] : loadKnownSessionIds(alias);
   const routedSession =
@@ -81,6 +93,9 @@ export function ChatPage() {
 
   const activeRunId = runId ?? null;
   const snapshot = useEndUserRun(activeRunId);
+  const approvals = useEndUserApprovals(snapshot.data?.status === "waiting_approval");
+  const activeApproval =
+    approvals.data?.find((item) => item.run_id === activeRunId) ?? null;
 
   useEffect(() => {
     if (snapshot.data?.finished_at !== null && snapshot.data?.finished_at !== undefined) {
@@ -129,7 +144,7 @@ export function ChatPage() {
         setOpenedId(created.id);
         go(created.id);
       }
-      return api<RunResponse>(`/api/v1/end-user/sessions/${sessionId}/runs`, {
+      return api<EndUserRunResponse>(`/api/v1/end-user/sessions/${sessionId}/runs`, {
         method: "POST",
         headers: { "Idempotency-Key": crypto.randomUUID() },
         body: JSON.stringify({ input: text }),
@@ -143,9 +158,32 @@ export function ChatPage() {
     },
     onError: (caught) => {
       setOptimistic(null);
-      setError(problemMessage(caught));
+      setError(problemMessage(caught, t));
     },
   });
+
+  const cancel = useMutation({
+    mutationFn: (input: { runId: string; stateVersion: number }) =>
+      cancelEndUserRun(input.runId, input.stateVersion),
+    onSuccess: (cancelled) => {
+      setConfirmingCancel(false);
+      setError(null);
+      queryClient.setQueryData(["end-user-run", cancelled.id], cancelled);
+    },
+    onError: (caught) => {
+      setConfirmingCancel(false);
+      setError(problemMessage(caught, t));
+    },
+  });
+
+  useEffect(() => {
+    // A confirmation left open past the moment its Run stopped being
+    // cancellable — finished on its own, or was cancelled through a second
+    // tab — is a button that would now only produce a stale-version error.
+    if (snapshot.data?.finished_at != null) {
+      setConfirmingCancel(false);
+    }
+  }, [snapshot.data?.finished_at]);
 
   if (alias === null) {
     return <p className="centered">{t("invalidAddress")}</p>;
@@ -218,6 +256,31 @@ export function ChatPage() {
             {` ${t("newChatHint")}`}
           </p>
         ) : null}
+        {activeApproval === null ? null : <ApprovalBanner approval={activeApproval} />}
+        {confirmingCancel && run !== undefined ? (
+          <div className="banner banner-warn">
+            <p>{t("cancelRunConfirm")}</p>
+            <div className="approval-actions">
+              <button
+                type="button"
+                className="is-danger"
+                disabled={cancel.isPending}
+                onClick={() =>
+                  cancel.mutate({ runId: run.id, stateVersion: run.state_version })
+                }
+              >
+                {t("cancelRunButton")}
+              </button>
+              <button
+                type="button"
+                disabled={cancel.isPending}
+                onClick={() => setConfirmingCancel(false)}
+              >
+                {t("cancel")}
+              </button>
+            </div>
+          </div>
+        ) : null}
         <div className="chat-scroll">
           <Transcript
             turns={messages.data ?? []}
@@ -232,7 +295,7 @@ export function ChatPage() {
         <Composer
           disabled={false}
           sending={send.isPending}
-          live={false}
+          live={Boolean(live)}
           canExport={(messages.data ?? []).length > 0}
           onSend={(text) => send.mutate(text)}
           onExport={() => {
@@ -248,7 +311,7 @@ export function ChatPage() {
               }),
             );
           }}
-          onStop={() => undefined}
+          onStop={() => setConfirmingCancel(true)}
         />
       </section>
     </div>

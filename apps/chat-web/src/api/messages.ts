@@ -1,6 +1,5 @@
 import { ApiError } from "./client";
 import type { MessageKey } from "../i18n/zh-CN";
-import { t } from "../i18n/zh-CN";
 
 const NAMED: Partial<Record<string, MessageKey>> = {
   agent_not_published: "agentNotPublished",
@@ -8,9 +7,19 @@ const NAMED: Partial<Record<string, MessageKey>> = {
   state_version_conflict: "stateVersionConflict",
   forbidden: "forbidden",
   workspace_scope_mismatch: "forbidden",
+  approval_reason_required: "approvalReasonRequired",
+  approval_expired: "approvalExpired",
+  approval_already_decided: "approvalAlreadyDecided",
 };
 
-export function problemMessage(error: unknown): string {
+/**
+ * The caller passes its own `t` because this module has no locale of its own.
+ * It used to import `t` from `../i18n/zh-CN` directly, which meant every
+ * mapped error code rendered in Chinese no matter what the user had chosen —
+ * the one place in the app where the locale switch silently did nothing, and
+ * the place a confused user is most likely to be looking.
+ */
+export function problemMessage(error: unknown, t: (key: MessageKey) => string): string {
   if (!(error instanceof ApiError)) {
     return error instanceof Error ? error.message : t("requestFailed");
   }

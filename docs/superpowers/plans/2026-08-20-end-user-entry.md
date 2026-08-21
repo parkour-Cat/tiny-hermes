@@ -233,17 +233,23 @@ React/Vite），新增 PyJWT。
 那条 Run 就永远停在那里。抹除的修法可以（也应该）不依赖它：**抹除必须能在任何 Run
 状态下完成**，这一点已经在修。但「用户答不了自己的确认」本身仍然是 §4.6 欠的账。
 
-- [ ] `GET /api/v1/end-user/approvals`：列出本人发起的 Run 上待答的 `user_confirmation`。
+- [x] `GET /api/v1/end-user/approvals`：列出本人发起的 Run 上待答的 `user_confirmation`。
       只列本人的——`仅发起人本人` 是 §4.6 的原话，别人的确认连存在都不该看见。
-- [ ] `POST /api/v1/end-user/approvals/{id}/decide`：本人答复。
+- [x] `POST /api/v1/end-user/approvals/{id}/decide`：本人答复。
       这里要一条测试钉住**不是发起人的终端用户答不了**，因为这是 §763 明确点名
       不许发生的那件事（管理员和开发者不能伪装用户代批，那么别的终端用户更不能）。
-- [ ] `POST /api/v1/end-user/runs/{id}/cancel`：本人取消自己的 Run。
+- [x] `POST /api/v1/end-user/runs/{id}/cancel`：本人取消自己的 Run。
       暂停与继续先不做——终端用户的界面里没有「暂停」这个动作的语义位置，而取消
       是抹除和「我不想要这个答案了」都需要的那一个。**计划明确只做三分之一，并
       在验收记录里说清楚欠了哪两个**，比默默把整行标绿诚实。
-- [ ] `apps/chat-web` 把待答确认显示出来并能答。§27.2 场景 6 的记录在此之前
+- [x] `apps/chat-web` 把待答确认显示出来并能答。§27.2 场景 6 的记录在此之前
       不得声称是绿的——生产者有了不等于这条路走得通。
 
 **出口检查：** 终端用户能答自己的确认、能取消自己的 Run；别人的确认答不了；
-§27.2 场景 6 的记录改成对证据说话。
+§27.2 场景 6 的记录改成对证据说话。**全部达成**，见
+`docs/superpowers/verification/2026-08-22-end-user-controls.md`。
+
+**这一节只做了 §4.6 那一行的三分之一，而且是故意的。** `暂停` 与 `继续` 没有建，
+理由写在上面。它不是留在计划里的一句话——`test_pause_has_no_end_user_route` 与
+`test_resume_has_no_end_user_route` 把这两条路线钉成 404。一句「我们有意只做了三分之
+一」会在几个月后被当成「这一行做完了」，一条测试不会。

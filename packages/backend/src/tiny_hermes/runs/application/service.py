@@ -343,6 +343,49 @@ class RunCoordination:
         await self.get_end_user_session(workspace_id, end_user_id, run.session_id)
         return run
 
+    async def cancel_end_user_run(
+        self,
+        workspace_id: UUID,
+        end_user_id: UUID,
+        run_id: UUID,
+        expected_state_version: int,
+        request_id: str,
+    ) -> RunSnapshot:
+        """Plan §10's Run half: 本人 can cancel a Run they started, once it
+        has stopped anywhere they cannot otherwise reach it.
+
+        Reuses `_store.control_run` — the same `ControlRunCommand` →
+        `SqlRunStore.control_run` → `RunStateMachine` path the console's own
+        `/runs/{id}/cancel` calls — rather than a second dispatcher: the
+        legal-transition table is `RunStateMachine`'s territory, not this
+        method's to reimplement for a second caller kind.
+
+        No `_require_role`: an end user is never a workspace member, so
+        there is no Role to read one off (`create_end_user_session`'s own
+        reasoning). Ownership stands in for it instead —
+        `get_end_user_run` raises before this reaches the store at all if
+        `run_id` is not this end user's own, the same check the read side
+        already enforces, asked again here rather than re-derived.
+
+        Only cancel. §10 leaves pause and resume out on purpose — the plan
+        itself explains why (no place in the chat UI for "pause", and
+        cancel is the one action both erasure and "stop, I don't want this"
+        need) — so there is no `pause_end_user_run`/`resume_end_user_run`
+        beside this one to eventually add a signal to.
+        """
+        await self.get_end_user_run(workspace_id, end_user_id, run_id)
+        return await self._store.control_run(
+            ControlRunCommand(
+                workspace_id=workspace_id,
+                run_id=run_id,
+                caller=CallerIdentity(CallerType.END_USER, end_user_id),
+                capabilities=RunCapabilities(can_control=True, can_retry=True),
+                signal=RunSignal.CANCEL_REQUESTED,
+                expected_state_version=expected_state_version,
+                request_id=request_id,
+            )
+        )
+
     async def retry_run(
         self,
         workspace_id: UUID,

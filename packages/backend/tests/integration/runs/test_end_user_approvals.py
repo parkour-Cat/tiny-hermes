@@ -181,6 +181,10 @@ def _decide(
     )
 
 
+def _list_pending(client: TestClient) -> Any:
+    return client.get("/api/v1/end-user/approvals")
+
+
 async def _pending_confirmation(engine: AsyncEngine, run_id: str) -> dict[str, Any]:
     async with engine.connect() as connection:
         found = await connection.execute(
@@ -389,3 +393,152 @@ async def test_a_governance_approval_is_refused_to_an_end_user_regardless(
 
     assert refused.status_code == 403, refused.text
     assert stand_in.requests == []
+
+
+# -- §10: the list a chat surface needs before it can show any of this ------
+#
+# `decide` above proves the door opens once an end user already has an
+# `approval_id`. Nothing before this task ever gave them one — no list
+# route, no id in any end-user response, `apps/chat-web` never mentioning
+# "approval" at all — so the door was real and permanently unreached. These
+# tests are the missing half: the same 仅发起人本人 rule §4.6 states for
+# deciding, now checked on what a person is even allowed to *see*.
+
+
+async def test_listing_returns_the_end_users_own_pending_confirmation(
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+    engine: AsyncEngine,
+    registered_issuer: None,
+    api: tuple[StandIn, str],
+    proxy: ProxyHandle,
+) -> None:
+    del registered_issuer
+    run, approval, stand_in = await _stopped_run(
+        client, scope, workspace_id, engine, api, proxy, sub="zhang"
+    )
+
+    listed = _list_pending(client)
+
+    assert listed.status_code == 200, listed.text
+    ids = [item["id"] for item in listed.json()]
+    assert ids == [approval["id"]]
+    assert listed.json()[0]["approval_type"] == "user_confirmation"
+    assert listed.json()[0]["run_id"] == run["id"]
+    del stand_in
+
+
+async def test_listing_does_not_include_another_end_users_confirmation(
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+    settings: Settings,
+    engine: AsyncEngine,
+    registered_issuer: None,
+    api: tuple[StandIn, str],
+    proxy: ProxyHandle,
+) -> None:
+    """§4.6: 仅发起人本人 — 小王 signed in for real must still see nothing
+    of 小张's pending confirmation, the same cross-subject shape
+    `test_a_different_end_users_confirmation_stays_out_of_reach` already
+    pins for deciding."""
+    del registered_issuer
+    _run, _approval, stand_in = await _stopped_run(
+        client, scope, workspace_id, engine, api, proxy, sub="zhang"
+    )
+
+    with TestClient(create_app(settings=settings), base_url="https://testserver") as wang_client:
+        _sign_in(wang_client, workspace_id, "wang")
+
+        listed = _list_pending(wang_client)
+
+    assert listed.status_code == 200, listed.text
+    assert listed.json() == []
+    del stand_in
+
+
+async def test_listing_never_includes_a_governance_approval(
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    registered_issuer: None,
+    api: tuple[StandIn, str],
+    proxy: ProxyHandle,
+) -> None:
+    """The other direction of §4.6's matrix, checked on the list this time:
+    an end user's own list must never surface a `governance_approval`, even
+    one sitting on a workspace member's own Run with no end user at all —
+    mirroring `test_a_governance_approval_is_refused_to_an_end_user_regardless`
+    on the read side rather than only the decide side."""
+    del registered_issuer
+    stand_in, url = api
+    approve_host(client, scope, "127.0.0.1")
+    version_id = register_tool(client, scope, url)
+    agent_id = _agent(client, scope, version_id, "governance")
+    session_id = session_for(agent_id)
+    created = client.post(
+        "/api/v1/runs",
+        headers={**scope, "Idempotency-Key": "console-write-2"},
+        json={"session_id": session_id, "input": "http.orders.createOrder"},
+    )
+    assert created.status_code == 201, created.text
+
+    await worker(engine, workspace_id, proxy).run_once()
+
+    approval = await _pending_confirmation(engine, created.json()["id"])
+    assert approval["approval_type"] == "governance_approval"
+
+    _sign_in(client, workspace_id, "zhang")
+    listed = _list_pending(client)
+
+    assert listed.status_code == 200, listed.text
+    assert approval["id"] not in [item["id"] for item in listed.json()]
+    del stand_in
+
+
+async def test_a_decided_confirmation_drops_off_the_list(
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+    engine: AsyncEngine,
+    registered_issuer: None,
+    api: tuple[StandIn, str],
+    proxy: ProxyHandle,
+) -> None:
+    del registered_issuer
+    run, approval, stand_in = await _stopped_run(
+        client, scope, workspace_id, engine, api, proxy, sub="zhang"
+    )
+
+    decided = _decide(client, approval["id"], "approve")
+    assert decided.status_code == 200, decided.text
+
+    listed = _list_pending(client)
+
+    assert listed.status_code == 200, listed.text
+    assert listed.json() == []
+    del run, stand_in
+
+
+async def test_an_unauthenticated_list_request_is_refused(
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+    engine: AsyncEngine,
+    registered_issuer: None,
+    api: tuple[StandIn, str],
+    proxy: ProxyHandle,
+) -> None:
+    del registered_issuer
+    _run, _approval, stand_in = await _stopped_run(
+        client, scope, workspace_id, engine, api, proxy, sub="zhang"
+    )
+    client.cookies.clear()
+
+    refused = _list_pending(client)
+
+    assert refused.status_code == 401, refused.text
+    del stand_in

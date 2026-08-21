@@ -92,6 +92,16 @@ export const zhCN = {
   statusInterrupted: "已中断",
   statusWaiting: "等待中",
   statusSessionBlocked: "会话阻塞",
+  cancelRunButton: "取消运行",
+  cancelRunConfirm: "确定要取消这次运行吗？取消后无法恢复。",
+  cancelRunDone: "已取消。",
+  approvalPendingTitle: "这次运行需要你确认才能继续",
+  approvalApprove: "同意",
+  approvalReject: "拒绝",
+  approvalReasonPlaceholder: "拒绝理由（必填）",
+  approvalReasonRequired: "请说明拒绝的理由",
+  approvalExpired: "这条确认已经过期，运行已暂停",
+  approvalAlreadyDecided: "这条确认已经处理过了",
 } as const;
 
 export type MessageKey = keyof typeof zhCN;

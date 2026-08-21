@@ -15,6 +15,7 @@ import { ChatTheme } from "../theme/ChatTheme";
 const ALIAS = "darwin";
 const SESSION = "33333333-4444-4555-8666-777777777777";
 const RUN = "55555555-6666-4777-8888-999999999999";
+const APPROVAL = "77777777-8888-4999-a000-111111111111";
 
 const BUDGET = {
   max_execution_seconds: 600,
@@ -186,6 +187,98 @@ test("a blocked queue shows the wait, not a silent refusal", async () => {
 
   expect(await screen.findByText(/上一条任务还没结束/)).toBeInTheDocument();
   expect(screen.getByText(/也可以开一个新对话/)).toBeInTheDocument();
+});
+
+test("plan §10: a running run offers stop, and confirming it cancels the run", async () => {
+  const cancellations: { runId: string; body: unknown }[] = [];
+  const running = finishedRun({ status: "running", finished_at: null, state_version: 1 });
+  const cancelled = finishedRun({
+    status: "cancelled",
+    finished_at: "2026-08-10T02:00:02Z",
+    state_version: 2,
+    queue: { position: 0, status: "terminal" },
+  });
+  server.use(
+    http.post(`/api/v1/end-user/agents/${ALIAS}/sessions`, () =>
+      HttpResponse.json(sessionRow(), { status: 201 }),
+    ),
+    http.post(`/api/v1/end-user/sessions/${SESSION}/runs`, () =>
+      HttpResponse.json(running, { status: 201 }),
+    ),
+    http.get(`/api/v1/end-user/runs/${RUN}`, () => HttpResponse.json(running)),
+    http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([])),
+    http.post(`/api/v1/end-user/runs/${RUN}/cancel`, async ({ request }) => {
+      cancellations.push({ runId: RUN, body: await request.json() });
+      return HttpResponse.json(cancelled);
+    }),
+  );
+
+  renderChat(`/${ALIAS}`);
+  await userEvent.type(await screen.findByLabelText("写给智能体"), "Keep working");
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+
+  await userEvent.click(await screen.findByRole("button", { name: "停止" }));
+  expect(screen.getByText("确定要取消这次运行吗？取消后无法恢复。")).toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "取消运行" }));
+
+  await waitFor(() => expect(cancellations).toHaveLength(1));
+  expect(cancellations[0]?.body).toEqual({ expected_state_version: 1 });
+  await waitFor(() =>
+    expect(screen.queryByText("确定要取消这次运行吗？取消后无法恢复。")).toBeNull(),
+  );
+});
+
+test("plan §10: a run waiting on the end user's own confirmation shows it, and approving it clears the banner", async () => {
+  const decisions: { id: string; body: unknown }[] = [];
+  let decided = false;
+  const waiting = finishedRun({
+    status: "waiting_approval",
+    finished_at: null,
+    queue: { position: 1, status: "waiting" },
+  });
+  const pendingApproval = {
+    id: APPROVAL,
+    run_id: RUN,
+    approval_type: "user_confirmation",
+    status: "pending",
+    tool: "http.orders.createOrder",
+    document: { tool: "http.orders.createOrder" },
+    required_permission: null,
+    requested_by: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    expires_at: "2026-08-10T03:00:00Z",
+  };
+  server.use(
+    http.post(`/api/v1/end-user/agents/${ALIAS}/sessions`, () =>
+      HttpResponse.json(sessionRow(), { status: 201 }),
+    ),
+    http.post(`/api/v1/end-user/sessions/${SESSION}/runs`, () =>
+      HttpResponse.json(waiting, { status: 201 }),
+    ),
+    http.get(`/api/v1/end-user/runs/${RUN}`, () => HttpResponse.json(waiting)),
+    http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([])),
+    http.get("/api/v1/end-user/approvals", () =>
+      HttpResponse.json(decided ? [] : [pendingApproval]),
+    ),
+    http.post(`/api/v1/end-user/approvals/${APPROVAL}/decision`, async ({ request }) => {
+      decided = true;
+      decisions.push({ id: APPROVAL, body: await request.json() });
+      return HttpResponse.json({ ...pendingApproval, status: "approved" });
+    }),
+  );
+
+  renderChat(`/${ALIAS}`);
+  await userEvent.type(await screen.findByLabelText("写给智能体"), "Place an order");
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+
+  expect(await screen.findByText("这次运行需要你确认才能继续")).toBeInTheDocument();
+  expect(screen.getByText("http.orders.createOrder")).toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole("button", { name: "同意" }));
+
+  await waitFor(() => expect(decisions).toHaveLength(1));
+  expect(decisions[0]?.body).toEqual({ decision: "approve", reason: null });
+  await waitFor(() => expect(screen.queryByText("这次运行需要你确认才能继续")).toBeNull());
 });
 
 test("session-rail actions stay behind the row menu, backed by this device's memory", async () => {
