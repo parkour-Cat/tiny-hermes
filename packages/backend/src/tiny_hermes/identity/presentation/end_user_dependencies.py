@@ -23,10 +23,11 @@ from typing import Annotated
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from fastapi import Cookie
+from fastapi import Cookie, Header
 from starlette.datastructures import Headers
 
 from tiny_hermes.identity.application.end_user_service import EndUserIdentityService
+from tiny_hermes.identity.presentation.dependencies import SESSION_COOKIE
 from tiny_hermes.shared.errors import AppError
 
 #: Deliberately not `tiny_hermes_session` (`presentation/dependencies.py`).
@@ -166,7 +167,11 @@ async def resolve_end_user_caller_for_write(
     return caller
 
 
-def reject_end_user_caller(end_user_session: EndUserSessionCookie = None) -> None:
+def reject_end_user_caller(
+    end_user_session: EndUserSessionCookie = None,
+    session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> None:
     """§8's last row, made into something every console router can depend on
     without knowing this feature exists. Presence alone is enough to refuse:
     checking validity would mean a database round trip on every console
@@ -174,6 +179,21 @@ def reject_end_user_caller(end_user_session: EndUserSessionCookie = None) -> Non
     holding this cookie at all is already the fact this endpoint cares
     about — whether that particular session has since expired changes
     nothing about whether it belongs here.
+
+    Task-9 review finding G: presence alone used to mean the end-user
+    cookie's presence *by itself*, which 403'd a single-domain deployment's
+    own case of "both a workspace member and an end user" — a browser
+    attaches every cookie it holds for this origin to every request,
+    regardless of which identity that request is actually trying to use, so
+    a console call from that browser always carried the end-user cookie too.
+    What changed: the end-user cookie only disqualifies a request that
+    carries *no console credential of its own* — `session_token`/
+    `authorization` — sitting next to it. Still presence, not validity, on
+    both sides, so this is still a database-free decision either way; a
+    forged or expired console cookie/bearer earns no free pass from this
+    function, it just clears this one and meets
+    `resolve_workspace_caller`'s own checks a moment later, exactly as it
+    always would have on a request with no end-user cookie in it at all.
     """
-    if end_user_session is not None:
+    if end_user_session is not None and session_token is None and authorization is None:
         raise console_forbidden()
