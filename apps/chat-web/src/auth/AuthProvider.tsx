@@ -60,6 +60,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setLoading(false);
       })
       .catch((caught: unknown) => {
+        // A refusal still involves a validly signed, unexpired credential
+        // (wrong Agent, gate closed) — it must not sit in the address bar
+        // or browser history for the rest of its 15-minute window just
+        // because the exchange failed. `replaceState` rather than
+        // `navigate`: there is nowhere past this screen to route to, only
+        // history to clean up.
+        window.history.replaceState(null, "", window.location.pathname);
         setError(caught instanceof Error ? caught.message : String(caught));
         setLoading(false);
       });
