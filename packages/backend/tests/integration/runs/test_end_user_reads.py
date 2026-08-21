@@ -21,11 +21,14 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncEngine
 from tiny_hermes.api.app import create_app
 from tiny_hermes.identity.presentation.end_user_dependencies import END_USER_SESSION_COOKIE
 from tiny_hermes.shared.config import Settings
 
 from ..conftest import VALID_SPEC
+from ..egress_support import ProxyHandle
+from .http_tool_support import StandIn, approve_host, register_tool, worker
 
 ISSUER = "https://idp.acme.example"
 CHANNEL = "web"
@@ -239,6 +242,103 @@ async def test_submitting_a_run_does_not_leak_the_consoles_operational_fields(
     assert submitted.status_code == 201, submitted.text
     body = submitted.json()
     assert not (_CONSOLE_ONLY_RUN_FIELDS & set(body))
+
+
+def _governance_agent(client: TestClient, scope: dict[str, str], version_id: str) -> None:
+    """A published Agent, reachable through `ALIAS` (so the existing
+    `_credential` helper's `agents` claim still names it), that stops for the
+    end user's own confirmation before it writes — the same `write_policy:
+    governance` shape `test_end_user_approvals.py` uses to reach
+    `waiting_approval`. That state is what a second Run submitted on the same
+    Session sees as a blocked queue below.
+    """
+    created = client.post(
+        "/api/v1/agents", headers=scope, json={"name": "Support Bot", "alias": ALIAS}
+    )
+    assert created.status_code == 201, created.text
+    agent_id = str(created.json()["id"])
+    spec = {
+        **VALID_SPEC,
+        "model_policy": {"provider": "deterministic", "scenario": "http_once"},
+        "network": {"allow": ["127.0.0.1"]},
+        "end_user_access": {"enabled": True},
+        "http_tools": [
+            {
+                "http_tool_version_id": version_id,
+                "operations": ["listOrders", "createOrder"],
+                "write_policy": "governance",
+            }
+        ],
+    }
+    draft = client.put(
+        f"/api/v1/agents/{agent_id}/draft",
+        headers=scope,
+        json={"expected_revision": 1, "spec": spec},
+    )
+    assert draft.status_code == 200, draft.text
+    published = client.post(
+        f"/api/v1/agents/{agent_id}/publish",
+        headers=scope,
+        json={"expected_revision": draft.json()["revision"]},
+    )
+    assert published.status_code == 201, published.text
+
+
+async def test_a_blocked_end_user_queue_carries_only_position_and_status(
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+    engine: AsyncEngine,
+    registered_issuer: None,
+    api: tuple[StandIn, str],
+    proxy: ProxyHandle,
+) -> None:
+    """Task-7 review finding 4 missed one nesting level: `EndUserRunResponse.
+    queue` reused the console's `QueueResponse` unchanged, and that class
+    still names `available_actions` — console-style action names computed
+    with `can_control=True`. The field is dormant until `queue.status ==
+    "session_blocked"`, and that status is ordinary for this audience: an end
+    user's own Run sitting in `waiting_approval` blocks its Session's head
+    exactly as a paused console Run does, and `WAITING_APPROVAL` is squarely
+    reachable — the end user's own approval route puts Runs there. This test
+    drives a real Run into that state through the same governance
+    write-policy path `test_end_user_approvals.py` uses, then submits a
+    second Run behind it, so the blocked queue it reads back is the one an
+    end user's own session actually produces — not a hand-built model that
+    would never have shown the leak in the first place.
+    """
+    del registered_issuer
+    stand_in, url = api
+    approve_host(client, scope, "127.0.0.1")
+    version_id = register_tool(client, scope, url)
+    _governance_agent(client, scope, version_id)
+    _sign_in(client, workspace_id, "zhang")
+    session_id = _start_session(client)
+
+    head = client.post(
+        f"/api/v1/end-user/sessions/{session_id}/runs",
+        headers={"Idempotency-Key": "head"},
+        json={"input": "http.orders.createOrder"},
+    )
+    assert head.status_code == 201, head.text
+
+    await worker(engine, workspace_id, proxy).run_once()
+
+    second = client.post(
+        f"/api/v1/end-user/sessions/{session_id}/runs",
+        headers={"Idempotency-Key": "second"},
+        json={"input": "hello"},
+    )
+    assert second.status_code == 201, second.text
+    second_body = second.json()
+
+    assert second_body["queue"]["status"] == "session_blocked"
+    assert second_body["queue"] == {"position": 2, "status": "session_blocked"}
+
+    read = client.get(f"/api/v1/end-user/runs/{second_body['id']}")
+    assert read.status_code == 200, read.text
+    assert read.json()["queue"] == {"position": 2, "status": "session_blocked"}
+    del stand_in
 
 
 async def test_an_end_user_cannot_read_another_end_users_session(
