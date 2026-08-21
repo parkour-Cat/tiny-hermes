@@ -21,7 +21,10 @@ import pytest
 import uvicorn
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
-from tiny_hermes.identity.infrastructure.jwks_key_source import OutboundJwksKeySource
+from tiny_hermes.identity.infrastructure.jwks_key_source import (
+    JwksCache,
+    OutboundJwksKeySource,
+)
 from tiny_hermes.outbound.client import EgressRoute, SafeOutboundClient
 
 from ..egress_support import PROXY_TOKEN, ProxyHandle, running_proxy
@@ -89,6 +92,46 @@ def _source(proxy: ProxyHandle) -> OutboundJwksKeySource:
         )
 
     return OutboundJwksKeySource(client)
+
+
+def _cached_source(proxy: ProxyHandle, cache: JwksCache) -> OutboundJwksKeySource:
+    def client() -> SafeOutboundClient:
+        return SafeOutboundClient(
+            egress=EgressRoute(url=proxy.url, token=PROXY_TOKEN),
+            connect_timeout=2.0,
+            read_timeout=10.0,
+        )
+
+    return OutboundJwksKeySource(client, cache)
+
+
+async def test_a_second_resolve_reuses_the_cache_without_a_second_proxy_round_trip(
+    host: tuple[JwksHost, str], proxy: ProxyHandle
+) -> None:
+    """Task-9 review finding E, proven at the level the module docstring
+    promises: `test_jwks_key_source.py` already proves the caching logic
+    against a fake transport; this is the same behaviour through the real
+    `SafeOutboundClient`/`EgressProxy` pair, so a regression that only shows
+    up once real HTTP is involved (a connection-pooling quirk, a header the
+    fake never modeled) would still be caught here.
+    """
+    app, url = host
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwk = json.loads(RSAAlgorithm(RSAAlgorithm.SHA256).to_jwk(private_key.public_key()))
+    jwk["kid"] = "acme-2026"
+    app.body = json.dumps({"keys": [jwk]}).encode()
+    token = jwt.encode({"sub": "x"}, private_key, algorithm="RS256", headers={"kid": "acme-2026"})
+    cache = JwksCache()
+    source = _cached_source(proxy, cache)
+    jwks_url = f"{url}/.well-known/jwks.json"
+
+    first = await source.resolve(public_key=None, jwks_url=jwks_url, token=token)
+    second = await source.resolve(public_key=None, jwks_url=jwks_url, token=token)
+
+    assert first is not None
+    assert second == first
+    # One fetch for two resolves — the real proxy only ever saw the first.
+    assert app.paths == ["/.well-known/jwks.json"]
 
 
 async def test_a_jwks_document_fetched_over_the_proxy_yields_a_usable_key(
