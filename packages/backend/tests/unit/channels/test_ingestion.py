@@ -11,9 +11,9 @@ from tiny_hermes.channels.application.ingestion import (
     ChannelBindingRecord,
     ChannelIngestion,
     ErasedSubjectRefused,
-    UpsertedSubject,
 )
 from tiny_hermes.channels.domain.events import ChannelEvent
+from tiny_hermes.identity.ports.end_user_store import UpsertedIdentity
 from tiny_hermes.runs.domain.models import SessionMode
 from tiny_hermes.runs.ports.store import AcceptedRun
 
@@ -36,9 +36,9 @@ class FakeSubjects:
 
     async def upsert_external_identity(
         self, workspace_id: UUID, channel: str, external_user_id: str
-    ) -> UpsertedSubject:
+    ) -> UpsertedIdentity:
         self.calls.append((workspace_id, channel, external_user_id))
-        return UpsertedSubject(end_user_id=self.end_user_id, erased_at=self.erased_at)
+        return UpsertedIdentity(end_user_id=self.end_user_id, erased_at=self.erased_at)
 
 
 class FakeConversations:

@@ -40,7 +40,7 @@ async def _binding(engine: AsyncEngine, workspace_id: str, agent_id: str) -> UUI
                 "INSERT INTO channel_bindings"
                 " (id, workspace_id, channel, agent_id, status, created_by,"
                 "  created_at, encrypt_key_ref)"
-                " VALUES (:i, :w, 'feishu', :a, 'active', :u, :t, 'env:TEST_KEY')"
+                " VALUES (:i, :w, 'feishu', :a, 'active', :u, :t, 'TEST_KEY')"
             ),
             {
                 "i": binding_id,
