@@ -456,3 +456,64 @@ async def _ask_gate(
         call=call,
         required_permission="http.orders.write",
     )
+
+
+async def test_an_approval_does_not_carry_over_to_a_call_with_different_arguments(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    api: tuple[StandIn, str],
+    proxy: ProxyHandle,
+) -> None:
+    """§23 assertion 8, at the layer the assertion names.
+
+    The rule already had a home in the domain — `is_still_valid` compares
+    content hashes and `test_an_approval_for_a_different_call_covers_nothing`
+    pins it. What had no test is the execution layer: that a Run holding a
+    real, approved, unexpired approval and then asking to make a *different*
+    call is not waved through by it.
+
+    Those are different claims. The domain test proves a function returns
+    False; this proves the store that guards the write actually asks that
+    function about the call in hand, rather than about the Run.
+
+    Two things worth naming about what happens instead of a refusal. §23
+    calls for the executor to return `approval_mismatch`; there is no such
+    code in this codebase and this test does not invent one. What the
+    executor does is ask again — the changed call finds no approval covering
+    it, so the Run stops for a person a second time. That is the same
+    safety property under a different shape, and recording which one is real
+    matters more than making the string match the spec.
+    """
+    run, _ = await _stopped_run(client, scope, engine, session_for, api, proxy)
+    pending = _pending(client, scope)[0]
+    decided = client.post(
+        f"/api/v1/approvals/{pending['id']}/decision",
+        headers=scope,
+        json={"decision": "approve"},
+    )
+    assert decided.status_code == 200, decided.text
+
+    approved_document = pending["document"]
+    changed = dict(approved_document)
+    changed["arguments"] = {**approved_document["arguments"], "sku": "swapped-after-yes"}
+
+    gate = SqlApprovalGate(async_sessionmaker(engine, expire_on_commit=False))
+    checked = await gate.check(
+        run_id=UUID(run["id"]),
+        approval_type=ApprovalType.GOVERNANCE_APPROVAL,
+        tool=approved_document["tool"],
+        call_id="call-changed",
+        call=normalize_call(
+            tool=approved_document["tool"],
+            arguments=changed["arguments"],
+            target=approved_document.get("target"),
+            required_permission=approved_document.get("required_permission"),
+        ),
+        required_permission=approved_document.get("required_permission"),
+    )
+
+    # Not APPROVED. The approval that exists is for the call a person read,
+    # and this is not that call.
+    assert checked.verdict is not ApprovalVerdict.APPROVED
