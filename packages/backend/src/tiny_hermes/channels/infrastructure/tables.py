@@ -29,6 +29,10 @@ class ChannelBindingRow(IdMixin, CreatedAtMixin, Base):
         CheckConstraint(
             "status IN ('active', 'disabled')", name="ck_channel_bindings_status"
         ),
+        CheckConstraint(
+            "channel <> 'feishu' OR encrypt_key_ref IS NOT NULL",
+            name="ck_channel_bindings_feishu_is_encrypted",
+        ),
         Index("ix_channel_bindings_workspace", "workspace_id", "channel"),
     )
 
@@ -39,6 +43,11 @@ class ChannelBindingRow(IdMixin, CreatedAtMixin, Base):
     agent_id: Mapped[UUID] = mapped_column(ForeignKey("agents.id", ondelete="RESTRICT"))
     status: Mapped[str] = mapped_column(String(32), default="active")
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    #: A reference, never the key — see migration 0037. Nullable because a
+    #: `web` or `api` binding has no such key; the CHECK above is what makes
+    #: it required for the channel that does.
+    encrypt_key_ref: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    app_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
 
 class ChannelEventRow(IdMixin, Base):
