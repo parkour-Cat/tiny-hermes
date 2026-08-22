@@ -9,11 +9,16 @@ than once and can arrive twice in the same instant.
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tiny_hermes.channels.infrastructure.tables import ChannelEventRow
+from tiny_hermes.channels.application.ingestion import ChannelBindingRecord
+from tiny_hermes.channels.infrastructure.tables import (
+    ChannelBindingRow,
+    ChannelConversationRow,
+    ChannelEventRow,
+)
 
 
 class SqlChannelStore:
@@ -50,6 +55,61 @@ class SqlChannelStore:
             .returning(ChannelEventRow.id)
         )
         return claimed.scalar_one_or_none()
+
+    async def active_binding(self, binding_id: UUID) -> ChannelBindingRecord | None:
+        """`None` for unknown *and* for disabled, deliberately.
+
+        A disabled binding that answered differently from an unknown one
+        would let anyone with the URL learn which bindings exist, and the
+        answer to both is the same refusal.
+        """
+        row = await self._session.scalar(
+            select(ChannelBindingRow).where(
+                ChannelBindingRow.id == binding_id,
+                ChannelBindingRow.status == "active",
+            )
+        )
+        if row is None:
+            return None
+        return ChannelBindingRecord(
+            id=row.id,
+            workspace_id=row.workspace_id,
+            agent_id=row.agent_id,
+            channel=row.channel,
+        )
+
+    async def encrypt_key_ref_of(self, binding_id: UUID) -> str | None:
+        return await self._session.scalar(
+            select(ChannelBindingRow.encrypt_key_ref).where(
+                ChannelBindingRow.id == binding_id
+            )
+        )
+
+    async def session_for(self, binding_id: UUID, external_user_id: str) -> UUID | None:
+        return await self._session.scalar(
+            select(ChannelConversationRow.session_id).where(
+                ChannelConversationRow.channel_binding_id == binding_id,
+                ChannelConversationRow.external_user_id == external_user_id,
+            )
+        )
+
+    async def remember_session(
+        self, binding_id: UUID, external_user_id: str, session_id: UUID
+    ) -> None:
+        """`ON CONFLICT DO NOTHING` for the same reason `claim_delivery` uses
+        it: two first messages from one person can be in flight at once, and
+        the loser must keep the winner's thread rather than raise."""
+        await self._session.execute(
+            insert(ChannelConversationRow)
+            .values(
+                id=uuid4(),
+                channel_binding_id=binding_id,
+                external_user_id=external_user_id,
+                session_id=session_id,
+            )
+            .on_conflict_do_nothing(constraint="uq_channel_conversations_participant")
+        )
+        await self._session.flush()
 
     async def attach_run(self, event_row_id: UUID, run_id: UUID) -> None:
         row = await self._session.get(ChannelEventRow, event_row_id)

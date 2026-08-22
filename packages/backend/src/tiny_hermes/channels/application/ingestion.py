@@ -8,12 +8,12 @@ for the Session, and the subject's own private memory. Feishu is a new
 """
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
 from tiny_hermes.channels.domain.blocked import BlockedNotice, notice_from_document
 from tiny_hermes.channels.domain.events import ChannelEvent
+from tiny_hermes.identity.ports.end_user_store import UpsertedIdentity
 from tiny_hermes.runs.domain.models import SessionMode, SessionSnapshot
 from tiny_hermes.runs.ports.store import AcceptedRun
 
@@ -37,16 +37,18 @@ class ChannelBindingRecord:
     channel: str
 
 
-@dataclass(frozen=True)
-class UpsertedSubject:
-    end_user_id: UUID
-    erased_at: datetime | None
-
-
 class SubjectDirectory(Protocol):
+    """§282's upsert, exactly as the end-user entry already defines it.
+
+    `UpsertedIdentity` is imported rather than re-declared here: a
+    structurally identical copy would drift the first time that type gained
+    a field, and the whole claim of this module is that Feishu is a second
+    transport onto one identity path rather than a second identity system.
+    """
+
     async def upsert_external_identity(
         self, workspace_id: UUID, channel: str, external_user_id: str
-    ) -> UpsertedSubject: ...
+    ) -> UpsertedIdentity: ...
 
 
 class Conversations(Protocol):
@@ -170,5 +172,4 @@ __all__ = [
     "ErasedSubjectRefused",
     "RunEntry",
     "SubjectDirectory",
-    "UpsertedSubject",
 ]
