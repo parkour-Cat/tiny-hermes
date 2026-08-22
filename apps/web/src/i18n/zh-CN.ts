@@ -377,8 +377,33 @@ export const zhCN = {
   costUnknownLabel: "未配置价格",
   costUnknownHint: "这个端点没有记录价格，所以这次运行花了多少说不出来。这和「免费」不是一回事。",
 
+  // -- 用量：按费用可信度分组，绝不合并成一个数字 --------------------------------
+  usage: "用量",
+  usageIntro:
+    "这个工作空间从创建以来的全部用量，按费用的可信度分组显示。来自服务商的实测费用和无法计价的部分不会被合并成一个数字——把它们加在一起，就会有人拿这个总数去对账，然后发现对不上。",
+  usageTotalRuns: "运行总数",
+  usageQualityColumn: "费用可信度",
+  usageRunCountColumn: "运行数",
+  usageEmpty: "这个工作空间还没有用量数据",
+
   // -- 审批 -------------------------------------------------------------------
   approvals: "审批",
+  audit: "审计记录",
+  auditIntro: "这个工作空间里谁做了什么。最新的在前。",
+  auditRedacted: "你看到的是脱敏后的记录",
+  auditRedactedHint: "你的角色可以知道某个动作发生过，但看不到随之记录的细节。行是完整的，细节那一列不是。",
+  auditActor: "操作者",
+  auditAction: "动作",
+  auditResource: "对象",
+  auditResult: "结果",
+  auditContext: "细节",
+  auditWhen: "时间",
+  auditFilterAction: "按动作过滤",
+  auditFilterResource: "按对象类型过滤",
+  auditEmpty: "还没有记录",
+  auditMore: "加载更多",
+  auditScopeOwn: "你只看到与你有关的记录",
+  auditScopeOwnHint: "你的角色能读到与自己的资源和操作相关的审计条目，不是整个工作空间的。",
   approvalsTitle: "等待决定",
   approvalsIntro: "运行停在这里而不是先做完。批准后它回到队列；拒绝会让它停下，并把原因告诉提交的人。",
   approvalsUser: "发起运行的那个人",

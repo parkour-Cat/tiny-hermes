@@ -275,3 +275,26 @@ test("a reused idempotency key is reported, and nothing is sent again on its own
   // Resending is how a console turns the idempotency record into a formality.
   await waitFor(() => expect(attempts).toBe(1));
 });
+
+test("a failed run says why in the list, not only after a click", async () => {
+  // §27.3 item 4 asks an administrator to see errors. `failure_reason` has
+  // been on RunResponse the whole time — the console simply never declared
+  // or rendered it, so the one column an operator scans to find what broke
+  // showed `failed` and nothing else. Served but not surfaced.
+  listing([runRow({ status: "failed", failure_reason: "model_provider_unreachable" })]);
+
+  renderRuns();
+
+  expect(await screen.findByText("model_provider_unreachable")).toBeVisible();
+});
+
+test("a run that has not failed shows no reason", async () => {
+  // The other half: a reason rendered for every row would turn into noise
+  // and stop meaning "this is what went wrong here".
+  listing([runRow({ status: "running", failure_reason: null })]);
+
+  renderRuns();
+
+  expect(await screen.findByText("running")).toBeVisible();
+  expect(screen.queryByText("model_provider_unreachable")).toBeNull();
+});

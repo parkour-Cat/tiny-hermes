@@ -46,6 +46,11 @@ const ModelEndpointsPage = lazy(() =>
 const SecretsPage = lazy(() =>
   import("./pages/SecretsPage").then((module) => ({ default: module.SecretsPage })),
 );
+const AuditPage = lazy(() =>
+  import("./pages/AuditPage").then((module) => ({
+    default: module.AuditPage,
+  })),
+);
 const ApprovalsPage = lazy(() =>
   import("./pages/ApprovalsPage").then((module) => ({
     default: module.ApprovalsPage,
@@ -73,6 +78,9 @@ const SkillProposalsPage = lazy(() =>
   import("./pages/SkillProposalsPage").then((module) => ({
     default: module.SkillProposalsPage,
   })),
+);
+const UsagePage = lazy(() =>
+  import("./pages/UsagePage").then((module) => ({ default: module.UsagePage })),
 );
 
 function AppRoutes() {
@@ -118,6 +126,7 @@ function AppRoutes() {
           <Route path="agents/:agentId/playground" element={<PlaygroundPage />} />
           <Route path="runs" element={<RunsPage />} />
           <Route path="runs/:runId" element={<RunDetailPage />} />
+          <Route path="usage" element={<UsagePage />} />
           <Route path="members" element={<MembersPage />} />
           <Route path="api-keys" element={<ApiKeysPage />} />
           <Route path="model-endpoints" element={<ModelEndpointsPage />} />
@@ -126,6 +135,7 @@ function AppRoutes() {
           <Route path="skills" element={<SkillsPage />} />
           <Route path="skill-proposals" element={<SkillProposalsPage />} />
           <Route path="approvals" element={<ApprovalsPage />} />
+          <Route path="audit" element={<AuditPage />} />
           <Route path="http-tools" element={<HttpToolsPage />} />
           <Route path="mcp-servers" element={<McpServersPage />} />
         </Route>

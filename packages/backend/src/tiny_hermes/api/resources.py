@@ -19,6 +19,8 @@ from tiny_hermes.agents.infrastructure.skill_bindings import CatalogSkillBinding
 from tiny_hermes.agents.infrastructure.sql_store import SqlAgentStore
 from tiny_hermes.artifacts.application.service import ArtifactService
 from tiny_hermes.artifacts.infrastructure.sql_store import SqlArtifactStore
+from tiny_hermes.audit.application.audit_service import AuditService
+from tiny_hermes.audit.infrastructure.sql_audit_store import SqlAuditStore
 from tiny_hermes.http_tools.application.service import HttpToolCatalog
 from tiny_hermes.http_tools.infrastructure.sql_store import SqlHttpToolStore
 from tiny_hermes.identity.application.auth_service import AuthService
@@ -423,6 +425,22 @@ class ApplicationResources:
         looking at what a workspace already holds is not an event."""
         async with self.session_factory()() as session:
             yield SqlSessionSearch(session)
+
+    async def audit_service(self) -> AsyncGenerator[AuditService]:
+        """Usually read-only like `session_search` above — but §3 makes one
+        read into an event: a platform administrator's cross-workspace read
+        writes `audit.cross_workspace_read`, and that line has to commit
+        with the read it describes or a request that failed after logging
+        would claim a cross-workspace look that never really returned rows.
+        """
+        async with self.session_factory()() as session:
+            try:
+                yield AuditService(SqlAuditStore(session))
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
 
     async def http_tool_catalog(self) -> AsyncGenerator[HttpToolCatalog]:
         async with self.session_factory()() as session:

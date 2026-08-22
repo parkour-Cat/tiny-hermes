@@ -59,6 +59,7 @@ from tiny_hermes.runs.domain.approval import ApprovalStatus
 from tiny_hermes.runs.domain.context_budget import Accounting, ContextWindow
 from tiny_hermes.runs.domain.models import (
     TERMINAL_STATES,
+    USAGE_WINDOW,
     BoundSkill,
     BudgetSummary,
     CallerIdentity,
@@ -83,6 +84,8 @@ from tiny_hermes.runs.domain.models import (
     TextBlock,
     WaitPolicy,
     WorkspaceCleanupTarget,
+    WorkspaceUsageByQuality,
+    WorkspaceUsageSummary,
     event_type_for,
     message_from_document,
 )
@@ -378,6 +381,67 @@ class SqlRunStore:
             )
         ).all()
         return [await self._snapshot(row, capabilities) for row in rows]
+
+    async def usage_summary(self, workspace_id: UUID) -> WorkspaceUsageSummary:
+        """§6's usage half: a workspace's spend, grouped by `cost_quality`.
+
+        Joined on `RunBudgetScopeRow.root_run_id == RunRow.id` rather than
+        `RunRow.budget_root_run_id`: a delegated child carries its parent's
+        `budget_root_run_id` (§13) but owns no `run_budget_scopes` row of its
+        own — only the root does. Matching the scope's own primary key
+        against the *matching* Run's id, instead of every Run's
+        `budget_root_run_id`, is what keeps each Run-tree's consumption
+        counted exactly once rather than once per child that shares it.
+        """
+        statement = (
+            select(
+                RunBudgetScopeRow.cost_quality,
+                func.sum(RunBudgetScopeRow.consumed_cost),
+                func.max(RunBudgetScopeRow.cost_currency),
+                func.count(),
+                func.sum(RunBudgetScopeRow.consumed_model_calls),
+                func.sum(RunBudgetScopeRow.consumed_tool_calls),
+                func.sum(RunBudgetScopeRow.consumed_tokens),
+                func.sum(RunBudgetScopeRow.consumed_execution_ms),
+            )
+            .select_from(RunBudgetScopeRow)
+            .join(RunRow, RunRow.id == RunBudgetScopeRow.root_run_id)
+            .where(RunRow.workspace_id == workspace_id)
+            .group_by(RunBudgetScopeRow.cost_quality)
+            .order_by(RunBudgetScopeRow.cost_quality)
+        )
+        rows = (await self._session.execute(statement)).all()
+        by_quality = tuple(
+            WorkspaceUsageByQuality(
+                cost_quality=quality,
+                consumed_cost=cost,
+                cost_currency=currency,
+                run_count=int(count),
+                consumed_model_calls=int(model_calls or 0),
+                consumed_tool_calls=int(tool_calls or 0),
+                consumed_tokens=int(tokens or 0),
+                consumed_execution_ms=int(execution_ms or 0),
+            )
+            for (
+                quality,
+                cost,
+                currency,
+                count,
+                model_calls,
+                tool_calls,
+                tokens,
+                execution_ms,
+            ) in rows
+        )
+        return WorkspaceUsageSummary(
+            window=USAGE_WINDOW,
+            by_cost_quality=by_quality,
+            total_run_count=sum(item.run_count for item in by_quality),
+            total_model_calls=sum(item.consumed_model_calls for item in by_quality),
+            total_tool_calls=sum(item.consumed_tool_calls for item in by_quality),
+            total_tokens=sum(item.consumed_tokens for item in by_quality),
+            total_execution_ms=sum(item.consumed_execution_ms for item in by_quality),
+        )
 
     async def append_events(self, command: AppendEventsCommand) -> tuple[RunEvent, ...]:
         if not command.events:

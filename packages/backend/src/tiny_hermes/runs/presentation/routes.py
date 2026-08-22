@@ -25,6 +25,7 @@ from tiny_hermes.runs.domain.models import (
     RunSnapshot,
     SessionMode,
     SessionSnapshot,
+    WorkspaceUsageSummary,
 )
 from tiny_hermes.runs.presentation.errors import as_app_error
 
@@ -157,6 +158,41 @@ class RunResponse(BaseModel):
     @classmethod
     def from_domain(cls, run: RunSnapshot) -> "RunResponse":
         return cls.model_validate(run.document())
+
+
+class UsageByQualityResponse(BaseModel):
+    cost_quality: str
+    #: A decimal string, or null for "nothing here can be priced" — never a
+    #: `0`. Same convention as `RunResponse`'s own `budget.consumed_cost`.
+    consumed_cost: str | None
+    cost_currency: str | None
+    run_count: int
+    consumed_model_calls: int
+    consumed_tool_calls: int
+    consumed_tokens: int
+    consumed_execution_ms: int
+
+
+class UsageSummaryResponse(BaseModel):
+    """A workspace's usage, grouped by `cost_quality`.
+
+    Deliberately no top-level cost field: the only place a cost figure
+    appears is inside `by_cost_quality`, keyed by how far it can be trusted.
+    The totals here are safe to blend across quality because none of them is
+    money.
+    """
+
+    window: str
+    by_cost_quality: list[UsageByQualityResponse]
+    total_run_count: int
+    total_model_calls: int
+    total_tool_calls: int
+    total_tokens: int
+    total_execution_ms: int
+
+    @classmethod
+    def from_domain(cls, summary: WorkspaceUsageSummary) -> "UsageSummaryResponse":
+        return cls.model_validate(summary.document())
 
 
 def session_router(resources: ApplicationResources) -> APIRouter:
@@ -651,6 +687,43 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         )
 
     return router
+
+
+def usage_router(resources: ApplicationResources) -> APIRouter:
+    router = APIRouter(prefix="/api/v1/usage", tags=["usage"])
+    auth_dependency = resources.auth_service
+    machines_dependency = resources.machine_identity_service
+    runs_dependency = resources.run_coordination
+
+    @router.get("", response_model=UsageSummaryResponse)
+    async def get_usage_summary(  # pyright: ignore[reportUnusedFunction]
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[
+            MachineIdentityService, Depends(machines_dependency, scope="function")
+        ],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        authorization: AuthorizationHeader = None,
+    ) -> UsageSummaryResponse:
+        caller = await resolve_workspace_caller(
+            auth,
+            machines,
+            session_token=session_token,
+            authorization=authorization,
+            csrf_token=None,
+            workspace_header=selected_workspace,
+            write=False,
+            required_scope="runs.read",
+        )
+        try:
+            summary = await runs.usage_summary(caller.workspace_id, caller.actor)
+        except RunCoordinationError as error:
+            raise as_app_error(error) from error
+        return UsageSummaryResponse.from_domain(summary)
+
+    return router
+
 
 def _apply_acceptance_headers(response: Response, replayed: bool, run_id: UUID) -> None:
     if replayed:

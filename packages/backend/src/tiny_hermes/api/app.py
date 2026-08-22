@@ -16,6 +16,7 @@ from tiny_hermes.api.health import (
 from tiny_hermes.api.request_context import RequestIdMiddleware
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.artifacts.presentation.routes import artifact_router
+from tiny_hermes.audit.presentation.routes import audit_router
 from tiny_hermes.http_tools.presentation.routes import http_tool_router
 from tiny_hermes.identity.presentation.end_user_dependencies import reject_end_user_caller
 from tiny_hermes.identity.presentation.end_user_routes import (
@@ -37,7 +38,7 @@ from tiny_hermes.runs.presentation.completions import completions_router
 from tiny_hermes.runs.presentation.end_user_approval_routes import end_user_approval_router
 from tiny_hermes.runs.presentation.end_user_routes import end_user_run_router
 from tiny_hermes.runs.presentation.events import run_event_router
-from tiny_hermes.runs.presentation.routes import run_router, session_router
+from tiny_hermes.runs.presentation.routes import run_router, session_router, usage_router
 from tiny_hermes.secrets.presentation.routes import secret_router
 from tiny_hermes.shared.config import Settings
 from tiny_hermes.shared.errors import AppError
@@ -109,6 +110,7 @@ def create_app(
     app.include_router(model_endpoint_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(session_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(run_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(usage_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(run_event_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(completions_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(artifact_router(resources), dependencies=_CONSOLE_ONLY)
@@ -117,6 +119,7 @@ def create_app(
     app.include_router(skill_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(http_tool_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(approval_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(audit_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(memory_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(subject_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(mcp_router(resources), dependencies=_CONSOLE_ONLY)
