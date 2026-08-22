@@ -29,7 +29,21 @@ def actor_of(user: AuthenticatedUser) -> Actor:
 def as_app_error(error: RunCoordinationError) -> AppError:
     """Turn Run Coordination refusals into Problem Details without leaking content."""
     if isinstance(error, ForbiddenRunAction):
-        return forbidden()
+        refusal = forbidden()
+        if error.recorded:
+            # The refusal wrote a security audit row (§23 assertion 2), so
+            # the transaction has to survive the exception. Without this the
+            # record is rolled back with everything else and the refusal
+            # leaves no trace — which is the state this assertion exists to
+            # end.
+            return AppError(
+                code=refusal.code,
+                title=refusal.title,
+                status=refusal.status,
+                detail=refusal.detail,
+                audited=True,
+            )
+        return refusal
     if isinstance(error, SessionAgentNotFound):
         return not_found("agent_not_found", "Agent not found", "agent")
     if isinstance(error, UnknownSession):

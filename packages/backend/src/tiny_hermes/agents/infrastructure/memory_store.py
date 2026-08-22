@@ -196,6 +196,7 @@ class MemoryAgentStore:
         resource_id: UUID,
         request_id: str,
         result: str = "succeeded",
+        context: dict[str, object] | None = None,
     ) -> None:
         del workspace_id, actor_id, resource_id, request_id, result
         self.audit_actions.append(action)

@@ -58,7 +58,20 @@ class RunCoordinationError(Exception):
 
 
 class ForbiddenRunAction(RunCoordinationError):
-    pass
+    """`recorded` says a security audit row was written before this was
+    raised, and therefore that the transaction must be committed rather than
+    rolled back.
+
+    Carried on the exception rather than decided at the HTTP boundary,
+    because only the raising site knows whether it wrote one — and a
+    boundary that guessed would either lose real refusal records or commit
+    transactions that wrote nothing. Default `False`: the ordinary 403 has
+    nothing to keep.
+    """
+
+    def __init__(self, *, recorded: bool = False) -> None:
+        super().__init__()
+        self.recorded = recorded
 
 
 class UnknownSession(RunCoordinationError):
@@ -304,7 +317,23 @@ class RunCoordination:
             session.caller.caller_type is not CallerType.END_USER
             or session.caller.caller_id != end_user_id
         ):
-            raise ForbiddenRunAction
+            # §23 assertion 2: refused *and recorded*. Written here rather
+            # than at the HTTP boundary because this is the only layer that
+            # knows both who reached and whose Session they reached for —
+            # `forbidden()` has neither, and an event that could not name
+            # both would not answer the question it exists for.
+            #
+            # The reacher is the actor. An event filed under the owner would
+            # put the probe in the victim's history, which is where nobody
+            # searching for a probe would look.
+            await self._store.record_refusal(
+                workspace_id=workspace_id,
+                actor_type=CallerType.END_USER.value,
+                actor_id=end_user_id,
+                action="end_user_session.refused",
+                resource_id=session_id,
+            )
+            raise ForbiddenRunAction(recorded=True)
         return session
 
     async def read_end_user_session_messages(

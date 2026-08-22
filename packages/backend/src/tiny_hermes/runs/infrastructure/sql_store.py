@@ -191,6 +191,33 @@ class SqlRunStore:
         )
         return Role(value) if value else None
 
+    async def record_refusal(
+        self,
+        *,
+        workspace_id: UUID,
+        actor_type: str,
+        actor_id: UUID,
+        action: str,
+        resource_id: UUID,
+    ) -> None:
+        self._session.add(
+            AuditEventRow(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                action=action,
+                resource_type="session",
+                resource_id=resource_id,
+                result="denied",
+                request_id="",
+                context={},
+                created_at=datetime.now(UTC),
+            )
+        )
+        await self._session.flush()
+
+
     async def create_session(self, command: CreateSessionCommand) -> SessionSnapshot:
         agent = await self._session.scalar(
             select(AgentRow).where(
