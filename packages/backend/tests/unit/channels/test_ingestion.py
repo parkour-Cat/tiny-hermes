@@ -15,6 +15,7 @@ from tiny_hermes.channels.application.ingestion import (
 )
 from tiny_hermes.channels.domain.events import ChannelEvent
 from tiny_hermes.runs.domain.models import SessionMode
+from tiny_hermes.runs.ports.store import AcceptedRun
 
 BINDING = ChannelBindingRecord(
     id=uuid4(), workspace_id=uuid4(), agent_id=uuid4(), channel="feishu"
@@ -56,7 +57,8 @@ class FakeConversations:
 
 
 class FakeRuns:
-    def __init__(self) -> None:
+    def __init__(self, document: dict[str, Any] | None = None) -> None:
+        self.document: dict[str, Any] = document if document is not None else {}
         self.created: list[tuple[UUID, UUID, SessionMode]] = []
         self.submitted: list[tuple[UUID, UUID, str | None]] = []
         self.session_id = uuid4()
@@ -89,7 +91,7 @@ class FakeRuns:
     ) -> Any:
         del workspace_id, text, request_id
         self.submitted.append((end_user_id, session_id, idempotency_key))
-        return object()
+        return AcceptedRun(run_id=uuid4(), document=self.document, replayed=False)
 
 
 def _ingestion(
@@ -170,3 +172,43 @@ async def test_the_event_id_is_the_idempotency_key() -> None:
     )
 
     assert runs.submitted[0][2] == "om_1"
+
+
+async def test_a_blocked_session_answers_with_the_notice_attached_to_the_run() -> None:
+    """§497 on the surface that needs it most. The pending Run is saved —
+    that is allowed — but the transport gets the reason with it, so it
+    cannot deliver silence to somebody who will read silence as a lost
+    message and send it again."""
+    blocking = uuid4()
+    runs = FakeRuns(
+        document={
+            "queue": {
+                "status": "session_blocked",
+                "position": 1,
+                "blocked_by_run_id": str(blocking),
+                "head_status": "waiting_approval",
+                "head_reason": {"pause_reason": None, "wait_kind": "user_confirmation"},
+                "available_actions": ["approve", "reject"],
+            }
+        }
+    )
+
+    delivered = await _ingestion(FakeSubjects(), FakeConversations(known=uuid4()), runs).run_for(
+        binding=BINDING, event=EVENT, request_id="req-4"
+    )
+
+    assert delivered.blocked is not None
+    assert delivered.blocked.blocked_by_run_id == blocking
+    assert delivered.blocked.available_actions == ("approve", "reject")
+    # The Run really was saved — §497 permits the queue, it forbids silence.
+    assert len(runs.submitted) == 1
+
+
+async def test_an_unblocked_delivery_carries_no_notice() -> None:
+    runs = FakeRuns(document={"queue": {"status": "queued", "position": 0}})
+
+    delivered = await _ingestion(FakeSubjects(), FakeConversations(known=uuid4()), runs).run_for(
+        binding=BINDING, event=EVENT, request_id="req-5"
+    )
+
+    assert delivered.blocked is None

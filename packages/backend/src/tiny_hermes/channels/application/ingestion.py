@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
+from tiny_hermes.channels.domain.blocked import BlockedNotice, notice_from_document
 from tiny_hermes.channels.domain.events import ChannelEvent
 from tiny_hermes.runs.domain.models import SessionMode, SessionSnapshot
 from tiny_hermes.runs.ports.store import AcceptedRun
@@ -84,6 +85,21 @@ class RunEntry(Protocol):
 
 
 @dataclass(frozen=True)
+class Delivered:
+    """What the transport has to say back.
+
+    `blocked` is not an error and not an alternative to `run`: §497 lets the
+    pending Run be saved *and* requires the caller be told. Both are present
+    together, which is the shape that makes "queued, and here is why" the
+    only thing a transport can express — a variant type would let one be
+    handled and the other forgotten.
+    """
+
+    run: AcceptedRun
+    blocked: BlockedNotice | None
+
+
+@dataclass(frozen=True)
 class ChannelIngestion:
     subjects: SubjectDirectory
     conversations: Conversations
@@ -95,7 +111,7 @@ class ChannelIngestion:
         binding: ChannelBindingRecord,
         event: ChannelEvent,
         request_id: str,
-    ) -> AcceptedRun:
+    ) -> Delivered:
         """The claimed delivery, turned into work.
 
         The idempotency key is the `channel_event_id` (§569's own rule: the
@@ -131,7 +147,7 @@ class ChannelIngestion:
                 binding.id, event.external_user_id, session_id
             )
 
-        return await self.runs.submit_end_user_run(
+        accepted = await self.runs.submit_end_user_run(
             binding.workspace_id,
             subject.end_user_id,
             session_id,
@@ -139,10 +155,16 @@ class ChannelIngestion:
             event.channel_event_id,
             request_id,
         )
+        # §497: saving the pending Run is allowed, staying quiet about it is
+        # not. Read here rather than left to each transport, so a transport
+        # cannot forget — the notice arrives attached to the thing it
+        # describes.
+        return Delivered(run=accepted, blocked=notice_from_document(accepted.document))
 
 
 __all__ = [
     "ChannelBindingRecord",
+    "Delivered",
     "ChannelIngestion",
     "Conversations",
     "ErasedSubjectRefused",
