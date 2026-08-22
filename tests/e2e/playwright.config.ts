@@ -31,7 +31,7 @@ export default defineConfig({
     },
     {
       name: "console",
-      testMatch: /(console|stream-contract)\.spec\.ts$/,
+      testMatch: /(console|stream-contract|audit)\.spec\.ts$/,
       dependencies: ["setup"],
       use: { storageState: CONSOLE_STATE },
     },

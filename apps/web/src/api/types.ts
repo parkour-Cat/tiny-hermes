@@ -208,6 +208,12 @@ export type RunResponse = {
   session_id: string;
   agent_version_id: string;
   status: string;
+  /**
+   * Why a `failed` Run failed, null otherwise. Extracted from the Run's
+   * checkpoint server-side (`_failure_reason`) rather than stored as a
+   * column, so it is a short machine name and not a sentence.
+   */
+  failure_reason: string | null;
   state_version: number;
   session_sequence: number;
   blocked_by_run_id: string | null;
@@ -580,4 +586,73 @@ export type PricingVersionResponse = {
   effective_at: string;
   created_by: string;
   created_at: string;
+};
+
+/**
+ * One row of the audit trail, as this reader is allowed to see it.
+ *
+ * `context` is the only field redaction touches (§2) — every other column is
+ * an identifier or fixed vocabulary. For a 查看者 it arrives `{}`, which is
+ * why `visibility` on the page below is not optional decoration: `{}` is
+ * also what an unredacted row with no detail looks like.
+ */
+export type AuditEventResponse = {
+  id: string;
+  workspace_id: string | null;
+  actor_type: string;
+  actor_id: string | null;
+  action: string;
+  resource_type: string;
+  resource_id: string | null;
+  result: string;
+  request_id: string;
+  context: Record<string, unknown>;
+  created_at: string;
+};
+
+export type AuditVisibility = "full" | "own_resources" | "redacted";
+
+export type AuditEventsPageResponse = {
+  items: AuditEventResponse[];
+  has_more: boolean;
+  /** Which of §4.6's ranges produced this page. See AuditEventResponse. */
+  visibility: AuditVisibility;
+};
+
+/**
+ * One `cost_quality` bucket of a workspace's usage, never blended with
+ * another. A `provider` total is read from what an endpoint actually
+ * billed; an `estimated` one is a forecast — summing the two would let
+ * someone reconcile a bill against a guess and call the platform wrong.
+ */
+export type UsageByQualityResponse = {
+  cost_quality: string;
+  /** A decimal string, or null for "nothing here can be priced" — never a
+   * `0`. Same convention as `BudgetDocument.consumed_cost`. */
+  consumed_cost: string | null;
+  cost_currency: string | null;
+  run_count: number;
+  consumed_model_calls: number;
+  consumed_tool_calls: number;
+  consumed_tokens: number;
+  consumed_execution_ms: number;
+};
+
+/**
+ * A workspace's usage, grouped by `cost_quality`.
+ *
+ * Deliberately no top-level cost field: the only place a cost figure appears
+ * is inside `by_cost_quality`. `window` is always `"all_time"` — the
+ * underlying counters are lifetime totals with no retention policy behind
+ * them yet, so a rolling window would answer a different question than the
+ * one they are actually kept for.
+ */
+export type UsageSummaryResponse = {
+  window: string;
+  by_cost_quality: UsageByQualityResponse[];
+  total_run_count: number;
+  total_model_calls: number;
+  total_tool_calls: number;
+  total_tokens: number;
+  total_execution_ms: number;
 };

@@ -595,6 +595,95 @@ class BudgetSummary:
         }
 
 
+#: All-time, on purpose. `consumed_*` on `run_budget_scopes` is a running
+#: lifetime total that is never reset per period — `BudgetSummary.allows_execution`
+#: already compares it against a ceiling with no window of its own, so a
+#: rolling-window usage total here would silently answer a different question
+#: than the one the valve asks. No retention or cleanup policy exists yet
+#: either (§6 says so explicitly), so any window would be an arbitrary cut
+#: with nothing behind it. Named as a constant and carried onto the wire
+#: (`WorkspaceUsageSummary.window`) rather than left for a reader to assume.
+USAGE_WINDOW = "all_time"
+
+
+@dataclass(frozen=True)
+class WorkspaceUsageByQuality:
+    """One `cost_quality` bucket of a workspace's usage, never blended with another.
+
+    A `provider` total is read from what an endpoint actually billed; an
+    `estimated` one is a forecast. Summing the two into one number is exactly
+    what would let someone reconcile a bill against a guess and call the
+    platform wrong — the same confusion `cost_quality` exists to prevent on a
+    single Run's `BudgetSummary`. Keeping every total keyed by quality here is
+    what makes that reading impossible rather than merely undocumented.
+    """
+
+    cost_quality: str
+    #: `None` when nothing in this bucket has a priced cost. Same rule as
+    #: `BudgetSummary.consumed_cost`: unknown is not zero.
+    consumed_cost: Decimal | None
+    cost_currency: str | None
+    #: Budget scopes counted here, one per Run tree — a root plus any depth-1
+    #: children it delegated to, which share the root's scope rather than
+    #: owning one of their own (see `SqlRunStore.usage_summary`). Not every
+    #: `runs` row: counting a delegated child too would double-count
+    #: consumption already folded into its root's row.
+    run_count: int
+    consumed_model_calls: int
+    consumed_tool_calls: int
+    consumed_tokens: int
+    consumed_execution_ms: int
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "cost_quality": self.cost_quality,
+            # Serialized as a string for the same reason as `BudgetSummary`:
+            # a JSON number is a float on the way to a screen, and money is
+            # the one place this platform is careful never to send through one.
+            "consumed_cost": (
+                None if self.consumed_cost is None else str(self.consumed_cost)
+            ),
+            "cost_currency": self.cost_currency,
+            "run_count": self.run_count,
+            "consumed_model_calls": self.consumed_model_calls,
+            "consumed_tool_calls": self.consumed_tool_calls,
+            "consumed_tokens": self.consumed_tokens,
+            "consumed_execution_ms": self.consumed_execution_ms,
+        }
+
+
+@dataclass(frozen=True)
+class WorkspaceUsageSummary:
+    """A workspace's consumption, aggregated over its Run-tree budgets.
+
+    `by_cost_quality` is the only place a cost figure appears. The totals
+    below are safe to blend across quality precisely because none of them is
+    money: a call count or a token count means the same thing regardless of
+    which price, if any, it will later be read against — so summing them
+    does not recreate the provider/estimated confusion `by_cost_quality`
+    exists to avoid.
+    """
+
+    window: str
+    by_cost_quality: tuple[WorkspaceUsageByQuality, ...]
+    total_run_count: int
+    total_model_calls: int
+    total_tool_calls: int
+    total_tokens: int
+    total_execution_ms: int
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "window": self.window,
+            "by_cost_quality": [item.document() for item in self.by_cost_quality],
+            "total_run_count": self.total_run_count,
+            "total_model_calls": self.total_model_calls,
+            "total_tool_calls": self.total_tool_calls,
+            "total_tokens": self.total_tokens,
+            "total_execution_ms": self.total_execution_ms,
+        }
+
+
 @dataclass(frozen=True)
 class SessionSnapshot:
     id: UUID
