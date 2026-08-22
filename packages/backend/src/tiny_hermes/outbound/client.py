@@ -25,7 +25,7 @@ stops" is a property of the code rather than a rule people remember.
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Self
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlencode, urljoin, urlsplit
 from uuid import UUID
 
 import httpx
@@ -193,10 +193,23 @@ class SafeOutboundClient:
         url: str,
         *,
         json: Any = None,
+        data: dict[str, str] | None = None,
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
+        if json is not None and data is not None:
+            # Two ways to say the same thing is a caller bug, not a request
+            # this client gets to guess about.
+            raise ValueError("request takes json or data, not both")
         sending: dict[str, str] = dict(headers) if headers else {}
-        content = None if json is None else httpx.Request("POST", url, json=json).content
+        if data is not None:
+            # RFC 6749 §4.1.3: a token endpoint takes a form body, not JSON —
+            # this is the one caller (`identity/application/oidc_service.py`)
+            # that needs it, so the encoding lives here rather than a second
+            # client the OIDC flow builds for itself.
+            content = urlencode(data).encode("ascii")
+            sending.setdefault("Content-Type", "application/x-www-form-urlencoded")
+        else:
+            content = None if json is None else httpx.Request("POST", url, json=json).content
         for _ in range(self._max_redirects + 1):
             response = await self._send(method, url, content, sending)
             if response.status_code not in REDIRECT_STATUSES:

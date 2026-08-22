@@ -24,6 +24,7 @@ from tiny_hermes.identity.presentation.end_user_routes import (
     end_user_router,
 )
 from tiny_hermes.identity.presentation.machine_routes import machine_router
+from tiny_hermes.identity.presentation.oidc_routes import oidc_router
 from tiny_hermes.identity.presentation.routes import identity_router
 from tiny_hermes.mcp.presentation.routes import mcp_router
 from tiny_hermes.memory.presentation.end_user_subject_routes import end_user_subject_router
@@ -98,6 +99,11 @@ def create_app(
     # user's entry point in the same module. `end_user_router` is the one
     # router that must not carry it, since it is that entry point.
     app.include_router(identity_router(resources), dependencies=_CONSOLE_ONLY)
+    # OIDC login design §2's own routes are anonymous the same way
+    # `identity_router`'s bootstrap/login are — a platform member has no
+    # console session yet when they reach `/auth/oidc/{id}/start` — so this
+    # is `_CONSOLE_ONLY` (not an end user's entry point) rather than exempt.
+    app.include_router(oidc_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(machine_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(workspace_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(agent_router(resources), dependencies=_CONSOLE_ONLY)

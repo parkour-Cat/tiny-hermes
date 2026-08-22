@@ -14,7 +14,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from tiny_hermes.identity.domain.models import API_KEY_SCOPES, ServiceAccountStatus
+from tiny_hermes.identity.domain.models import (
+    API_KEY_SCOPES,
+    OidcProviderStatus,
+    ServiceAccountStatus,
+)
 from tiny_hermes.shared.database import Base, CreatedAtMixin, IdMixin
 
 
@@ -41,7 +45,12 @@ class AuthIdentityRow(IdMixin, CreatedAtMixin, Base):
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     provider: Mapped[str] = mapped_column(String(32))
     subject: Mapped[str] = mapped_column(String(320))
-    password_hash: Mapped[str] = mapped_column(String(512))
+    #: Nullable since migration 0035: an `oidc` identity authenticates through
+    #: the IdP's own exchange and never has a password of its own. A `local`
+    #: identity always has one — nothing creates one without — but the column
+    #: cannot say that on its own, which is why `AuthService.login` checks for
+    #: `None` explicitly rather than trusting this constraint alone.
+    password_hash: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
 
 class AuthSessionRow(IdMixin, CreatedAtMixin, Base):
@@ -98,3 +107,48 @@ class ApiKeyRow(IdMixin, CreatedAtMixin, Base):
     agent_ids: Mapped[list[Any]] = mapped_column(JSON, default=list)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class OidcProviderRow(IdMixin, CreatedAtMixin, Base):
+    """OIDC login design §1. `client_secret_ref` names either an environment
+    variable or the id of an active `secrets` row — the same two-shape
+    reference `ModelEndpointRow.credential_ref` already uses
+    (`model_catalog/infrastructure/credentials.py`) — never a plaintext
+    column. Resolved at call time by `CredentialResolver` and stored nowhere
+    else."""
+
+    __tablename__ = "oidc_providers"
+    __table_args__ = (
+        UniqueConstraint("issuer", name="uq_oidc_providers_issuer"),
+        CheckConstraint(_in_enum("status", OidcProviderStatus), name="ck_oidc_providers_status"),
+    )
+
+    issuer: Mapped[str] = mapped_column(String(500))
+    client_id: Mapped[str] = mapped_column(String(255))
+    client_secret_ref: Mapped[str] = mapped_column(String(200))
+    discovery_url: Mapped[str] = mapped_column(String(500))
+    scopes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(32), default=OidcProviderStatus.ACTIVE.value)
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+
+
+class OidcLoginStateRow(IdMixin, CreatedAtMixin, Base):
+    """One `/start` → one row: `state` and `nonce` (both CSRF/replay guards
+    per design §2) plus the PKCE `code_verifier`, held server-side rather
+    than in a cookie so a callback cannot be completed with anything the
+    browser carried on its own. `consumed_at` makes `state` single-use —
+    `SqlOidcProviderStore.consume_login_state` sets it with the same
+    `UPDATE ... WHERE consumed_at IS NULL RETURNING` shape a race cannot
+    beat, so a replayed `state` finds no row the second time."""
+
+    __tablename__ = "oidc_login_states"
+
+    provider_id: Mapped[UUID] = mapped_column(
+        ForeignKey("oidc_providers.id", ondelete="CASCADE"), index=True
+    )
+    state: Mapped[str] = mapped_column(String(128), unique=True)
+    nonce: Mapped[str] = mapped_column(String(128))
+    code_verifier: Mapped[str] = mapped_column(String(128))
+    redirect_uri: Mapped[str] = mapped_column(String(500))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
