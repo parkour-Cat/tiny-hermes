@@ -656,3 +656,13 @@ export type UsageSummaryResponse = {
   total_tokens: number;
   total_execution_ms: number;
 };
+
+/**
+ * What an anonymous login page is told about an identity provider. The
+ * backend model is deliberately this thin — see `OfferableProviderResponse`
+ * in `oidc_routes.py` for why it is not a subset of the admin shape.
+ */
+export type OfferableProviderResponse = {
+  id: string;
+  issuer: string;
+};

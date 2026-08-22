@@ -107,7 +107,25 @@ export function WorkspacesPage() {
         ) : (
           <Card loading={workspaces.isPending} variant="borderless">
             {(workspaces.data ?? []).length === 0 ? (
-              <Empty description={t("emptyWorkspaces")} />
+              // Two different situations that look identical from here. A
+              // platform administrator with no workspaces has not made one
+              // yet and can; anybody else — including a user just created
+              // by an OIDC login, who has no Membership at all — is waiting
+              // on somebody and can do nothing about it. "还没有工作空间"
+              // reads to the second as "this system is empty", which sends
+              // them looking for a bug that is not there.
+              auth.user?.is_platform_admin === false ? (
+                <Empty
+                  description={
+                    <Space orientation="vertical" size={4}>
+                      <Typography.Text>{t("noWorkspacesTitle")}</Typography.Text>
+                      <Typography.Text type="secondary">{t("noWorkspacesBody")}</Typography.Text>
+                    </Space>
+                  }
+                />
+              ) : (
+                <Empty description={t("emptyWorkspaces")} />
+              )
             ) : (
               <div className="workspace-list" role="list">
                 {(workspaces.data ?? []).map((workspace) => (
