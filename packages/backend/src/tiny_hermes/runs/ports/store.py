@@ -444,6 +444,26 @@ class RunStore(Protocol):
 
     async def role_for(self, workspace_id: UUID, user_id: UUID) -> Role | None: ...
 
+    async def record_refusal(
+        self,
+        *,
+        workspace_id: UUID,
+        actor_type: str,
+        actor_id: UUID,
+        action: str,
+        resource_id: UUID,
+    ) -> None:
+        """§23 assertion 2's second half: a refusal that leaves a trace.
+
+        Separate from the ordinary audit writers because what it records is
+        the *absence* of an action — `result="denied"` rather than
+        `succeeded` — and because the caller is, by definition, not
+        authorized for the thing being named. A refusal with no record is
+        indistinguishable from a request that never happened, which lets the
+        platform say "they did not get in" and not "they tried".
+        """
+        ...
+
     async def create_session(self, command: CreateSessionCommand) -> SessionSnapshot: ...
 
     async def get_session(

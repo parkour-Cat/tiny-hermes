@@ -37,6 +37,7 @@ from tiny_hermes.runs.domain.context_budget import (
     estimate_tokens,
     fit_budget,
 )
+from tiny_hermes.shared.errors import AuditedDenial
 from tiny_hermes.tenancy.domain.models import Actor, Role
 
 WRITERS = {Role.WORKSPACE_ADMIN, Role.DEVELOPER}
@@ -129,11 +130,31 @@ class AgentNetworkOutsideWorkspace(AgentCatalogError):
 
     All of them, because publishing four times to find four problems is how an
     author learns to stop reading the message.
+
+    `recorded` says a security audit row was written before this was raised
+    (§23 assertion 14), so the transaction must be committed rather than
+    rolled back — the same shape `ForbiddenRunAction` uses, and for the same
+    reason: only the raising site knows whether it wrote one.
     """
 
     def __init__(self, entries: tuple[str, ...]) -> None:
         super().__init__(f"{len(entries)} targets outside the workspace scope")
         self.entries = entries
+
+
+class AgentNetworkRefusalRecorded(AgentNetworkOutsideWorkspace, AuditedDenial):
+    """The same refusal, after its security audit row was written.
+
+    Both parents on purpose. The request dependency commits and re-raises for
+    `AuditedDenial` only, so without that half the row is rolled back with
+    everything else; the route matches on `AgentNetworkOutsideWorkspace`, so
+    without that half the caller stops getting a 422 naming the entries.
+
+    Ordering matters here rather than being incidental: the service raises
+    this before the dependency's `except` runs, which is why marking the
+    `AppError` the route builds later cannot work — by then the transaction
+    is already gone.
+    """
 
 
 class AgentNetworkUnavailable(AgentCatalogError):
@@ -611,7 +632,9 @@ class AgentCatalog:
         if draft is not None:
             await self._check_endpoint(draft.spec)
             await self._check_skills(workspace_id, draft.spec)
-            await self._check_network(workspace_id, draft.spec)
+            await self._check_network(
+                workspace_id, draft.spec, actor, agent_id, request_id
+            )
             # After the network check, so a host measured against
             # `network.allow` is measured against entries already known to be
             # inside the workspace's.
@@ -670,7 +693,10 @@ class AgentCatalog:
             raise ModelOutputLimitTooHigh
         self._check_context_budget(spec, endpoint, wanted)
 
-    async def _check_network(self, workspace_id: UUID, spec: AgentSpec) -> None:
+    async def _check_network(
+        self, workspace_id: UUID, spec: AgentSpec, actor: Actor | None = None,
+        agent_id: UUID | None = None, request_id: str = ""
+    ) -> None:
         """Refuse a version naming a target its workspace never approved.
 
         §16.5: a layer may narrow and never widen. Caught here rather than at
@@ -692,6 +718,26 @@ class AgentCatalog:
             if not any(allowed.contains(parse_entry(entry)) for allowed in approved.entries)
         )
         if outside:
+            if actor is not None and agent_id is not None:
+                # §23 assertion 14: refused *and recorded*. An Agent published
+                # again and again against targets its workspace never approved
+                # is something somebody should be able to notice afterwards,
+                # and without this row there is nothing to notice — the author
+                # sees a 422 and the workspace sees nothing at all.
+                await self._store.append_audit(
+                    workspace_id,
+                    actor.id,
+                    "agent.network_refused",
+                    agent_id,
+                    request_id,
+                    result="denied",
+                    context={"entries": list(outside)},
+                )
+                # `AuditedDenial` is this module's existing way of saying
+                # "commit before re-raising" — the agents provider already
+                # branches on it. Inventing a second mechanism beside it
+                # would leave two things to keep in step.
+                raise AgentNetworkRefusalRecorded(outside)
             raise AgentNetworkOutsideWorkspace(outside)
 
     async def _check_http_tools(

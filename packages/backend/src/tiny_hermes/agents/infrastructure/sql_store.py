@@ -260,6 +260,7 @@ class SqlAgentStore:
         resource_id: UUID,
         request_id: str,
         result: str = "succeeded",
+        context: dict[str, object] | None = None,
     ) -> None:
         self._session.add(
             AuditEventRow(
@@ -271,7 +272,9 @@ class SqlAgentStore:
                 resource_id=resource_id,
                 result=result,
                 request_id=request_id,
-                context={},
+                # A refusal that cannot say *what* was reached for answers
+                # "somebody was refused" and not "they asked for this".
+                context=context or {},
             )
         )
 
