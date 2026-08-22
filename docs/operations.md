@@ -45,8 +45,12 @@ docker exec tiny-hermes-postgres-1 pg_dump -U tiny_hermes -Fc tiny_hermes > back
 
 ## 4. 恢复
 
+**`--clean` 不是可选的。** 演练里先试过 `--data-only`：它按字母序恢复且外键是活的，
+于是 `agents` 先于 `workspaces` 进去、外键直接失败，`alembic_version` 还会撞主键。
+`--clean` 先删后建，顺序就不再是个问题。
+
 ```
-docker exec -i tiny-hermes-postgres-1 pg_restore -U tiny_hermes -d tiny_hermes --clean backup.dump
+docker exec -i tiny-hermes-postgres-1 pg_restore -U tiny_hermes -d tiny_hermes --clean --if-exists backup.dump
 docker exec tiny-hermes-postgres-1 psql -U tiny_hermes -d tiny_hermes -tAc \
   "select version_num from alembic_version"
 ```
@@ -55,7 +59,25 @@ docker exec tiny-hermes-postgres-1 psql -U tiny_hermes -d tiny_hermes -tAc \
 升上来。新代码配旧库会在运行时炸；旧库配新代码，`alembic upgrade head` 才是正确动作。
 
 Secret 的可读性取决于 KEK：恢复出来的库如果配的是另一把 KEK，Secret 全部打不开，
-而且**这不会在启动时报错**——它会在第一次用到某个 Secret 时报。恢复后建议主动验证一条。
+而且**这不会在启动时报错**——它会在第一次用到某个 Secret 时报。
+`scripts/backup_restore_drill.py` 实测过这一点（`UnwrapFailed`），所以它不是推测：
+**一个配错钥匙的部署看起来是健康的**，健康检查会过，直到某件事需要一个 Secret。
+恢复后主动验证一条，别等它自己暴露。
+
+### 备份恢复演练
+
+和回滚演练一样，它自建临时库，**不碰任何现有数据库**：
+
+```
+docker run -d --name th-drill-pg -e POSTGRES_USER=tiny_hermes \
+  -e POSTGRES_PASSWORD=local-only -e POSTGRES_DB=postgres \
+  -p 127.0.0.1:55433:5432 postgres:16
+uv run --no-sync python scripts/backup_restore_drill.py \
+  --admin postgresql://tiny_hermes:local-only@127.0.0.1:55433/postgres \
+  --container th-drill-pg
+```
+
+它走的是这一节的同一套命令，所以**它验证的是这份手册本身**，不是手册的一个变体。
 
 ## 5. 升级回滚
 
@@ -125,5 +147,5 @@ curl -X POST http://localhost:8000/api/v1/secrets/rewrap \
 
 - **没有在真实生产部署上演练过。** 上面的表和步骤都来自本地容器。
 - **没有做过"真的销毁旧 KEK 之后"的演练**，测试里两把钥匙始终都在。
-- **对象存储的备份恢复没有演练**，只写了"要单独备份"。
+- **对象存储的备份恢复没有演练**，只写了"要单独备份"。数据库演练过了，MinIO 没有。
 - **没有测量过规模**：十万条 Secret 的轮换要多久、大库的 `pg_restore` 要多久，都不知道。
