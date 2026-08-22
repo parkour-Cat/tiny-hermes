@@ -215,3 +215,44 @@ async def test_registering_an_endpoint_approves_its_host_and_disabling_takes_it_
             text("SELECT count(*) FROM outbound_scopes WHERE entry = 'models.example.com'")
         )
         assert remaining.scalar_one() == 0
+
+
+async def test_naming_an_unapproved_target_is_refused_and_recorded(
+    client: TestClient,
+    scope: dict[str, str],
+    admin_csrf: str,
+    engine: AsyncEngine,
+) -> None:
+    """§23 assertion 14's second half, which was never built.
+
+    "配置或连接被拒绝**并写安全审计事件**". The refusal is covered by the test
+    above; the event had no implementation — `AgentNetworkOutsideWorkspace`
+    maps to a 422 with `audited` left at its default, so nothing survived
+    the rolled-back transaction.
+
+    This is the same gap assertion 2 had, in a different module, and it
+    matters for the same reason: an Agent repeatedly published against
+    targets its workspace never approved is a thing somebody should be able
+    to notice afterwards. Without the row there is nothing to notice — the
+    author sees a 422 and the workspace sees nothing at all.
+    """
+    approve_platform(client, admin_csrf, "*.example.com")
+    approve_workspace(client, scope, "api.example.com")
+
+    refused = publish_with_network(client, scope, ["api.example.com", "evil.example.com"])
+
+    assert refused.status_code == 422, refused.text
+    async with engine.connect() as connection:
+        rows = await connection.execute(
+            text(
+                "SELECT actor_type, result, context FROM audit_events"
+                " WHERE action = 'agent.network_refused'"
+            )
+        )
+        events = list(rows.all())
+
+    assert len(events) == 1
+    assert events[0].result == "denied"
+    # The entries that broke the rule, so the row answers "what did they
+    # reach for" and not only "somebody was refused".
+    assert events[0].context["entries"] == ["evil.example.com"]

@@ -42,7 +42,7 @@ from tiny_hermes.runs.presentation.events import run_event_router
 from tiny_hermes.runs.presentation.routes import run_router, session_router, usage_router
 from tiny_hermes.secrets.presentation.routes import secret_router
 from tiny_hermes.shared.config import Settings
-from tiny_hermes.shared.errors import AppError
+from tiny_hermes.shared.errors import AppError, AuditedDenial
 from tiny_hermes.skills.presentation.routes import skill_proposal_router, skill_router
 from tiny_hermes.tenancy.presentation.routes import workspace_router
 
@@ -53,6 +53,16 @@ from tiny_hermes.tenancy.presentation.routes import workspace_router
 #: later — which is what makes "no exceptions" true without a per-router
 #: opt-in that a future router could forget.
 _CONSOLE_ONLY = [Depends(reject_end_user_caller)]
+
+
+async def audited_denial_handler(request: Request, error: Exception) -> JSONResponse:
+    """Answer a refusal whose audit row has already been committed."""
+    from tiny_hermes.agents.application.service import AgentCatalogError
+    from tiny_hermes.agents.presentation.routes import _as_app_error
+
+    if isinstance(error, AgentCatalogError):
+        return await app_error_handler(request, _as_app_error(error))
+    raise error  # pragma: no cover - every AuditedDenial today is one of these
 
 
 async def app_error_handler(request: Request, error: Exception) -> JSONResponse:
@@ -92,6 +102,13 @@ def create_app(
     app = FastAPI(title="tiny-hermes API", version="0.0.0", lifespan=lifespan)
     app.add_middleware(RequestIdMiddleware)
     app.add_exception_handler(AppError, app_error_handler)
+    # An `AuditedDenial` reaches here only because its route let it through
+    # rather than converting it, which is what gives the request dependency
+    # a chance to commit the security audit row the refusal wrote (§23
+    # assertions 2 and 14). By this point that commit has happened, so all
+    # that is left is to answer the caller — with exactly the response the
+    # route would have produced had it converted the error itself.
+    app.add_exception_handler(AuditedDenial, audited_denial_handler)
     app.include_router(health_router(selected_readiness))
     # End-user entry design §4.5's first sentence: an end user never reaches
     # any of these. Every router below is a console capability and carries

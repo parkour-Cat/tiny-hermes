@@ -37,7 +37,7 @@ from tiny_hermes.identity.presentation.dependencies import (
     require_workspace_id,
     verify_browser_write,
 )
-from tiny_hermes.shared.errors import AppError
+from tiny_hermes.shared.errors import AppError, AuditedDenial
 from tiny_hermes.tenancy.domain.models import Actor
 
 WorkspaceHeader = Annotated[str | None, Header(alias="X-Workspace-Id")]
@@ -353,6 +353,14 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
                 payload.expected_revision,
                 request.state.request_id,
             )
+        except AuditedDenial:
+            # Re-raised as itself so the request dependency can commit the
+            # security audit row before the transaction unwinds (§23
+            # assertion 14). Caught first because the recorded refusal is
+            # also an AgentCatalogError, and converting it here would strip
+            # the one property that keeps its record — the handler turns it
+            # back into the same 422 a moment later.
+            raise
         except AgentCatalogError as error:
             raise _as_app_error(error) from error
         response.status_code = (

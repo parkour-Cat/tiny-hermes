@@ -85,4 +85,5 @@ class AgentStore(Protocol):
         resource_id: UUID,
         request_id: str,
         result: str = "succeeded",
+        context: dict[str, object] | None = None,
     ) -> None: ...
