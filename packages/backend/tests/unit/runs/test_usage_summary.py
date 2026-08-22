@@ -118,7 +118,13 @@ def test_non_monetary_totals_may_blend_across_quality_because_none_is_money() ->
         window=USAGE_WINDOW,
         by_cost_quality=(
             _bucket(cost_quality="provider", run_count=2, consumed_tokens=100),
-            _bucket(cost_quality="unknown", run_count=1, consumed_tokens=50, consumed_cost=None, cost_currency=None),
+            _bucket(
+                cost_quality="unknown",
+                run_count=1,
+                consumed_tokens=50,
+                consumed_cost=None,
+                cost_currency=None,
+            ),
         ),
         total_run_count=3,
         total_model_calls=18,

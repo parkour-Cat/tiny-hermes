@@ -27,6 +27,7 @@ from tiny_hermes.runs.domain.models import (
     StoredMessage,
     WaitPolicy,
     WorkspaceCleanupTarget,
+    WorkspaceUsageSummary,
 )
 from tiny_hermes.tenancy.domain.models import Role
 from tiny_hermes.tools.domain.http_calls import BoundOperation
@@ -498,6 +499,8 @@ class RunStore(Protocol):
     async def list_session_messages(
         self, workspace_id: UUID, session_id: UUID
     ) -> Sequence[CanonicalMessage]: ...
+
+    async def usage_summary(self, workspace_id: UUID) -> WorkspaceUsageSummary: ...
 
     async def record_end_user_session_read(
         self,

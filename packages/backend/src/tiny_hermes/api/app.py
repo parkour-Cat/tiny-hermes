@@ -37,7 +37,7 @@ from tiny_hermes.runs.presentation.completions import completions_router
 from tiny_hermes.runs.presentation.end_user_approval_routes import end_user_approval_router
 from tiny_hermes.runs.presentation.end_user_routes import end_user_run_router
 from tiny_hermes.runs.presentation.events import run_event_router
-from tiny_hermes.runs.presentation.routes import run_router, session_router
+from tiny_hermes.runs.presentation.routes import run_router, session_router, usage_router
 from tiny_hermes.secrets.presentation.routes import secret_router
 from tiny_hermes.shared.config import Settings
 from tiny_hermes.shared.errors import AppError
@@ -104,6 +104,7 @@ def create_app(
     app.include_router(model_endpoint_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(session_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(run_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(usage_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(run_event_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(completions_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(artifact_router(resources), dependencies=_CONSOLE_ONLY)

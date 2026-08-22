@@ -14,6 +14,7 @@ from tiny_hermes.runs.domain.models import (
     SessionMode,
     SessionSnapshot,
     TextBlock,
+    WorkspaceUsageSummary,
     fingerprint_request,
 )
 from tiny_hermes.runs.ports.store import (
@@ -423,6 +424,17 @@ class RunCoordination:
     ) -> Sequence[RunSnapshot]:
         role = await self._require_role(workspace_id, actor, READERS)
         return await self._store.list_runs(workspace_id, session_id, _capabilities(role))
+
+    async def usage_summary(
+        self, workspace_id: UUID, actor: Actor
+    ) -> WorkspaceUsageSummary:
+        """§6's usage half. Gated exactly like `list_runs` on purpose — the
+        plan names no separate rule for who may see a workspace's spend, and
+        inventing a narrower one here would be a permission this task was not
+        asked to design.
+        """
+        await self._require_role(workspace_id, actor, READERS)
+        return await self._store.usage_summary(workspace_id)
 
     async def open_event_stream(
         self, workspace_id: UUID, actor: Actor, run_id: UUID, after_sequence: int
