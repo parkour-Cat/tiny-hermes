@@ -75,6 +75,7 @@ export function ConsoleLayout() {
           <nav className="console-nav">
             <NavLink to={`/workspaces/${workspaceId}/agents`}>{t("agents")}</NavLink>
             <NavLink to={`/workspaces/${workspaceId}/runs`}>{t("runs")}</NavLink>
+            <NavLink to={`/workspaces/${workspaceId}/usage`}>{t("usage")}</NavLink>
             <NavLink to={`/workspaces/${workspaceId}/members`}>{t("members")}</NavLink>
             <NavLink to={`/workspaces/${workspaceId}/model-endpoints`}>{t("modelEndpoints")}</NavLink>
             <NavLink to={`/workspaces/${workspaceId}/api-keys`}>{t("apiKeys")}</NavLink>

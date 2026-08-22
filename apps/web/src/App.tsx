@@ -79,6 +79,9 @@ const SkillProposalsPage = lazy(() =>
     default: module.SkillProposalsPage,
   })),
 );
+const UsagePage = lazy(() =>
+  import("./pages/UsagePage").then((module) => ({ default: module.UsagePage })),
+);
 
 function AppRoutes() {
   const t = useT();
@@ -123,6 +126,7 @@ function AppRoutes() {
           <Route path="agents/:agentId/playground" element={<PlaygroundPage />} />
           <Route path="runs" element={<RunsPage />} />
           <Route path="runs/:runId" element={<RunDetailPage />} />
+          <Route path="usage" element={<UsagePage />} />
           <Route path="members" element={<MembersPage />} />
           <Route path="api-keys" element={<ApiKeysPage />} />
           <Route path="model-endpoints" element={<ModelEndpointsPage />} />

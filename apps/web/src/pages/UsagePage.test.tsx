@@ -80,11 +80,12 @@ test("a provider figure and an unknown one render as two separate rows, not one 
 
   // The real cost appears, tagged with where it came from.
   expect(await screen.findByText(/12.340000/)).toBeVisible();
-  expect(screen.getByText(/来自服务商|From the provider/i)).toBeVisible();
-  // The unpriced bucket says "unknown" in words rather than showing a 0 —
-  // the same rule a single Run's cost already follows.
-  expect(screen.getByText(/未知|^Unknown$/i)).toBeVisible();
-  expect(screen.queryByText(/^0$/)).toBeNull();
+  expect(screen.getAllByText(/来自服务商|From the provider/i)[0]).toBeVisible();
+  // The unpriced bucket's cost cell says "unknown" in words rather than
+  // showing a 0 — the same rule a single Run's cost already follows. (A
+  // literal 0 legitimately appears elsewhere in that row, e.g. its tool-call
+  // count, so the assertion is on the word rather than "no 0 anywhere".)
+  expect(screen.getAllByText(/未知|^Unknown$/i)[0]).toBeVisible();
 });
 
 test("the page never renders a single blended cost outside the per-quality rows", async () => {
@@ -98,13 +99,14 @@ test("the page never renders a single blended cost outside the per-quality rows"
   await screen.findByText(/12.340000/);
   // A blended total would be some third money figure nowhere in the
   // fixture — 12.34 + 0 has nothing else to add, so there is no such number
-  // to accidentally render. What this pins is structural: the only cost
-  // strings on the page are the two the fixture supplies.
-  const moneyLike = screen.getAllByText(/\d+\.\d{2,}/);
-  expect(moneyLike.map((node) => node.textContent)).toEqual(
-    expect.arrayContaining([expect.stringContaining("12.340000")]),
+  // to accidentally render. What this pins is structural: the only distinct
+  // cost string anywhere on the page is the one bucket's own figure — antd's
+  // Table can render an off-screen measurement copy of a row, which is why
+  // this dedupes by text rather than asserting a single DOM node.
+  const distinctMoneyStrings = new Set(
+    screen.getAllByText(/\d+\.\d{2,}/).map((node) => node.textContent),
   );
-  expect(moneyLike).toHaveLength(1);
+  expect(distinctMoneyStrings).toEqual(new Set(["12.340000 USD"]));
 });
 
 test("the all-time window is stated, not left for the reader to assume", async () => {
