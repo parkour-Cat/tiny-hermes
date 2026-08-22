@@ -15,7 +15,9 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from tiny_hermes.channels.infrastructure.sql_channel_store import SqlChannelStore
 
@@ -29,10 +31,16 @@ async def _binding(engine: AsyncEngine, workspace_id: str, agent_id: str) -> UUI
             text("SELECT id FROM users LIMIT 1"),
         )
         await connection.execute(
+            # `encrypt_key_ref` is not decoration here: migration 0037's
+            # CHECK refuses a feishu binding without one, because such a
+            # binding would accept unsigned deliveries from anyone who
+            # learned the URL. The constraint caught this helper when it was
+            # added, which is the constraint working.
             text(
                 "INSERT INTO channel_bindings"
-                " (id, workspace_id, channel, agent_id, status, created_by, created_at)"
-                " VALUES (:i, :w, 'feishu', :a, 'active', :u, :t)"
+                " (id, workspace_id, channel, agent_id, status, created_by,"
+                "  created_at, encrypt_key_ref)"
+                " VALUES (:i, :w, 'feishu', :a, 'active', :u, :t, 'env:TEST_KEY')"
             ),
             {
                 "i": binding_id,
@@ -198,3 +206,40 @@ async def test_the_sweep_forgets_past_the_window_and_keeps_what_is_inside_it(
             {"b": binding_id},
         )
         assert [row.channel_event_id for row in left] == ["om_recent"]
+
+
+async def test_a_feishu_binding_without_a_key_cannot_be_created(
+    engine: AsyncEngine, workspace_id: str, published_agent: str
+) -> None:
+    """Migration 0037's CHECK, asserted rather than assumed.
+
+    Such a binding would accept unsigned, unencrypted deliveries from anyone
+    who learned the URL — a webhook endpoint is public by construction, so
+    the signature is the only thing between it and the internet. Feishu
+    permits plaintext callbacks; this platform does not, and the point of
+    putting that in the schema is that no code path can opt out of it.
+
+    This constraint caught this file's own helper when it was added. That is
+    the behaviour being pinned here, so a later migration cannot quietly
+    relax it.
+    """
+    async with engine.connect() as connection:
+        user = await connection.execute(text("SELECT id FROM users LIMIT 1"))
+        owner = user.scalar_one()
+
+    with pytest.raises(IntegrityError):
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO channel_bindings"
+                    " (id, workspace_id, channel, agent_id, status, created_by, created_at)"
+                    " VALUES (:i, :w, 'feishu', :a, 'active', :u, :t)"
+                ),
+                {
+                    "i": uuid4(),
+                    "w": UUID(workspace_id),
+                    "a": UUID(published_agent),
+                    "u": owner,
+                    "t": NOW,
+                },
+            )
