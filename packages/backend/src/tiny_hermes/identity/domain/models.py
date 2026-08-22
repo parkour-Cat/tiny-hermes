@@ -25,7 +25,10 @@ class AuthenticatedUser:
 @dataclass(frozen=True)
 class StoredIdentity:
     user: AuthenticatedUser
-    password_hash: str
+    #: `None` for an `oidc` identity — there is no password to check, and
+    #: `AuthService.login` must refuse rather than ask `pwdlib` to verify
+    #: against nothing (OIDC login design §1's one schema change).
+    password_hash: str | None
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,16 @@ class ChannelIssuerStatus(StrEnum):
     """Design §4.3: disabling a row invalidates that issuer's *new* credentials
     immediately. A session already exchanged is unaffected until it is
     separately revoked — a real trade documented there, not a gap here."""
+
+    ACTIVE = "active"
+    DISABLED = "disabled"
+
+
+class OidcProviderStatus(StrEnum):
+    """OIDC login design §1: disabling a row refuses a *new* `/start`
+    immediately (`OidcProviderService._active_provider`). A session already
+    issued is unaffected until it is separately revoked — same trade as
+    `ChannelIssuerStatus`, for the same reason."""
 
     ACTIVE = "active"
     DISABLED = "disabled"
