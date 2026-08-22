@@ -8,6 +8,7 @@ from tiny_hermes.secrets.domain.envelope import (
     UnwrapFailed,
     decode_kek,
     seal,
+    unseal,
 )
 from tiny_hermes.secrets.domain.envelope import (
     rewrap as rewrap_envelope,
@@ -67,6 +68,13 @@ class RewrapResult:
     #: rotation that reports the same `remaining` forever, unable to tell
     #: "not reached yet" from "this ciphertext is not coming back".
     unrecoverable: int = 0
+    #: Records that were rewrapped and then could **not** be reopened under
+    #: the new KEK, so the old wrap was put back. §376 asks for 重包、校验
+    #: and 审计 — three things, and this is what makes the audit a statement
+    #: about recoverability rather than about activity. An operator reads
+    #: that audit to decide whether the previous KEK can be destroyed, and
+    #: deleting it while any of these exist is how a secret is lost for good.
+    unverifiable: int = 0
 
 
 @dataclass(frozen=True)
@@ -164,6 +172,7 @@ class SecretService:
         previous = self._previous_kek()
         processed = 0
         unrecoverable = 0
+        unverifiable = 0
         for record in await self._store.list_by_key_id(self._kek.previous_id):
             try:
                 rotated = rewrap_envelope(
@@ -180,9 +189,38 @@ class SecretService:
                     extra={"secret_id": str(record.id), "key_id": self._kek.previous_id},
                 )
                 continue
+            # The ground truth, read before anything is overwritten and
+            # while the previous KEK is still the one that opens this row.
+            expected = unseal(record.envelope(), previous)
+
             await self._store.replace_wrap(
                 record.id, rotated.wrapped_dek, rotated.wrap_nonce, rotated.key_id
             )
+
+            # §376's 校验, and read back from the store rather than checked
+            # on the value just computed. The fault this guards against is
+            # not the cipher — AES-GCM does not silently corrupt — but the
+            # plumbing around it: a nonce landing in the wrong column, a
+            # `key_id` that disagrees with the AAD it was sealed under, a
+            # partial write. Every one of those produces a row that looks
+            # rotated and cannot be opened, and verifying the in-memory
+            # envelope would miss all of them.
+            if not await self._reopens(record.id, current, expected):
+                # Put the old wrap back. The previous KEK still exists at
+                # this moment, so restoring is the recoverable outcome and
+                # leaving the row rotated-but-unreadable is not.
+                await self._store.replace_wrap(
+                    record.id,
+                    record.wrapped_dek,
+                    record.wrap_nonce,
+                    record.key_id,
+                )
+                unverifiable += 1
+                logger.error(
+                    "rewrapped secret could not be reopened; old wrap restored",
+                    extra={"secret_id": str(record.id), "key_id": self._kek.current_id},
+                )
+                continue
             processed += 1
         remaining = await self._store.count_by_key_id(self._kek.previous_id)
         await self._store.append_audit(
@@ -195,6 +233,7 @@ class SecretService:
                 "processed": str(processed),
                 "remaining": str(remaining),
                 "unrecoverable": str(unrecoverable),
+                "unverifiable": str(unverifiable),
                 "current_key_id": self._kek.current_id,
             },
         )
@@ -203,7 +242,23 @@ class SecretService:
             remaining=remaining,
             current_key_id=self._kek.current_id,
             unrecoverable=unrecoverable,
+            unverifiable=unverifiable,
         )
+
+    async def _reopens(self, secret_id: UUID, kek: bytes, expected: bytes) -> bool:
+        """Does this row, as stored, still yield the plaintext it held?
+
+        Compared against the plaintext rather than merely "did it decrypt":
+        a wrap that opens onto the wrong DEK is as lost as one that does not
+        open at all, and only the comparison tells them apart.
+        """
+        stored = await self._store.get(secret_id)
+        if stored is None:  # pragma: no cover - written a line ago
+            return False
+        try:
+            return unseal(stored.envelope(), kek) == expected
+        except UnwrapFailed:
+            return False
 
     async def _visible(self, workspace_id: UUID, secret_id: UUID) -> SecretRecord:
         record = await self._store.get(secret_id)
