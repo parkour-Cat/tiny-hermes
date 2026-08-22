@@ -164,7 +164,7 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
                 workspace_id, _actor(user), request.state.request_id
             )
         except AgentCatalogError as error:
-            raise _as_app_error(error) from error
+            raise as_app_error(error) from error
         return [AgentResponse.from_domain(agent) for agent in agents]
 
     @router.post("", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
@@ -188,7 +188,7 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
                 request.state.request_id,
             )
         except AgentCatalogError as error:
-            raise _as_app_error(error) from error
+            raise as_app_error(error) from error
         return AgentResponse.from_domain(agent)
 
     @router.get("/{agent_id}", response_model=AgentResponse)
@@ -207,7 +207,7 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
                 workspace_id, _actor(user), agent_id, request.state.request_id
             )
         except AgentCatalogError as error:
-            raise _as_app_error(error) from error
+            raise as_app_error(error) from error
         return AgentResponse.from_domain(agent)
 
     @router.patch("/{agent_id}", response_model=AgentResponse)
@@ -240,7 +240,7 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
                 request.state.request_id,
             )
         except AgentCatalogError as error:
-            raise _as_app_error(error) from error
+            raise as_app_error(error) from error
         return AgentResponse.from_domain(agent)
 
     @router.get("/{agent_id}/draft", response_model=AgentDraftResponse)
@@ -259,7 +259,7 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
                 workspace_id, _actor(user), agent_id, request.state.request_id
             )
         except AgentCatalogError as error:
-            raise _as_app_error(error) from error
+            raise as_app_error(error) from error
         return AgentDraftResponse.from_domain(draft)
 
     @router.put("/{agent_id}/draft", response_model=AgentDraftResponse)
@@ -285,7 +285,7 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
                 request.state.request_id,
             )
         except AgentCatalogError as error:
-            raise _as_app_error(error) from error
+            raise as_app_error(error) from error
         return AgentDraftResponse.from_domain(draft)
 
     @router.get("/{agent_id}/versions", response_model=list[AgentVersionResponse])
@@ -304,7 +304,7 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
                 workspace_id, _actor(user), agent_id, request.state.request_id
             )
         except AgentCatalogError as error:
-            raise _as_app_error(error) from error
+            raise as_app_error(error) from error
         return [AgentVersionResponse.from_domain(version) for version in versions]
 
     @router.get("/{agent_id}/versions/{version_id}", response_model=AgentVersionDetailResponse)
@@ -328,7 +328,7 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
                 request.state.request_id,
             )
         except AgentCatalogError as error:
-            raise _as_app_error(error) from error
+            raise as_app_error(error) from error
         return AgentVersionDetailResponse.from_domain(version)
 
     @router.post("/{agent_id}/publish", response_model=AgentVersionResponse)
@@ -362,7 +362,7 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
             # back into the same 422 a moment later.
             raise
         except AgentCatalogError as error:
-            raise _as_app_error(error) from error
+            raise as_app_error(error) from error
         response.status_code = (
             status.HTTP_200_OK if result.unchanged else status.HTTP_201_CREATED
         )
@@ -390,7 +390,7 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
                 request.state.request_id,
             )
         except AgentCatalogError as error:
-            raise _as_app_error(error) from error
+            raise as_app_error(error) from error
         return AgentVersionResponse.from_domain(version)
 
     return router
@@ -400,7 +400,15 @@ def _actor(user: AuthenticatedUser) -> Actor:
     return Actor(user.id, user.is_platform_admin)
 
 
-def _as_app_error(error: AgentCatalogError) -> AppError:
+def as_app_error(error: AgentCatalogError) -> AppError:
+    """Public because `api/app.py`'s `AuditedDenial` handler needs it.
+
+    That handler exists precisely so a refusal which already committed its
+    audit row still answers with the response this route would have built —
+    so the conversion has to be reachable from there. Both modules are
+    presentation, so this crosses no layer; it was private only because
+    nothing outside had needed it yet.
+    """
     """Turn Agent Catalog refusals into Problem Details without leaking content."""
     if isinstance(error, ForbiddenAgentAction):
         return forbidden()

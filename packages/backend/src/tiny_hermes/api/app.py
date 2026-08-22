@@ -58,10 +58,10 @@ _CONSOLE_ONLY = [Depends(reject_end_user_caller)]
 async def audited_denial_handler(request: Request, error: Exception) -> JSONResponse:
     """Answer a refusal whose audit row has already been committed."""
     from tiny_hermes.agents.application.service import AgentCatalogError
-    from tiny_hermes.agents.presentation.routes import _as_app_error
+    from tiny_hermes.agents.presentation.routes import as_app_error
 
     if isinstance(error, AgentCatalogError):
-        return await app_error_handler(request, _as_app_error(error))
+        return await app_error_handler(request, as_app_error(error))
     raise error  # pragma: no cover - every AuditedDenial today is one of these
 
 
