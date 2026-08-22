@@ -315,7 +315,7 @@ async def test_a_redacted_page_says_so_rather_than_looking_like_a_full_one(
         json={"email": "view2@example.com", "role": "viewer"},
     )
     assert invited.status_code == 201, invited.text
-    await _seed_audit_row(
+    row_id = await _seed_audit_row(
         engine,
         workspace_id=workspace_id,
         actor_id=uuid4(),
@@ -337,5 +337,14 @@ async def test_a_redacted_page_says_so_rather_than_looking_like_a_full_one(
     assert viewer["visibility"] == "redacted"
     # And the thing the field exists to distinguish: same row, both readers,
     # one of them told that something was taken out.
-    assert admin["items"][0]["context"] == {"reason": "held for review"}
-    assert viewer["items"][0]["context"] == {}
+    #
+    # Found by id, not by position. Inviting the viewer above is itself an
+    # audited action, so this workspace has more than one row by now, and
+    # `created_at DESC` has no tiebreaker — two rows written in the same
+    # instant come back in whatever order the plan happens to produce. This
+    # test passed alone and failed in the full suite for exactly that reason.
+    def find(page: dict[str, Any]) -> dict[str, Any]:
+        return next(entry for entry in page["items"] if entry["id"] == str(row_id))
+
+    assert find(admin)["context"] == {"reason": "held for review"}
+    assert find(viewer)["context"] == {}
