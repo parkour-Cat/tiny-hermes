@@ -24,9 +24,12 @@ from tiny_hermes.http_tools.infrastructure.sql_store import SqlHttpToolStore
 from tiny_hermes.identity.application.auth_service import AuthService
 from tiny_hermes.identity.application.end_user_service import EndUserIdentityService
 from tiny_hermes.identity.application.machine_service import MachineIdentityService
+from tiny_hermes.identity.application.oidc_service import OidcProviderService
 from tiny_hermes.identity.infrastructure.jwks_key_source import JwksCache, OutboundJwksKeySource
+from tiny_hermes.identity.infrastructure.oidc_discovery import OutboundDiscoveryFetcher
 from tiny_hermes.identity.infrastructure.sql_end_user_store import SqlEndUserStore
 from tiny_hermes.identity.infrastructure.sql_machine_store import SqlMachineIdentityStore
+from tiny_hermes.identity.infrastructure.sql_oidc_store import SqlOidcProviderStore
 from tiny_hermes.identity.infrastructure.sql_store import SqlAuthStore
 from tiny_hermes.mcp.application.service import McpCatalog
 from tiny_hermes.mcp.infrastructure.outbound_reader import (
@@ -166,6 +169,36 @@ class ApplicationResources:
                     # burst the finding is about.
                     OutboundJwksKeySource(self.outbound_client, self.jwks_cache()),
                     timedelta(seconds=self.settings.end_user_session_ttl_seconds),
+                )
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
+
+    async def oidc_provider_service(self) -> AsyncGenerator[OidcProviderService]:
+        async with self.session_factory()() as session:
+            try:
+                yield OidcProviderService(
+                    SqlOidcProviderStore(session),
+                    SqlSecretStore(session),
+                    optional_kek(self.settings.tiny_hermes_kek),
+                    # Discovery and JWKS are both outbound traffic (design
+                    # §1), so both go through the egress route every other
+                    # outbound call in this process uses. The JWKS cache is
+                    # the same process-lifetime instance
+                    # `end_user_identity_service` shares — task-9 review
+                    # finding E applies here too, keyed by `jwks_uri` rather
+                    # than a `channel_issuers` row so the two features'
+                    # fetches cannot collide.
+                    OutboundDiscoveryFetcher(self.outbound_client),
+                    OutboundJwksKeySource(self.outbound_client, self.jwks_cache()),
+                    self.outbound_client,
+                    AuthService(
+                        SqlAuthStore(session),
+                        self.settings.bootstrap_token,
+                        self.settings.session_ttl_seconds,
+                    ),
                 )
             except BaseException:
                 await session.rollback()
