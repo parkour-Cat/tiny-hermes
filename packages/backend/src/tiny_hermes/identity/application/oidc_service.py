@@ -159,6 +159,27 @@ class OidcProviderService:
         await self._require_admin(actor)
         return await self._store.list_providers()
 
+    async def offerable_providers(self) -> Sequence[OidcProviderRecord]:
+        """The providers a login page may offer, with no actor at all.
+
+        Deliberately not `list_providers` with the admin check relaxed. A
+        person who has not signed in yet cannot be an actor, so there is
+        nobody to authorize — and the honest way to express "this needs no
+        permission" is a method that never takes one, rather than a
+        parameter some future caller can pass `None` to and quietly widen
+        the admin path. The narrowing that keeps this safe is at the
+        response model, which carries only an id and an issuer.
+
+        Disabled providers are left out because a button that cannot
+        complete a login is worse than no button: the person who clicks it
+        gets an error they will read as their own mistake.
+        """
+        return [
+            record
+            for record in await self._store.list_providers()
+            if record.status is OidcProviderStatus.ACTIVE
+        ]
+
     async def disable(
         self, actor: Actor, provider_id: UUID, request_id: str
     ) -> OidcProviderRecord:

@@ -47,6 +47,21 @@ class RegisterOidcProviderRequest(BaseModel):
     scopes: list[str] = Field(default_factory=list)
 
 
+class OfferableProviderResponse(BaseModel):
+    """What an anonymous login page is told about an identity provider:
+    an id to start the flow with, and the issuer to put on the button.
+
+    Its own model rather than a subset of `OidcProviderResponse`, so that
+    adding a field there — a client id, a discovery URL, whatever a future
+    admin screen wants — cannot leak it here by inheritance. That this
+    reveals which IdPs the deployment trusts is unavoidable and accepted:
+    a login page cannot offer a choice it refuses to name.
+    """
+
+    id: UUID
+    issuer: str
+
+
 class OidcProviderResponse(BaseModel):
     id: UUID
     issuer: str
@@ -114,6 +129,23 @@ def oidc_router(resources: ApplicationResources) -> APIRouter:
                 detail=str(error),
             ) from error
         return OidcProviderResponse.from_domain(record)
+
+    @router.get("/auth/oidc/available", response_model=list[OfferableProviderResponse])
+    async def available_providers(  # pyright: ignore[reportUnusedFunction]
+        oidc: Annotated[OidcProviderService, Depends(oidc_dependency, scope="function")],
+    ) -> list[OfferableProviderResponse]:
+        """Unauthenticated on purpose: the login page has to render before
+        anyone has signed in, so an authenticated list could never feed it.
+
+        No `Depends` on auth at all, rather than an optional one — an
+        endpoint that sometimes reads a session invites a later change that
+        widens what it returns for a signed-in caller, and this one must
+        return the same thin shape to everybody.
+        """
+        return [
+            OfferableProviderResponse(id=record.id, issuer=record.issuer)
+            for record in await oidc.offerable_providers()
+        ]
 
     @router.get("/oidc/providers", response_model=list[OidcProviderResponse])
     async def list_providers(  # pyright: ignore[reportUnusedFunction]
