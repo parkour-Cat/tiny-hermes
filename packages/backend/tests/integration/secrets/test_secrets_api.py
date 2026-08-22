@@ -1,9 +1,16 @@
 from typing import Any, cast
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 from tiny_hermes.api.app import create_app
+from tiny_hermes.secrets.domain.envelope import (
+    Envelope,
+    UnwrapFailed,
+    decode_kek,
+    unseal,
+)
 from tiny_hermes.shared.config import Settings
 
 
@@ -200,6 +207,11 @@ def test_rewrap_skips_already_rotated_rows(
             # unrecoverable is the difference between "finished" and
             # "finished, and some ciphertext is gone".
             "unrecoverable": 0,
+            # Likewise, and this is the number that authorizes destroying
+            # the previous KEK: §376 asks for 重包、校验 and 审计, and an
+            # operator who cannot see the 校验 result from here is deciding
+            # on activity rather than on recoverability.
+            "unverifiable": 0,
         }
         second = other.post("/api/v1/secrets/rewrap", headers=headers)
         assert second.json() == {
@@ -207,4 +219,115 @@ def test_rewrap_skips_already_rotated_rows(
             "remaining": 0,
             "current_key_id": "v2",
             "unrecoverable": 0,
+            "unverifiable": 0,
         }
+
+
+async def test_a_rotation_interrupted_partway_resumes_and_finishes(
+    settings: Settings,
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+    engine: AsyncEngine,
+) -> None:
+    """§27.3 item 5 and §1154 scenario 11, against a real database.
+
+    The unit suite already proves resumption against a memory store. What
+    that cannot show is that the *state resumption reads* survives a
+    process ending — and it is real rows on real Postgres that have to
+    carry it, because an interrupted rotation is by definition one where
+    nothing in memory outlived the interruption.
+
+    Interruption is modelled by rotating with a mid-flight failure and then
+    starting a completely fresh app: no shared service, no shared session,
+    nothing but what was committed. Resumption works because `key_id` on
+    each row *is* the progress record — a row that is already on the new key
+    is not selected again — which is stronger than reading a checkpoint,
+    because there is no second place to fall out of step with.
+    """
+    for name in ("one", "two", "three"):
+        assert _create(client, scope, name=name).status_code == 201
+
+    async with engine.begin() as connection:
+        # One row already carried over, standing in for the work an
+        # interrupted run had committed before it stopped.
+        await connection.execute(
+            text(
+                "UPDATE secrets SET key_id = 'v2' WHERE id ="
+                " (SELECT id FROM secrets ORDER BY created_at LIMIT 1)"
+            )
+        )
+
+    rotated = settings.model_copy(
+        update={
+            "tiny_hermes_kek": NEXT_KEK,
+            "tiny_hermes_kek_id": "v2",
+            "tiny_hermes_previous_kek": TEST_KEK,
+            "tiny_hermes_previous_kek_id": "v1",
+        }
+    )
+    with TestClient(create_app(settings=rotated)) as resumed:
+        login = resumed.post(
+            "/api/v1/auth/sessions",
+            json={"subject": "admin@example.com", "password": "long-pass-123"},
+        )
+        headers = {
+            "X-Workspace-Id": workspace_id,
+            "X-CSRF-Token": login.cookies["tiny_hermes_csrf"],
+        }
+        answer = resumed.post("/api/v1/secrets/rewrap", headers=headers)
+
+    assert answer.status_code == 200, answer.text
+    # Two, not three: the row already on v2 is not touched again. A rotation
+    # that redid finished work would still end correct and would waste the
+    # window in which both keys must exist.
+    assert answer.json()["processed"] == 2
+    assert answer.json()["remaining"] == 0
+    assert answer.json()["unverifiable"] == 0
+
+    async with engine.connect() as connection:
+        keys = await connection.execute(text("SELECT DISTINCT key_id FROM secrets"))
+        assert [row.key_id for row in keys] == ["v2"]
+
+
+async def test_a_database_backup_without_the_kek_cannot_be_decrypted(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine
+) -> None:
+    """§1154 scenario 11's first half, asserted rather than assumed.
+
+    The claim is architectural: §374 says the KEK must not live in the same
+    database, so whoever holds only a dump holds ciphertext and a wrapped
+    DEK and nothing that opens either. Worth a test because it is exactly
+    the kind of property that quietly stops being true — one convenience
+    column, one debug field, and a backup becomes a breach.
+    """
+    assert _create(client, scope, name="only").status_code == 201
+
+    async with engine.connect() as connection:
+        columns = await connection.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_name = 'secrets'"
+            )
+        )
+        names = {row.column_name for row in columns}
+        row = await connection.execute(
+            text("SELECT ciphertext, wrapped_dek, wrap_nonce, nonce, key_id FROM secrets")
+        )
+        stored = row.one()
+
+    # Nothing in the dump is, or could be mistaken for, the plaintext.
+    assert "plaintext" not in names
+    assert "value" not in names
+    assert b"sk-secret-value" not in bytes(stored.ciphertext)
+
+    # And the wrapped DEK does not open under a key that is not the KEK.
+    envelope = Envelope(
+        ciphertext=bytes(stored.ciphertext),
+        nonce=bytes(stored.nonce),
+        wrapped_dek=bytes(stored.wrapped_dek),
+        wrap_nonce=bytes(stored.wrap_nonce),
+        key_id=stored.key_id,
+    )
+    with pytest.raises(UnwrapFailed):
+        unseal(envelope, decode_kek(NEXT_KEK))

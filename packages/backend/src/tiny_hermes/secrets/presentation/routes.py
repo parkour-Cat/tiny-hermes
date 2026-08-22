@@ -68,6 +68,13 @@ class RewrapResponse(BaseModel):
     remaining: int
     current_key_id: str
     unrecoverable: int
+    #: §376 asks for 重包、校验 and 审计. This is the 校验 result, and it is on
+    #: the wire because this response is what an operator reads before
+    #: destroying the previous KEK — a count of rows that were rewritten and
+    #: then could not be reopened. Deleting the old key while any of these
+    #: exist loses those secrets for good, so a caller that cannot see this
+    #: number is deciding on activity rather than on recoverability.
+    unverifiable: int
 
 
 def secret_router(resources: ApplicationResources) -> APIRouter:
@@ -172,6 +179,7 @@ def secret_router(resources: ApplicationResources) -> APIRouter:
             remaining=result.remaining,
             current_key_id=result.current_key_id,
             unrecoverable=result.unrecoverable,
+            unverifiable=result.unverifiable,
         )
 
     @router.post("/{secret_id}/disable", response_model=SecretResponse)
