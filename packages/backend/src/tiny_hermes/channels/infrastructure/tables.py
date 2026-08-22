@@ -69,3 +69,26 @@ class ChannelEventRow(IdMixin, Base):
     #: first is what makes the claim exclusive. A Run created before the claim
     #: would be the duplicate this table exists to prevent.
     run_id: Mapped[UUID | None] = mapped_column(nullable=True)
+
+
+class ChannelConversationRow(IdMixin, CreatedAtMixin, Base):
+    """See migration `20260822_0038` for why this is keyed by participant
+    rather than by the channel's own chat id, and why it does not live in
+    `channel_events`."""
+
+    __tablename__ = "channel_conversations"
+    __table_args__ = (
+        UniqueConstraint(
+            "channel_binding_id",
+            "external_user_id",
+            name="uq_channel_conversations_participant",
+        ),
+    )
+
+    channel_binding_id: Mapped[UUID] = mapped_column(
+        ForeignKey("channel_bindings.id", ondelete="CASCADE")
+    )
+    external_user_id: Mapped[str] = mapped_column(String(200))
+    session_id: Mapped[UUID] = mapped_column(
+        ForeignKey("sessions.id", ondelete="CASCADE")
+    )
