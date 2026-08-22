@@ -396,6 +396,15 @@ export const enUS: Record<MessageKey, string> = {
   costUnknownHint:
     "This endpoint has no price recorded, so what this Run cost cannot be stated. That is not the same as free.",
 
+  // -- usage: grouped by how far its cost can be trusted, never blended -------
+  usage: "Usage",
+  usageIntro:
+    "Everything this workspace has consumed since it was created, grouped by how far the cost can be trusted. A provider figure billed by an endpoint and a cost nobody could price are never summed into one number — doing that is exactly what would let someone reconcile a bill against a guess and find it doesn't match.",
+  usageTotalRuns: "Total runs",
+  usageQualityColumn: "Cost quality",
+  usageRunCountColumn: "Runs",
+  usageEmpty: "This workspace has no usage yet",
+
   // -- approvals --------------------------------------------------------------
   approvals: "Approvals",
   audit: "Audit trail",
