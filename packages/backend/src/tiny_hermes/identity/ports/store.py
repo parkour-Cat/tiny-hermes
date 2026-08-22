@@ -17,6 +17,18 @@ class AuthStore(Protocol):
 
     async def find_local_identity(self, subject: str) -> StoredIdentity | None: ...
 
+    async def find_oidc_identity(self, subject: str) -> StoredIdentity | None:
+        """`subject` is the IdP's own `sub` claim, never an email. OIDC login
+        design's red line: a lookup miss must lead to a new User, never to a
+        `find_local_identity` fallback keyed on the same claim's `email`."""
+        ...
+
+    async def create_oidc_user(self, subject: str, display_name: str) -> AuthenticatedUser:
+        """A brand new User plus one `AuthIdentityRow(provider='oidc', ...)`,
+        with no password. Called only after `find_oidc_identity` missed —
+        never as a way to attach a second identity to an existing User."""
+        ...
+
     async def create_session(
         self,
         user_id: UUID,

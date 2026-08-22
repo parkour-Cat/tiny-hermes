@@ -61,7 +61,18 @@ class AuthService:
         self, subject: str, password: str, request_id: str
     ) -> tuple[str, str, AuthenticatedUser]:
         identity = await self._store.find_local_identity(subject.strip().lower())
-        if identity is None or not self._passwords.verify(password, identity.password_hash):
+        # `identity.password_hash is None` is its own check, not folded into
+        # the `or` below by accident of short-circuiting: OIDC login design's
+        # one schema change made this column nullable, and `pwdlib.verify`
+        # was never written to be handed `None` — this refuses explicitly
+        # rather than relying on however `verify` happens to behave when a
+        # future identity legitimately has no password (see this method's
+        # own test for a `local` identity seeded with a null hash).
+        if (
+            identity is None
+            or identity.password_hash is None
+            or not self._passwords.verify(password, identity.password_hash)
+        ):
             await self._store.append_audit(
                 actor_id=None,
                 action="identity.login_failed",
@@ -70,22 +81,61 @@ class AuthService:
                 context={},
             )
             raise InvalidCredentials
+        session_token, csrf_token = await self._issue_session(
+            identity.user, request_id, "identity.login_succeeded"
+        )
+        return session_token, csrf_token, identity.user
+
+    async def find_or_create_oidc_identity(
+        self, subject: str, display_name: str, request_id: str
+    ) -> AuthenticatedUser:
+        """OIDC login design's red line: `subject` is the IdP's own `sub`,
+        looked up only against `provider='oidc'` identities. A miss creates a
+        brand new User — this never falls back to `find_local_identity` or
+        any other lookup keyed on `display_name`/email, however plausible a
+        match would look."""
+        identity = await self._store.find_oidc_identity(subject)
+        if identity is not None:
+            return identity.user
+        user = await self._store.create_oidc_user(subject, display_name)
+        await self._store.append_audit(
+            actor_id=user.id,
+            action="identity.oidc_user_created",
+            result="succeeded",
+            request_id=request_id,
+            context={},
+        )
+        return user
+
+    async def issue_session_for(
+        self, user: AuthenticatedUser, request_id: str, action: str
+    ) -> tuple[str, str]:
+        """The one place a session is minted, so a browser cookie cannot tell
+        a local login from an OIDC one apart (OIDC login design §2: "与本地
+        登录同一条路径"). `login`'s own session issuance below and
+        `OidcProviderService.handle_callback` both call this — never a
+        second copy of the token-generation/audit-write pair."""
+        return await self._issue_session(user, request_id, action)
+
+    async def _issue_session(
+        self, user: AuthenticatedUser, request_id: str, action: str
+    ) -> tuple[str, str]:
         session_token = secrets.token_urlsafe(32)
         csrf_token = secrets.token_urlsafe(32)
         await self._store.create_session(
-            identity.user.id,
+            user.id,
             self.digest_token(session_token),
             self.digest_token(csrf_token),
             datetime.now(UTC) + self._session_ttl,
         )
         await self._store.append_audit(
-            actor_id=identity.user.id,
-            action="identity.login_succeeded",
+            actor_id=user.id,
+            action=action,
             result="succeeded",
             request_id=request_id,
             context={},
         )
-        return session_token, csrf_token, identity.user
+        return session_token, csrf_token
 
     @staticmethod
     def digest_token(token: str) -> str:

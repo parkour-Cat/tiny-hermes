@@ -74,6 +74,42 @@ class SqlAuthStore:
         user, identity = row[0], row[1]
         return StoredIdentity(self._to_user(user, identity.subject), identity.password_hash)
 
+    async def find_oidc_identity(self, subject: str) -> StoredIdentity | None:
+        result = await self._session.execute(
+            select(UserRow, AuthIdentityRow)
+            .join(AuthIdentityRow, AuthIdentityRow.user_id == UserRow.id)
+            .where(AuthIdentityRow.provider == "oidc", AuthIdentityRow.subject == subject)
+        )
+        row = result.one_or_none()
+        if row is None:
+            return None
+        user, identity = row[0], row[1]
+        return StoredIdentity(self._to_user(user, identity.subject), identity.password_hash)
+
+    async def create_oidc_user(self, subject: str, display_name: str) -> AuthenticatedUser:
+        user = UserRow(
+            status="active",
+            display_name=display_name,
+            is_platform_admin=False,
+        )
+        self._session.add(user)
+        await self._session.flush()
+        self._session.add(
+            AuthIdentityRow(
+                user_id=user.id,
+                provider="oidc",
+                subject=subject,
+                password_hash=None,
+            )
+        )
+        return AuthenticatedUser(
+            user.id,
+            subject,
+            user.display_name,
+            user.status,
+            user.is_platform_admin,
+        )
+
     async def create_session(
         self,
         user_id: UUID,
@@ -92,21 +128,37 @@ class SqlAuthStore:
         )
 
     async def find_session(self, token_digest: str, now: datetime) -> StoredSession | None:
+        # Not `.join(AuthIdentityRow, ... provider == "local")`: that hard-coded
+        # filter meant an OIDC-authenticated session could never be re-found by
+        # `AuthService.authenticate`/`verify_csrf`, silently breaking OIDC
+        # login design §2's own requirement — "the same session cookie ...
+        # through the same code path". A scalar subquery instead of a second
+        # join keeps this to one row per session even though a User may in
+        # principle carry more than one `AuthIdentityRow` (§353): which
+        # identity minted a given session is not recorded anywhere, so this
+        # picks the oldest deterministically rather than raising on however
+        # many identities a future admin-console binding feature creates.
+        identity_subject = (
+            select(AuthIdentityRow.subject)
+            .where(AuthIdentityRow.user_id == UserRow.id)
+            .order_by(AuthIdentityRow.created_at)
+            .limit(1)
+            .correlate(UserRow)
+            .scalar_subquery()
+        )
         result = await self._session.execute(
-            select(AuthSessionRow, UserRow, AuthIdentityRow)
+            select(AuthSessionRow, UserRow, identity_subject)
             .join(UserRow, UserRow.id == AuthSessionRow.user_id)
-            .join(
-                AuthIdentityRow,
-                (AuthIdentityRow.user_id == UserRow.id) & (AuthIdentityRow.provider == "local"),
-            )
             .where(AuthSessionRow.token_digest == token_digest, AuthSessionRow.expires_at > now)
         )
         row = result.one_or_none()
         if row is None:
             return None
-        auth_session, user, identity = row[0], row[1], row[2]
+        auth_session, user, subject = row[0], row[1], row[2]
+        if subject is None:
+            return None
         return StoredSession(
-            self._to_user(user, identity.subject),
+            self._to_user(user, subject),
             auth_session.csrf_digest,
             auth_session.expires_at,
             auth_session.revoked_at,
