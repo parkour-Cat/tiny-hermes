@@ -35,7 +35,8 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
-import asyncpg
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 #: How far back to roll. Four is the run of migrations added since the last
 #: release, which is the distance an operator actually rolls back — not
@@ -87,100 +88,119 @@ def _alembic(database_url: str, *args: str) -> None:
         raise DrillFailed(f"alembic {' '.join(args)} failed")
 
 
-async def _count(dsn: str, table: str) -> int | None:
+async def _count(url: str, table: str) -> int | None:
     """`None` means the table is not there, which is itself an answer this
     drill is asking for and is not the same as zero rows."""
-    connection = await asyncpg.connect(dsn)
+    engine = create_async_engine(url)
     try:
-        exists = await connection.fetchval("SELECT to_regclass($1) IS NOT NULL", table)
-        if not exists:
-            return None
-        return int(await connection.fetchval(f"SELECT count(*) FROM {table}"))  # noqa: S608
+        async with engine.connect() as connection:
+            exists = await connection.scalar(
+                text("SELECT to_regclass(:name) IS NOT NULL"), {"name": table}
+            )
+            if not exists:
+                return None
+            counted = await connection.scalar(text(f"SELECT count(*) FROM {table}"))  # noqa: S608
+            return int(counted or 0)
     finally:
-        await connection.close()
+        await engine.dispose()
 
 
-async def _seed(dsn: str) -> None:
+async def _seed(url: str) -> None:
     """One row per watched table, carrying only what its constraints demand.
 
     Deliberately minimal. This drill measures whether rows survive a
     round-trip; a rich fixture would only add ways for the seed itself to fail
     against the schema it is supposed to be testing.
     """
-    connection = await asyncpg.connect(dsn)
+    engine = create_async_engine(url)
     try:
-        user_id = await connection.fetchval(
-            "INSERT INTO users (id, display_name, status, is_platform_admin, created_at)"
-            " VALUES (gen_random_uuid(), 'Drill', 'active', false, now())"
-            " RETURNING id"
-        )
-        workspace_id = await connection.fetchval(
-            "INSERT INTO workspaces (id, name, status, created_at)"
-            " VALUES (gen_random_uuid(), 'Drill', 'active', now()) RETURNING id"
-        )
-        agent_id = await connection.fetchval(
-            "INSERT INTO agents (id, workspace_id, name, alias, status, created_at)"
-            " VALUES (gen_random_uuid(), $1, 'Drill', 'drill', 'draft', now())"
-            " RETURNING id",
-            workspace_id,
-        )
-        binding_id = await connection.fetchval(
-            "INSERT INTO channel_bindings"
-            " (id, workspace_id, channel, agent_id, status, created_by, created_at,"
-            "  encrypt_key_ref)"
-            " VALUES (gen_random_uuid(), $1, 'feishu', $2, 'active', $3, now(),"
-            "  'DRILL_KEY') RETURNING id",
-            workspace_id,
-            agent_id,
-            user_id,
-        )
-        await connection.execute(
-            "INSERT INTO channel_events"
-            " (id, channel_binding_id, channel_event_id, received_at)"
-            " VALUES (gen_random_uuid(), $1, 'om_drill', now())",
-            binding_id,
-        )
-        await connection.execute(
-            "INSERT INTO oidc_providers"
-            " (id, issuer, client_id, client_secret_ref, discovery_url, scopes,"
-            "  status, created_by, created_at)"
-            " VALUES (gen_random_uuid(), 'https://idp.example.com', 'cid', 'REF',"
-            "  'https://idp.example.com/.well-known/openid-configuration',"
-            "  '[\"openid\"]', 'active', $1, now())",
-            user_id,
-        )
+        async with engine.begin() as connection:
+            user_id = await connection.scalar(
+                text(
+                    "INSERT INTO users (id, display_name, status, is_platform_admin,"
+                    " created_at) VALUES (gen_random_uuid(), 'Drill', 'active', false,"
+                    " now()) RETURNING id"
+                )
+            )
+            workspace_id = await connection.scalar(
+                text(
+                    "INSERT INTO workspaces (id, name, status, created_at)"
+                    " VALUES (gen_random_uuid(), 'Drill', 'active', now()) RETURNING id"
+                )
+            )
+            agent_id = await connection.scalar(
+                text(
+                    "INSERT INTO agents (id, workspace_id, name, alias, status,"
+                    " created_at) VALUES (gen_random_uuid(), :w, 'Drill', 'drill',"
+                    " 'draft', now()) RETURNING id"
+                ),
+                {"w": workspace_id},
+            )
+            binding_id = await connection.scalar(
+                text(
+                    "INSERT INTO channel_bindings (id, workspace_id, channel, agent_id,"
+                    " status, created_by, created_at, encrypt_key_ref)"
+                    " VALUES (gen_random_uuid(), :w, 'feishu', :a, 'active', :u, now(),"
+                    " 'DRILL_KEY') RETURNING id"
+                ),
+                {"w": workspace_id, "a": agent_id, "u": user_id},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO channel_events (id, channel_binding_id,"
+                    " channel_event_id, received_at)"
+                    " VALUES (gen_random_uuid(), :b, 'om_drill', now())"
+                ),
+                {"b": binding_id},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO oidc_providers (id, issuer, client_id,"
+                    " client_secret_ref, discovery_url, scopes, status, created_by,"
+                    " created_at)"
+                    " VALUES (gen_random_uuid(), 'https://idp.example.com', 'cid',"
+                    " 'REF', 'https://idp.example.com/.well-known/openid-configuration',"
+                    " '[\"openid\"]', 'active', :u, now())"
+                ),
+                {"u": user_id},
+            )
     finally:
-        await connection.close()
+        await engine.dispose()
 
 
-async def _rebuild(admin_dsn: str, scratch: str) -> None:
-    connection = await asyncpg.connect(admin_dsn)
+async def _rebuild(admin_url: str, scratch: str) -> None:
+    """CREATE DATABASE cannot run inside a transaction, hence AUTOCOMMIT."""
+    engine = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
     try:
-        await connection.execute(f'DROP DATABASE IF EXISTS "{scratch}"')
-        await connection.execute(f'CREATE DATABASE "{scratch}"')
+        async with engine.connect() as connection:
+            await connection.execute(text(f'DROP DATABASE IF EXISTS "{scratch}"'))
+            await connection.execute(text(f'CREATE DATABASE "{scratch}"'))
     finally:
-        await connection.close()
+        await engine.dispose()
 
 
 async def run(admin_dsn: str, scratch: str) -> int:
-    await _rebuild(admin_dsn, scratch)
-    scratch_dsn = f"{admin_dsn.rsplit('/', 1)[0]}/{scratch}"
-    alembic_url = scratch_dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
+    # One URL shape throughout: SQLAlchemy's, which is also what alembic reads
+    # from DATABASE_URL. Accepting a bare postgresql:// on the command line is
+    # a convenience for whoever is holding a psql connection string already.
+    admin_url = admin_dsn.replace("postgresql://", "postgresql+asyncpg://", 1)
+    await _rebuild(admin_url, scratch)
+    scratch_url = f"{admin_url.rsplit('/', 1)[0]}/{scratch}"
 
-    _alembic(alembic_url, "upgrade", "head")
-    await _seed(scratch_dsn)
+    _alembic(scratch_url, "upgrade", "head")
+    await _seed(scratch_url)
 
     findings = [Finding(table=name) for name in WATCHED]
     for finding in findings:
-        finding.before = await _count(scratch_dsn, finding.table)
+        finding.before = await _count(scratch_url, finding.table)
 
-    _alembic(alembic_url, "downgrade", f"-{STEPS}")
+    _alembic(scratch_url, "downgrade", f"-{STEPS}")
     for finding in findings:
-        finding.after_downgrade = await _count(scratch_dsn, finding.table)
+        finding.after_downgrade = await _count(scratch_url, finding.table)
 
-    _alembic(alembic_url, "upgrade", "head")
+    _alembic(scratch_url, "upgrade", "head")
     for finding in findings:
-        finding.after_upgrade = await _count(scratch_dsn, finding.table)
+        finding.after_upgrade = await _count(scratch_url, finding.table)
         # Irreversible when rows existed before and are not there afterwards.
         # A table that comes back empty is not the same as one that comes back
         # with its rows, and that difference is the whole report.
