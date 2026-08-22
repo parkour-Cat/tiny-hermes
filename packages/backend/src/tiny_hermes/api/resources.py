@@ -21,6 +21,10 @@ from tiny_hermes.artifacts.application.service import ArtifactService
 from tiny_hermes.artifacts.infrastructure.sql_store import SqlArtifactStore
 from tiny_hermes.audit.application.audit_service import AuditService
 from tiny_hermes.audit.infrastructure.sql_audit_store import SqlAuditStore
+from tiny_hermes.channels.application.feishu_service import FeishuChannelService
+from tiny_hermes.channels.application.ingestion import ChannelIngestion
+from tiny_hermes.channels.application.webhook_service import FeishuWebhookService
+from tiny_hermes.channels.infrastructure.sql_channel_store import SqlChannelStore
 from tiny_hermes.http_tools.application.service import HttpToolCatalog
 from tiny_hermes.http_tools.infrastructure.sql_store import SqlHttpToolStore
 from tiny_hermes.identity.application.auth_service import AuthService
@@ -45,6 +49,7 @@ from tiny_hermes.memory.infrastructure.sql_service_store import SqlMemoryStore
 from tiny_hermes.memory.infrastructure.sql_subject_store import SqlSubjectStore
 from tiny_hermes.model_catalog.application.pricing_service import PricingService
 from tiny_hermes.model_catalog.application.service import ModelEndpointService
+from tiny_hermes.model_catalog.infrastructure.credentials import CredentialResolver
 from tiny_hermes.model_catalog.infrastructure.sql_pricing_store import (
     SqlPricingStore,
 )
@@ -172,6 +177,43 @@ class ApplicationResources:
                     OutboundJwksKeySource(self.outbound_client, self.jwks_cache()),
                     timedelta(seconds=self.settings.end_user_session_ttl_seconds),
                 )
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
+
+    async def feishu_channel_service(self) -> AsyncGenerator[FeishuChannelService]:
+        """One session for the whole delivery, on purpose.
+
+        The claim in `channel_events` and the Run it leads to have to commit
+        or roll back together. Split across two sessions, a crash between
+        them would leave the delivery claimed and no Run started — and the
+        claim is what stops Feishu's retry, so that message would be lost
+        with nothing left to say so.
+        """
+        async with self.session_factory()() as session:
+            store = SqlChannelStore(session)
+            credentials = CredentialResolver(
+                SqlSecretStore(session), optional_kek(self.settings.tiny_hermes_kek)
+            )
+            try:
+                yield FeishuChannelService(
+                    bindings=store,
+                    resolve_secret=credentials.resolve,
+                    webhooks=FeishuWebhookService(store),
+                    ingestion=ChannelIngestion(
+                        subjects=SqlEndUserStore(session),
+                        conversations=store,
+                        runs=RunCoordination(SqlRunStore(session)),
+                    ),
+                )
+            except AppError as error:
+                if error.audited:
+                    await session.commit()
+                else:
+                    await session.rollback()
+                raise
             except BaseException:
                 await session.rollback()
                 raise

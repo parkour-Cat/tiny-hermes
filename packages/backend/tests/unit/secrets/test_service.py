@@ -307,3 +307,67 @@ async def test_a_secret_the_previous_kek_cannot_open_is_counted_not_skipped(
     assert "cannot be unwrapped" in caplog.text
     assert str(doomed.id) in str(caplog.records[-1].__dict__.get("secret_id", ""))
     assert "gamma" not in caplog.text
+
+
+class CorruptingRewrap(MemorySecretStore):
+    """A store whose `replace_wrap` writes a wrap that cannot be opened.
+
+    Stands in for the class of fault §376's 校验 exists to catch: not a
+    failure of the cipher, which does not silently corrupt, but of the
+    plumbing around it — a nonce written to the wrong column, a `key_id`
+    that disagrees with the AAD it was sealed under, a partial write. Every
+    one of those produces a row that looks rotated and is unreadable.
+    """
+
+    async def replace_wrap(
+        self, secret_id: UUID, wrapped_dek: bytes, wrap_nonce: bytes, key_id: str
+    ) -> SecretRecord | None:
+        # Only the forward write is damaged. Corrupting the restore too
+        # would make this fixture test itself rather than the service — and
+        # the fault being modelled is one that happens while writing the
+        # *new* wrap, not while putting the old one back.
+        if key_id == "v2":
+            wrap_nonce = b"\x00" * 12
+        return await super().replace_wrap(secret_id, wrapped_dek, wrap_nonce, key_id)
+
+
+@pytest.mark.asyncio
+async def test_a_rewrap_that_cannot_be_reopened_leaves_the_row_on_the_old_key() -> None:
+    """§376: 重包、校验和审计 — three things, and the middle one is what makes
+    the audit mean anything.
+
+    An operator deciding whether the old KEK can be deleted reads that
+    audit. `processed` alone says "these rows were rewritten", which is a
+    statement about activity. What they need is a statement about
+    recoverability, because deleting the old KEK against the first one is
+    how a secret is lost permanently.
+
+    So a rewrap that cannot be reopened must not count as processed, and
+    must not leave the row worse than it found it — the old wrap is still
+    readable, and the old KEK still exists at this moment, so refusing is
+    the recoverable outcome and writing is not.
+    """
+    store = CorruptingRewrap()
+    workspace_id = uuid4()
+    store.memberships[(workspace_id, PLATFORM.id)] = Role.WORKSPACE_ADMIN
+    creator = SecretService(store, KekSettings(current=TEST_KEK, current_id="v1"))
+    created = await creator.create(
+        PLATFORM, workspace_id, "one", SecretScope.PLATFORM, "alpha", "req-1"
+    )
+    rotator = SecretService(
+        store,
+        KekSettings(
+            current=OTHER_KEK, current_id="v2", previous=TEST_KEK, previous_id="v1"
+        ),
+    )
+
+    result = await rotator.rewrap(PLATFORM, workspace_id, "req-rewrap")
+
+    assert result.processed == 0
+    assert result.unverifiable == 1
+    # Still on the old key, and still openable with the old KEK — which is
+    # the point: the operator has not lost anything and can retry.
+    assert store.records[created.id].key_id == "v1"
+    assert unseal(store.records[created.id].envelope(), decode_kek(TEST_KEK)) == b"alpha"
+    # And `remaining` still counts it, so nobody reads this audit as done.
+    assert result.remaining == 1

@@ -17,6 +17,7 @@ from tiny_hermes.api.request_context import RequestIdMiddleware
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.artifacts.presentation.routes import artifact_router
 from tiny_hermes.audit.presentation.routes import audit_router
+from tiny_hermes.channels.presentation.routes import feishu_webhook_router
 from tiny_hermes.http_tools.presentation.routes import http_tool_router
 from tiny_hermes.identity.presentation.end_user_dependencies import reject_end_user_caller
 from tiny_hermes.identity.presentation.end_user_routes import (
@@ -126,6 +127,11 @@ def create_app(
     app.include_router(pricing_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(skill_proposal_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(end_user_console_router(resources), dependencies=_CONSOLE_ONLY)
+    # Not console-only: Feishu holds no credential of this platform's and
+    # arrives with no cookies, so the guard that refuses an end-user cookie
+    # has nothing to say about it. The signature over the body is what makes
+    # this door safe (see the router's own docstring).
+    app.include_router(feishu_webhook_router(resources))
     app.include_router(end_user_router(resources))
     # §5's own entry point: an end user running an Agent. Never `_CONSOLE_
     # ONLY`, for the same reason `end_user_router` above is not — every
