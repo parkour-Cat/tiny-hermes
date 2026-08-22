@@ -14,6 +14,7 @@ inventing a second one for reads.
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 import jwt
@@ -21,6 +22,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 from tiny_hermes.api.app import create_app
 from tiny_hermes.identity.presentation.end_user_dependencies import END_USER_SESSION_COOKIE
@@ -430,3 +432,78 @@ async def test_an_unknown_session_id_is_refused_not_found_shaped(
     )
 
     assert read.status_code == 404, read.text
+
+
+async def _security_events(engine: AsyncEngine, action: str) -> list[Any]:
+    async with engine.connect() as connection:
+        rows = await connection.execute(
+            text(
+                "SELECT actor_type, actor_id, resource_id, result, context"
+                " FROM audit_events WHERE action = :a"
+            ),
+            {"a": action},
+        )
+        return list(rows.all())
+
+
+async def test_reaching_for_another_end_users_session_is_refused_and_recorded(
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+    engine: AsyncEngine,
+    registered_issuer: None,
+    published_agent: None,
+) -> None:
+    """§23 assertion 2 has two halves and only the first was ever tested.
+
+    "服务端拒绝**并写安全审计事件**" — the refusal has been covered since
+    the end-user entry shipped. The audit event had neither a test nor an
+    implementation: `ForbiddenRunAction` maps to `forbidden()`, which
+    carries `audited=False` and writes nothing.
+
+    The difference matters at the moment somebody asks whether an account
+    was probing. A refusal that leaves no trace is indistinguishable from a
+    request that never happened, so the platform can say "they did not get
+    in" and cannot say "they tried" — and the second is the sentence an
+    incident review needs.
+
+    Recorded with the reacher as actor and the owner's session as resource,
+    because "who reached for what" is the whole content of the event.
+    """
+    del registered_issuer, published_agent
+    _sign_in(client, workspace_id, "zhang")
+    zhang_session = _start_session(client)
+
+    _sign_in(client, workspace_id, "li")
+    read = client.get(f"/api/v1/end-user/sessions/{zhang_session}/messages")
+
+    assert read.status_code == 403, read.text
+    events = await _security_events(engine, "end_user_session.refused")
+    assert len(events) == 1
+    recorded = events[0]
+    # The reacher, not the owner: an event naming the victim would file this
+    # under the wrong person the day somebody searches by actor.
+    assert recorded.actor_type == "end_user"
+    assert str(recorded.resource_id) == zhang_session
+    assert recorded.result == "denied"
+
+
+async def test_a_read_of_ones_own_session_records_nothing(
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+    engine: AsyncEngine,
+    registered_issuer: None,
+    published_agent: None,
+) -> None:
+    """The other half of making the event mean something. If every read
+    wrote one, the refusals would be a handful of rows among thousands and
+    the search that matters would not find them."""
+    del registered_issuer, published_agent
+    _sign_in(client, workspace_id, "zhang")
+    own = _start_session(client)
+
+    read = client.get(f"/api/v1/end-user/sessions/{own}/messages")
+
+    assert read.status_code == 200, read.text
+    assert await _security_events(engine, "end_user_session.refused") == []
