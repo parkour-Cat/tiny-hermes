@@ -438,3 +438,45 @@ class TestFailures:
         callback = await _callback(app_client, registered_provider, code="auth-code", state=state)
 
         assert callback.status_code == 400
+
+
+async def test_the_login_page_can_list_providers_without_being_signed_in(
+    app_client: TestClient, registered_provider: str, admin_csrf: str
+) -> None:
+    """The chicken-and-egg §4 runs into: a login page has to know which
+    identity providers exist *before* anyone has signed in, and
+    `/api/v1/oidc/providers` is admin-only by design.
+
+    So there is a second, deliberately thin door. It carries only what a
+    button needs — an id to start the flow and the issuer to label it —
+    and never `client_id`, `client_secret_ref`, `discovery_url` or
+    `created_by`. It does reveal which IdPs this deployment trusts, which
+    is unavoidable: a login page cannot offer a choice it refuses to name.
+    """
+    listed = app_client.get("/api/v1/auth/oidc/available")
+
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert [entry["id"] for entry in body] == [registered_provider]
+    assert set(body[0]) == {"id", "issuer"}
+    assert "client_secret_ref" not in listed.text
+    assert "shhh-its-a-secret" not in listed.text
+
+
+async def test_a_disabled_provider_is_not_offered_on_the_login_page(
+    app_client: TestClient, registered_provider: str, admin_csrf: str
+) -> None:
+    """§1's own requirement, at the surface a person actually sees. A
+    provider that can no longer complete a login must not be offered as a
+    way to start one — a button that always fails is worse than no button,
+    because the person cannot tell it apart from their own mistake."""
+    disabled = app_client.post(
+        f"/api/v1/oidc/providers/{registered_provider}/disable",
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+    assert disabled.status_code == 200, disabled.text
+
+    listed = app_client.get("/api/v1/auth/oidc/available")
+
+    assert listed.status_code == 200, listed.text
+    assert listed.json() == []
