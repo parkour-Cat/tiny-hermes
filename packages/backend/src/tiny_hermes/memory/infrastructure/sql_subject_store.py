@@ -37,7 +37,10 @@ from tiny_hermes.identity.infrastructure.end_user_tables import (
     ExternalIdentityRow,
 )
 from tiny_hermes.memory.application.service import MemoryRecord
-from tiny_hermes.memory.application.subject_service import ErasureReport
+from tiny_hermes.memory.application.subject_service import (
+    ErasureReport,
+    ResolvedSubject,
+)
 from tiny_hermes.memory.domain.scope import MemoryKind, MemoryScope, MemoryStatus
 from tiny_hermes.memory.infrastructure.sql_service_store import record_of
 from tiny_hermes.memory.infrastructure.tables import MemoryRow
@@ -180,6 +183,72 @@ class SqlSubjectStore:
             )
         )
         return list(rows.all())
+
+    async def resolve_external(
+        self, workspace_id: UUID, channel: str, external_user_id: str
+    ) -> ResolvedSubject | None:
+        """One subject, by the name their own directory uses.
+
+        `workspace_id` is in the where-clause of the join, not checked
+        afterwards: `external_user_id` is unique per workspace *and* channel,
+        so the same directory name genuinely exists in two tenants, and a
+        query that found the row first would have already read another
+        tenant's subject before deciding not to return it.
+        """
+        found = (
+            await self._session.execute(
+                select(
+                    ExternalIdentityRow.end_user_id,
+                    ExternalIdentityRow.created_at,
+                    EndUserRow.erased_at,
+                )
+                .join(EndUserRow, EndUserRow.id == ExternalIdentityRow.end_user_id)
+                .where(
+                    ExternalIdentityRow.workspace_id == workspace_id,
+                    ExternalIdentityRow.channel == channel,
+                    ExternalIdentityRow.external_user_id == external_user_id,
+                    EndUserRow.workspace_id == workspace_id,
+                )
+            )
+        ).first()
+        if found is None:
+            return None
+        return ResolvedSubject(
+            subject_id=found.end_user_id,
+            channel=channel,
+            external_user_id=external_user_id,
+            erased_at=found.erased_at,
+            first_seen_at=found.created_at,
+        )
+
+    async def subject_type_of(
+        self, workspace_id: UUID, subject_id: UUID
+    ) -> CallerType | None:
+        """Which id space this id belongs to, within this workspace.
+
+        `end_users` first because that is the subject an administrator acts
+        for in practice; either query alone decides, since the two tables
+        mint their own uuids and an id never appears in both.
+
+        A workspace member is scoped by their membership rather than by a
+        column on `users`: `users` is instance-wide, and answering `user`
+        for somebody with no membership here would let a steward of one
+        workspace act on a member of another.
+        """
+        as_end_user = await self._session.scalar(
+            select(EndUserRow.id).where(
+                EndUserRow.id == subject_id, EndUserRow.workspace_id == workspace_id
+            )
+        )
+        if as_end_user is not None:
+            return CallerType.END_USER
+        as_member = await self._session.scalar(
+            select(MembershipRow.user_id).where(
+                MembershipRow.user_id == subject_id,
+                MembershipRow.workspace_id == workspace_id,
+            )
+        )
+        return CallerType.USER if as_member is not None else None
 
     async def erase(
         self, workspace_id: UUID, subject: CallerIdentity

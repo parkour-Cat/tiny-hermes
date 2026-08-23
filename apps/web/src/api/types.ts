@@ -370,6 +370,25 @@ export type OidcProviderResponse = {
   created_at: string;
 };
 
+/** One subject, found by the name the enterprise's own directory uses. */
+export type ResolvedSubjectResponse = {
+  subject_id: string;
+  channel: string;
+  external_user_id: string;
+  /** §344 keeps the row after an erasure — null means not erased. */
+  erased_at: string | null;
+  first_seen_at: string;
+};
+
+/** Everything held about one subject, for them to take away. */
+export type SubjectExportResponse = {
+  subject_type: string;
+  subject_id: string;
+  workspace_id: string;
+  memories: MemoryResponse[];
+  sessions: string[];
+};
+
 export type RewrapResponse = {
   processed: number;
   remaining: number;

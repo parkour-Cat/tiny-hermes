@@ -12,6 +12,7 @@ the reply says how many of each went — which is the same thing the audit recor
 says, and the only way afterwards to tell an erasure from one that never ran.
 """
 
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -32,11 +33,11 @@ from tiny_hermes.memory.application.service import InvalidMemoryBody
 from tiny_hermes.memory.application.subject_service import (
     ForbiddenSubjectAction,
     SubjectService,
+    UnknownSubject,
     UnknownSubjectMemory,
 )
 from tiny_hermes.memory.domain.policy import MAX_BODY_LENGTH
 from tiny_hermes.memory.presentation.routes import MemoryResponse
-from tiny_hermes.runs.domain.models import CallerIdentity, CallerType
 from tiny_hermes.shared.errors import AppError
 from tiny_hermes.tenancy.domain.models import Actor
 
@@ -47,6 +48,17 @@ SessionCookie = Annotated[str | None, Cookie(alias=SESSION_COOKIE)]
 
 class CorrectMemoryRequest(BaseModel):
     body: str = Field(min_length=1, max_length=MAX_BODY_LENGTH)
+
+
+class ResolvedSubjectResponse(BaseModel):
+    subject_id: UUID
+    channel: str
+    external_user_id: str
+    #: §344 keeps the row after an erasure. "Already erased, on this date"
+    #: and "no such person" are different answers to a second request from
+    #: the same person, and only one of them is true.
+    erased_at: datetime | None
+    first_seen_at: datetime
 
 
 class SubjectExportResponse(BaseModel):
@@ -71,6 +83,56 @@ def subject_router(resources: ApplicationResources) -> APIRouter:
     auth_dependency = resources.auth_service
     service_dependency = resources.subject_service
 
+    @router.get("/lookup", response_model=ResolvedSubjectResponse)
+    async def lookup(  # pyright: ignore[reportUnusedFunction]
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        service: Annotated[
+            SubjectService, Depends(service_dependency, scope="function")
+        ],
+        channel: str,
+        external_user_id: str,
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+    ) -> ResolvedSubjectResponse:
+        """The subject a data-rights request names, by their external id.
+
+        Every route below takes `subject_id` — a uuid this platform minted —
+        and a request arrives naming a person the way the enterprise's own
+        directory names them. Without this the four of them were reachable
+        only by reading the database by hand.
+        """
+        user = await authenticate_browser_user(auth, session_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            found = await service.lookup(
+                _actor(user),
+                workspace_id,
+                channel,
+                external_user_id,
+                request.state.request_id,
+            )
+        except ForbiddenSubjectAction as error:
+            raise forbidden() from error
+        except UnknownSubject as error:
+            raise AppError(
+                code="subject_not_found",
+                title="Subject not found",
+                status=404,
+                # The name is not repeated. This endpoint answers whether a
+                # named person is known here, and an error page carrying the
+                # name puts it into logs and a browser's history for somebody
+                # who turned out not to exist.
+                detail="No end user of this workspace goes by that name on that channel.",
+            ) from error
+        return ResolvedSubjectResponse(
+            subject_id=found.subject_id,
+            channel=found.channel,
+            external_user_id=found.external_user_id,
+            erased_at=found.erased_at,
+            first_seen_at=found.first_seen_at,
+        )
+
     @router.get("/{subject_id}/export", response_model=SubjectExportResponse)
     async def export(  # pyright: ignore[reportUnusedFunction]
         subject_id: UUID,
@@ -85,8 +147,8 @@ def subject_router(resources: ApplicationResources) -> APIRouter:
     ) -> SubjectExportResponse:
         user = await authenticate_browser_user(auth, session_token)
         workspace_id = require_workspace_id(selected_workspace)
-        subject = _subject(subject_id)
         try:
+            subject = await service.subject_in(workspace_id, subject_id)
             exported = await service.export(
                 _actor(user),
                 workspace_id,
@@ -96,6 +158,8 @@ def subject_router(resources: ApplicationResources) -> APIRouter:
             )
         except ForbiddenSubjectAction as error:
             raise forbidden() from error
+        except UnknownSubject as error:
+            raise _no_such_subject() from error
         return SubjectExportResponse(
             subject_type=exported.subject.caller_type.value,
             subject_id=exported.subject.caller_id,
@@ -182,11 +246,13 @@ def subject_router(resources: ApplicationResources) -> APIRouter:
             report = await service.erase(
                 _actor(user),
                 workspace_id,
-                _subject(subject_id),
+                await service.subject_in(workspace_id, subject_id),
                 request.state.request_id,
             )
         except ForbiddenSubjectAction as error:
             raise forbidden() from error
+        except UnknownSubject as error:
+            raise _no_such_subject() from error
         return ErasureResponse(
             memories=report.memories,
             sessions=report.sessions,
@@ -197,18 +263,18 @@ def subject_router(resources: ApplicationResources) -> APIRouter:
     return router
 
 
-def _subject(subject_id: UUID) -> CallerIdentity:
-    """A path id read as a person.
+def _no_such_subject() -> AppError:
+    """One refusal for "no such id" and for "not in this workspace".
 
-    `user` rather than a parameter: §4.6's row is about people, and a service
-    account has no "本人" to be. §4.5's end-user identity landed as a third
-    `CallerType`, but not here — this router is `_CONSOLE_ONLY`
-    (`api/app.py`), and an end user never reaches it. Their own "本人" row is
-    `memory/presentation/end_user_subject_routes.py`, which never reads a
-    `subject_id` at all: the caller's own session is the only subject that
-    door can ever mean.
+    Telling them apart would let a steward of one tenant confirm that a
+    given id is a subject of another.
     """
-    return CallerIdentity(caller_type=CallerType.USER, caller_id=subject_id)
+    return AppError(
+        code="subject_not_found",
+        title="Subject not found",
+        status=404,
+        detail="No subject of this workspace has that identifier.",
+    )
 
 
 def _actor(user: AuthenticatedUser) -> Actor:
