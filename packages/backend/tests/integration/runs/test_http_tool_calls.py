@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from ..conftest import VALID_SPEC
 from ..egress_support import ProxyHandle
 from .http_tool_support import (
+    RecordingModel,
     StandIn,
     approve_host,
     ask,
@@ -322,3 +323,46 @@ async def test_a_far_end_that_echoes_the_credential_does_not_hand_it_to_the_mode
     # nothing about scrubbing, only that the echo did not happen.
     assert stand_in.requests
     assert "sk-live-do-not-echo-me" not in messages.text
+
+
+async def test_no_model_request_in_the_run_ever_carries_the_credential(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    api: tuple[StandIn, str],
+    proxy: ProxyHandle,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§23 assertion 7's structural half, pinned instead of argued.
+
+    "Secrets never enter the model's context" was, until this test, a
+    sentence somebody arrived at by reading the code — which is exactly the
+    kind of claim this repository has been wrong about before. The echo path
+    was closed by scrubbing the response body; that says nothing about the
+    prompt, the tool schemas, the skill lines, or the personality.
+
+    So this records every `ModelRequest` the Worker actually sent during a
+    Run that calls a credentialed tool, and looks for the secret in all of
+    them at once. `str(request)` rather than a field-by-field walk on
+    purpose: a check that named the fields would keep passing the day
+    somebody adds a new one.
+    """
+    stand_in, url = api
+    monkeypatch.setenv("PROMPT_TOOL_TOKEN", "sk-never-in-a-prompt")
+    approve_host(client, scope, "127.0.0.1")
+    version_id = register_tool(client, scope, url, credential_ref="PROMPT_TOOL_TOKEN")
+    session_id = session_for(
+        _agent(client, scope, version_id, ["listOrders"], ["127.0.0.1"])
+    )
+    ask(client, scope, session_id, "http.orders.listOrders")
+
+    model = RecordingModel()
+    await worker(engine, scope["X-Workspace-Id"], proxy, model).run_once()
+
+    # The Run really did call the tool, or there was no credential in play
+    # and this test would pass without touching the property.
+    assert stand_in.requests
+    assert model.requests
+    for request in model.requests:
+        assert "sk-never-in-a-prompt" not in str(request)

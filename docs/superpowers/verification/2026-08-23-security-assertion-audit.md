@@ -128,11 +128,14 @@ MCP 那条写成**独立测试**而不是并进 HTTP 那条，理由是：两条
 | | |
 |---|---|
 | backend unit | 2011 passed |
-| backend integration | 676 passed（不含 sandbox）|
+| backend integration | 677 passed（不含 sandbox）|
 | ruff / pyright | clean |
 
 ## 5. 这一遍没能证明什么
 
-- 断言 7 的**结构性保证本身没有被独立证明**——这一遍堵的是它唯一的破口，
-  而「Secret 不进模型上下文」这句话仍然是读代码得出的，不是测试钉住的。
+- ~~断言 7 的结构性保证本身没有被独立证明。~~ **已补**：
+  `test_no_model_request_in_the_run_ever_carries_the_credential` 记录 Run 期间
+  Worker 真正发出的每一个 `ModelRequest`，在全部里面找那个密钥。
+  用 `str(request)` 而不是逐字段检查——点名字段的检查会在有人加新字段的那天
+  照样通过，而那正是它该失败的时候。
 - 修好的三条都是后端行为，**没有一条走过浏览器**——但它们本来也不是界面上的东西。
