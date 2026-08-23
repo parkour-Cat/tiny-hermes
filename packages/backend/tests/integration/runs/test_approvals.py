@@ -517,3 +517,45 @@ async def test_an_approval_does_not_carry_over_to_a_call_with_different_argument
     # Not APPROVED. The approval that exists is for the call a person read,
     # and this is not that call.
     assert checked.verdict is not ApprovalVerdict.APPROVED
+
+
+async def test_a_tool_the_version_never_bound_never_reaches_the_implementation(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    api: tuple[StandIn, str],
+    proxy: ProxyHandle,
+) -> None:
+    """§23 assertion 4, at the layer the assertion names.
+
+    The refusal itself is pinned in the unit suite: `http_call_of` raises
+    `tool_not_authorized` for a name the version did not bind. What that
+    cannot show is that the Worker has no *second* path to an
+    implementation — the planner refusing proves the planner refuses, not
+    that every tool call goes through it.
+
+    So this drives a real Run whose model emits a `tool_call` for an
+    operation that exists on the registered API and is not bound by this
+    Agent, and asserts the stand-in received nothing at all. A path that
+    skipped the planner would show up here as a request in that list, and
+    nowhere else in this repository.
+    """
+    stand_in, url = api
+    approve_host(client, scope, "127.0.0.1")
+    version_id = register_tool(client, scope, url)
+    session_id = session_for(_agent(client, scope, version_id, "governance"))
+
+    # `listOrders` is on the registered document; this Agent bound only what
+    # `_agent` binds, so the model naming it is exactly the case §23 asks
+    # about — a well-formed tool_call for something nobody authorized.
+    run = ask(client, scope, session_id, "http.orders.deleteEverything")
+    await worker(engine, scope["X-Workspace-Id"], proxy).run_once()
+
+    assert stand_in.requests == []
+    status = _status(client, scope, run["id"])["status"]
+    # Not `waiting_approval`: an unauthorized name is refused outright rather
+    # than queued for somebody to approve. Asking a person to approve a call
+    # the Agent was never allowed to make would be offering them a decision
+    # that is not theirs.
+    assert status != "waiting_approval"
