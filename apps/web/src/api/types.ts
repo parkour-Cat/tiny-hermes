@@ -337,6 +337,25 @@ export type ChannelBindingResponse = {
   created_at: string;
 };
 
+/**
+ * One identity provider this deployment trusts.
+ *
+ * `client_secret_ref` is a **reference** — an environment variable name or
+ * a platform Secret id — never the secret. There is deliberately no field
+ * here that could carry one.
+ */
+export type OidcProviderResponse = {
+  id: string;
+  issuer: string;
+  client_id: string;
+  client_secret_ref: string;
+  discovery_url: string;
+  scopes: string[];
+  status: string;
+  created_by: string;
+  created_at: string;
+};
+
 export type RewrapResponse = {
   processed: number;
   remaining: number;
@@ -586,11 +605,43 @@ export type ApprovalResponse = {
   decision_reason: string | null;
 };
 
+/** One ready-made Agent this platform ships (§21's last setup step). */
+export type AgentExampleResponse = {
+  slug: string;
+  name: string;
+  summary: string;
+};
+
+/** What creating an example produced: the Agent, and the version it published. */
+export type CreatedExampleResponse = {
+  agent: AgentResponse;
+  version_id: string;
+};
+
 /** One page of the approvals queue, pending or answered. */
 export type ApprovalsPageResponse = {
   items: ApprovalResponse[];
   /** Whether a later offset holds more. A silent cut-off reads as "that is all". */
   has_more: boolean;
+};
+
+/** One Run in a task tree. */
+export type RunTreeNode = {
+  id: string;
+  status: string;
+  depth: number;
+  parent_run_id: string | null;
+  /** `root`, `child` or `retry` — why this Run shares the budget. */
+  relation: string;
+  created_at: string;
+  finished_at: string | null;
+};
+
+/** Every Run sharing one budget, and the budget they share (§669). */
+export type RunTreeResponse = {
+  budget_root_run_id: string;
+  nodes: RunTreeNode[];
+  budget: BudgetDocument;
 };
 
 /** What an endpoint charges, as one recorded version. */

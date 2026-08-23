@@ -71,6 +71,11 @@ const ChannelsPage = lazy(() =>
     default: module.ChannelsPage,
   })),
 );
+const IdentityProvidersPage = lazy(() =>
+  import("./pages/IdentityProvidersPage").then((module) => ({
+    default: module.IdentityProvidersPage,
+  })),
+);
 const OutboundScopePage = lazy(() =>
   import("./pages/OutboundScopePage").then((module) => ({
     default: module.OutboundScopePage,
@@ -144,6 +149,7 @@ function AppRoutes() {
           <Route path="http-tools" element={<HttpToolsPage />} />
           <Route path="mcp-servers" element={<McpServersPage />} />
           <Route path="channels" element={<ChannelsPage />} />
+          <Route path="identity-providers" element={<IdentityProvidersPage />} />
         </Route>
         <Route
           path="*"

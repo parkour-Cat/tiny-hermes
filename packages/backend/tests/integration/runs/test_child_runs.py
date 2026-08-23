@@ -987,3 +987,97 @@ async def test_erasing_a_subject_whose_run_delegated_takes_the_whole_tree(
         engine, "SELECT id FROM runs WHERE session_id IN (SELECT id FROM sessions)"
     )
     assert [row for row in left if row.id in {r.id for r in tree}] == []
+
+
+async def test_the_whole_tree_is_reachable_from_any_run_in_it(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    coordinator: str,
+) -> None:
+    """§952's 完整父子任务树, and the half a parent-shaped view leaves out.
+
+    A parent lists its children; a child carries `parent_run_id`. So from a
+    child, the other children of the same delegation are two hops away and
+    the console has no way to ask for them — an administrator who opened the
+    child that failed cannot see that three siblings succeeded. The tree is
+    one thing, and it has to be answerable from any node in it.
+    """
+    workspace_id = scope["X-Workspace-Id"]
+    parent_run = str(
+        client.post(
+            "/api/v1/runs",
+            headers={**scope, "Idempotency-Key": "tree-from-anywhere"},
+            json={"session_id": session_for(coordinator), "input": "reader,checker"},
+        ).json()["id"]
+    )
+    await _drain(engine, workspace_id)
+    children = await _rows(
+        engine,
+        "SELECT id FROM runs WHERE parent_run_id = :p ORDER BY created_at, id",
+        p=UUID(parent_run),
+    )
+    assert len(children) == 2
+
+    from_child = client.get(f"/api/v1/runs/{children[0].id}/tree", headers=scope)
+
+    assert from_child.status_code == 200, from_child.text
+    body = from_child.json()
+    listed = {node["id"] for node in body["nodes"]}
+    assert listed == {parent_run, *(str(row.id) for row in children)}
+    # And the same tree, whichever node was asked.
+    from_parent = client.get(f"/api/v1/runs/{parent_run}/tree", headers=scope)
+    assert {node["id"] for node in from_parent.json()["nodes"]} == listed
+
+
+async def test_the_tree_carries_the_one_budget_it_shares(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    coordinator: str,
+) -> None:
+    """§669: the whole tree spends one budget.
+
+    Worth carrying on the tree rather than leaving on each Run: `budget` on a
+    Run response is already the *tree's* consumption, read from
+    `run_budget_scopes` by `budget_root_run_id`. A child's page showing that
+    under the heading "Budget" tells an administrator this child made 18
+    model calls when the tree did.
+    """
+    workspace_id = scope["X-Workspace-Id"]
+    parent_run = str(
+        client.post(
+            "/api/v1/runs",
+            headers={**scope, "Idempotency-Key": "tree-budget"},
+            json={"session_id": session_for(coordinator), "input": "reader,checker"},
+        ).json()["id"]
+    )
+    await _drain(engine, workspace_id)
+
+    tree = client.get(f"/api/v1/runs/{parent_run}/tree", headers=scope)
+
+    assert tree.status_code == 200, tree.text
+    body = tree.json()
+    assert body["budget_root_run_id"] == parent_run
+    # The same numbers the Run response carries, said once for the tree
+    # instead of once per node.
+    run = client.get(f"/api/v1/runs/{parent_run}", headers=scope).json()
+    assert body["budget"]["consumed_model_calls"] == run["budget"]["consumed_model_calls"]
+
+
+async def test_a_tree_in_another_workspace_is_not_readable(
+    client: TestClient, scope: dict[str, str], submitted_run: dict[str, Any]
+) -> None:
+    """§23 assertion 1. A route added late is the one that forgets."""
+    other = {**scope, "X-Workspace-Id": "11111111-2222-4333-8444-555555555555"}
+
+    refused = client.get(f"/api/v1/runs/{submitted_run['id']}/tree", headers=other)
+
+    assert refused.status_code in (403, 404), refused.text
+    assert submitted_run["id"] not in refused.text
+    # And the same request from the owning workspace works — without this the
+    # test passes just as well against a route that does not exist.
+    allowed = client.get(f"/api/v1/runs/{submitted_run['id']}/tree", headers=scope)
+    assert allowed.status_code == 200, allowed.text

@@ -11,6 +11,7 @@ from tiny_hermes.runs.domain.models import (
     RunCapabilities,
     RunSignal,
     RunSnapshot,
+    RunTree,
     SessionMode,
     SessionSnapshot,
     TextBlock,
@@ -448,6 +449,21 @@ class RunCoordination:
             raise UnknownRun
         return run
 
+    async def run_tree(self, workspace_id: UUID, actor: Actor, run_id: UUID) -> RunTree:
+        """§952's 完整父子任务树, answerable from any node.
+
+        Gated exactly like `get_run`: every Run in the tree is in this
+        workspace — `budget_root_run_id` never crosses one — so a reader who
+        may see this Run may see the tree it belongs to. A narrower rule here
+        would be a permission this milestone was not asked to design, and a
+        wider one would be a way to read Runs `get_run` refuses.
+        """
+        role = await self._require_role(workspace_id, actor, READERS)
+        tree = await self._store.run_tree(workspace_id, run_id, _capabilities(role))
+        if tree is None:
+            raise UnknownRun
+        return tree
+
     async def list_runs(
         self, workspace_id: UUID, actor: Actor, session_id: UUID | None
     ) -> Sequence[RunSnapshot]:
@@ -662,7 +678,15 @@ def _caller(actor: Actor) -> CallerIdentity:
 
 def _capabilities(role: Role) -> RunCapabilities:
     writable = role in WRITERS
-    return RunCapabilities(can_control=writable, can_retry=writable)
+    return RunCapabilities(
+        can_control=writable,
+        can_retry=writable,
+        # The same set `widen_budget` itself checks. Read from one constant so
+        # the action a console is offered and the action the service accepts
+        # cannot come to disagree — an offered button the API refuses is worse
+        # than no button.
+        can_hold_budget=role in BUDGET_HOLDERS,
+    )
 
 
 def _require_idempotency_key(value: str | None) -> str:

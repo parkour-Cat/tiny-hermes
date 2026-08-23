@@ -145,7 +145,12 @@ class RunStateMachine:
         )
 
     def available_actions(
-        self, view: RunStateView, *, can_control: bool, can_retry: bool
+        self,
+        view: RunStateView,
+        *,
+        can_control: bool,
+        can_retry: bool,
+        can_hold_budget: bool = False,
     ) -> tuple[str, ...]:
         if view.state in TERMINAL_STATES:
             if view.state is RunState.FAILED and can_control and can_retry:
@@ -159,6 +164,18 @@ class RunStateMachine:
             actions.append("pause")
         if view.state is RunState.PAUSED and view.budget_allows_execution:
             actions.append("resume")
+        if (
+            view.state is RunState.PAUSED
+            and not view.budget_allows_execution
+            and can_hold_budget
+        ):
+            # §26's 安全阀管理. `resume` is withheld above because it would
+            # fail, which leaves this Run with nothing but `cancel` — the
+            # valve had no release, and raising the ceiling was reachable
+            # only from an API client. Offered *only* here: on a healthy
+            # budget it would read as a routine control rather than the
+            # thing you reach for when a ceiling stopped the work.
+            actions.append("widen_budget")
         if view.state is not RunState.CANCELLING and not view.cancel_requested:
             actions.append("cancel")
         return tuple(actions)

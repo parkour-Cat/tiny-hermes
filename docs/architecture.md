@@ -52,6 +52,23 @@ Run 是切片执行的：Worker 领租约、跑一轮、写检查点、让出。
 子 Agent 只有一层（`depth <= 1`），权限是父权限与 `delegation_scope` 的**交集**，
 预算按整棵树计。
 
+## 示例 Agent
+
+平台自带一个示例（§21 初始化向导的最后一步）。它在
+`packages/backend/src/tiny_hermes/agents/domain/examples.py`，不是一个
+`examples/*.json`——放在那里的样例会悄悄地跟 schema 脱节，而这里的 spec 走的是
+每个已发布版本都要走的同一个 `AgentSpec`。
+
+它读文件、写一个文件，不碰网络、不需要注册 HTTP 工具或 MCP 服务器。这不是为了
+简单：向导跑到这一步时，部署里除了一个模型别名之外什么都还没有，一个需要别的东西
+的示例根本创建不出来。
+
+值得读的是它的 `completion.expected_artifacts`。模型说自己做完了不算数，那个文件
+必须真的在（§12.2）——一个「说完了就算完了」的示例会把这个平台最要紧的一条教反。
+
+创建走 `create_agent` → `replace_draft` → `publish` 三个既有方法，不另开写入路径：
+绕过 `publish` 的检查往 `agent_versions` 里塞一行，就是第二扇没人看守的门。
+
 ## 更细的地方
 
 - 产品事实来源：`docs/superpowers/specs/2026-08-09-tiny-hermes-product-design.md`

@@ -22,6 +22,7 @@ from tiny_hermes.runs.domain.models import (
     RunEventType,
     RunSignal,
     RunSnapshot,
+    RunTree,
     SessionMode,
     SessionSnapshot,
     StoredMessage,
@@ -481,6 +482,10 @@ class RunStore(Protocol):
     async def list_runs(
         self, workspace_id: UUID, session_id: UUID | None, capabilities: RunCapabilities
     ) -> Sequence[RunSnapshot]: ...
+
+    async def run_tree(
+        self, workspace_id: UUID, run_id: UUID, capabilities: RunCapabilities
+    ) -> RunTree | None: ...
 
     async def control_run(self, command: ControlRunCommand) -> RunSnapshot: ...
 

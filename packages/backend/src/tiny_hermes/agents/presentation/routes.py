@@ -25,7 +25,9 @@ from tiny_hermes.agents.application.service import (
     SkillBoundTwice,
     SkillSummaryBudgetExceeded,
     UnknownAgent,
+    UnknownAgentExample,
 )
+from tiny_hermes.agents.domain.examples import EXAMPLES
 from tiny_hermes.agents.domain.models import Agent, AgentDraft, AgentVersion
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.identity.application.auth_service import AuthService
@@ -144,6 +146,29 @@ class AgentVersionDetailResponse(AgentVersionResponse):
         )
 
 
+class AgentExampleResponse(BaseModel):
+    """One ready-made Agent this platform ships (§21's last wizard step)."""
+
+    slug: str
+    name: str
+    summary: str
+
+
+class CreateExampleRequest(BaseModel):
+    #: Which model endpoint the example should use. Named by the caller
+    #: rather than chosen by the platform: §21 configures a model alias
+    #: before this step, and picking one here would silently bind whichever
+    #: row happened to come first.
+    endpoint_id: UUID
+
+
+class CreatedExampleResponse(BaseModel):
+    agent: AgentResponse
+    #: The published version. An example left as a draft is not runnable, and
+    #: the console links straight to what was made.
+    version_id: UUID
+
+
 def agent_router(resources: ApplicationResources) -> APIRouter:
     router = APIRouter(prefix="/api/v1/agents", tags=["agents"])
     auth_dependency = resources.auth_service
@@ -190,6 +215,54 @@ def agent_router(resources: ApplicationResources) -> APIRouter:
         except AgentCatalogError as error:
             raise as_app_error(error) from error
         return AgentResponse.from_domain(agent)
+
+    # Registered before `/{agent_id}`: FastAPI matches in order, and
+    # "examples" is not a UUID — behind it, these would 422 on the path
+    # parameter instead of ever being reached.
+    @router.get("/examples", response_model=list[AgentExampleResponse])
+    async def list_examples(  # pyright: ignore[reportUnusedFunction]
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        session_token: SessionCookie = None,
+    ) -> list[AgentExampleResponse]:
+        # Authenticated but not workspace-scoped: what this platform ships is
+        # the same everywhere, and asking for a workspace header would imply
+        # otherwise.
+        await authenticate_browser_user(auth, session_token)
+        return [
+            AgentExampleResponse(slug=item.slug, name=item.name, summary=item.summary)
+            for item in EXAMPLES
+        ]
+
+    @router.post(
+        "/examples/{slug}",
+        response_model=CreatedExampleResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def create_example(  # pyright: ignore[reportUnusedFunction]
+        slug: str,
+        payload: CreateExampleRequest,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[AgentCatalog, Depends(catalog_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> CreatedExampleResponse:
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            agent, published = await catalog.create_example_agent(
+                workspace_id,
+                _actor(user),
+                slug,
+                payload.endpoint_id,
+                request.state.request_id,
+            )
+        except AgentCatalogError as error:
+            raise as_app_error(error) from error
+        return CreatedExampleResponse(
+            agent=AgentResponse.from_domain(agent), version_id=published.version.id
+        )
 
     @router.get("/{agent_id}", response_model=AgentResponse)
     async def get_agent(  # pyright: ignore[reportUnusedFunction]
@@ -412,6 +485,13 @@ def as_app_error(error: AgentCatalogError) -> AppError:
     """Turn Agent Catalog refusals into Problem Details without leaking content."""
     if isinstance(error, ForbiddenAgentAction):
         return forbidden()
+    if isinstance(error, UnknownAgentExample):
+        return AppError(
+            code="agent_example_not_found",
+            title="Example not found",
+            status=404,
+            detail="This deployment does not ship an example by that name.",
+        )
     if isinstance(error, UnknownAgent):
         return AppError(
             code="agent_not_found",

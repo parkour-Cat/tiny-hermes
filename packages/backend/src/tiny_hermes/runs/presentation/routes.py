@@ -119,6 +119,28 @@ class QueueResponse(BaseModel):
         return data
 
 
+class TreeNodeResponse(BaseModel):
+    id: UUID
+    status: str
+    depth: int
+    parent_run_id: UUID | None
+    #: `root`, `child` or `retry` — why this Run shares the budget. Without
+    #: it a retried Run reads as one the root delegated to.
+    relation: str
+    created_at: datetime
+    finished_at: datetime | None
+
+
+class RunTreeResponse(BaseModel):
+    budget_root_run_id: UUID
+    nodes: list[TreeNodeResponse]
+    #: Carried once, for the tree. It is what every Run in the tree already
+    #: reports as its own `budget` — the same `run_budget_scopes` row — and
+    #: saying it here is what lets a console stop labelling a tree's spend as
+    #: one Run's.
+    budget: dict[str, Any]
+
+
 class RunResponse(BaseModel):
     id: UUID
     session_id: UUID
@@ -434,6 +456,41 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         except RunCoordinationError as error:
             raise as_app_error(error) from error
         return RunResponse.from_domain(found)
+
+    @router.get("/{run_id}/tree", response_model=RunTreeResponse)
+    async def get_run_tree(  # pyright: ignore[reportUnusedFunction]
+        run_id: UUID,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[
+            MachineIdentityService, Depends(machines_dependency, scope="function")
+        ],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        authorization: AuthorizationHeader = None,
+    ) -> RunTreeResponse:
+        """§952's 完整父子任务树, answerable from any Run in it.
+
+        Its own route rather than more fields on `RunResponse`: a tree is the
+        same answer for every node, and putting it on the Run would make one
+        console page fetch it once per node it draws. `runs.read` because it
+        reads Runs and nothing else.
+        """
+        caller = await resolve_workspace_caller(
+            auth,
+            machines,
+            session_token=session_token,
+            authorization=authorization,
+            csrf_token=None,
+            workspace_header=selected_workspace,
+            write=False,
+            required_scope="runs.read",
+        )
+        try:
+            tree = await runs.run_tree(caller.workspace_id, caller.actor, run_id)
+        except RunCoordinationError as error:
+            raise as_app_error(error) from error
+        return RunTreeResponse.model_validate(tree.document())
 
     @router.get("/{run_id}/artifacts", response_model=list[ArtifactResponse])
     async def list_run_artifacts(  # pyright: ignore[reportUnusedFunction]
