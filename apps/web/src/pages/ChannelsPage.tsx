@@ -7,6 +7,7 @@ import { problemMessage } from "../api/messages";
 import type {
   AgentResponse,
   ChannelBindingResponse,
+  ChannelIssuerResponse,
   SecretResponse,
 } from "../api/types";
 import { moment } from "../i18n/moment";
@@ -55,6 +56,53 @@ export function ChannelsPage() {
     queryKey: ["secrets", workspaceId] as const,
     queryFn: () => api<SecretResponse[]>("/api/v1/secrets", scope),
     enabled: workspaceId !== null && (open || nothingBound),
+  });
+
+  // A binding says which Agent is published; an issuer says whose word this
+  // platform takes for who a person is. Neither is usable without the other,
+  // so they belong on one page rather than in two nav entries.
+  const issuersQuery = ["channel-issuers", workspaceId] as const;
+  const issuers = useQuery({
+    queryKey: issuersQuery,
+    queryFn: () => api<ChannelIssuerResponse[]>("/api/v1/channel-issuers", scope),
+    enabled: workspaceId !== null,
+  });
+  const [registering, setRegistering] = useState(false);
+  const [issuerForm] = Form.useForm<{ issuer: string; jwksUrl: string; origins: string }>();
+
+  const registerIssuer = useMutation({
+    mutationFn: (values: { issuer: string; jwksUrl: string; origins: string }) =>
+      api<ChannelIssuerResponse>("/api/v1/channel-issuers", {
+        ...scope,
+        method: "POST",
+        body: JSON.stringify({
+          channel: "web",
+          issuer: values.issuer,
+          jwks_url: values.jwksUrl,
+          // One per line. A comma-separated blob would split an origin that
+          // legitimately contains one, and the API takes a list anyway.
+          allowed_origins: values.origins
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line !== ""),
+        }),
+      }),
+    onSuccess: () => {
+      setRegistering(false);
+      issuerForm.resetFields();
+      void queryClient.invalidateQueries({ queryKey: issuersQuery });
+    },
+    onError: (caught) =>
+      issuerForm.setFields([{ name: "issuer", errors: [problemMessage(caught, t)] }]),
+  });
+
+  const disableIssuer = useMutation({
+    mutationFn: (issuerId: string) =>
+      api<ChannelIssuerResponse>(`/api/v1/channel-issuers/${issuerId}/disable`, {
+        ...scope,
+        method: "POST",
+      }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: issuersQuery }),
   });
 
   const bind = useMutation({
@@ -176,6 +224,86 @@ export function ChannelsPage() {
           />
         )}
       </Card>
+
+      <Card
+        title={t("channelIssuers")}
+        variant="borderless"
+        className="page-alert"
+        loading={issuers.isPending}
+        extra={
+          <Button onClick={() => setRegistering(true)}>{t("registerIssuer")}</Button>
+        }
+      >
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          <Typography.Paragraph type="secondary">{t("channelIssuersIntro")}</Typography.Paragraph>
+          {(issuers.data ?? []).length === 0 ? (
+            <Empty description={t("channelIssuersEmpty")} />
+          ) : (
+            <Table<ChannelIssuerResponse>
+              rowKey="id"
+              size="small"
+              pagination={false}
+              dataSource={issuers.data ?? []}
+              columns={[
+                { title: t("channelKind"), dataIndex: "channel", render: (v: string) => <Tag>{v}</Tag> },
+                { title: t("issuerName"), dataIndex: "issuer" },
+                {
+                  title: t("issuerOrigins"),
+                  dataIndex: "allowed_origins",
+                  // Shown rather than hidden behind a detail view: an origin
+                  // nobody remembers adding is how an embedded portal stops
+                  // working, and this is the only list of them.
+                  render: (value: string[]) => (value.length === 0 ? "—" : value.join(" ")),
+                },
+                { title: t("channelStatus"), dataIndex: "status", render: (v: string) => <Tag>{v}</Tag> },
+                {
+                  title: "",
+                  key: "actions",
+                  render: (_value, row) =>
+                    row.status === "active" ? (
+                      <Button
+                        danger
+                        size="small"
+                        loading={disableIssuer.isPending}
+                        onClick={() => disableIssuer.mutate(row.id)}
+                      >
+                        {t("channelDisable")}
+                      </Button>
+                    ) : null,
+                },
+              ]}
+            />
+          )}
+        </Space>
+      </Card>
+
+      <Modal
+        open={registering}
+        title={t("registerIssuer")}
+        okText={t("saveName")}
+        cancelText={t("cancel")}
+        confirmLoading={registerIssuer.isPending}
+        onCancel={() => setRegistering(false)}
+        onOk={() => void issuerForm.submit()}
+      >
+        <Form
+          form={issuerForm}
+          layout="vertical"
+          requiredMark={false}
+          onFinish={(values) => registerIssuer.mutate(values)}
+        >
+          <Typography.Paragraph type="secondary">{t("registerIssuerHint")}</Typography.Paragraph>
+          <Form.Item name="issuer" label={t("issuerName")} rules={[{ required: true }]}>
+            <Input placeholder="https://sso.example.com" />
+          </Form.Item>
+          <Form.Item name="jwksUrl" label={t("issuerJwksUrl")} rules={[{ required: true }]}>
+            <Input placeholder="https://sso.example.com/.well-known/jwks.json" />
+          </Form.Item>
+          <Form.Item name="origins" label={t("issuerOrigins")}>
+            <Input.TextArea rows={3} placeholder="https://portal.example.com" />
+          </Form.Item>
+        </Form>
+      </Modal>
 
       <Modal
         open={open}

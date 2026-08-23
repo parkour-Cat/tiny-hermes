@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Form, Input, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Empty, Form, Input, Modal, Space, Tag, Typography } from "antd";
 import { useState } from "react";
 
 import { api, apiWithStatus } from "../api/client";
@@ -29,6 +29,7 @@ export function McpServersPage() {
   const t = useT();
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
+  const [modal, contextHolder] = Modal.useModal();
   const [form] = Form.useForm<ServerValues>();
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -101,6 +102,23 @@ export function McpServersPage() {
     onError: (caught) => setError(problemMessage(caught, t)),
   });
 
+  // The same answer the HTTP tool catalogue already gives: an Agent may not
+  // bind this any more. Withdrawing rather than deleting keeps the record of
+  // what this server once offered, which every published AgentVersion that
+  // bound it still refers to.
+  const withdraw = useMutation({
+    mutationFn: (input: { serverId: string; versionId: string }) =>
+      api<McpServerVersionResponse>(
+        `/api/v1/mcp-servers/${input.serverId}/versions/${input.versionId}/withdraw`,
+        { ...scope, method: "POST" },
+      ),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["mcp-server-versions"] });
+      void queryClient.invalidateQueries({ queryKey: ["mcp-servers"] });
+    },
+    onError: (caught) => setNote(problemMessage(caught, t)),
+  });
+
   if (servers.isError) {
     return (
       <Alert
@@ -114,6 +132,7 @@ export function McpServersPage() {
 
   return (
     <>
+      {contextHolder}
       <div className="page-heading">
         <div>
           <Typography.Title level={2}>{t("mcpServersTitle")}</Typography.Title>
@@ -204,6 +223,26 @@ export function McpServersPage() {
                   <Tag>v{version.version_number}</Tag>
                   <Typography.Text type="secondary">{t("mcpServerTools")}</Typography.Text>
                   {version.bindable ? null : <Tag color="default">{version.status}</Tag>}
+                  {version.bindable ? (
+                    <Button
+                      size="small"
+                      loading={withdraw.isPending}
+                      onClick={() =>
+                        void modal.confirm({
+                          title: t("mcpServerWithdraw"),
+                          content: t("mcpServerWithdrawWarning"),
+                          okText: t("confirm"),
+                          cancelText: t("cancel"),
+                          onOk: () =>
+                            withdraw
+                              .mutateAsync({ serverId: server.id, versionId: version.id })
+                              .catch(() => undefined),
+                        })
+                      }
+                    >
+                      {t("mcpServerWithdraw")}
+                    </Button>
+                  ) : null}
                 </Space>
                 <Space wrap size={[8, 4]}>
                   {version.tools.map((tool) => (

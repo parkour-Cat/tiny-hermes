@@ -400,6 +400,21 @@ export type SearchHitResponse = {
   shortened: boolean;
 };
 
+/** Whose word this platform takes for who an end user is. */
+export type ChannelIssuerResponse = {
+  id: string;
+  workspace_id: string;
+  channel: string;
+  issuer: string;
+  public_key: string | null;
+  jwks_url: string | null;
+  /** Where a credential from this issuer may be presented from. */
+  allowed_origins: string[];
+  status: string;
+  created_by: string;
+  created_at: string;
+};
+
 export type RewrapResponse = {
   processed: number;
   remaining: number;

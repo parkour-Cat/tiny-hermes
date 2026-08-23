@@ -2,12 +2,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Button, Card, Empty, Form, Input, InputNumber, Select, Space, Tag, Typography , Modal } from "antd";
 import { useState } from "react";
 
-import { api } from "../api/client";
+import { ApiError, api } from "../api/client";
 import { problemMessage } from "../api/messages";
 import type {
   EndpointCheckResponse,
   ModelEndpointDetail,
   ModelEndpointSummary,
+  PricingVersionResponse,
 } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
 import { useT } from "../i18n/locale";
@@ -52,6 +53,68 @@ export function ModelEndpointsPage() {
       return Object.fromEntries(rows.map((row) => [row.id, row]));
     },
     enabled: admin && listed.data !== undefined && listed.data.length > 0,
+  });
+
+  // §6's other half. Usage is money, and until this the price a Run is
+  // measured against lived only in the database — the Usage page could show
+  // what was spent without anything showing the rate it was spent at.
+  const prices = useQuery({
+    queryKey: ["endpoint-pricing", listed.data?.map((entry) => entry.id)] as const,
+    queryFn: async () => {
+      const rows = await Promise.all(
+        (listed.data ?? []).map(async (entry) => {
+          try {
+            return [
+              entry.id,
+              await api<PricingVersionResponse>(`/api/v1/model-endpoints/${entry.id}/pricing`),
+            ] as const;
+          } catch (caught) {
+            // A 404 is "no price set", which is a state rather than a
+            // failure — and a different one from "priced at nothing".
+            if (caught instanceof ApiError && caught.status === 404) {
+              return [entry.id, null] as const;
+            }
+            throw caught;
+          }
+        }),
+      );
+      return Object.fromEntries(rows);
+    },
+    enabled: admin && listed.data !== undefined && listed.data.length > 0,
+  });
+
+  const [pricingFor, setPricingFor] = useState<string | null>(null);
+  const [priceForm] = Form.useForm<{
+    currency: string;
+    inputPerMillion: string;
+    outputPerMillion: string;
+  }>();
+
+  const setPrice = useMutation({
+    mutationFn: (values: {
+      id: string;
+      currency: string;
+      inputPerMillion: string;
+      outputPerMillion: string;
+    }) =>
+      api<PricingVersionResponse>(`/api/v1/model-endpoints/${values.id}/pricing`, {
+        method: "POST",
+        // Decimal strings, never numbers. Money through a float is how a
+        // rate becomes 3.0000000000000004; the API takes text on purpose
+        // and this must not undo it.
+        body: JSON.stringify({
+          currency: values.currency,
+          input_per_million: values.inputPerMillion,
+          output_per_million: values.outputPerMillion,
+        }),
+      }),
+    onSuccess: () => {
+      setPricingFor(null);
+      priceForm.resetFields();
+      void queryClient.invalidateQueries({ queryKey: ["endpoint-pricing"] });
+    },
+    onError: (caught) =>
+      priceForm.setFields([{ name: "inputPerMillion", errors: [problemMessage(caught, t)] }]),
   });
 
   const register = useMutation({
@@ -239,6 +302,16 @@ export function ModelEndpointsPage() {
                       </Typography.Text>
                     </>
                   )}
+                  {admin ? (
+                    <Typography.Paragraph type="secondary">
+                      {(prices.data ?? {})[entry.id] == null
+                        ? // Said, not shown as a zero: "priced at nothing"
+                          // and "not priced" are different states, and a
+                          // zero for the second makes every Run look free.
+                          t("pricingUnset")
+                        : `${(prices.data ?? {})[entry.id]?.currency} ${(prices.data ?? {})[entry.id]?.input_per_million} / ${(prices.data ?? {})[entry.id]?.output_per_million} ${t("pricingPerMillion")}`}
+                    </Typography.Paragraph>
+                  ) : null}
                 </div>
                 <Space wrap>
                   <Tag>{entry.status}</Tag>
@@ -246,6 +319,14 @@ export function ModelEndpointsPage() {
                     <>
                       <Button onClick={() => check.mutate(entry.id)} loading={check.isPending}>
                         {t("checkEndpoint")}
+                      </Button>
+                      <Button
+                        onClick={() => {
+                          setPricingFor(entry.id);
+                          priceForm.setFieldsValue({ currency: "USD" });
+                        }}
+                      >
+                        {t("setPricing")}
                       </Button>
                       {entry.status === "active" ? (
                         <Button
@@ -276,6 +357,38 @@ export function ModelEndpointsPage() {
           })
         )}
       </Card>
+      <Modal
+        open={pricingFor !== null}
+        title={t("setPricing")}
+        okText={t("saveName")}
+        cancelText={t("cancel")}
+        confirmLoading={setPrice.isPending}
+        onCancel={() => setPricingFor(null)}
+        onOk={() => void priceForm.submit()}
+      >
+        <Form
+          form={priceForm}
+          layout="vertical"
+          requiredMark={false}
+          onFinish={(values) =>
+            pricingFor === null ? undefined : setPrice.mutate({ id: pricingFor, ...values })
+          }
+        >
+          <Typography.Paragraph type="secondary">{t("pricingHint")}</Typography.Paragraph>
+          <Form.Item name="currency" label={t("pricingCurrency")} rules={[{ required: true }]}>
+            <Input maxLength={3} />
+          </Form.Item>
+          {/* Text inputs, not `InputNumber`: a rate typed as 3.00 must reach
+              the API as "3.00". A numeric control hands back a float, and a
+              float is how a price becomes 3.0000000000000004. */}
+          <Form.Item name="inputPerMillion" label={t("pricingInput")} rules={[{ required: true }]}>
+            <Input inputMode="decimal" />
+          </Form.Item>
+          <Form.Item name="outputPerMillion" label={t("pricingOutput")} rules={[{ required: true }]}>
+            <Input inputMode="decimal" />
+          </Form.Item>
+        </Form>
+      </Modal>
     </>
   );
 }
