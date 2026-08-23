@@ -1,15 +1,12 @@
 tiny-hermes
-Copyright ［待填：版权所有者的法律名称］ ［待填：年份］
+Copyright 2026 gavinL (parkour-Cat)
 
 Licensed under the Apache License, Version 2.0. See LICENSE for the full text.
 
 --------------------------------------------------------------------------------
 
-**发布前必须填掉上面两个待填项。**
-
-它们被留空而不是填一个看起来合理的值，因为版权归属是一个法律事实，不是一个可以
-从 git 提交者或 GitHub 用户名推断出来的东西——推断出来的名字看起来和真的一样，
-而错的那个要到有人主张权利时才会显出来。
+版权人写的是仓库所有者公开使用的名字。**如果将来需要主张权利，换成法律全名**——
+版权本来就归作者，这份通知只是标识他，但真名在那种场合更硬。改它是一行的事。
 
 LICENSE 保持 Apache 官方原文逐字不动，包括附录里的
 `Copyright [yyyy] [name of copyright owner]` 模板行：那是许可证文本的一部分，
