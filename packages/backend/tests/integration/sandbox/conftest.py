@@ -11,7 +11,10 @@ and this suite is the thing most likely to cause one.
 """
 
 import os
+import shutil
+import tempfile
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -31,6 +34,46 @@ from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
 #: than one that takes a minute the first time.
 IMAGE_TAG = "tiny-hermes-sandbox:test"
 LABEL = "tiny-hermes.test"
+
+
+#: What `sockaddr_un.sun_path` holds, including its terminator. 104 on
+#: macOS and the BSDs, 108 on Linux — the smaller one, because a path that
+#: fits everywhere is the only kind worth creating in a shared fixture.
+MAX_SOCKET_PATH = 104
+
+
+def _short_temp_root() -> str:
+    """A temp directory whose name leaves room for a socket inside it.
+
+    `tempfile.gettempdir()` is `/tmp` on Linux and
+    `/var/folders/<16 chars>/<20 chars>/T` on macOS — 56 characters before
+    pytest adds `pytest-of-<user>/pytest-<n>/<test name>0/`. A socket under
+    that is over the limit, and the failure is `OSError: AF_UNIX path too
+    long` at fixture setup: the seventeen tests in this directory have never
+    run on a Mac.
+    """
+    # A *parent* for `mkdtemp`, never a path anything is created at: the
+    # directory it returns is made with a unique name and mode 0700, which is
+    # what S108 is about. Named as a constant so the rule is answered once.
+    shared = "/tmp"  # noqa: S108 - parent of a mkdtemp, not a fixed filename
+    if os.path.isdir(shared) and os.access(shared, os.W_OK):
+        return shared
+    return tempfile.gettempdir()  # pragma: no cover - environment without /tmp
+
+
+@pytest.fixture
+def socket_dir() -> Iterator[Path]:
+    """Somewhere to put a Unix socket, short enough that the kernel takes it.
+
+    Deliberately not `tmp_path`: pytest builds that name out of the test's
+    own name, so whether a socket fits would depend on how long somebody
+    called their test.
+    """
+    created = tempfile.mkdtemp(prefix="th-sock-", dir=_short_temp_root())
+    try:
+        yield Path(created)
+    finally:
+        shutil.rmtree(created, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")

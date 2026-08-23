@@ -40,12 +40,21 @@ uv run ruff check packages/backend migrations && uv run pyright
 pnpm --filter @tiny-hermes/web test && pnpm chat:test
 ```
 
+`--ignore` 掉 sandbox 是为了快（那一档约 70 秒，而且要一个能连上的 Docker）。
+**它现在在 macOS 上跑得起来**——去掉 `--ignore` 是 790 条全绿。以前不行：那 17 条
+的 socket 路径是用 `tmp_path` 拼的，pytest 拿测试名当目录名，在 macOS 上超过
+`sockaddr_un.sun_path` 的 104 字节，**在 setup 阶段就 ERROR**。这种失败最难看见——
+pytest 报的是 error 不是 failure，一整个目录就那么静悄悄地没跑。
+
 **永远只跑一个 pytest。** 两个套件抢同一个数据库会互相拖垮，症状是长时间没输出。
 诊断 `select pid,state,now()-state_change from pg_stat_activity where state like '%idle in transaction%'`，
 有孤儿就 `pg_terminate_backend`，别等。
 
 macOS 上 `greenlet` 要手动装进 venv（SQLAlchemy 的平台标记覆盖 `aarch64` 而非
 macOS 的 `arm64`）——**不要改 `pyproject.toml`**。
+
+Unix socket 的路径不要用 `tmp_path` 拼——用
+`tests/integration/sandbox/conftest.py` 的 `socket_dir`。
 
 ## 合并前
 
