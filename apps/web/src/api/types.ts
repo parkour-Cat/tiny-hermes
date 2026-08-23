@@ -319,6 +319,24 @@ export type SecretResponse = {
   updated_at: string;
 };
 
+/**
+ * One channel a workspace publishes an Agent into.
+ *
+ * `encrypt_key_ref` is the **name of a secret**, never a key: §4.6 lets an
+ * administrator manage this metadata without ever seeing plaintext, and
+ * there is deliberately no field here that could carry one.
+ */
+export type ChannelBindingResponse = {
+  id: string;
+  channel: string;
+  agent_id: string;
+  status: string;
+  app_id: string | null;
+  encrypt_key_ref: string | null;
+  created_by: string;
+  created_at: string;
+};
+
 export type RewrapResponse = {
   processed: number;
   remaining: number;

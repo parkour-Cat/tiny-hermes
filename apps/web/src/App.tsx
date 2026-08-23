@@ -66,6 +66,11 @@ const McpServersPage = lazy(() =>
     default: module.McpServersPage,
   })),
 );
+const ChannelsPage = lazy(() =>
+  import("./pages/ChannelsPage").then((module) => ({
+    default: module.ChannelsPage,
+  })),
+);
 const OutboundScopePage = lazy(() =>
   import("./pages/OutboundScopePage").then((module) => ({
     default: module.OutboundScopePage,
@@ -138,6 +143,7 @@ function AppRoutes() {
           <Route path="audit" element={<AuditPage />} />
           <Route path="http-tools" element={<HttpToolsPage />} />
           <Route path="mcp-servers" element={<McpServersPage />} />
+          <Route path="channels" element={<ChannelsPage />} />
         </Route>
         <Route
           path="*"
