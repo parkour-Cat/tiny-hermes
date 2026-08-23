@@ -11,13 +11,23 @@ end-user cookie, which has nothing to do with this caller. Feishu arrives
 with no cookies at all.
 """
 
-from typing import Annotated
+from datetime import datetime
+from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, Request, Response, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Cookie, Depends, Header, Request, Response, status
+from pydantic import BaseModel, Field
 
 from tiny_hermes.api.resources import ApplicationResources
+from tiny_hermes.channels.application.binding_service import (
+    ChannelAlreadyBound,
+    ChannelBindingService,
+    ChannelBindingView,
+    ChannelKeyRequired,
+    ChannelKeyUnknown,
+    ForbiddenChannelAction,
+    UnknownChannel,
+)
 from tiny_hermes.channels.application.feishu_service import (
     Challenge,
     FeishuChannelService,
@@ -26,7 +36,21 @@ from tiny_hermes.channels.application.feishu_service import (
 from tiny_hermes.channels.application.ingestion import ErasedSubjectRefused
 from tiny_hermes.channels.domain.events import MalformedChannelEvent
 from tiny_hermes.channels.domain.webhook import WebhookRefused
+from tiny_hermes.identity.application.auth_service import AuthService
+from tiny_hermes.identity.domain.models import AuthenticatedUser
+from tiny_hermes.identity.presentation.dependencies import (
+    SESSION_COOKIE,
+    authenticate_browser_user,
+    forbidden,
+    require_workspace_id,
+    verify_browser_write,
+)
 from tiny_hermes.shared.errors import AppError
+from tiny_hermes.tenancy.domain.models import Actor
+
+WorkspaceHeader = Annotated[str | None, Header(alias="X-Workspace-Id")]
+CsrfHeader = Annotated[str | None, Header(alias="X-CSRF-Token")]
+SessionCookie = Annotated[str | None, Cookie(alias=SESSION_COOKIE)]
 
 
 class ChallengeResponse(BaseModel):
@@ -135,3 +159,172 @@ def feishu_webhook_router(resources: ApplicationResources) -> APIRouter:
         )
 
     return router
+
+
+class CreateChannelBindingRequest(BaseModel):
+    channel: Literal["feishu"]
+    agent_id: UUID
+    #: The tenant's own identifier for the app. Metadata: it names which app
+    #: this binding belongs to, and is not a credential.
+    app_id: str | None = Field(default=None, max_length=120)
+    #: The **name of a workspace secret**, never a key. §4.6 lets an
+    #: administrator manage this metadata without ever seeing plaintext, and
+    #: a field that took the key itself would make that impossible to keep.
+    encrypt_key_ref: str | None = Field(default=None, max_length=200)
+
+
+class ChannelBindingResponse(BaseModel):
+    id: UUID
+    channel: str
+    agent_id: UUID
+    status: str
+    app_id: str | None
+    encrypt_key_ref: str | None
+    created_by: UUID
+    created_at: datetime
+
+    @classmethod
+    def of(cls, view: ChannelBindingView) -> "ChannelBindingResponse":
+        return cls(
+            id=view.id,
+            channel=view.channel,
+            agent_id=view.agent_id,
+            status=view.status,
+            app_id=view.app_id,
+            encrypt_key_ref=view.encrypt_key_ref,
+            created_by=view.created_by,
+            created_at=view.created_at,
+        )
+
+
+def _binding_error(error: Exception) -> AppError:
+    if isinstance(error, ForbiddenChannelAction):
+        return forbidden()
+    if isinstance(error, ChannelKeyRequired):
+        return AppError(
+            code="channel_key_required",
+            title="A key reference is required",
+            status=400,
+            detail=(
+                "This channel's deliveries are encrypted, so the binding must "
+                "name the workspace secret holding its encrypt key."
+            ),
+        )
+    if isinstance(error, ChannelKeyUnknown):
+        return AppError(
+            code="channel_key_unknown",
+            title="No such secret",
+            status=400,
+            detail=(
+                "No active workspace secret has that name. A binding pointing "
+                "at a secret that does not exist accepts deliveries it can "
+                "never decrypt."
+            ),
+        )
+    if isinstance(error, ChannelAlreadyBound):
+        return AppError(
+            code="channel_already_bound",
+            title="Already bound",
+            status=409,
+            detail="This Agent is already bound to that channel.",
+        )
+    return AppError(
+        code="channel_binding_not_found",
+        title="Channel binding not found",
+        status=404,
+        detail="No such channel binding exists in the selected workspace.",
+    )
+
+
+def channel_binding_router(resources: ApplicationResources) -> APIRouter:
+    """§20.1's Channels, which had no rows anyone could make.
+
+    Every route here is workspace-scoped through `X-Workspace-Id`; none of
+    them is the delivery path, which is unauthenticated by necessity and
+    lives in `feishu_webhook_router` above.
+    """
+    router = APIRouter(prefix="/api/v1/channel-bindings", tags=["channels"])
+    auth_dependency = resources.auth_service
+    service_dependency = resources.channel_binding_service
+
+    @router.post("", response_model=ChannelBindingResponse, status_code=201)
+    async def create_binding(  # pyright: ignore[reportUnusedFunction]
+        payload: CreateChannelBindingRequest,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        service: Annotated[
+            ChannelBindingService, Depends(service_dependency, scope="function")
+        ],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> ChannelBindingResponse:
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            created = await service.create(
+                _actor(user),
+                workspace_id,
+                channel=payload.channel,
+                agent_id=payload.agent_id,
+                app_id=payload.app_id,
+                encrypt_key_ref=payload.encrypt_key_ref,
+                request_id=request.state.request_id,
+            )
+        except (
+            ForbiddenChannelAction,
+            ChannelKeyRequired,
+            ChannelKeyUnknown,
+            ChannelAlreadyBound,
+            UnknownChannel,
+        ) as error:
+            raise _binding_error(error) from error
+        return ChannelBindingResponse.of(created)
+
+    @router.get("", response_model=list[ChannelBindingResponse])
+    async def list_bindings(  # pyright: ignore[reportUnusedFunction]
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        service: Annotated[
+            ChannelBindingService, Depends(service_dependency, scope="function")
+        ],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+    ) -> list[ChannelBindingResponse]:
+        user = await authenticate_browser_user(auth, session_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            listed = await service.list(
+                _actor(user), workspace_id, request.state.request_id
+            )
+        except ForbiddenChannelAction as error:
+            raise _binding_error(error) from error
+        return [ChannelBindingResponse.of(item) for item in listed]
+
+    @router.post("/{binding_id}/disable", response_model=ChannelBindingResponse)
+    async def disable_binding(  # pyright: ignore[reportUnusedFunction]
+        binding_id: UUID,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        service: Annotated[
+            ChannelBindingService, Depends(service_dependency, scope="function")
+        ],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> ChannelBindingResponse:
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            updated = await service.disable(
+                _actor(user), workspace_id, binding_id, request.state.request_id
+            )
+        except (ForbiddenChannelAction, UnknownChannel) as error:
+            raise _binding_error(error) from error
+        return ChannelBindingResponse.of(updated)
+
+    return router
+
+
+def _actor(user: AuthenticatedUser) -> Actor:
+    return Actor(id=user.id, is_platform_admin=user.is_platform_admin)

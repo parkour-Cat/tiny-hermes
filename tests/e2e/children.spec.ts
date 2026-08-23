@@ -245,9 +245,16 @@ test("the console shows the tree and each child is a link", async ({ page }) => 
   await link.click();
   await expect(page).toHaveURL(new RegExp(`/runs/${childId}$`));
   // And the child says who delegated it, which is the only thing on its own
-  // page that connects it to the work it was doing. Twice over, and that is
-  // not a duplicate: the parent is both what delegated this Run and the root
-  // its budget is measured against, which is §12.4 showing through the UI.
+  // page that connects it to the work it was doing. It appears more than
+  // once, and none of them is a duplicate: the parent is what delegated this
+  // Run (概要), the root its budget is measured against (§12.4), and the top
+  // of the task tree (§952). The count is deliberately not pinned — it moved
+  // from 2 to 3 the day the tree landed, and a count says nothing a reader
+  // could act on.
   await expect(page.getByRole("link", { name: runId }).first()).toBeVisible();
-  await expect(page.getByRole("link", { name: runId })).toHaveCount(2);
+  // The tree is the claim worth making here: from the child, the sibling it
+  // was delegated alongside is reachable — which was the whole gap §952
+  // named. Two children were delegated, so exactly one is not this one.
+  const treeCard = page.locator(".ant-card", { hasText: "任务树" });
+  await expect(treeCard.getByRole("link", { name: runId })).toBeVisible();
 });

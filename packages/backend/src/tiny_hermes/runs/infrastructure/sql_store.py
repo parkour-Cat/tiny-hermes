@@ -77,11 +77,13 @@ from tiny_hermes.runs.domain.models import (
     RunSnapshot,
     RunState,
     RunStateView,
+    RunTree,
     SessionMode,
     SessionSnapshot,
     StateDecision,
     StoredMessage,
     TextBlock,
+    TreeNode,
     WaitPolicy,
     WorkspaceCleanupTarget,
     WorkspaceUsageByQuality,
@@ -2863,7 +2865,10 @@ class SqlRunStore:
             queue_status=queue_status,
             budget=summary,
             available_actions=self._machine.available_actions(
-                view, can_control=capabilities.can_control, can_retry=retry_allowed
+                view,
+                can_control=capabilities.can_control,
+                can_retry=retry_allowed,
+                can_hold_budget=capabilities.can_hold_budget,
             ),
             checkpoint_replay_safe=run.checkpoint_replay_safe,
             checkpoint_effect_status=CheckpointEffectStatus(run.checkpoint_effect_status),
@@ -2881,6 +2886,71 @@ class SqlRunStore:
             head_wait_deadline_at=head_deadline,
             queue_available_actions=head_actions,
             children=await self._child_refs(run),
+        )
+
+    async def run_tree(
+        self, workspace_id: UUID, run_id: UUID, capabilities: RunCapabilities
+    ) -> RunTree | None:
+        """Every Run sharing this one's budget, from whichever node was asked.
+
+        Anchored on `budget_root_run_id` rather than walked from a parent:
+        asked about a child, walking would have to go up first and then back
+        down, and a child that is itself a retry has two upward edges. The
+        anchor is one column and it is the same answer from every node.
+
+        `workspace_id` is in the where-clause of both queries. A tree cannot
+        span workspaces, so this is belt and braces — but the query that
+        looked up the root and the query that listed the tree are two
+        chances to forget, and §23's first assertion is about exactly the
+        route somebody added last.
+        """
+        del capabilities
+        root_id = await self._session.scalar(
+            select(RunRow.budget_root_run_id).where(
+                RunRow.id == run_id, RunRow.workspace_id == workspace_id
+            )
+        )
+        if root_id is None:
+            return None
+        rows = (
+            await self._session.execute(
+                select(
+                    RunRow.id,
+                    RunRow.status,
+                    RunRow.depth,
+                    RunRow.parent_run_id,
+                    RunRow.retry_of_run_id,
+                    RunRow.created_at,
+                    RunRow.finished_at,
+                )
+                .where(
+                    RunRow.workspace_id == workspace_id,
+                    RunRow.budget_root_run_id == root_id,
+                )
+                # `id` breaks the tie: two children delegated in one round
+                # share a `created_at`, and an order left to the planner puts
+                # a tree in a different shape on every read.
+                .order_by(RunRow.depth, RunRow.created_at, RunRow.id)
+            )
+        ).all()
+        budget = await self._session.get(RunBudgetScopeRow, root_id)
+        if budget is None:
+            return None
+        return RunTree(
+            budget_root_run_id=root_id,
+            nodes=tuple(
+                TreeNode(
+                    id=row.id,
+                    status=RunState(row.status),
+                    depth=row.depth,
+                    parent_run_id=row.parent_run_id,
+                    relation=_relation(row.id, root_id, row.retry_of_run_id),
+                    created_at=row.created_at,
+                    finished_at=row.finished_at,
+                )
+                for row in rows
+            ),
+            budget=_budget_summary(budget),
         )
 
     async def _child_refs(self, run: RunRow) -> tuple[ChildRunRef, ...]:
@@ -2941,7 +3011,10 @@ class SqlRunStore:
             head.wait_kind,
             head.wait_deadline_at,
             self._machine.available_actions(
-                head_view, can_control=capabilities.can_control, can_retry=False
+                head_view,
+                can_control=capabilities.can_control,
+                can_retry=False,
+                can_hold_budget=capabilities.can_hold_budget,
             ),
         )
 
@@ -3098,6 +3171,20 @@ def _latest_request(history: Sequence[StoredMessage]) -> str:
         if item.message.role == "user":
             return item.message.text
     return ""
+
+
+def _relation(run_id: UUID, root_id: UUID, retry_of: UUID | None) -> str:
+    """Why this Run is in the tree.
+
+    Checked in this order because a retried root is both: it is the budget
+    root's own retry, and calling it "root" would hide that the tree holds two
+    Runs of the same task. `retry` wins.
+    """
+    if retry_of is not None:
+        return "retry"
+    if run_id == root_id:
+        return "root"
+    return "child"
 
 
 def _budget_summary(row: RunBudgetScopeRow) -> BudgetSummary:
