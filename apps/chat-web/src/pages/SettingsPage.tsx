@@ -1,10 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { api } from "../api/client";
 import { forgetAllSessionIds } from "../chat/localSessions";
 import { problemMessage } from "../api/messages";
-import type { ErasureResponse, SubjectExportResponse } from "../api/types";
+import type { ErasureResponse, MemoryResponse, SubjectExportResponse } from "../api/types";
 import { useLocale, useT } from "../i18n/locale";
 import { useChatTheme } from "../theme/ChatTheme";
 
@@ -21,9 +21,12 @@ function downloadJson(filename: string, value: unknown): void {
 }
 
 /**
- * Appearance, language, and design §4.6's "本人" row — export and erase,
- * the two self-service actions an end user has over their own data and
- * nothing else offers a door to. No account section: §4.5.1 means there is
+ * Appearance, language, and design §4.6's "本人" row — **查看、更正、删除
+ * 和导出**, the four self-service actions an end user has over their own
+ * data and nothing else offers a door to. It used to offer two of them: a
+ * JSON download and erase-everything. A file is not 查看 — it is the same
+ * data behind a step most people never take, and nothing a correction
+ * button could sit beside. No account section: §4.5.1 means there is
  * no name or email this app was ever given to show.
  *
  * Sign-out sits alongside them but is not one of them: it clears what this
@@ -44,6 +47,65 @@ export function SettingsPage() {
   const [erased, setErased] = useState<ErasureResponse | null>(null);
   const [confirmingErase, setConfirmingErase] = useState(false);
   const [signedOut, setSignedOut] = useState(false);
+
+  const [held, setHeld] = useState<MemoryResponse[] | null>(null);
+  const [heldError, setHeldError] = useState<string | null>(null);
+  const [correcting, setCorrecting] = useState<MemoryResponse | null>(null);
+  const [draft, setDraft] = useState("");
+  const [busyMemory, setBusyMemory] = useState<string | null>(null);
+
+  // The same door the download uses. One request answers both "show me" and
+  // "give me the file", so asking twice would be two chances for the page to
+  // show something the file does not contain.
+  async function loadHeld(): Promise<void> {
+    try {
+      const exported = await api<SubjectExportResponse>("/api/v1/end-user/subjects/me/export");
+      setHeld(exported.memories);
+      setHeldError(null);
+    } catch (caught) {
+      setHeldError(problemMessage(caught, t));
+    }
+  }
+
+  // Once, on open. The list changes only through this page's own buttons,
+  // and each of them refreshes it, so there is nothing for a dependency to
+  // track — `loadHeld` is read through a ref-free closure that only touches
+  // setters, all of which React keeps stable.
+  useEffect(() => {
+    void loadHeld();
+  }, []);
+
+  async function correctMemory(memoryId: string, body: string): Promise<void> {
+    setBusyMemory(memoryId);
+    try {
+      await api<MemoryResponse>(`/api/v1/end-user/subjects/memories/${memoryId}/correct`, {
+        method: "POST",
+        body: JSON.stringify({ body }),
+      });
+      setCorrecting(null);
+      await loadHeld();
+    } catch (caught) {
+      setHeldError(problemMessage(caught, t));
+    } finally {
+      setBusyMemory(null);
+    }
+  }
+
+  async function forgetMemory(memoryId: string): Promise<void> {
+    setBusyMemory(memoryId);
+    try {
+      // One memory, through its own door. Erase-everything is a different
+      // request with a different consequence — it also ends every chat.
+      await api<MemoryResponse>(`/api/v1/end-user/subjects/memories/${memoryId}/forget`, {
+        method: "POST",
+      });
+      await loadHeld();
+    } catch (caught) {
+      setHeldError(problemMessage(caught, t));
+    } finally {
+      setBusyMemory(null);
+    }
+  }
 
   async function exportData(): Promise<void> {
     setExporting(true);
@@ -127,6 +189,63 @@ export function SettingsPage() {
             {t("localeEn")}
           </button>
         </div>
+      </section>
+      <section>
+        <h2>{t("heldAboutYou")}</h2>
+        <p className="settings-hint">{t("heldAboutYouHint")}</p>
+        {heldError === null ? null : <p className="auth-error">{heldError}</p>}
+        {held !== null && held.length === 0 ? (
+          <p className="settings-hint">{t("heldAboutYouEmpty")}</p>
+        ) : null}
+        {(held ?? []).map((memory) => (
+          <div key={memory.id} className="settings-memory">
+            {correcting?.id === memory.id ? (
+              <>
+                <label htmlFor={`correct-${memory.id}`}>{t("correctedText")}</label>
+                <textarea
+                  id={`correct-${memory.id}`}
+                  rows={3}
+                  value={draft}
+                  onChange={(event) => setDraft(event.target.value)}
+                />
+                <div className="choice-pills">
+                  <button
+                    type="button"
+                    disabled={busyMemory === memory.id}
+                    onClick={() => void correctMemory(memory.id, draft)}
+                  >
+                    {t("save")}
+                  </button>
+                  <button type="button" onClick={() => setCorrecting(null)}>
+                    {t("cancel")}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p>{memory.body}</p>
+                <div className="choice-pills">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCorrecting(memory);
+                      setDraft(memory.body);
+                    }}
+                  >
+                    {t("correctMemory")}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busyMemory === memory.id}
+                    onClick={() => void forgetMemory(memory.id)}
+                  >
+                    {t("forgetMemory")}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        ))}
       </section>
       <section>
         <h2>{t("exportData")}</h2>

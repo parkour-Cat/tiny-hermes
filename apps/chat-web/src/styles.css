@@ -631,6 +631,27 @@ button:disabled {
   line-height: 1.5;
 }
 
+/* One remembered note, with its own controls. Boxed so that "delete this
+   one" is visibly attached to the text above it rather than floating near
+   the section's own erase-everything button. */
+.settings-memory {
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid var(--th-line);
+  border-radius: 10px;
+}
+
+.settings-memory p {
+  margin: 0 0 8px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.settings-memory textarea {
+  width: 100%;
+  margin: 0 0 8px;
+}
+
 .settings section {
   margin-top: 32px;
 }
