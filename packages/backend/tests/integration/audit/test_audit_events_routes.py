@@ -11,9 +11,11 @@ import json
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
+from tiny_hermes.audit.domain import query as query_module
 from tiny_hermes.audit.domain.query import MAX_PAGE_SIZE
 
 from ..conftest import PASSWORD
@@ -348,3 +350,128 @@ async def test_a_redacted_page_says_so_rather_than_looking_like_a_full_one(
 
     assert find(admin)["context"] == {"reason": "held for review"}
     assert find(viewer)["context"] == {}
+
+
+async def test_an_export_carries_the_same_scope_the_reader_already_had(
+    client: TestClient, scope: dict[str, str], workspace_id: str, engine: AsyncEngine
+) -> None:
+    """§26's "审计查询与导出" — and the half that matters is the second word.
+
+    An export is a second door onto the same rows, so the thing worth
+    testing is not that it produces a file: it is that the file is narrowed
+    exactly as the reader's own page would have been. A viewer's export with
+    `context` intact would hand them, in a spreadsheet, the detail the API
+    refuses them on screen — and nobody would notice, because the export
+    "worked".
+    """
+    await _seed_user(engine, "Exp", "exp@example.com")
+    invited = client.post(
+        f"/api/v1/workspaces/{workspace_id}/members",
+        headers=scope,
+        json={"email": "exp@example.com", "role": "viewer"},
+    )
+    assert invited.status_code == 201, invited.text
+    await _seed_audit_row(
+        engine,
+        workspace_id=workspace_id,
+        actor_id=uuid4(),
+        action="run.paused",
+        resource_type="run",
+        context={"reason": "a detail a viewer may not read"},
+    )
+
+    admin_export = client.get("/api/v1/audit-events/export", headers=scope)
+    headers = {**_login(client, "exp@example.com"), "X-Workspace-Id": workspace_id}
+    viewer_export = client.get("/api/v1/audit-events/export", headers=headers)
+
+    assert admin_export.status_code == 200, admin_export.text
+    assert viewer_export.status_code == 200, viewer_export.text
+    # A file, not a JSON page: an auditor opens this in a spreadsheet.
+    assert admin_export.headers["content-type"].startswith("text/csv")
+    assert "attachment" in admin_export.headers.get("content-disposition", "")
+    # The row reaches both — redaction removes a column, not a row (§2).
+    assert "run.paused" in admin_export.text
+    assert "run.paused" in viewer_export.text
+    # And the detail reaches only the reader whose scope allows it.
+    assert "a detail a viewer may not read" in admin_export.text
+    assert "a detail a viewer may not read" not in viewer_export.text
+
+
+async def test_an_end_user_cookie_cannot_export_either(
+    client: TestClient, scope: dict[str, str], workspace_id: str, engine: AsyncEngine
+) -> None:
+    """§4.6 gives an end user 否 on audit, and a second door must be shut the
+    same way. A guard applied to the list route and forgotten on the export
+    is the shape this repository keeps finding.
+
+    The request carries the end-user cookie **and no console credential**,
+    which is what `reject_end_user_caller` refuses since task-9 finding G —
+    presence alongside a valid console session is a member who also happens
+    to be an end user, and locking them out was the bug that finding fixed.
+    An earlier version of this test sent the admin's CSRF too and passed
+    with a 200; it was asserting behaviour I had deliberately removed.
+    """
+    del engine, workspace_id
+    fresh = TestClient(client.app)
+    fresh.cookies.set("tiny_hermes_end_user_session", "not-a-real-session")
+
+    refused = fresh.get("/api/v1/audit-events/export", headers={"X-Workspace-Id": str(uuid4())})
+
+    assert refused.status_code == 403, refused.text
+
+
+async def test_an_export_is_not_silently_cut_off_at_one_page(
+    client: TestClient, scope: dict[str, str], workspace_id: str, engine: AsyncEngine
+) -> None:
+    """An export that stops at `MAX_PAGE_SIZE` and says nothing is the worst
+    of the shapes this repository keeps finding: the file opens, the columns
+    are right, every row in it is true — and the ones that would have
+    mattered are simply absent. An auditor draws conclusions from it.
+
+    The first version of this route passed `MAX_EXPORT_ROWS` to `filter_for`,
+    which clamps to `MAX_PAGE_SIZE`; it returned 200 rows out of any number.
+    Every other test in this file passed, because none of them seeds a
+    second page.
+    """
+    marks = [uuid4() for _ in range(MAX_PAGE_SIZE + 5)]
+    for mark in marks:
+        await _seed_audit_row(
+            engine,
+            workspace_id=workspace_id,
+            actor_id=uuid4(),
+            action="run.started",
+            resource_id=mark,
+        )
+
+    exported = client.get("/api/v1/audit-events/export", headers=scope)
+
+    assert exported.status_code == 200, exported.text
+    body = exported.text
+    missing = [str(mark) for mark in marks if str(mark) not in body]
+    assert not missing, f"{len(missing)} of {len(marks)} rows never reached the file"
+
+
+async def test_an_export_over_the_ceiling_refuses_instead_of_truncating(
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ceiling's whole purpose is the refusal, and at 50,000 rows no
+    test would ever reach it — so the branch that refuses would be the one
+    piece of this route nobody had run. The ceiling is read from the module
+    at call time; lowering it here exercises the real path.
+    """
+    monkeypatch.setattr(query_module, "MAX_EXPORT_ROWS", 2)
+    for _ in range(3):
+        await _seed_audit_row(
+            engine, workspace_id=workspace_id, actor_id=uuid4(), action="run.started"
+        )
+
+    refused = client.get("/api/v1/audit-events/export", headers=scope)
+
+    assert refused.status_code == 413, refused.text
+    # Says what to do about it — a bare "too large" leaves an auditor with a
+    # filter they cannot fix.
+    assert "Narrow" in refused.json()["detail"]

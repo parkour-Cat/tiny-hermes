@@ -19,6 +19,13 @@ DEFAULT_PAGE_SIZE = 50
 #: clamped rather than refused, the same distinction
 #: `memory/domain/search.py::request_for` draws for its own `limit`.
 MAX_PAGE_SIZE = 200
+#: The most one export ever holds. Deliberately not `MAX_PAGE_SIZE`: an
+#: export is the whole of what a reader may see under their filters, not a
+#: page of it, and running it through `filter_for` — which clamps to
+#: `MAX_PAGE_SIZE` — is how the first version of the export route came to
+#: return 200 rows out of any number, silently. A file that stops early
+#: still opens, still has the right columns, and every row in it is true.
+MAX_EXPORT_ROWS = 50_000
 
 
 class InvalidAuditFilter(Exception):
@@ -48,6 +55,55 @@ def filter_for(
     limit: int | None = None,
     offset: int = 0,
 ) -> AuditFilter:
+    return _filter_within(
+        MAX_PAGE_SIZE,
+        action=action,
+        resource_type=resource_type,
+        actor_id=actor_id,
+        since=since,
+        until=until,
+        limit=limit,
+        offset=offset,
+    )
+
+
+def export_filter_for(
+    *,
+    action: str | None = None,
+    resource_type: str | None = None,
+    actor_id: UUID | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> AuditFilter:
+    """One export's worth of the same request `filter_for` validates.
+
+    Same window and same refusals — only the ceiling differs, so the two
+    doors onto `audit_events` cannot come to disagree about what a filter
+    means. No `offset`: an export is not paged.
+    """
+    return _filter_within(
+        MAX_EXPORT_ROWS,
+        action=action,
+        resource_type=resource_type,
+        actor_id=actor_id,
+        since=since,
+        until=until,
+        limit=MAX_EXPORT_ROWS,
+        offset=0,
+    )
+
+
+def _filter_within(
+    ceiling: int,
+    *,
+    action: str | None,
+    resource_type: str | None,
+    actor_id: UUID | None,
+    since: datetime | None,
+    until: datetime | None,
+    limit: int | None,
+    offset: int,
+) -> AuditFilter:
     if since is not None and until is not None and since > until:
         raise InvalidAuditFilter("the time window's start is after its end")
     if offset < 0:
@@ -61,7 +117,7 @@ def filter_for(
         actor_id=actor_id,
         since=since,
         until=until,
-        limit=min(asked, MAX_PAGE_SIZE),
+        limit=min(asked, ceiling),
         offset=offset,
     )
 

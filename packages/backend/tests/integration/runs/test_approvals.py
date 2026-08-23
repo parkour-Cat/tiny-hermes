@@ -91,9 +91,16 @@ def _agent(
 
 
 def _pending(client: TestClient, scope: dict[str, str]) -> list[dict[str, Any]]:
-    page = client.get("/api/v1/approvals", headers=scope)
+    return _queue(client, scope)
+
+
+def _queue(
+    client: TestClient, scope: dict[str, str], **query: str
+) -> list[dict[str, Any]]:
+    """The queue as the console reads it. No `status` means pending."""
+    page = client.get("/api/v1/approvals", headers=scope, params=query)
     assert page.status_code == 200, page.text
-    return list(page.json())
+    return list(page.json()["items"])
 
 
 def _decide(
@@ -559,3 +566,70 @@ async def test_a_tool_the_version_never_bound_never_reaches_the_implementation(
     # the Agent was never allowed to make would be offering them a decision
     # that is not theirs.
     assert status != "waiting_approval"
+
+
+async def test_a_decision_is_still_readable_after_it_was_made(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    api: tuple[StandIn, str],
+    proxy: ProxyHandle,
+) -> None:
+    """§26's queue, and the half M2 left out.
+
+    `decided_by`, `decided_at` and `decision_reason` have been written
+    faithfully since §16.3 shipped, and until this route nothing could read
+    them: the moment an administrator answered, the record of who answered and
+    why left the product. An accountability trail that only the database can
+    see is not one.
+    """
+    await _stopped_run(client, scope, engine, session_for, api, proxy)
+    approval_id = _pending(client, scope)[0]["id"]
+
+    decided = _decide(client, scope, approval_id, "reject", "not this quarter")
+    assert decided.status_code == 200, decided.text
+
+    # Gone from the working queue — that is what deciding it means.
+    assert _pending(client, scope) == []
+
+    answered = _queue(client, scope, status="rejected")
+    assert [item["id"] for item in answered] == [approval_id]
+    assert answered[0]["decision_reason"] == "not this quarter"
+    assert answered[0]["decided_by"] is not None
+    assert answered[0]["decided_at"] is not None
+
+
+async def test_the_queue_can_be_narrowed_and_says_no_when_nothing_matches(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    api: tuple[StandIn, str],
+    proxy: ProxyHandle,
+) -> None:
+    await _stopped_run(client, scope, engine, session_for, api, proxy)
+
+    assert len(_queue(client, scope, tool="http.orders.createOrder")) == 1
+    assert _queue(client, scope, tool="http.orders.listOrders") == []
+    # And the row is reachable under "everything" as well as under its status,
+    # so a reader who does not know what became of it can still find it.
+    assert len(_queue(client, scope, status="any")) == 1
+
+
+async def test_a_misspelled_status_is_refused_rather_than_ignored(
+    client: TestClient, scope: dict[str, str]
+) -> None:
+    """The failure that looks like an answer.
+
+    An unknown value dropped on the floor leaves the caller reading the
+    default pending queue under the heading they asked for — "approved", say —
+    and concluding that everything in it was approved.
+    """
+    refused = client.get(
+        "/api/v1/approvals", headers=scope, params={"status": "aproved"}
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert "aproved" not in refused.text  # not echoed back
+    assert "approved" in refused.json()["detail"]

@@ -1,8 +1,20 @@
-"""The approvals' HTTP face: see what is waiting, and decide one.
+"""The approvals' HTTP face: read the queue, and decide one.
 
-Two routes, because §16.3 needs exactly two things from a person: knowing that
-something is waiting, and answering it. The queue with filters, assignment and
-history is M3's; this is the part without which a write cannot happen at all.
+§16.3 needs two things from a person — knowing that something is waiting and
+answering it — and §26 adds the third: reading back what was decided. All
+three go through these two routes.
+
+The queue is one route with a `status` filter rather than a working list and
+a separate history endpoint. Two doors onto the same rows drift: the day a
+filter or a redaction lands on one of them, the other quietly answers a
+different question. It defaults to `pending`, so a caller who says nothing
+still gets the working queue and not the archive.
+
+There is no assignment. The product design names no assignee anywhere, and
+§4.6 already fixes who may decide a `governance_approval`; a queue that let
+one administrator claim a row would either be advisory (a label two people
+can ignore) or a second permission system beside the matrix. Neither is
+something to invent here.
 
 `document` goes out as it was hashed. A reviewer deciding from a summary the
 platform rewrote would be approving something nobody can prove matches what
@@ -14,7 +26,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Cookie, Depends, Header, Request
+from fastapi import APIRouter, Cookie, Depends, Header, Query, Request
 from pydantic import BaseModel, Field
 
 from tiny_hermes.api.resources import ApplicationResources
@@ -36,7 +48,17 @@ from tiny_hermes.runs.application.approvals import (
     ReasonRequired,
     UnknownApproval,
 )
-from tiny_hermes.runs.domain.approval import Approval, ApprovalDecision
+from tiny_hermes.runs.domain.approval import (
+    Approval,
+    ApprovalDecision,
+    ApprovalStatus,
+    ApprovalType,
+)
+from tiny_hermes.runs.domain.approval_query import (
+    InvalidApprovalFilter,
+    QueueOrder,
+    filter_for,
+)
 from tiny_hermes.shared.errors import AppError
 from tiny_hermes.tenancy.domain.models import Actor
 
@@ -86,13 +108,75 @@ class ApprovalResponse(BaseModel):
         )
 
 
+class ApprovalsPageResponse(BaseModel):
+    items: list[ApprovalResponse]
+    #: Whether a later offset holds more. A queue that ended at the page
+    #: boundary with no sign of it reads as "nothing else is waiting".
+    has_more: bool
+
+
+#: What a caller writes to mean "every status". `status=` with no value is
+#: indistinguishable from the parameter being absent over a query string,
+#: and "absent" already means the working queue.
+ANY_STATUS = "any"
+
+
+def _statuses(asked: list[str] | None) -> tuple[ApprovalStatus, ...] | None:
+    if asked is None:
+        return None
+    if ANY_STATUS in asked:
+        return ()
+    try:
+        return tuple(ApprovalStatus(value) for value in asked)
+    except ValueError as error:
+        # Refused, not dropped. A misspelled status that is ignored hands the
+        # caller the default queue under the heading they asked for.
+        raise AppError(
+            code="invalid_approval_filter",
+            title="Invalid filter",
+            status=400,
+            detail=f"Unknown approval status. Expected one of: "
+            f"{', '.join(item.value for item in ApprovalStatus)}, or '{ANY_STATUS}'.",
+        ) from error
+
+
+def _approval_type(asked: str | None) -> ApprovalType | None:
+    if asked is None:
+        return None
+    try:
+        return ApprovalType(asked)
+    except ValueError as error:
+        raise AppError(
+            code="invalid_approval_filter",
+            title="Invalid filter",
+            status=400,
+            detail=f"Unknown approval type. Expected one of: "
+            f"{', '.join(item.value for item in ApprovalType)}.",
+        ) from error
+
+
+def _order(asked: str | None) -> QueueOrder | None:
+    if asked is None:
+        return None
+    try:
+        return QueueOrder(asked)
+    except ValueError as error:
+        raise AppError(
+            code="invalid_approval_filter",
+            title="Invalid filter",
+            status=400,
+            detail=f"Unknown order. Expected one of: "
+            f"{', '.join(item.value for item in QueueOrder)}.",
+        ) from error
+
+
 def approval_router(resources: ApplicationResources) -> APIRouter:
     router = APIRouter(prefix="/api/v1/approvals", tags=["approvals"])
     auth_dependency = resources.auth_service
     service_dependency = resources.approval_service
 
-    @router.get("", response_model=list[ApprovalResponse])
-    async def list_pending(  # pyright: ignore[reportUnusedFunction]
+    @router.get("", response_model=ApprovalsPageResponse)
+    async def list_approvals(  # pyright: ignore[reportUnusedFunction]
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
         service: Annotated[
@@ -100,16 +184,53 @@ def approval_router(resources: ApplicationResources) -> APIRouter:
         ],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
-    ) -> list[ApprovalResponse]:
+        # Repeatable: `?status=approved&status=rejected` is "answered". An
+        # explicit empty list is not expressible over a query string, so
+        # `status=any` carries §26's "everything" — see `_statuses`.
+        status: Annotated[list[str] | None, Query()] = None,
+        approval_type: str | None = None,
+        tool: str | None = None,
+        decided_by: UUID | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        order: str | None = None,
+        # No `le=` here: `filter_for` clamps an over-large page rather than
+        # refusing it, the same rule `audit/presentation/routes.py` follows,
+        # and an HTTP ceiling would 422 exactly the requests it means to cap.
+        limit: Annotated[int | None, Query(ge=1)] = None,
+        offset: Annotated[int, Query(ge=0)] = 0,
+    ) -> ApprovalsPageResponse:
         user = await authenticate_browser_user(auth, session_token)
         workspace_id = require_workspace_id(selected_workspace)
         try:
-            listed = await service.list_pending(
-                _actor(user), workspace_id, request.state.request_id
+            criteria = filter_for(
+                statuses=_statuses(status),
+                approval_type=_approval_type(approval_type),
+                tool=tool,
+                decided_by=decided_by,
+                since=since,
+                until=until,
+                order=_order(order),
+                limit=limit,
+                offset=offset,
+            )
+        except InvalidApprovalFilter as error:
+            raise AppError(
+                code="invalid_approval_filter",
+                title="Invalid filter",
+                status=400,
+                detail=str(error),
+            ) from error
+        try:
+            page = await service.list_approvals(
+                _actor(user), workspace_id, criteria, request.state.request_id
             )
         except ForbiddenApprovalAction as error:
             raise forbidden() from error
-        return [ApprovalResponse.from_domain(item) for item in listed]
+        return ApprovalsPageResponse(
+            items=[ApprovalResponse.from_domain(item) for item in page.items],
+            has_more=page.has_more,
+        )
 
     @router.post("/{approval_id}/decision", response_model=ApprovalResponse)
     async def decide(  # pyright: ignore[reportUnusedFunction]

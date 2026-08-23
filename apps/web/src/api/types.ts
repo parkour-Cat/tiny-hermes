@@ -581,6 +581,13 @@ export type CreatedExampleResponse = {
   version_id: string;
 };
 
+/** One page of the approvals queue, pending or answered. */
+export type ApprovalsPageResponse = {
+  items: ApprovalResponse[];
+  /** Whether a later offset holds more. A silent cut-off reads as "that is all". */
+  has_more: boolean;
+};
+
 /** What an endpoint charges, as one recorded version. */
 export type PricingVersionResponse = {
   id: string;

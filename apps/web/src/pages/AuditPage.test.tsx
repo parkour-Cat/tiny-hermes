@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { expect, test } from "vitest";
@@ -100,4 +101,52 @@ test("a full view is not decorated with a warning it does not need", async () =>
   expect(await screen.findByText(/held for review/)).toBeVisible();
   expect(screen.queryByText(/脱敏|redacted view/i)).toBeNull();
   expect(screen.queryByText(/与你有关|rows you are named in/i)).toBeNull();
+});
+
+test("the export asks the question the screen is showing, not a different one", async () => {
+  // The whole risk of a second door: a file exported while the table is
+  // filtered to `run.paused` that quietly contains everything is not a
+  // smaller problem than one that contains too little — an auditor believes
+  // the filename and the screen they were looking at when they clicked.
+  let exported: URL | null = null;
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(USER)),
+    http.get("/api/v1/audit-events", () =>
+      HttpResponse.json({ items: [row()], has_more: false, visibility: "full" }),
+    ),
+    http.get("/api/v1/audit-events/export", ({ request }) => {
+      exported = new URL(request.url);
+      return new HttpResponse("occurred_at\n", { headers: { "Content-Type": "text/csv" } });
+    }),
+  );
+
+  renderAudit();
+  await userEvent.type(await screen.findByLabelText(/按动作过滤|Filter by action/i), "run.paused");
+  await userEvent.click(screen.getByRole("button", { name: /导出|Export/i }));
+
+  await waitFor(() => expect(exported).not.toBeNull());
+  expect(exported!.searchParams.get("action")).toBe("run.paused");
+});
+
+test("a refused export says why, instead of handing over an error page as a file", async () => {
+  // A browser will happily save whatever comes back. Downloading the JSON
+  // body of a 413 under the name `audit-….csv` produces a file that opens,
+  // has one row, and is a lie.
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(USER)),
+    http.get("/api/v1/audit-events", () =>
+      HttpResponse.json({ items: [row()], has_more: false, visibility: "full" }),
+    ),
+    http.get("/api/v1/audit-events/export", () =>
+      HttpResponse.json(
+        { code: "audit_export_too_large", detail: "Narrow the time window and export again." },
+        { status: 413 },
+      ),
+    ),
+  );
+
+  renderAudit();
+  await userEvent.click(await screen.findByRole("button", { name: /导出|Export/i }));
+
+  expect(await screen.findByText(/Narrow the time window/)).toBeVisible();
 });
