@@ -5,7 +5,6 @@ import { createElement, type ReactNode } from "react";
 import { expect, test } from "vitest";
 
 import { useRunEvents } from "./useRunEvents";
-import { t } from "../i18n/zh-CN";
 import { server } from "../test/server";
 
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
