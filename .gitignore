@@ -1,5 +1,6 @@
 .superpowers/
 .worktrees/
+.claude/
 .env
 .env.*
 !.env.example
