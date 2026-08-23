@@ -8,6 +8,7 @@ import { expect, test } from "vitest";
 import { ChannelsPage } from "./ChannelsPage";
 import { TestTheme } from "../test/TestTheme";
 import { server } from "../test/server";
+import { t } from "../i18n/zh-CN";
 
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
 const AGENT = "22222222-3333-4444-8555-666666666666";
@@ -140,4 +141,72 @@ test("a viewer is told they may not look, not shown an empty page", async () => 
   renderChannels();
 
   expect(await screen.findByText(/没有权限|not allowed|forbidden/i)).toBeVisible();
+});
+
+const ISSUER = {
+  id: "i1",
+  workspace_id: WORKSPACE,
+  channel: "web",
+  issuer: "https://sso.example.com",
+  public_key: null,
+  jwks_url: "https://sso.example.com/.well-known/jwks.json",
+  allowed_origins: ["https://portal.example.com"],
+  status: "active",
+  created_by: "u1",
+  created_at: "2026-08-20T00:00:00Z",
+};
+
+test("who may vouch for an end user is listed beside what they can talk to", async () => {
+  // A binding says which Agent is published; an issuer says whose word this
+  // platform takes for who a person is. Neither is usable without the other,
+  // and until now only one of them had a page.
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json([binding()])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/channel-issuers", () => HttpResponse.json([ISSUER])),
+  );
+
+  renderChannels();
+
+  expect(await screen.findByText("https://sso.example.com")).toBeVisible();
+  // The origins are the embedding allow-list. Shown, because an origin
+  // nobody remembers adding is how a portal stops working.
+  expect(screen.getByText(/portal\.example\.com/)).toBeVisible();
+});
+
+test("registering an issuer sends the key reference shape the API takes", async () => {
+  let sent: Record<string, unknown> | null = null;
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json([])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/secrets", () => HttpResponse.json([])),
+    http.get("/api/v1/channel-issuers", () => HttpResponse.json([])),
+    http.post("/api/v1/channel-issuers", async ({ request }) => {
+      sent = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json(ISSUER, { status: 201 });
+    }),
+  );
+
+  renderChannels();
+  await userEvent.click(await screen.findByRole("button", { name: t("registerIssuer") }));
+  await userEvent.type(await screen.findByLabelText(t("issuerName")), "https://sso.example.com");
+  await userEvent.type(
+    await screen.findByLabelText(t("issuerJwksUrl")),
+    "https://sso.example.com/.well-known/jwks.json",
+  );
+  await userEvent.type(
+    await screen.findByLabelText(t("issuerOrigins")),
+    "https://portal.example.com",
+  );
+  await userEvent.click(screen.getByRole("button", { name: t("saveName") }));
+
+  await waitFor(() => expect(sent).not.toBeNull());
+  expect(sent).toEqual({
+    channel: "web",
+    issuer: "https://sso.example.com",
+    jwks_url: "https://sso.example.com/.well-known/jwks.json",
+    // One per line, split here rather than sent as a blob: the API takes a
+    // list and a comma inside an origin would otherwise split it in two.
+    allowed_origins: ["https://portal.example.com"],
+  });
 });

@@ -9,6 +9,7 @@ import { McpServersPage } from "./McpServersPage";
 import { AuthProvider } from "../auth/AuthProvider";
 import { TestTheme } from "../test/TestTheme";
 import { server } from "../test/server";
+import { t } from "../i18n/zh-CN";
 
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
 
@@ -155,4 +156,47 @@ test("nothing registered says so", async () => {
   renderServers();
 
   expect(await screen.findByText("还没有登记 MCP 服务。")).toBeInTheDocument();
+});
+
+test("a bindable version can be withdrawn, the way an HTTP tool version can", async () => {
+  // The two catalogues answer the same question — "may an Agent still bind
+  // this?" — and only one of them could say no. A server whose tools turned
+  // out to be wrong had no way to be taken out of circulation short of
+  // deleting it, which takes the record of what it once offered with it.
+  let withdrew: string | null = null;
+  server.use(
+    http.get("/api/v1/mcp-servers", () => HttpResponse.json([mcpServer()])),
+    http.get("/api/v1/mcp-servers/s1/versions", () => HttpResponse.json([version()])),
+    http.post(
+      "/api/v1/mcp-servers/s1/versions/v1/withdraw",
+      ({ request }) => {
+        withdrew = new URL(request.url).pathname;
+        return HttpResponse.json(version({ bindable: false, status: "withdrawn" }));
+      },
+    ),
+  );
+
+  renderServers();
+  await userEvent.click(await screen.findByRole("button", { name: t("mcpServerWithdraw") }));
+  // Confirmed, like the HTTP tool catalogue's own withdraw: this takes a
+  // version out of circulation for every Agent that has not bound it yet.
+  await userEvent.click(await screen.findByRole("button", { name: t("confirm") }));
+
+  await waitFor(() =>
+    expect(withdrew).toBe("/api/v1/mcp-servers/s1/versions/v1/withdraw"),
+  );
+});
+
+test("a version already withdrawn is not offered the button again", async () => {
+  server.use(
+    http.get("/api/v1/mcp-servers", () => HttpResponse.json([mcpServer()])),
+    http.get("/api/v1/mcp-servers/s1/versions", () =>
+      HttpResponse.json([version({ bindable: false, status: "withdrawn" })]),
+    ),
+  );
+
+  renderServers();
+
+  await screen.findByText(/withdrawn/);
+  expect(screen.queryByRole("button", { name: t("mcpServerWithdraw") })).toBeNull();
 });
