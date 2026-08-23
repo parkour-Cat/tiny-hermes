@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from tiny_hermes.agents.domain.delegation import asked_by, scope_of_spec
+from tiny_hermes.agents.domain.examples import example_for
 from tiny_hermes.agents.domain.models import (
     Agent,
     AgentDraft,
@@ -54,6 +55,11 @@ class AgentCatalogError(Exception):
 
 class ForbiddenAgentAction(AgentCatalogError):
     pass
+
+
+class UnknownAgentExample(AgentCatalogError):
+    """No example by that slug. A typo, or a stale console asking for one
+    this deployment no longer ships."""
 
 
 class UnknownAgent(AgentCatalogError):
@@ -392,6 +398,50 @@ class AgentCatalog:
         )
         await self._audit(workspace_id, actor, "agent.created", agent.id, request_id, platform)
         return agent
+
+    async def create_example_agent(
+        self,
+        workspace_id: UUID,
+        actor: Actor,
+        slug: str,
+        endpoint_id: UUID,
+        request_id: str,
+    ) -> tuple[Agent, PublishResult]:
+        """§21's last wizard step: an Agent that is ready to run.
+
+        Composed from `create_agent`, `replace_draft` and `publish` rather
+        than writing a version directly. Every role check, every publish-time
+        rule and every audit event happens exactly as it would if a person had
+        done the three steps by hand — and a shortcut that inserted a
+        published version would be a second way into `agent_versions` that
+        skips the checks `publish` exists to run.
+
+        Published, not left as a draft: the wizard step is "create an example
+        Agent", and a draft is not something anyone can run.
+        """
+        example = example_for(slug)
+        if example is None:
+            raise UnknownAgentExample
+        agent = await self.create_agent(
+            workspace_id, actor, example.name, example.alias, request_id
+        )
+        # Read rather than assumed to be 1: what a fresh draft's revision is
+        # belongs to the store, and an example that hardcoded it would break
+        # quietly the day that changed — with a revision conflict an
+        # administrator has no way to interpret.
+        blank = await self.get_draft(workspace_id, actor, agent.id, request_id)
+        draft = await self.replace_draft(
+            workspace_id,
+            actor,
+            agent.id,
+            blank.revision,
+            example.spec(endpoint_id),
+            request_id,
+        )
+        published = await self.publish(
+            workspace_id, actor, agent.id, draft.revision, request_id
+        )
+        return agent, published
 
     async def list_agents(
         self, workspace_id: UUID, actor: Actor, request_id: str

@@ -568,6 +568,19 @@ export type ApprovalResponse = {
   decision_reason: string | null;
 };
 
+/** One ready-made Agent this platform ships (§21's last setup step). */
+export type AgentExampleResponse = {
+  slug: string;
+  name: string;
+  summary: string;
+};
+
+/** What creating an example produced: the Agent, and the version it published. */
+export type CreatedExampleResponse = {
+  agent: AgentResponse;
+  version_id: string;
+};
+
 /** One page of the approvals queue, pending or answered. */
 export type ApprovalsPageResponse = {
   items: ApprovalResponse[];
