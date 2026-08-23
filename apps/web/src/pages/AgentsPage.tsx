@@ -1,11 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Avatar, Button, Card, Empty, Form, Input, Modal, Tag, Typography } from "antd";
+import { Alert, Avatar, Button, Card, Empty, Form, Input, Modal, Select, Space, Tag, Typography } from "antd";
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../api/client";
 import { problemField, problemMessage } from "../api/messages";
-import type { AgentResponse } from "../api/types";
+import type {
+  AgentExampleResponse,
+  AgentResponse,
+  CreatedExampleResponse,
+  ModelEndpointSummary,
+} from "../api/types";
 import { useT } from "../i18n/locale";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
@@ -27,6 +32,44 @@ export function AgentsPage() {
     queryFn: () => api<AgentResponse[]>("/api/v1/agents", { workspace: workspaceId ?? "" }),
     enabled: workspaceId !== null,
   });
+  // Fetched only while the workspace is empty: §21 offers the example at the
+  // end of setup, and a workspace that already has Agents has passed that
+  // point. Two requests on every visit to a busy list would be paid forever
+  // for a card nobody sees.
+  const nothingYet = (agents.data ?? []).length === 0 && !agents.isPending;
+  const examples = useQuery({
+    queryKey: ["agent-examples"] as const,
+    queryFn: () => api<AgentExampleResponse[]>("/api/v1/agents/examples"),
+    enabled: nothingYet,
+  });
+  const endpoints = useQuery({
+    queryKey: ["model-endpoints"] as const,
+    queryFn: () => api<ModelEndpointSummary[]>("/api/v1/model-endpoints"),
+    enabled: nothingYet,
+  });
+  const [endpointId, setEndpointId] = useState<string | null>(null);
+  const available = endpoints.data ?? [];
+  // The chosen one, or the only one. Never a hardcoded id: publishing would
+  // fail on every deployment but the one it was written against.
+  const chosen = endpointId ?? available[0]?.id ?? null;
+  const [exampleError, setExampleError] = useState<string | null>(null);
+
+  const createExample = useMutation({
+    mutationFn: (slug: string) =>
+      api<CreatedExampleResponse>(`/api/v1/agents/examples/${slug}`, {
+        method: "POST",
+        workspace: workspaceId ?? "",
+        body: JSON.stringify({ endpoint_id: chosen }),
+      }),
+    onSuccess: (created) => {
+      void queryClient.invalidateQueries({ queryKey: agentsQuery });
+      // Into the builder, like `createAgent` — the example is a thing to read
+      // and adapt, and a list row in small type does not invite that.
+      navigate(`/workspaces/${workspaceId ?? ""}/agents/${created.agent.id}`);
+    },
+    onError: (caught) => setExampleError(problemMessage(caught, t)),
+  });
+
   const createAgent = useMutation({
     mutationFn: (values: AgentValues) =>
       api<AgentResponse>("/api/v1/agents", {
@@ -79,7 +122,52 @@ export function AgentsPage() {
       </div>
       <Card loading={agents.isPending} variant="borderless">
         {(agents.data ?? []).length === 0 ? (
-          <Empty description={t("emptyAgents")} />
+          <Space direction="vertical" size="large" style={{ width: "100%" }}>
+            <Empty description={t("emptyAgents")} />
+            {(examples.data ?? []).length === 0 ? null : (
+              <Card variant="borderless" className="page-alert" title={t("exampleAgentTitle")}>
+                <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+                  <Typography.Paragraph type="secondary">
+                    {t("exampleAgentIntro")}
+                  </Typography.Paragraph>
+                  {exampleError === null ? null : (
+                    <Alert type="error" showIcon message={exampleError} />
+                  )}
+                  {available.length === 0 ? (
+                    // Said before the button rather than after the failure:
+                    // §21 configures a model alias before this step, and a
+                    // button that can only fail teaches nothing.
+                    <Alert type="info" showIcon message={t("exampleAgentNeedsEndpoint")} />
+                  ) : (
+                    <>
+                      <Select
+                        aria-label={t("exampleAgentEndpoint")}
+                        style={{ minWidth: 260 }}
+                        value={chosen}
+                        onChange={(value: string) => setEndpointId(value)}
+                        options={available.map((endpoint) => ({
+                          value: endpoint.id,
+                          label: `${endpoint.name} · ${endpoint.model}`,
+                        }))}
+                      />
+                      {(examples.data ?? []).map((example) => (
+                        <Space key={example.slug} direction="vertical" size={4}>
+                          <Typography.Text strong>{example.name}</Typography.Text>
+                          <Typography.Text type="secondary">{example.summary}</Typography.Text>
+                          <Button
+                            loading={createExample.isPending}
+                            onClick={() => createExample.mutate(example.slug)}
+                          >
+                            {t("exampleAgentCreate")}
+                          </Button>
+                        </Space>
+                      ))}
+                    </>
+                  )}
+                </Space>
+              </Card>
+            )}
+          </Space>
         ) : (
           <div className="workspace-list" role="list">
             {(agents.data ?? []).map((entry) => (

@@ -164,3 +164,75 @@ test("a refusal is shown as itself, never traded for another workspace", async (
   // One address, one request, one answer. No second workspace is tried.
   expect(scopes).toEqual([OTHER_WORKSPACE]);
 });
+
+const EXAMPLE = {
+  slug: "notes-tidier",
+  name: "Notes tidier",
+  summary: "Reads note files and writes one summary.md.",
+};
+
+const ENDPOINT = {
+  id: "e1",
+  name: "acme-gpt",
+  model: "acme-large",
+  context_window: 128000,
+  max_output_tokens: 4096,
+  usage_quality: "provider",
+  context_accounting: "provider",
+  tokenizer: null,
+  status: "enabled",
+};
+
+test("an empty workspace is offered the example rather than a blank page", async () => {
+  // §21's last wizard step. Somebody who has just finished setup has nothing
+  // to look at and no idea what an Agent spec should contain; "create one"
+  // with a name field is not an answer to that.
+  server.use(
+    http.get("/api/v1/agents", () => HttpResponse.json([])),
+    http.get("/api/v1/agents/examples", () => HttpResponse.json([EXAMPLE])),
+    http.get("/api/v1/model-endpoints", () => HttpResponse.json([ENDPOINT])),
+  );
+
+  renderAgents();
+
+  expect(await screen.findByText(/Reads note files/)).toBeVisible();
+});
+
+test("the example is created against a model endpoint the deployment actually has", async () => {
+  // The one thing that can be wrong here and look right: creating it against
+  // no endpoint, or against a hardcoded one. Publishing would then fail on a
+  // deployment where the ids differ — which is every deployment but ours.
+  let sent: unknown = null;
+  server.use(
+    http.get("/api/v1/agents", () => HttpResponse.json([])),
+    http.get("/api/v1/agents/examples", () => HttpResponse.json([EXAMPLE])),
+    http.get("/api/v1/model-endpoints", () => HttpResponse.json([ENDPOINT])),
+    http.post("/api/v1/agents/examples/notes-tidier", async ({ request }) => {
+      sent = await request.json();
+      return HttpResponse.json(
+        { agent: agent({ id: "a9", name: "Notes tidier" }), version_id: "v1" },
+        { status: 201 },
+      );
+    }),
+  );
+
+  renderAgents();
+  await userEvent.click(await screen.findByRole("button", { name: /创建示例|Create example/i }));
+
+  await waitFor(() => expect(sent).toEqual({ endpoint_id: "e1" }));
+});
+
+test("with no model endpoint configured, the example says what is missing first", async () => {
+  // §21 configures a model alias before this step. Offering a button that
+  // can only fail — with a message about an endpoint id — teaches nothing.
+  server.use(
+    http.get("/api/v1/agents", () => HttpResponse.json([])),
+    http.get("/api/v1/agents/examples", () => HttpResponse.json([EXAMPLE])),
+    http.get("/api/v1/model-endpoints", () => HttpResponse.json([])),
+  );
+
+  renderAgents();
+
+  expect(await screen.findByText(/模型接入点|model endpoint/i)).toBeVisible();
+  expect(screen.queryByRole("button", { name: /创建示例|Create example/i })).toBeNull();
+});

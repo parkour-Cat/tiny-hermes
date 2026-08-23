@@ -568,6 +568,19 @@ export type ApprovalResponse = {
   decision_reason: string | null;
 };
 
+/** One ready-made Agent this platform ships (§21's last setup step). */
+export type AgentExampleResponse = {
+  slug: string;
+  name: string;
+  summary: string;
+};
+
+/** What creating an example produced: the Agent, and the version it published. */
+export type CreatedExampleResponse = {
+  agent: AgentResponse;
+  version_id: string;
+};
+
 /** What an endpoint charges, as one recorded version. */
 export type PricingVersionResponse = {
   id: string;
