@@ -82,6 +82,7 @@ export function ConsoleLayout() {
             <NavLink to={`/workspaces/${workspaceId}/skills`}>{t("skills")}</NavLink>
             <NavLink to={`/workspaces/${workspaceId}/skill-proposals`}>{t("proposals")}</NavLink>
             <NavLink to={`/workspaces/${workspaceId}/approvals`}>{t("approvals")}</NavLink>
+            <NavLink to={`/workspaces/${workspaceId}/memory`}>{t("memoryReview")}</NavLink>
             <NavLink to={`/workspaces/${workspaceId}/http-tools`}>{t("httpTools")}</NavLink>
             <NavLink to={`/workspaces/${workspaceId}/mcp-servers`}>{t("mcpServers")}</NavLink>
             <NavLink to={`/workspaces/${workspaceId}/outbound`}>{t("outboundScopes")}</NavLink>

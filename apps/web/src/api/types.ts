@@ -319,6 +319,20 @@ export type SecretResponse = {
   updated_at: string;
 };
 
+/** One thing an Agent asked to remember, and what became of the request. */
+export type MemoryResponse = {
+  id: string;
+  workspace_id: string;
+  agent_id: string;
+  kind: string;
+  status: string;
+  /** As proposed. This is the text that gets written, so it is the text to read. */
+  body: string;
+  origin: string;
+  created_at: string;
+  updated_at: string;
+};
+
 export type RewrapResponse = {
   processed: number;
   remaining: number;
