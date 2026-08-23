@@ -349,7 +349,12 @@ async def test_the_safety_valve_stops_a_run_before_another_model_call(
     reloaded = client.get(f"/api/v1/runs/{run['id']}", headers=scope).json()
     assert reloaded["status"] == "paused"
     assert reloaded["pause_reason"] == "limit"
-    assert reloaded["available_actions"] == ["cancel"]
+    # `resume` is the assertion, not the whole list: a workspace administrator
+    # is also offered `widen_budget` here (§26's 安全阀管理), and pinning the
+    # list would make adding the one action that can move this Run look like
+    # a regression.
+    assert "resume" not in reloaded["available_actions"]
+    assert "cancel" in reloaded["available_actions"]
     assert provider.calls == 1
     assert await _events(engine, run["id"]) == [
         "run_created",

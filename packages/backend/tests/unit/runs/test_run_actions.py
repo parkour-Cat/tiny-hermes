@@ -115,3 +115,57 @@ def test_viewers_receive_no_control_actions() -> None:
         "cancel",
     )
     assert machine.available_actions(view, can_control=False, can_retry=True) == ()
+
+
+def test_an_exhausted_budget_offers_the_one_action_that_can_move_it() -> None:
+    """§26's 安全阀管理, and the state this platform could not get out of.
+
+    `resume` is withheld while the budget forbids execution — correctly, it
+    would fail. But widening the ceiling was API-only, so a Run paused on an
+    exhausted budget offered a workspace administrator nothing but `cancel`:
+    the safety valve had no release. `available_actions` is how this codebase
+    answers "may I?" for a Run, so the answer belongs here rather than in a
+    second notion of permission on the console side.
+    """
+    view = RunStateView(
+        state=RunState.PAUSED,
+        pause_reason=PauseReason.LIMIT,
+        budget_allows_execution=False,
+    )
+
+    actions = RunStateMachine().available_actions(
+        view, can_control=True, can_retry=False, can_hold_budget=True
+    )
+
+    assert "widen_budget" in actions
+    assert "resume" not in actions  # still true, and still for the same reason
+
+
+def test_only_a_budget_holder_is_offered_the_valve() -> None:
+    # §4.6 gives the budget to a workspace administrator. A developer who can
+    # control a Run may pause and cancel it; raising a spend ceiling is not
+    # the same power, and offering the button to somebody the API refuses
+    # would be a button that only ever produces a 403.
+    view = RunStateView(
+        state=RunState.PAUSED,
+        pause_reason=PauseReason.LIMIT,
+        budget_allows_execution=False,
+    )
+
+    actions = RunStateMachine().available_actions(
+        view, can_control=True, can_retry=False, can_hold_budget=False
+    )
+
+    assert "widen_budget" not in actions
+
+
+def test_a_healthy_budget_is_not_offered_a_valve_it_does_not_need() -> None:
+    # Offered on every Run, it would read as a routine control rather than
+    # what it is: the thing you reach for when a ceiling stopped the work.
+    view = RunStateView(state=RunState.RUNNING, budget_allows_execution=True)
+
+    actions = RunStateMachine().available_actions(
+        view, can_control=True, can_retry=False, can_hold_budget=True
+    )
+
+    assert "widen_budget" not in actions

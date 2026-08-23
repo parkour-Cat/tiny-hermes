@@ -575,6 +575,25 @@ export type ApprovalsPageResponse = {
   has_more: boolean;
 };
 
+/** One Run in a task tree. */
+export type RunTreeNode = {
+  id: string;
+  status: string;
+  depth: number;
+  parent_run_id: string | null;
+  /** `root`, `child` or `retry` — why this Run shares the budget. */
+  relation: string;
+  created_at: string;
+  finished_at: string | null;
+};
+
+/** Every Run sharing one budget, and the budget they share (§669). */
+export type RunTreeResponse = {
+  budget_root_run_id: string;
+  nodes: RunTreeNode[];
+  budget: BudgetDocument;
+};
+
 /** What an endpoint charges, as one recorded version. */
 export type PricingVersionResponse = {
   id: string;

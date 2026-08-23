@@ -117,12 +117,19 @@ async def test_a_paused_run_offers_no_resume_until_the_budget_is_widened(
     session_for: Callable[[str], str],
     submit_run: Callable[[str, str], dict[str, Any]],
 ) -> None:
-    """The valve is the state of the budget, not a flag someone can clear."""
+    """The valve is the state of the budget, not a flag someone can clear.
+
+    `resume` is the assertion; the list is not. A workspace administrator is
+    also offered `widen_budget` here — §26's 安全阀管理 — and pinning the
+    whole list would make adding the one action that can move this Run look
+    like a regression.
+    """
     paused = await stopped_at_the_limit(
         client, scope, engine, agent_with_scenario, session_for, submit_run
     )
 
-    assert paused["available_actions"] == ["cancel"]
+    assert "resume" not in paused["available_actions"]
+    assert "cancel" in paused["available_actions"]
 
 
 async def test_widening_the_budget_reopens_the_run_without_resetting_a_counter(
@@ -276,3 +283,38 @@ async def test_the_widening_is_written_to_the_audit_log(
     )
 
     assert "run.budget_widened" in await audits(engine, scope["X-Workspace-Id"])
+
+
+async def test_the_administrator_holding_the_budget_is_offered_the_valve(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    agent_with_scenario: Callable[..., str],
+    session_for: Callable[[str], str],
+    submit_run: Callable[[str, str], dict[str, Any]],
+) -> None:
+    """§26's 安全阀管理, over the route a console actually reads.
+
+    Widening has worked since M2; nothing told anyone it was possible. A Run
+    stopped by its ceiling reported `cancel` and nothing else, so the console
+    drew a dead end — the valve existed and had no release. This is the same
+    "written but unreachable" shape this repository keeps finding, and the
+    unit test on `available_actions` would pass just as well with the
+    capability never reaching the store.
+    """
+    paused = await stopped_at_the_limit(
+        client, scope, engine, agent_with_scenario, session_for, submit_run
+    )
+
+    assert "widen_budget" in paused["available_actions"]
+    # And it is not decoration: the action it advertises is one the API takes.
+    widened = client.post(
+        f"/api/v1/runs/{paused['id']}/budget",
+        headers=scope,
+        json={
+            "expected_state_version": paused["state_version"],
+            "max_model_calls": paused["budget"]["max_model_calls"] + 5,
+        },
+    )
+    assert widened.status_code == 200, widened.text
+    assert "resume" in widened.json()["available_actions"]
