@@ -87,9 +87,11 @@ class _Refused(Exception):
 
 
 @pytest.fixture
-async def wired(tmp_path: Path) -> AsyncIterator[tuple[SpyStreams, ControllerClient]]:
+async def wired(
+    socket_dir: Path,
+) -> AsyncIterator[tuple[SpyStreams, ControllerClient]]:
     spy = SpyStreams()
-    path = str(tmp_path / "controller.sock")
+    path = str(socket_dir / "c.sock")
     server = ControllerServer(
         dispatch=spy.dispatch, stream_dispatch=spy.dispatch_stream, path=path
     )
@@ -248,7 +250,7 @@ async def test_a_five_thousand_entry_scan_survives_the_socket(
 
 
 async def test_progress_frames_keep_a_silent_stream_inside_the_idle_window(
-    tmp_path: Path,
+    socket_dir: Path,
 ) -> None:
     """Design §5.3: a legal silent exec is not killed by the 30s idle rule.
 
@@ -282,7 +284,7 @@ async def test_progress_frames_keep_a_silent_stream_inside_the_idle_window(
             "truncated": False,
         }
 
-    path = str(tmp_path / "controller.sock")
+    path = str(socket_dir / "c.sock")
     server = ControllerServer(
         dispatch=dispatch, stream_dispatch=dispatch_stream, path=path
     )
@@ -306,7 +308,7 @@ async def test_progress_frames_keep_a_silent_stream_inside_the_idle_window(
 
 
 async def test_a_silent_stream_without_progress_dies_inside_the_client_window(
-    tmp_path: Path,
+    socket_dir: Path,
 ) -> None:
     """The keep-alive is load-bearing: silence alone still trips the deadline."""
 
@@ -323,7 +325,7 @@ async def test_a_silent_stream_without_progress_dies_inside_the_client_window(
         await channel.finish_send()
         return {"exit_code": 0}
 
-    path = str(tmp_path / "controller.sock")
+    path = str(socket_dir / "c.sock")
     server = ControllerServer(
         dispatch=dispatch, stream_dispatch=dispatch_stream, path=path
     )

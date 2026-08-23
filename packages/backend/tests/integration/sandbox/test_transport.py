@@ -23,6 +23,8 @@ import pytest
 from tiny_hermes.sandbox.transport.client import ControllerClient
 from tiny_hermes.sandbox.transport.server import ControllerServer, ProtocolError
 
+from .conftest import MAX_SOCKET_PATH
+
 pytestmark = pytest.mark.skipif(
     not hasattr(socket, "AF_UNIX"),
     reason="socket.AF_UNIX does not exist in Python on Windows; CI covers this",
@@ -58,9 +60,11 @@ class _Refused(Exception):
 
 
 @pytest.fixture
-async def wired(tmp_path: Path) -> AsyncIterator[tuple[SpyController, ControllerClient]]:
+async def wired(
+    socket_dir: Path,
+) -> AsyncIterator[tuple[SpyController, ControllerClient]]:
     spy = SpyController()
-    path = str(tmp_path / "controller.sock")
+    path = str(socket_dir / "c.sock")
     server = ControllerServer(dispatch=spy.dispatch, path=path)
     await server.start()
     try:
@@ -99,7 +103,7 @@ async def test_a_refusal_arrives_as_a_refusal_and_not_as_a_dropped_connection(
 
 
 async def test_the_server_survives_a_malformed_frame(
-    wired: tuple[SpyController, ControllerClient], tmp_path: Path
+    wired: tuple[SpyController, ControllerClient],
 ) -> None:
     """One bad client must not take the Controller down for the other one."""
     spy, client = wired
@@ -194,3 +198,17 @@ async def test_the_socket_is_not_world_writable(
     _, client = wired
     mode = os.stat(client.path).st_mode  # noqa: PTH116 - one stat, no event loop
     assert not mode & 0o007
+
+
+def test_the_socket_path_fits_in_the_kernels_own_field(socket_dir: Path) -> None:
+    """`sockaddr_un.sun_path` is 104 bytes on macOS and 108 on Linux.
+
+    Pinned rather than left to the fixture's comment, because the failure it
+    prevents is invisible: a path one byte too long refuses at *setup*, so
+    pytest reports errors rather than failures and a whole directory of tests
+    quietly does not run. Every test in this file went that way on macOS
+    until the fixture stopped building socket paths out of test names.
+    """
+    path = socket_dir / "c.sock"
+
+    assert len(str(path).encode()) < MAX_SOCKET_PATH, str(path)
