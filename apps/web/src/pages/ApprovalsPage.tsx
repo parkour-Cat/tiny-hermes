@@ -1,11 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Descriptions, Empty, Form, Input, Modal, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Descriptions, Empty, Form, Input, Modal, Radio, Space, Table, Tag, Typography } from "antd";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
 import { problemMessage } from "../api/messages";
-import type { ApprovalResponse } from "../api/types";
+import type { ApprovalResponse, ApprovalsPageResponse } from "../api/types";
 import { moment } from "../i18n/moment";
 import { useT } from "../i18n/locale";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
@@ -24,10 +24,59 @@ import { useWorkspaceId } from "../workspace/useWorkspaceId";
  * reviewer deciding from a summary this console rewrote would be approving
  * something nobody can prove matches what runs.
  *
- * The full governance queue — filters, assignment, history — is M3's. This is
- * the part without which a write cannot happen at all: see it, approve it,
- * reject it, know why.
+ * §26's queue adds the third thing: reading back what was decided. It is a
+ * section of its own rather than a status column on the cards above, because
+ * an answered approval is not work — mixing it into a list a person works
+ * through is how a decided row gets a second decision aimed at it.
+ *
+ * History is narrowed by the server, never here. Filtering a page the browser
+ * happens to hold answers "none of the rows I fetched match" to somebody who
+ * asked "did this ever happen", and those two look identical.
+ *
+ * There is no assignment: the product design names no assignee, and §4.6
+ * already fixes who may decide. See `approval_routes.py`.
  */
+/**
+ * What "history" means by default: everything that is no longer waiting.
+ *
+ * `expired` belongs here as much as the two answers do. Nobody decided it,
+ * and that is the fact worth reading — a queue that showed only approvals and
+ * rejections would quietly drop the rows that timed out, which are the ones
+ * §26's 审批负担 question is about.
+ */
+const DECIDED = ["approved", "rejected", "expired"];
+
+/**
+ * A status in the reader's language.
+ *
+ * Spelled out rather than built as `t(\`approvalStatus_${status}\`)`: a
+ * template key type-checks against nothing, so a status the backend adds
+ * later would render blank in every language and nobody would see a build
+ * error. An unknown one falls back to its own name, which is at least true.
+ */
+function statusLabel(status: string, t: (key: "approvalStatus_pending" | "approvalStatus_approved" | "approvalStatus_rejected" | "approvalStatus_expired") => string): string {
+  switch (status) {
+    case "pending":
+      return t("approvalStatus_pending");
+    case "approved":
+      return t("approvalStatus_approved");
+    case "rejected":
+      return t("approvalStatus_rejected");
+    case "expired":
+      return t("approvalStatus_expired");
+    default:
+      return status;
+  }
+}
+
+/** What the history filter offers, and which statuses each choice asks for. */
+const HISTORY_CHOICES: { key: string; statuses: string[] }[] = [
+  { key: "all", statuses: DECIDED },
+  { key: "approved", statuses: ["approved"] },
+  { key: "rejected", statuses: ["rejected"] },
+  { key: "expired", statuses: ["expired"] },
+];
+
 export function ApprovalsPage() {
   const t = useT();
   const workspaceId = useWorkspaceId();
@@ -40,7 +89,21 @@ export function ApprovalsPage() {
 
   const approvals = useQuery({
     queryKey: ["approvals", workspaceId] as const,
-    queryFn: () => api<ApprovalResponse[]>("/api/v1/approvals", scope),
+    queryFn: () => api<ApprovalsPageResponse>("/api/v1/approvals", scope),
+    enabled: workspaceId !== null,
+  });
+
+  const [historyChoice, setHistoryChoice] = useState("all");
+  const historyStatus =
+    HISTORY_CHOICES.find((choice) => choice.key === historyChoice)?.statuses ?? DECIDED;
+  const history = useQuery({
+    queryKey: ["approvals", "history", workspaceId, historyStatus] as const,
+    queryFn: () => {
+      const query = new URLSearchParams();
+      for (const status of historyStatus) query.append("status", status);
+      query.set("order", "newest_first");
+      return api<ApprovalsPageResponse>(`/api/v1/approvals?${query.toString()}`, scope);
+    },
     enabled: workspaceId !== null,
   });
 
@@ -74,7 +137,7 @@ export function ApprovalsPage() {
     );
   }
 
-  const waiting = approvals.data ?? [];
+  const waiting = approvals.data?.items ?? [];
   const user = waiting.filter((item) => item.approval_type === "user_confirmation");
   const governance = waiting.filter((item) => item.approval_type === "governance_approval");
 
@@ -183,6 +246,85 @@ export function ApprovalsPage() {
         ) : (
           governance.map(card)
         )}
+      </Card>
+
+      <Card
+        title={t("approvalsHistory")}
+        variant="borderless"
+        className="page-alert"
+        loading={history.isPending}
+      >
+        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+          <Typography.Paragraph type="secondary">
+            {t("approvalsHistoryIntro")}
+          </Typography.Paragraph>
+          <Radio.Group
+            aria-label={t("approvalsHistoryStatus")}
+            optionType="button"
+            value={historyChoice}
+            onChange={(event) => setHistoryChoice(String(event.target.value))}
+            options={HISTORY_CHOICES.map((choice) => ({
+              value: choice.key,
+              label: choice.key === "all" ? t("approvalsHistoryAll") : statusLabel(choice.key, t),
+            }))}
+          />
+          {history.isError ? (
+            <Alert type="error" showIcon title={problemMessage(history.error, t)} />
+          ) : null}
+          {(history.data?.items ?? []).length === 0 && !history.isPending ? (
+            <Empty description={t("approvalsHistoryEmpty")} />
+          ) : (
+            <Table<ApprovalResponse>
+              rowKey="id"
+              size="small"
+              pagination={false}
+              dataSource={history.data?.items ?? []}
+              columns={[
+                {
+                  title: t("approvalWhen"),
+                  dataIndex: "decided_at",
+                  render: (value: string | null) => (value === null ? "—" : moment(value)),
+                },
+                {
+                  title: t("approvalTool"),
+                  dataIndex: "tool",
+                  render: (value: string) => <Typography.Text code>{value}</Typography.Text>,
+                },
+                {
+                  title: t("approvalOutcome"),
+                  dataIndex: "status",
+                  render: (value: string) => <Tag>{statusLabel(value, t)}</Tag>,
+                },
+                {
+                  title: t("approvalDecidedBy"),
+                  dataIndex: "decided_by",
+                  // "—" rather than blank: an expired approval was decided by
+                  // nobody, and that is different from a missing value.
+                  render: (value: string | null) => value ?? "—",
+                },
+                {
+                  title: t("approvalReason"),
+                  dataIndex: "decision_reason",
+                  render: (value: string | null) => value ?? "—",
+                },
+                {
+                  title: t("approvalRun"),
+                  dataIndex: "run_id",
+                  render: (value: string) => (
+                    <Link to={`/workspaces/${workspaceId}/runs/${value}`}>{value}</Link>
+                  ),
+                },
+              ]}
+            />
+          )}
+          {history.data?.has_more === true ? (
+            // Said, not paged over: a table that ends at the page boundary
+            // without a word reads as "that is all there was".
+            <Typography.Paragraph type="secondary">
+              {t("approvalsHistoryMore")}
+            </Typography.Paragraph>
+          ) : null}
+        </Space>
       </Card>
 
       <Modal
