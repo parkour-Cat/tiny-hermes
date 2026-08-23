@@ -49,7 +49,7 @@ export function SecretsPage() {
       form.resetFields();
       setError(null);
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   const disable = useMutation({
@@ -64,7 +64,7 @@ export function SecretsPage() {
       );
       setError(null);
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   const rewrap = useMutation({
@@ -76,14 +76,14 @@ export function SecretsPage() {
       );
       setError(null);
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   if (listed.isError) {
     return (
       <Alert
         type="error"
-        title={problemMessage(listed.error)}
+        title={problemMessage(listed.error, t)}
         action={<Button onClick={() => void listed.refetch()}>{t("retry")}</Button>}
         showIcon
       />

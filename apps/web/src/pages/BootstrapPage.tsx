@@ -3,8 +3,8 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../api/client";
+import { useT } from "../i18n/locale";
 import type { User } from "../auth/AuthProvider";
-import { t } from "../i18n/zh-CN";
 import { PublicShell } from "./LoginPage";
 
 type BootstrapValues = {
@@ -15,6 +15,7 @@ type BootstrapValues = {
 };
 
 export function BootstrapPage() {
+  const t = useT();
   const navigate = useNavigate();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);

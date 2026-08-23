@@ -111,7 +111,7 @@ export function PlaygroundPage() {
       setRunId(null);
       setError(null);
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   const send = useMutation({
@@ -128,7 +128,7 @@ export function PlaygroundPage() {
       setInput("");
       setError(null);
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   const control = useMutation({
@@ -151,7 +151,7 @@ export function PlaygroundPage() {
     },
     onError: (caught) => {
       setNote(null);
-      setError(problemMessage(caught));
+      setError(problemMessage(caught, t));
     },
   });
 
@@ -179,7 +179,7 @@ export function PlaygroundPage() {
     return (
       <Alert
         type="error"
-        title={problemMessage(failed.error)}
+        title={problemMessage(failed.error, t)}
         action={<Button onClick={() => void failed.refetch()}>{t("retry")}</Button>}
         showIcon
       />
@@ -225,7 +225,7 @@ export function PlaygroundPage() {
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}
       {events.error === null ? null : (
-        <Alert className="page-alert" type="warning" title={events.error} showIcon />
+        <Alert className="page-alert" type="warning" title={problemMessage(events.error, t)} showIcon />
       )}
       {blocked ? (
         <Alert
@@ -307,7 +307,7 @@ export function PlaygroundPage() {
               <Button
                 onClick={() =>
                   void downloadArtifact(file.id, file.filename, workspaceId ?? "").catch((caught) =>
-                    setError(problemMessage(caught)),
+                    setError(problemMessage(caught, t)),
                   )
                 }
               >

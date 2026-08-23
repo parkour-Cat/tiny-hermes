@@ -65,7 +65,7 @@ export function ModelEndpointsPage() {
       form.resetFields();
       setError(null);
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   const setStatus = useMutation({
@@ -75,7 +75,7 @@ export function ModelEndpointsPage() {
         body: JSON.stringify({ status }),
       }),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: listQuery }),
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   const check = useMutation({
@@ -89,14 +89,14 @@ export function ModelEndpointsPage() {
       );
       setError(null);
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   if (listed.isError) {
     return (
       <Alert
         type="error"
-        title={problemMessage(listed.error)}
+        title={problemMessage(listed.error, t)}
         action={<Button onClick={() => void listed.refetch()}>{t("retry")}</Button>}
         showIcon
       />

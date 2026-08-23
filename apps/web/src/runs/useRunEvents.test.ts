@@ -191,7 +191,11 @@ test("a refused stream stops the reader and is not tried again", async () => {
     wrapper,
   });
 
-  await waitFor(() => expect(result.current.error).toBe(t("forbidden")));
+  // The code, not a sentence. This hook decides *what* happened and the
+  // page decides how to say it, so asserting the wording here would tie a
+  // data test to a locale — and would have kept passing while the console's
+  // language switcher did nothing to it.
+  await waitFor(() => expect(result.current.error?.code).toBe("forbidden"));
   await rest();
   expect(calls).toBe(1);
 });
@@ -209,7 +213,7 @@ test("a Run the platform does not know stops the reader and is not tried again",
     wrapper,
   });
 
-  await waitFor(() => expect(result.current.error).toBe("No such run."));
+  await waitFor(() => expect(result.current.error?.code).toBe("run_not_found"));
   await rest();
   expect(calls).toBe(1);
 });

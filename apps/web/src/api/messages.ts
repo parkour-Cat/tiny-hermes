@@ -1,6 +1,5 @@
 import { ApiError } from "./client";
 import type { MessageKey } from "../i18n/zh-CN";
-import { t } from "../i18n/zh-CN";
 
 /**
  * Codes the console has its own wording for.
@@ -23,6 +22,11 @@ const NAMED: Partial<Record<string, MessageKey>> = {
   user_not_found: "userNotFound",
   member_already_present: "memberAlreadyPresent",
   last_workspace_admin: "lastWorkspaceAdmin",
+  // The two the transport itself raises. They live here rather than in
+  // `client.ts` so that nothing below this file needs a locale at all: the
+  // transport produces codes, and one place turns codes into sentences.
+  network_failed: "networkFailed",
+  request_failed: "requestFailed",
 };
 
 /** Which form field a refusal belongs to, when it belongs to one. */
@@ -32,12 +36,25 @@ const FIELDS: Partial<Record<string, string>> = {
   invalid_agent_name: "name",
 };
 
-export function problemMessage(error: unknown): string {
+/**
+ * The caller passes its own `t` because this module has no locale of its own.
+ *
+ * It used to import `t` from `../i18n/zh-CN` directly, so every mapped code
+ * rendered in Chinese however the reader had set the language — the console's
+ * switcher changed the chrome around a message that never moved. The signature
+ * now makes a return to that a compile error rather than a wrong string.
+ */
+export function problemMessage(error: unknown, t: (key: MessageKey) => string): string {
   if (!(error instanceof ApiError)) {
     return error instanceof Error ? error.message : t("requestFailed");
   }
   const key = NAMED[error.code];
-  return key === undefined ? error.message : t(key);
+  // An empty `message` means the platform sent no `detail` — there is nothing
+  // to fall through to, so this says the one true thing it can.
+  if (key === undefined) {
+    return error.message === "" ? t("requestFailed") : error.message;
+  }
+  return t(key);
 }
 
 export function problemField(error: unknown): string | null {

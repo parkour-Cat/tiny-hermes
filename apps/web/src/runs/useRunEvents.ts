@@ -3,7 +3,6 @@ import { useEffect, useState } from "react";
 
 import { readFrames } from "./eventFrames";
 import { ApiError, api, asApiError } from "../api/client";
-import { problemMessage } from "../api/messages";
 import type { RunEventFrame, RunResponse } from "../api/types";
 
 /**
@@ -43,7 +42,8 @@ export type TimelineEntry =
 export type RunEvents = {
   entries: TimelineEntry[];
   /** Why the subscription stopped, when it stopped for a reason worth showing. */
-  error: string | null;
+  /** The refusal itself, not a sentence — see `setError`'s own comment. */
+  error: ApiError | null;
 };
 
 /**
@@ -69,7 +69,7 @@ export function useRunEvents({
 }): RunEvents {
   const queryClient = useQueryClient();
   const [entries, setEntries] = useState<TimelineEntry[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ApiError | null>(null);
 
   useEffect(() => {
     if (runId === null || workspaceId === null) {
@@ -174,7 +174,13 @@ export function useRunEvents({
             // Anything else the platform refuses outright — no membership, no
             // such Run, a malformed request — is not fixed by asking again.
             if (problem.status < 500) {
-              setError(problemMessage(problem));
+              // The `ApiError`, not a sentence. Translating here would give
+              // this data hook a locale dependency — and therefore a
+              // `LocaleProvider` requirement — for the sake of one string,
+              // when both callers are pages already holding a `t`. Same
+              // division `explain.ts` keeps: this layer decides *what*
+              // happened, the page decides how to say it.
+              setError(problem);
               return;
             }
             throw problem;

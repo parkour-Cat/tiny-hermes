@@ -149,7 +149,7 @@ export function RunDetailPage() {
     },
     onError: async (caught) => {
       setNote(null);
-      setActionError(problemMessage(caught));
+      setActionError(problemMessage(caught, t));
       if (caught instanceof ApiError && caught.code === "state_version_conflict") {
         await snapshot.refetch();
       }
@@ -172,7 +172,7 @@ export function RunDetailPage() {
     },
     onError: (caught) => {
       setNote(null);
-      setActionError(problemMessage(caught));
+      setActionError(problemMessage(caught, t));
     },
   });
 
@@ -180,7 +180,7 @@ export function RunDetailPage() {
     return (
       <Alert
         type="error"
-        title={problemMessage(snapshot.error)}
+        title={problemMessage(snapshot.error, t)}
         action={<Button onClick={() => void snapshot.refetch()}>{t("retry")}</Button>}
         showIcon
       />
@@ -378,7 +378,7 @@ export function RunDetailPage() {
         <Alert className="page-alert" type="warning" title={actionError} showIcon />
       )}
       {events.error === null ? null : (
-        <Alert className="page-alert" type="warning" title={events.error} showIcon />
+        <Alert className="page-alert" type="warning" title={problemMessage(events.error, t)} showIcon />
       )}
       {situation === null ? null : (
         <Alert className="page-alert" type="info" title={t(situation)} showIcon />
@@ -432,7 +432,7 @@ export function RunDetailPage() {
                     key={id}
                     onClick={() =>
                       void downloadArtifact(id, id, workspaceId ?? "").catch((caught) =>
-                        setActionError(problemMessage(caught)),
+                        setActionError(problemMessage(caught, t)),
                       )
                     }
                   >
@@ -454,7 +454,7 @@ export function RunDetailPage() {
               <Button
                 onClick={() =>
                   void downloadArtifact(file.id, file.filename, workspaceId ?? "").catch((caught) =>
-                    setActionError(problemMessage(caught)),
+                    setActionError(problemMessage(caught, t)),
                   )
                 }
               >

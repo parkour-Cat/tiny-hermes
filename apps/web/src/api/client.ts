@@ -1,4 +1,3 @@
-import { t } from "../i18n/zh-CN";
 
 type ProblemDetails = {
   code?: string;
@@ -85,7 +84,10 @@ export async function apiWithStatus<T>(path: string, init: ApiInit = {}): Promis
       headers,
     });
   } catch {
-    throw new ApiError(0, "network_failed", t("networkFailed"));
+    // No message: this module has no locale, and `problemMessage` maps
+    // `network_failed` to one. A sentence written here would be the one the
+    // language switcher could not move.
+    throw new ApiError(0, "network_failed", "");
   }
 
   if (!response.ok) {
@@ -108,7 +110,9 @@ export async function asApiError(response: Response): Promise<ApiError> {
   return new ApiError(
     response.status,
     problem.code ?? "request_failed",
-    problem.detail ?? t("requestFailed"),
+    // Empty rather than a sentence, for the reason above: an absent
+    // `detail` is turned into words by whoever displays it.
+    problem.detail ?? "",
     problem.context ?? {},
   );
 }

@@ -384,7 +384,7 @@ export function AgentDetailPage() {
       queryClient.setQueryData(draftQuery, saved);
       setSaveError(null);
     },
-    onError: (caught) => setSaveError(problemMessage(caught)),
+    onError: (caught) => setSaveError(problemMessage(caught, t)),
   });
 
   const rename = useMutation({
@@ -398,7 +398,7 @@ export function AgentDetailPage() {
       queryClient.setQueryData(agentQuery, updated);
       setSaveError(null);
     },
-    onError: (caught) => setSaveError(problemMessage(caught)),
+    onError: (caught) => setSaveError(problemMessage(caught, t)),
   });
 
   const publish = useMutation({
@@ -422,7 +422,7 @@ export function AgentDetailPage() {
       setSummaryCosts(null);
     },
     onError: (caught) => {
-      setSaveError(problemMessage(caught));
+      setSaveError(problemMessage(caught, t));
       setSummaryCosts(summaryCostsOf(caught));
     },
   });
@@ -442,7 +442,7 @@ export function AgentDetailPage() {
       );
       setSaveError(null);
     },
-    onError: (caught) => setSaveError(problemMessage(caught)),
+    onError: (caught) => setSaveError(problemMessage(caught, t)),
   });
 
   const failed = [agent, draft, versions].find((query) => query.isError);
@@ -450,7 +450,7 @@ export function AgentDetailPage() {
     return (
       <Alert
         type="error"
-        title={problemMessage(failed.error)}
+        title={problemMessage(failed.error, t)}
         action={<Button onClick={() => void failed.refetch()}>{t("retry")}</Button>}
         showIcon
       />

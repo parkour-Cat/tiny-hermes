@@ -86,7 +86,7 @@ export function SkillProposalsPage() {
       );
       settled();
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   const reject = useMutation({
@@ -99,14 +99,14 @@ export function SkillProposalsPage() {
       setNote(null);
       settled();
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   if (listed.isError) {
     return (
       <Alert
         type="error"
-        title={problemMessage(listed.error)}
+        title={problemMessage(listed.error, t)}
         action={<Button onClick={() => void listed.refetch()}>{t("retry")}</Button>}
         showIcon
       />
@@ -215,7 +215,7 @@ export function SkillProposalsPage() {
                   <Diff
                     files={opened.data?.diff ?? []}
                     loading={opened.isPending}
-                    error={opened.isError ? problemMessage(opened.error) : null}
+                    error={opened.isError ? problemMessage(opened.error, t) : null}
                   />
                 ) : null}
               </div>

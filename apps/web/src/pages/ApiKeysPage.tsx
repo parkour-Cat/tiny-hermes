@@ -63,7 +63,7 @@ export function ApiKeysPage() {
       accountForm.resetFields();
       setError(null);
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   const disableAccount = useMutation({
@@ -78,7 +78,7 @@ export function ApiKeysPage() {
       );
       setError(null);
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   const createKey = useMutation({
@@ -96,7 +96,7 @@ export function ApiKeysPage() {
       setPlaintext(issued);
       setError(null);
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   const revoke = useMutation({
@@ -112,14 +112,14 @@ export function ApiKeysPage() {
       );
       setError(null);
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   if (accounts.isError) {
     return (
       <Alert
         type="error"
-        title={problemMessage(accounts.error)}
+        title={problemMessage(accounts.error, t)}
         action={<Button onClick={() => void accounts.refetch()}>{t("retry")}</Button>}
         showIcon
       />

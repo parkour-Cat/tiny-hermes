@@ -79,7 +79,7 @@ export function SkillsPage() {
       setNote(null);
       refresh();
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   const importing = useMutation({
@@ -94,14 +94,14 @@ export function SkillsPage() {
       setNote(null);
       refresh();
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   if (listed.isError) {
     return (
       <Alert
         type="error"
-        title={problemMessage(listed.error)}
+        title={problemMessage(listed.error, t)}
         action={<Button onClick={() => void listed.refetch()}>{t("retry")}</Button>}
         showIcon
       />
@@ -253,7 +253,7 @@ function SkillRow({ skill, editable, onChanged, onError, onNote, confirm }: RowP
       onNote(result.status === 200 ? t("skillUnchanged") : null);
       onChanged();
     },
-    onError: (caught) => onError(problemMessage(caught)),
+    onError: (caught) => onError(problemMessage(caught, t)),
   });
 
   const withdraw = useMutation({
@@ -263,7 +263,7 @@ function SkillRow({ skill, editable, onChanged, onError, onNote, confirm }: RowP
         method: "POST",
       }),
     onSuccess: onChanged,
-    onError: (caught) => onError(problemMessage(caught)),
+    onError: (caught) => onError(problemMessage(caught, t)),
   });
 
   const makeCurrent = useMutation({
@@ -274,7 +274,7 @@ function SkillRow({ skill, editable, onChanged, onError, onNote, confirm }: RowP
         body: JSON.stringify({ version_id: versionId }),
       }),
     onSuccess: onChanged,
-    onError: (caught) => onError(problemMessage(caught)),
+    onError: (caught) => onError(problemMessage(caught, t)),
   });
 
   const rows = versions.data ?? [];

@@ -52,7 +52,7 @@ export function MembersPage() {
       form.resetFields();
       setError(null);
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   const changeRole = useMutation({
@@ -68,7 +68,7 @@ export function MembersPage() {
       );
       setError(null);
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   const remove = useMutation({
@@ -83,14 +83,14 @@ export function MembersPage() {
       );
       setError(null);
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   if (members.isError) {
     return (
       <Alert
         type="error"
-        title={problemMessage(members.error)}
+        title={problemMessage(members.error, t)}
         action={<Button onClick={() => void members.refetch()}>{t("retry")}</Button>}
         showIcon
       />

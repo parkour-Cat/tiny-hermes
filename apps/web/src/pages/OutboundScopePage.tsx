@@ -61,7 +61,7 @@ export function OutboundScopePage() {
       platformForm.resetFields();
       refresh();
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   const approveWorkspace = useMutation({
@@ -75,21 +75,21 @@ export function OutboundScopePage() {
       workspaceForm.resetFields();
       refresh();
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   const revoke = useMutation({
     mutationFn: (entryId: string) =>
       api<void>(`/api/v1/outbound-scopes/${entryId}`, { ...scope, method: "DELETE" }),
     onSuccess: refresh,
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   if (platform.isError) {
     return (
       <Alert
         type="error"
-        title={problemMessage(platform.error)}
+        title={problemMessage(platform.error, t)}
         action={<Button onClick={() => void platform.refetch()}>{t("retry")}</Button>}
         showIcon
       />

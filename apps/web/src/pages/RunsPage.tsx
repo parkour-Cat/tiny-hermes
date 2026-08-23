@@ -4,10 +4,10 @@ import { useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../api/client";
+import { useT } from "../i18n/locale";
 import { problemMessage } from "../api/messages";
 import type { AgentResponse, RunResponse, SessionResponse } from "../api/types";
 import { moment } from "../i18n/moment";
-import { t } from "../i18n/zh-CN";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 type SubmitValues = {
@@ -32,6 +32,7 @@ type Attempt = {
 };
 
 export function RunsPage() {
+  const t = useT();
   const workspaceId = useWorkspaceId();
   const navigate = useNavigate();
   const [form] = Form.useForm<SubmitValues>();
@@ -88,10 +89,10 @@ export function RunsPage() {
       // Nothing is sent again here. A console that resubmits on its own turns
       // the idempotency record into decoration, and the one refusal that says
       // the key is spent is the one where sending it again cannot succeed.
-      if (problemMessage(caught) === t("idempotencyKeyReused")) {
+      if (problemMessage(caught, t) === t("idempotencyKeyReused")) {
         attempt.current = null;
       }
-      setSubmitError(problemMessage(caught));
+      setSubmitError(problemMessage(caught, t));
     },
   });
 
@@ -99,7 +100,7 @@ export function RunsPage() {
     return (
       <Alert
         type="error"
-        title={problemMessage(runs.error)}
+        title={problemMessage(runs.error, t)}
         action={<Button onClick={() => void runs.refetch()}>{t("retry")}</Button>}
         showIcon
       />
