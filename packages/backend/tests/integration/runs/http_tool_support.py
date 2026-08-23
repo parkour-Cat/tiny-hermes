@@ -115,7 +115,29 @@ async def serving(app: StandIn) -> AsyncGenerator[str]:
         await task
 
 
-def worker(engine: AsyncEngine, workspace_id: str, proxy: ProxyHandle) -> WorkerRuntime:
+class RecordingModel:
+    """Every `ModelRequest` this Worker actually sent.
+
+    Kept here rather than in one test file because "what did the model see"
+    is the only way to check a claim about what the model *cannot* see, and
+    more than one assertion needs it.
+    """
+
+    def __init__(self) -> None:
+        self.inner = DeterministicModelProvider(delay_ms=0)
+        self.requests: list[Any] = []
+
+    async def complete(self, request: Any) -> Any:
+        self.requests.append(request)
+        return await self.inner.complete(request)
+
+
+def worker(
+    engine: AsyncEngine,
+    workspace_id: str,
+    proxy: ProxyHandle,
+    model: Any = None,
+) -> WorkerRuntime:
     """A Worker with the two things an HTTP tool call needs and nothing else.
 
     The approval gate is real. A Worker built without one refuses every write,
@@ -125,7 +147,7 @@ def worker(engine: AsyncEngine, workspace_id: str, proxy: ProxyHandle) -> Worker
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     return WorkerRuntime(
         session_factory=sessions,
-        model=DeterministicModelProvider(delay_ms=0),
+        model=model or DeterministicModelProvider(delay_ms=0),
         notifier=NullWakeUpNotifier(),
         approvals=SqlApprovalGate(sessions),
         http_sender=OutboundHttpToolSender(
