@@ -21,6 +21,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
 from tiny_hermes.runs.domain.approval import Approval, ApprovalStatus, ApprovalType
+from tiny_hermes.runs.domain.approval_query import (
+    ApprovalFilter,
+    ApprovalPage,
+    QueueOrder,
+)
 from tiny_hermes.runs.domain.models import (
     PauseReason,
     RunCapabilities,
@@ -52,19 +57,50 @@ class SqlApprovalStore:
         )
         return Role(value) if value else None
 
-    async def list_pending(self, workspace_id: UUID) -> Sequence[Approval]:
+    async def list_approvals(
+        self, workspace_id: UUID, criteria: ApprovalFilter
+    ) -> ApprovalPage:
+        """One page of this workspace's approvals, pending or answered.
+
+        `workspace_id` is applied here and is not part of `ApprovalFilter` —
+        the filter carries what a caller asked for, and the one bound they
+        may never widen is not something they should be able to express.
+        """
+        query = select(ApprovalRow).where(ApprovalRow.workspace_id == workspace_id)
+        if criteria.statuses:
+            query = query.where(
+                ApprovalRow.status.in_([status.value for status in criteria.statuses])
+            )
+        if criteria.approval_type is not None:
+            query = query.where(
+                ApprovalRow.approval_type == criteria.approval_type.value
+            )
+        if criteria.tool is not None:
+            query = query.where(ApprovalRow.tool == criteria.tool)
+        if criteria.decided_by is not None:
+            query = query.where(ApprovalRow.decided_by == criteria.decided_by)
+        if criteria.since is not None:
+            query = query.where(ApprovalRow.created_at >= criteria.since)
+        if criteria.until is not None:
+            query = query.where(ApprovalRow.created_at <= criteria.until)
+
+        # `id` breaks the tie in both directions. Two approvals created in the
+        # same transaction share a `created_at`, and an order that leaves them
+        # to the planner can show one row on two pages and another on none.
+        if criteria.order is QueueOrder.NEWEST_FIRST:
+            query = query.order_by(ApprovalRow.created_at.desc(), ApprovalRow.id.desc())
+        else:
+            query = query.order_by(ApprovalRow.created_at, ApprovalRow.id)
+
         rows = (
             await self._session.scalars(
-                select(ApprovalRow)
-                .where(
-                    ApprovalRow.workspace_id == workspace_id,
-                    ApprovalRow.status == ApprovalStatus.PENDING.value,
-                )
-                # Oldest first: a queue people work through, not a feed.
-                .order_by(ApprovalRow.created_at)
+                query.offset(criteria.offset).limit(criteria.limit + 1)
             )
         ).all()
-        return [_approval(row) for row in rows]
+        return ApprovalPage(
+            items=tuple(_approval(row) for row in rows[: criteria.limit]),
+            has_more=len(rows) > criteria.limit,
+        )
 
     async def list_pending_for_end_user(
         self, workspace_id: UUID, end_user_id: UUID

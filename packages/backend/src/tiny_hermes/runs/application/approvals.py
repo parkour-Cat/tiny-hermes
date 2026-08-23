@@ -31,6 +31,7 @@ from tiny_hermes.runs.domain.approval import (
     Decider,
     may_decide,
 )
+from tiny_hermes.runs.domain.approval_query import ApprovalFilter, ApprovalPage
 from tiny_hermes.tenancy.domain.models import Actor, Role
 
 #: How long a rejection reason may be. Long enough for a paragraph, short
@@ -41,7 +42,9 @@ MAX_REASON_LENGTH = 2048
 class ApprovalStore(Protocol):
     async def user_role(self, workspace_id: UUID, user_id: UUID) -> Role | None: ...
 
-    async def list_pending(self, workspace_id: UUID) -> Sequence[Approval]: ...
+    async def list_approvals(
+        self, workspace_id: UUID, criteria: ApprovalFilter
+    ) -> ApprovalPage: ...
 
     async def list_pending_for_end_user(
         self, workspace_id: UUID, end_user_id: UUID
@@ -122,21 +125,25 @@ class ReasonRequired(ApprovalError):
 class ApprovalService:
     store: ApprovalStore
 
-    async def list_pending(
-        self, actor: Actor, workspace_id: UUID, request_id: str
-    ) -> Sequence[Approval]:
-        """Every approval this workspace is being asked about.
+    async def list_approvals(
+        self, actor: Actor, workspace_id: UUID, criteria: ApprovalFilter, request_id: str
+    ) -> ApprovalPage:
+        """One page of what this workspace has been asked, and answered.
 
         Unfiltered by who may decide each one, on purpose: a developer who can
         see that their Run is waiting on an administrator knows to go and ask,
         while a list that hid it would leave them watching a Run that appears
         stuck for no reason. Deciding is still checked per approval.
+
+        Answered rows are readable by the same members, which is the point of
+        §26's queue — a decision whose `decided_by` nobody can read is an
+        accountability record that exists only in the database.
         """
         del request_id
         role = await self.store.user_role(workspace_id, actor.id)
         if role is None and not actor.is_platform_admin:
             raise ForbiddenApprovalAction
-        return await self.store.list_pending(workspace_id)
+        return await self.store.list_approvals(workspace_id, criteria)
 
     async def list_pending_for_end_user(
         self, end_user_id: UUID, workspace_id: UUID, request_id: str

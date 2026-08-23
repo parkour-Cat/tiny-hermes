@@ -43,6 +43,21 @@ function approval(overrides: object = {}) {
   };
 }
 
+/**
+ * The queue endpoint, answering the page's two questions.
+ *
+ * The page asks it twice — once with no `status` for the working queue, once
+ * with a status for history — so a handler that ignored the query would feed
+ * decided rows into the "waiting for a decision" cards and vice versa, which
+ * is the bug these tests exist to catch.
+ */
+function queue(pending: object[], history: object[] = []) {
+  return http.get("/api/v1/approvals", ({ request }) => {
+    const asked = new URL(request.url).searchParams.getAll("status");
+    return HttpResponse.json({ items: asked.length === 0 ? pending : history, has_more: false });
+  });
+}
+
 function renderApprovals(): void {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
@@ -63,12 +78,10 @@ function renderApprovals(): void {
 test("the two kinds are shown apart, because they are two different powers", async () => {
   server.use(
     http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
-    http.get("/api/v1/approvals", () =>
-      HttpResponse.json([
-        approval(),
-        approval({ id: "a2", approval_type: "user_confirmation", tool: "file.write" }),
-      ]),
-    ),
+    queue([
+      approval(),
+      approval({ id: "a2", approval_type: "user_confirmation", tool: "file.write" }),
+    ]),
   );
 
   renderApprovals();
@@ -86,7 +99,7 @@ test("the two kinds are shown apart, because they are two different powers", asy
 test("the arguments shown are the normalized ones the platform hashed", async () => {
   server.use(
     http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
-    http.get("/api/v1/approvals", () => HttpResponse.json([approval()])),
+    queue([approval()]),
   );
 
   renderApprovals();
@@ -103,7 +116,7 @@ test("approving asks first and says what exactly it allows", async () => {
   const decided: unknown[] = [];
   server.use(
     http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
-    http.get("/api/v1/approvals", () => HttpResponse.json([approval()])),
+    queue([approval()]),
     http.post("/api/v1/approvals/a1/decision", async ({ request }) => {
       decided.push(await request.json());
       return HttpResponse.json(approval({ status: "approved" }));
@@ -126,7 +139,7 @@ test("a rejection cannot be sent without a reason", async () => {
   const decided: unknown[] = [];
   server.use(
     http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
-    http.get("/api/v1/approvals", () => HttpResponse.json([approval()])),
+    queue([approval()]),
     http.post("/api/v1/approvals/a1/decision", async ({ request }) => {
       decided.push(await request.json());
       return HttpResponse.json(approval({ status: "rejected" }));
@@ -150,7 +163,7 @@ test("a rejection with a reason sends it", async () => {
   const decided: unknown[] = [];
   server.use(
     http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
-    http.get("/api/v1/approvals", () => HttpResponse.json([approval()])),
+    queue([approval()]),
     http.post("/api/v1/approvals/a1/decision", async ({ request }) => {
       decided.push(await request.json());
       return HttpResponse.json(approval({ status: "rejected" }));
@@ -173,10 +186,75 @@ test("a rejection with a reason sends it", async () => {
 test("nothing waiting says so in both sections", async () => {
   server.use(
     http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
-    http.get("/api/v1/approvals", () => HttpResponse.json([])),
+    queue([]),
   );
 
   renderApprovals();
 
   expect(await screen.findAllByText("没有待处理的审批。")).toHaveLength(2);
+});
+
+test("a decision is readable afterwards, with who made it and why", async () => {
+  // §26. The three decision columns have always been written and were never
+  // readable; an accountability record only the database can see is not one.
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
+    queue(
+      [],
+      [
+        approval({
+          id: "a9",
+          status: "rejected",
+          decided_by: "u1",
+          decided_at: "2026-08-20T09:00:00Z",
+          decision_reason: "not this quarter",
+        }),
+      ],
+    ),
+  );
+
+  renderApprovals();
+
+  expect(await screen.findByText("not this quarter")).toBeVisible();
+});
+
+test("an answered approval is not offered a second decision", async () => {
+  // Deciding it again is not a thing the API allows, and a button that looks
+  // available is a reviewer's wasted click and a moment of believing they
+  // changed something.
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
+    queue([], [approval({ id: "a9", status: "approved", decided_by: "u1", decided_at: "2026-08-20T09:00:00Z" })]),
+  );
+
+  renderApprovals();
+
+  // The run link, not the status word: "已批准" is also the label of the
+  // filter chip above the table, and a matcher that hits both proves nothing.
+  await screen.findByRole("link", { name: "r1" });
+  expect(screen.queryByRole("button", { name: /批准|Approve/ })).toBeNull();
+});
+
+test("narrowing history asks the server, rather than filtering the page it holds", async () => {
+  // The silent one. Filtering a paged list in the browser narrows the rows
+  // that happened to arrive, so a reviewer looking for a rejection from last
+  // month gets "none" from a page that never contained it.
+  const asked: string[][] = [];
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
+    http.get("/api/v1/approvals", ({ request }) => {
+      const status = new URL(request.url).searchParams.getAll("status");
+      if (status.length > 0) asked.push(status);
+      return HttpResponse.json({ items: [], has_more: false });
+    }),
+  );
+
+  renderApprovals();
+  await waitFor(() => expect(asked.length).toBeGreaterThan(0));
+  // The label, not the input: antd's button-style radios put
+  // `pointer-events: none` on the input itself, so a real click lands here.
+  const chosen = await screen.findByRole("radio", { name: /已拒绝|Rejected/i });
+  await userEvent.click(chosen.closest("label") ?? chosen);
+
+  await waitFor(() => expect(asked.at(-1)).toEqual(["rejected"]));
 });
