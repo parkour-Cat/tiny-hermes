@@ -319,6 +319,25 @@ export type SecretResponse = {
   updated_at: string;
 };
 
+/**
+ * One identity provider this deployment trusts.
+ *
+ * `client_secret_ref` is a **reference** — an environment variable name or
+ * a platform Secret id — never the secret. There is deliberately no field
+ * here that could carry one.
+ */
+export type OidcProviderResponse = {
+  id: string;
+  issuer: string;
+  client_id: string;
+  client_secret_ref: string;
+  discovery_url: string;
+  scopes: string[];
+  status: string;
+  created_by: string;
+  created_at: string;
+};
+
 export type RewrapResponse = {
   processed: number;
   remaining: number;
