@@ -58,9 +58,9 @@
 
 | 文件 | 状态 |
 |---|---|
-| `LICENSE` | Apache-2.0，**占位** ——发布前必须换成全文 |
+| `LICENSE` | Apache-2.0 **官方原文**（202 行，取自 apache.org） |
 | `SECURITY.md` | 漏洞报告流程，以及**这个平台认为哪些线是线** |
-| `CODE_OF_CONDUCT.md` | Contributor Covenant 2.1，**占位** ——发布前需全文与联系方式 |
+| `CODE_OF_CONDUCT.md` | Contributor Covenant 2.1 **官方原文**（取自其官方仓库，CC BY 4.0） |
 | `CONTRIBUTING.md` | 上手、检查项、以及这个项目最在意的那件事 |
 | `docs/architecture.md` | 边界在哪、为什么在那里 |
 | `THIRD_PARTY_LICENSES.md` | **生成的**，见下 |
@@ -83,7 +83,15 @@
 ## 5. 这一遍没能证明什么
 
 - **15 条断言里只有 1 条是读代码验的**（见 §1）。其余 14 条只有关键词证据。
-- **`LICENSE` 与 `CODE_OF_CONDUCT.md` 是占位**，不是可发布的全文。
+- ~~`LICENSE` 与 `CODE_OF_CONDUCT.md` 是占位。~~ **已换成官方原文（2026-08-23）。**
+  新增 `NOTICE`，因为 LICENSE 保持逐字原样——附录里的
+  `Copyright [yyyy] [name of copyright owner]` 是**许可证文本的一部分，不是待填空格**，
+  实际归属属于 NOTICE（Apache-2.0 第 4(d) 条为它安排的位置）。
+- **三处联系方式与版权人仍是待填项**：`NOTICE` 的版权人与年份、`SECURITY.md` 的
+  安全报告邮箱、`CODE_OF_CONDUCT.md` 的举报邮箱。**留空是有意的**：一个填错的安全
+  报告地址比一个空白的更危险——它看起来是通的，于是报告安静地掉进没人读的地方，
+  而报告人以为自己已经尽到责任了。版权人同理：它是法律事实，不是能从 git 提交者或
+  GitHub 用户名推断出来的东西，而推断出来的名字看起来和真的一样。
 - **没有做法律审查。** §28 最后一句要求发布前由合格的人审阅许可证结论，这一遍没有，
   也不可能由这一遍完成。
 - **没有核对 §28 的 FastClaw 与 Hermes Agent 条款**：那两条要求「不复制受附加条款
