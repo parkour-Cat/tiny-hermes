@@ -99,6 +99,51 @@ export async function apiWithStatus<T>(path: string, init: ApiInit = {}): Promis
   };
 }
 
+/**
+ * Fetches a file rather than a JSON body, and saves it.
+ *
+ * Not an `<a href>`: a plain link carries cookies but no `X-Workspace-Id`,
+ * and the export route scopes by that header — the link would either 400 or,
+ * worse, answer for some other workspace. Going through `fetch` also means a
+ * refusal is still a refusal: a browser told to download a 413 saves the
+ * error body under the .csv name, producing a file that opens and lies.
+ */
+export async function download(path: string, init: ApiInit = {}): Promise<void> {
+  const { workspace, ...request } = init;
+  const headers = new Headers(request.headers);
+  if (workspace !== undefined) {
+    headers.set("X-Workspace-Id", workspace);
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(path, { ...request, credentials: "include", headers });
+  } catch {
+    throw new ApiError(0, "network_failed", "");
+  }
+  if (!response.ok) {
+    throw await asApiError(response);
+  }
+
+  const url = URL.createObjectURL(await response.blob());
+  try {
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filenameFrom(response.headers.get("Content-Disposition"));
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/** The server's own filename, falling back to one rather than to "download". */
+function filenameFrom(disposition: string | null): string {
+  const quoted = disposition?.match(/filename="([^"]+)"/);
+  return quoted?.[1] ?? "export.csv";
+}
+
 /** Reads a Problem Details body into an `ApiError`, tolerating a missing one. */
 export async function asApiError(response: Response): Promise<ApiError> {
   let problem: ProblemDetails;

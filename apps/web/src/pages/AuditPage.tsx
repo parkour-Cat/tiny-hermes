@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { Alert, Card, Empty, Input, Space, Table, Tag, Typography } from "antd";
+import { Alert, Button, Card, Empty, Input, Space, Table, Tag, Typography } from "antd";
 import { useState } from "react";
 
-import { api } from "../api/client";
+import { api, download } from "../api/client";
+import { problemMessage } from "../api/messages";
 import type { AuditEventsPageResponse } from "../api/types";
 import { moment } from "../i18n/moment";
 import { useLocale, useT } from "../i18n/locale";
@@ -49,6 +50,25 @@ export function AuditPage() {
   const page = events.data;
   const items = page?.items ?? [];
 
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  // The same `suffix` the table above is showing, on purpose: an export that
+  // built its own query could answer a different question than the screen
+  // the auditor clicked it from, and nothing about the file would say so.
+  async function exportEvents(): Promise<void> {
+    setExporting(true);
+    setExportError(null);
+    try {
+      await download(`/api/v1/audit-events/export${suffix}`, {
+        workspace: workspaceId ?? "",
+      });
+    } catch (caught) {
+      setExportError(problemMessage(caught, t));
+    } finally {
+      setExporting(false);
+    }
+  }
+
   return (
     <Card title={t("audit")}>
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -86,7 +106,19 @@ export function AuditPage() {
             onChange={(event) => setResourceType(event.target.value)}
             allowClear
           />
+          <Button onClick={() => void exportEvents()} loading={exporting}>
+            {t("auditExport")}
+          </Button>
         </Space>
+        {page?.visibility !== undefined && page.visibility !== "full" ? (
+          // The file inherits the banner's narrowing, and a spreadsheet
+          // carries no banner — so the page has to say it before the click,
+          // not after.
+          <Typography.Paragraph type="secondary">{t("auditExportScoped")}</Typography.Paragraph>
+        ) : null}
+        {exportError !== null ? (
+          <Alert type="error" showIcon message={exportError} closable onClose={() => setExportError(null)} />
+        ) : null}
 
         {items.length === 0 && !events.isLoading ? (
           <Empty description={t("auditEmpty")} />

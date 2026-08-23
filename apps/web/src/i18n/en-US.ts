@@ -425,6 +425,8 @@ export const enUS: Record<MessageKey, string> = {
   auditFilterAction: "Filter by action",
   auditFilterResource: "Filter by resource type",
   auditEmpty: "Nothing recorded yet",
+  auditExport: "Export CSV",
+  auditExportScoped: "An export is narrowed the same way this page is, and the file itself will not say so.",
   auditMore: "Load more",
   auditScopeOwn: "You are seeing only rows you are named in",
   auditScopeOwnHint: "Your role reads audit entries related to your own resources and actions, not the whole workspace.",
