@@ -6,9 +6,9 @@
 >
 > **本文件不构成法律意见**（产品设计 §28 最后一句）。
 
-本项目自身采用 Apache-2.0。依赖共 56 个。
+本项目自身采用 Apache-2.0。Python 依赖 56 个；前端见文末。
 
-## 分布
+## Python 依赖的分布
 
 | 许可证 | 数量 |
 |---|---:|
@@ -36,7 +36,7 @@
 
 - `certifi`
 
-## 全部依赖
+## 全部 Python 依赖
 
 | 包 | 版本 | 许可证 |
 |---|---|---|
@@ -96,3 +96,88 @@
 | typing_extensions | 4.16.0 | PSF-2.0 |
 | urllib3 | 2.7.0 | MIT |
 | uvicorn | 0.52.1 | BSD-3-Clause |
+
+## 前端（pnpm，生产依赖）
+
+共 74 个。
+
+| 许可证 | 数量 |
+|---|---:|
+| MIT | 74 |
+
+| 包 | 版本 | 许可证 |
+|---|---|---|
+| @ant-design/colors | 8.0.1 | MIT |
+| @ant-design/cssinjs | 2.1.2 | MIT |
+| @ant-design/cssinjs-utils | 2.1.2 | MIT |
+| @ant-design/fast-color | 3.0.1 | MIT |
+| @ant-design/icons | 6.3.2 | MIT |
+| @ant-design/icons-svg | 4.5.0 | MIT |
+| @ant-design/react-slick | 2.0.0 | MIT |
+| @babel/runtime | 7.29.7 | MIT |
+| @babel/runtime | 8.0.0 | MIT |
+| @emotion/hash | 0.8.0 | MIT |
+| @emotion/unitless | 0.7.5 | MIT |
+| @rc-component/async-validator | 6.0.0 | MIT |
+| @rc-component/cascader | 1.17.0 | MIT |
+| @rc-component/checkbox | 2.0.0 | MIT |
+| @rc-component/collapse | 1.2.0 | MIT |
+| @rc-component/color-picker | 3.1.1 | MIT |
+| @rc-component/context | 2.0.2 | MIT |
+| @rc-component/dialog | 1.10.0 | MIT |
+| @rc-component/drawer | 1.4.2 | MIT |
+| @rc-component/dropdown | 1.0.3 | MIT |
+| @rc-component/form | 1.8.6 | MIT |
+| @rc-component/image | 1.9.0 | MIT |
+| @rc-component/input | 1.3.1 | MIT |
+| @rc-component/input-number | 1.6.2 | MIT |
+| @rc-component/mentions | 1.10.0 | MIT |
+| @rc-component/menu | 1.4.1 | MIT |
+| @rc-component/mini-decimal | 1.1.4 | MIT |
+| @rc-component/motion | 1.3.3 | MIT |
+| @rc-component/mutate-observer | 2.0.1 | MIT |
+| @rc-component/notification | 2.0.7 | MIT |
+| @rc-component/overflow | 1.0.1 | MIT |
+| @rc-component/pagination | 1.4.0 | MIT |
+| @rc-component/picker | 1.12.0 | MIT |
+| @rc-component/portal | 2.2.1 | MIT |
+| @rc-component/progress | 1.0.2 | MIT |
+| @rc-component/qrcode | 2.0.0 | MIT |
+| @rc-component/rate | 1.0.1 | MIT |
+| @rc-component/resize-observer | 1.1.2 | MIT |
+| @rc-component/segmented | 1.3.0 | MIT |
+| @rc-component/select | 1.8.2 | MIT |
+| @rc-component/slider | 1.1.1 | MIT |
+| @rc-component/steps | 1.2.2 | MIT |
+| @rc-component/switch | 1.0.3 | MIT |
+| @rc-component/table | 1.10.4 | MIT |
+| @rc-component/tabs | 1.11.0 | MIT |
+| @rc-component/tooltip | 1.4.0 | MIT |
+| @rc-component/tour | 2.4.0 | MIT |
+| @rc-component/tree | 1.3.2 | MIT |
+| @rc-component/tree-select | 1.11.0 | MIT |
+| @rc-component/trigger | 3.10.1 | MIT |
+| @rc-component/upload | 1.1.1 | MIT |
+| @rc-component/util | 1.12.0 | MIT |
+| @rc-component/virtual-list | 1.5.1 | MIT |
+| @tanstack/query-core | 5.101.4 | MIT |
+| @tanstack/react-query | 5.101.4 | MIT |
+| antd | 6.5.4 | MIT |
+| clsx | 2.1.1 | MIT |
+| compute-scroll-into-view | 3.1.1 | MIT |
+| cookie | 1.1.1 | MIT |
+| csstype | 3.2.3 | MIT |
+| dayjs | 1.11.21 | MIT |
+| is-mobile | 5.0.0 | MIT |
+| json2mq | 0.2.0 | MIT |
+| react | 19.2.8 | MIT |
+| react-dom | 19.2.8 | MIT |
+| react-is | 19.2.8 | MIT |
+| react-router | 7.18.2 | MIT |
+| react-router-dom | 7.18.2 | MIT |
+| scheduler | 0.27.0 | MIT |
+| scroll-into-view-if-needed | 3.1.0 | MIT |
+| set-cookie-parser | 2.7.2 | MIT |
+| string-convert | 0.2.1 | MIT |
+| stylis | 4.4.0 | MIT |
+| throttle-debounce | 5.0.2 | MIT |
