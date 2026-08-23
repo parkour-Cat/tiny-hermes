@@ -241,7 +241,11 @@ function SkillRow({ skill, editable, onChanged, onError, onNote, confirm }: RowP
 
   const reimport = useMutation({
     mutationFn: (url: string) =>
-      apiWithStatus<SkillVersionResponse>(`/api/v1/skills/${skill.id}/import`, {
+      // `/versions/import`, not `/import`. `/api/v1/skills/import` creates a
+      // *skill* from a repository; this re-imports a **version** of one that
+      // exists. The wrong URL matched no route at all and answered 404 —
+      // FastAPI's own, without a `code` — for as long as this button shipped.
+      apiWithStatus<SkillVersionResponse>(`/api/v1/skills/${skill.id}/versions/import`, {
         ...scope,
         method: "POST",
         body: JSON.stringify({ url }),

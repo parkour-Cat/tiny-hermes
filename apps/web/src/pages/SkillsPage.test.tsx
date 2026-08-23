@@ -146,7 +146,7 @@ test("importing the same content again says no version was created", async () =>
       ]),
     ),
     // 200, not 201: this content was already a version.
-    http.post(`/api/v1/skills/${MINE}/import`, () =>
+    http.post(`/api/v1/skills/${MINE}/versions/import`, () =>
       HttpResponse.json(version(V1, MINE, 1, { source: "git" }), { status: 200 }),
     ),
   );
