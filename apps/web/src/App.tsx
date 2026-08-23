@@ -81,6 +81,11 @@ const MemoryPage = lazy(() =>
     default: module.MemoryPage,
   })),
 );
+const SubjectDataPage = lazy(() =>
+  import("./pages/SubjectDataPage").then((module) => ({
+    default: module.SubjectDataPage,
+  })),
+);
 const OutboundScopePage = lazy(() =>
   import("./pages/OutboundScopePage").then((module) => ({
     default: module.OutboundScopePage,
@@ -156,6 +161,7 @@ function AppRoutes() {
           <Route path="channels" element={<ChannelsPage />} />
           <Route path="identity-providers" element={<IdentityProvidersPage />} />
           <Route path="memory" element={<MemoryPage />} />
+          <Route path="subjects" element={<SubjectDataPage />} />
         </Route>
         <Route
           path="*"

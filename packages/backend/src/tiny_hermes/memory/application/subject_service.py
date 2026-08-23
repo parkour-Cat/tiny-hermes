@@ -38,6 +38,24 @@ STEWARDS = frozenset({Role.WORKSPACE_ADMIN})
 
 
 @dataclass(frozen=True)
+class ResolvedSubject:
+    """One subject, found by the name an enterprise's own directory uses.
+
+    `erased_at` is carried because §344 keeps the row after an erasure —
+    Runs reference it, and the fact that somebody was here is not what an
+    erasure removes. A second request from the same person needs "already
+    erased, on this date", which is a different answer from "no such
+    person" and the only true one.
+    """
+
+    subject_id: UUID
+    channel: str
+    external_user_id: str
+    erased_at: datetime | None
+    first_seen_at: datetime
+
+
+@dataclass(frozen=True)
 class ErasureReport:
     """What an erasure removed, in counts.
 
@@ -103,6 +121,20 @@ class SubjectStore(Protocol):
         self, memory_id: UUID, status: MemoryStatus, now: datetime
     ) -> MemoryRecord | None: ...
 
+    async def resolve_external(
+        self, workspace_id: UUID, channel: str, external_user_id: str
+    ) -> "ResolvedSubject | None": ...
+
+    async def subject_type_of(
+        self, workspace_id: UUID, subject_id: UUID
+    ) -> CallerType | None:
+        """Which kind of subject this id is, or `None` for neither.
+
+        `users` and `end_users` are separate id spaces, so an id belongs to
+        at most one of them and the answer is not a guess.
+        """
+        ...
+
     async def sessions_of(
         self, workspace_id: UUID, subject: CallerIdentity
     ) -> Sequence[UUID]: ...
@@ -136,6 +168,15 @@ class ForbiddenSubjectAction(SubjectError):
     pass
 
 
+class UnknownSubject(SubjectError):
+    """Nobody here goes by that name on that channel.
+
+    One exception for "no such identity" and for "not in this workspace":
+    telling them apart would let a steward of one tenant confirm that a
+    named person is an end user of another.
+    """
+
+
 class UnknownSubjectMemory(SubjectError):
     pass
 
@@ -143,6 +184,31 @@ class UnknownSubjectMemory(SubjectError):
 @dataclass(frozen=True)
 class SubjectService:
     store: SubjectStore
+
+    async def subject_in(
+        self, workspace_id: UUID, subject_id: UUID
+    ) -> CallerIdentity:
+        """The subject an id stands for, read rather than assumed.
+
+        `subject_routes.py` used to build `CallerType.USER` for every id it
+        was handed, defending it on the grounds that the router is
+        console-only and an end user never calls it. That is true of the
+        *caller* and says nothing about whose data they are acting on —
+        which for §4.6's `代办` row is exactly the question.
+
+        The cost was as bad as this feature gets: erasing an end user
+        deleted rows matching `caller_type='user'`, found none, and
+        answered `200` with a report of zeros while everything stayed. An
+        erasure that says it happened and did not is worse than one that
+        fails.
+        """
+        found = await self.store.subject_type_of(workspace_id, subject_id)
+        if found is None:
+            # Refused rather than assumed. "Nothing was held about them" and
+            # "that id is nobody" are different answers, and an
+            # administrator replying to a request needs to know which.
+            raise UnknownSubject
+        return CallerIdentity(caller_type=found, caller_id=subject_id)
 
     async def export(
         self,
@@ -262,6 +328,46 @@ class SubjectService:
             },
         )
         return report
+
+    async def lookup(
+        self,
+        actor: Actor,
+        workspace_id: UUID,
+        channel: str,
+        external_user_id: str,
+        request_id: str,
+    ) -> ResolvedSubject:
+        """The subject a data-rights request names, by their external id.
+
+        Steward-only, with no "self" branch: an end user asking about their
+        own data goes through `end_user_subject_routes.py`, which reads the
+        subject from their credential and never needs to resolve a name. A
+        self branch here would be a second way to reach that, gated on a
+        string the caller supplies.
+
+        Audited on every call, hit or miss. Resolving a name is the first
+        step of acting on somebody's data and it is worth a line whether or
+        not the person turned out to exist — an audit that only recorded
+        successful lookups would leave "who did we search for" unanswerable.
+        """
+        if actor.is_service_account:
+            raise ForbiddenSubjectAction
+        role = await self.store.user_role(workspace_id, actor.id)
+        if role not in STEWARDS and not actor.is_platform_admin:
+            raise ForbiddenSubjectAction
+        found = await self.store.resolve_external(workspace_id, channel, external_user_id)
+        await self.store.append_audit(
+            workspace_id=workspace_id,
+            actor_id=actor.id,
+            actor_type=CallerType.USER.value,
+            action="subject.looked_up",
+            resource_id=found.subject_id if found else workspace_id,
+            request_id=request_id,
+            context={"channel": channel, "found": "true" if found else "false"},
+        )
+        if found is None:
+            raise UnknownSubject
+        return found
 
     async def _owned(
         self, actor: Actor, workspace_id: UUID, memory_id: UUID, request_id: str
