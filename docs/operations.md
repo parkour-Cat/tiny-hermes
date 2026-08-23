@@ -143,10 +143,27 @@ curl -X POST http://localhost:8000/api/v1/secrets/rewrap \
 
 轮换可以中断后重跑，`key_id` 本身就是进度记录，已经轮换过的行不会被重做。
 
+### KEK 销毁演练
+
+```
+docker run -d --name th-drill-pg -e POSTGRES_USER=tiny_hermes \
+  -e POSTGRES_PASSWORD=local-only -e POSTGRES_DB=postgres \
+  -p 127.0.0.1:55433:5432 postgres:16
+uv run --no-sync python scripts/kek_destruction_drill.py \
+  --admin postgresql://tiny_hermes:local-only@127.0.0.1:55433/postgres
+```
+
+它自建临时库，**不碰任何现有数据库**，也**不删除磁盘上的任何钥匙**——销毁是用
+「服务只持有新钥匙、没有 `previous` 可退」来模拟的，那正是从部署里删掉一把 KEK
+之后剩下的样子。
+
 ## 7. 这份手册没有覆盖什么
 
 - **没有在真实生产部署上演练过。** 上面的表和步骤都来自本地容器。
-- **没有做过"真的销毁旧 KEK 之后"的演练**，测试里两把钥匙始终都在。
+- ~~没有做过「真的销毁旧 KEK 之后」的演练。~~ **已补（2026-08-23）**：
+  `scripts/kek_destruction_drill.py` 两个方向都跑过——先重包完再销毁，三条全部
+  仍可打开；漏掉一条就销毁，那一条**永久打不开**。第二个方向是**演示**出来的，
+  不是断言出来的：一条没人看着它失败过的规则，是一条会被绕过去的规则。
 - ~~对象存储的备份恢复没有演练。~~ **已补（2026-08-23）**，见第 3 节。
   仍然没有演练过的是**跨主机**恢复：演练里备份桶和主桶在同一个 MinIO 里，
   所以它证明的是「备份能还原」，不是「备份能搬到另一台机器上还原」。
