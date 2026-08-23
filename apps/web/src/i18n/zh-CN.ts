@@ -406,6 +406,8 @@ export const zhCN = {
   auditFilterAction: "按动作过滤",
   auditFilterResource: "按对象类型过滤",
   auditEmpty: "还没有记录",
+  auditExport: "导出 CSV",
+  auditExportScoped: "导出和这个页面收窄的范围一致，而文件本身不会说明这一点。",
   auditMore: "加载更多",
   auditScopeOwn: "你只看到与你有关的记录",
   auditScopeOwnHint: "你的角色能读到与自己的资源和操作相关的审计条目，不是整个工作空间的。",

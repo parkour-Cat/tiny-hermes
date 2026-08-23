@@ -17,16 +17,24 @@ picks which class to build with `AuditReadResult.visibility`, the one fact
 ask `user_role` a second, independently-drifting question.
 """
 
-from datetime import datetime
+import csv
+import io
+import json
+from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Cookie, Depends, Header, Query, Request
+from fastapi import APIRouter, Cookie, Depends, Header, Query, Request, Response
 from pydantic import BaseModel
 
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.audit.application.audit_service import AuditService, ForbiddenAuditRead
-from tiny_hermes.audit.domain.query import InvalidAuditFilter, filter_for
+from tiny_hermes.audit.domain.query import (
+    MAX_EXPORT_ROWS,
+    InvalidAuditFilter,
+    export_filter_for,
+    filter_for,
+)
 from tiny_hermes.audit.domain.record import AuditRecord
 from tiny_hermes.audit.domain.scope import AuditVisibility
 from tiny_hermes.identity.application.auth_service import AuthService
@@ -146,6 +154,121 @@ def audit_router(resources: ApplicationResources) -> APIRouter:
     router = APIRouter(prefix="/api/v1/audit-events", tags=["audit"])
     auth_dependency = resources.auth_service
     service_dependency = resources.audit_service
+
+    @router.get("/export")
+    async def export_events(  # pyright: ignore[reportUnusedFunction]
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        service: Annotated[AuditService, Depends(service_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        action: str | None = None,
+        resource_type: str | None = None,
+        actor_id: UUID | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+    ) -> Response:
+        """§26's export, over the same call the page above makes.
+
+        Deliberately `service.list_events` rather than a query of its own.
+        An export is a second door onto the same rows, and the whole risk is
+        that the two doors disagree: a viewer whose page hides `context` but
+        whose spreadsheet contains it has been handed the thing the API
+        refuses them, and nothing would look wrong — the export "worked".
+        Sharing the call makes that disagreement impossible rather than
+        unlikely, and the cross-workspace trace (§3) comes along with it.
+
+        No `limit`/`offset`: an export is the whole of what this reader may
+        see under these filters, and a paginated export is a file somebody
+        has to reassemble. `MAX_EXPORT_ROWS` is a ceiling rather than a page
+        — a caller who hits it is told, not silently truncated.
+        """
+        user = await authenticate_browser_user(auth, session_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            built = export_filter_for(
+                action=action,
+                resource_type=resource_type,
+                actor_id=actor_id,
+                since=since,
+                until=until,
+            )
+        except InvalidAuditFilter as error:
+            raise AppError(
+                code="invalid_audit_filter",
+                title="Invalid filter",
+                status=400,
+                detail=str(error),
+            ) from error
+        try:
+            result = await service.list_events(
+                _actor(user), workspace_id, built, request.state.request_id
+            )
+        except ForbiddenAuditRead as error:
+            raise forbidden() from error
+
+        # `has_more` is the store's own limit+1 answer, so reaching it means
+        # the window genuinely holds more than one export may carry. Refusing
+        # is the point: a 200 with a truncated file is indistinguishable from
+        # a complete one, and this is an audit trail.
+        if result.has_more:
+            raise AppError(
+                code="audit_export_too_large",
+                title="Too many rows to export",
+                status=413,
+                detail=(
+                    f"This filter matches more than {MAX_EXPORT_ROWS} events. "
+                    "Narrow the time window or the action and export again."
+                ),
+            )
+
+        rows = io.StringIO()
+        writer = csv.writer(rows)
+        writer.writerow(
+            [
+                "occurred_at",
+                "actor_type",
+                "actor_id",
+                "action",
+                "resource_type",
+                "resource_id",
+                "result",
+                "request_id",
+                "context",
+            ]
+        )
+        for item in result.items:
+            # `context` is already redacted for a viewer — `list_events` did
+            # it. Serialized as JSON in one cell rather than spread into
+            # columns, because its keys differ per action and a spreadsheet
+            # with a column per key would be mostly empty.
+            writer.writerow(
+                [
+                    item.created_at.isoformat(),
+                    item.actor_type,
+                    "" if item.actor_id is None else str(item.actor_id),
+                    item.action,
+                    item.resource_type,
+                    "" if item.resource_id is None else str(item.resource_id),
+                    item.result,
+                    item.request_id,
+                    json.dumps(item.context, ensure_ascii=False, sort_keys=True),
+                ]
+            )
+        stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        return Response(
+            content=rows.getvalue(),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="audit-{stamp}.csv"'
+                ),
+                # Says which of §4.6's ranges produced the file, for the same
+                # reason the JSON page carries it: a redacted export and a
+                # full one are the same shape, and only this tells them apart.
+                "X-Audit-Visibility": result.visibility.value,
+            },
+        )
 
     @router.get("", response_model=AuditEventsPage | RedactedAuditEventsPage)
     async def list_events(  # pyright: ignore[reportUnusedFunction]
