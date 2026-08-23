@@ -389,6 +389,17 @@ export type SubjectExportResponse = {
   sessions: string[];
 };
 
+/** One message a search matched, as much of it as a snippet holds. */
+export type SearchHitResponse = {
+  session_id: string;
+  run_id: string | null;
+  sequence: number;
+  role: string;
+  snippet: string;
+  /** True when the message was longer than one snippet. */
+  shortened: boolean;
+};
+
 export type RewrapResponse = {
   processed: number;
   remaining: number;

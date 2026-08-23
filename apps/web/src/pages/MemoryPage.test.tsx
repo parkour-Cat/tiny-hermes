@@ -6,6 +6,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { expect, test } from "vitest";
 
 import { MemoryPage } from "./MemoryPage";
+import { t } from "../i18n/zh-CN";
 import { TestTheme } from "../test/TestTheme";
 import { server } from "../test/server";
 
@@ -128,4 +129,62 @@ test("a role that may not review is told so", async () => {
   renderMemory();
 
   expect(await screen.findByText(/没有权限|not allowed|forbidden/i)).toBeVisible();
+});
+
+const HIT = {
+  session_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+  run_id: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+  sequence: 4,
+  role: "assistant",
+  snippet: "…the rollout was moved to October…",
+  shortened: true,
+};
+
+test("a search asks the server, and a shortened hit says it is shortened", async () => {
+  // A snippet a reader does not know is partial gets read as the whole of a
+  // message — which is the one way a search result can mislead somebody
+  // reading a conversation they were not part of.
+  let asked: URL | null = null;
+  server.use(
+    http.get("/api/v1/memories/pending", () => HttpResponse.json([])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/memories/search", ({ request }) => {
+      asked = new URL(request.url);
+      return HttpResponse.json([HIT]);
+    }),
+  );
+
+  renderMemory();
+  await userEvent.type(await screen.findByLabelText(t("searchSessions")), "rollout");
+  await userEvent.click(screen.getByRole("button", { name: t("searchRun") }));
+
+  await waitFor(() => expect(asked).not.toBeNull());
+  expect(asked!.searchParams.get("q")).toBe("rollout");
+  expect(await screen.findByText(/rollout was moved/)).toBeVisible();
+  expect(screen.getByText(t("searchShortened"))).toBeVisible();
+});
+
+test("a shared memory can be written directly, against a named Agent", async () => {
+  // §14.2 gives shared memory two doors: an Agent proposing one, and a
+  // person writing one. Only the first had a way in.
+  let sent: unknown = null;
+  server.use(
+    http.get("/api/v1/memories/pending", () => HttpResponse.json([])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.post("/api/v1/memories/shared", async ({ request }) => {
+      sent = await request.json();
+      return HttpResponse.json(memory({ kind: "shared", status: "active" }), { status: 201 });
+    }),
+  );
+
+  renderMemory();
+  await userEvent.click(await screen.findByRole("button", { name: t("writeShared") }));
+  await userEvent.click(await screen.findByLabelText(t("memoryAgent")));
+  await userEvent.click(await screen.findByTitle("Support"));
+  await userEvent.type(await screen.findByLabelText(t("memoryBody")), "Ship notes on Fridays.");
+  await userEvent.click(screen.getByRole("button", { name: t("saveName") }));
+
+  await waitFor(() =>
+    expect(sent).toEqual({ agent_id: AGENT, body: "Ship notes on Fridays." }),
+  );
 });
