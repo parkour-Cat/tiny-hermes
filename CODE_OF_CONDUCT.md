@@ -1,10 +1,7 @@
 <!--
   Contributor Covenant 2.1 的原文，取自官方仓库
   （EthicalSource/contributor_covenant，CC BY 4.0，见文末 Attribution）。
-
-  **发布前必须填掉正文里的举报联系方式。** 它被留成一个显眼的待填项而不是一个
-  看起来合理的默认值：一个填错的举报地址比一个空白的更糟，因为它看起来是通的，
-  而举报会静静地掉进没人读的地方。
+  正文只改了一处：举报联系方式。
 -->
 
 # Contributor Covenant Code of Conduct
@@ -45,7 +42,7 @@ This Code of Conduct applies within all community spaces, and also applies when 
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community leaders responsible for enforcement at **［待填：安全与行为准则举报邮箱］**. All complaints will be reviewed and investigated promptly and fairly.
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community leaders responsible for enforcement at **1004149036@qq.com**. All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the reporter of any incident.
 
