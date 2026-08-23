@@ -61,6 +61,10 @@ class StandIn:
     requests: list[tuple[str, str, dict[str, str]]] = field(
         default_factory=list[tuple[str, str, dict[str, str]]]
     )
+    #: When set, the answer body carries back the request header of this name.
+    #: Stands in for every far end that reflects what it was sent — a debug
+    #: endpoint, a misconfigured gateway, or one that means to.
+    echo_header: str | None = None
 
     @property
     def methods(self) -> list[str]:
@@ -77,7 +81,10 @@ class StandIn:
             message = await receive()
             if not message.get("more_body", False):
                 break
-        body = json.dumps(ANSWER).encode()
+        answer = dict(ANSWER)
+        if self.echo_header is not None:
+            answer = {**answer, "you_sent": headers.get(self.echo_header.lower(), "")}
+        body = json.dumps(answer).encode()
         await send(
             {
                 "type": "http.response.start",
@@ -165,7 +172,11 @@ def approve_host(client: TestClient, scope: dict[str, str], entry: str) -> None:
 
 
 def register_tool(
-    client: TestClient, scope: dict[str, str], base_url: str, body: str | None = None
+    client: TestClient,
+    scope: dict[str, str],
+    base_url: str,
+    body: str | None = None,
+    credential_ref: str | None = None,
 ) -> str:
     """A tool in the catalog. Returns the id of its first version."""
     created = client.post(
@@ -175,7 +186,7 @@ def register_tool(
             "name": "orders",
             "base_url": base_url,
             "document": body or document(),
-            "credential_ref": None,
+            "credential_ref": credential_ref,
         },
     )
     assert created.status_code == 201, created.text

@@ -26,6 +26,7 @@ from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -277,3 +278,47 @@ async def test_revoking_the_workspace_entry_stops_the_next_call(
     ]
     assert len(refused) == 1
     assert refused[0]["payload"]["reason"] != "approval_required"
+
+
+async def test_a_far_end_that_echoes_the_credential_does_not_hand_it_to_the_model(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    api: tuple[StandIn, str],
+    proxy: ProxyHandle,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§23 assertion 7, at the one place a secret can actually come back.
+
+    Secrets are resolved at the moment of an outbound call and injected into
+    a header; they never enter the model's context. That is a structural
+    guarantee and it is stronger than scrubbing — except for one path, which
+    this test is about: the response body. `body = response.content` becomes
+    the tool result the model reads, so a far end that reflects the
+    `Authorization` header it was sent puts the credential in front of the
+    model, into the RunEvent, and within reach of a memory proposal.
+
+    It requires the far end to echo, which is not this platform's doing. But
+    the consequence is: the secret moves from "held by the outbound layer"
+    into surfaces with entirely different access rules — session content a
+    developer may read, and memory that persists.
+    """
+    stand_in, url = api
+    stand_in.echo_header = "authorization"
+    monkeypatch.setenv("ECHO_TOOL_TOKEN", "sk-live-do-not-echo-me")
+    approve_host(client, scope, "127.0.0.1")
+    version_id = register_tool(client, scope, url, credential_ref="ECHO_TOOL_TOKEN")
+    session_id = session_for(
+        _agent(client, scope, version_id, ["listOrders"], ["127.0.0.1"])
+    )
+
+    ask(client, scope, session_id, "http.orders.listOrders")
+    await worker(engine, scope["X-Workspace-Id"], proxy).run_once()
+
+    messages = client.get(f"/api/v1/sessions/{session_id}/messages", headers=scope)
+    assert messages.status_code == 200, messages.text
+    # The far end really did send it back — otherwise this test proves
+    # nothing about scrubbing, only that the echo did not happen.
+    assert stand_in.requests
+    assert "sk-live-do-not-echo-me" not in messages.text

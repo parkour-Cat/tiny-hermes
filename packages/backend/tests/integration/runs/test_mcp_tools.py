@@ -59,6 +59,10 @@ class StandInServer:
 
     padding: int = 0
     tools_listed: int = 0
+    #: When true, the tool answer carries back the Authorization header it was
+    #: sent — a far end that reflects what it received, which is the one way a
+    #: credential can travel back into the model's context.
+    echo_authorization: bool = False
     calls: list[tuple[str, dict[str, Any]]] = field(
         default_factory=list[tuple[str, dict[str, Any]]]
     )
@@ -93,6 +97,10 @@ class StandInServer:
             raw += message.get("body", b"")
             if not message.get("more_body", False):
                 break
+        seen = {
+            key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in scope["headers"]
+        }
         request: dict[str, Any] = json.loads(raw or b"{}")
         method = str(request.get("method", ""))
         if method == "tools/list":
@@ -102,7 +110,10 @@ class StandInServer:
             params: dict[str, Any] = request.get("params") or {}
             arguments: dict[str, Any] = params.get("arguments") or {}
             self.calls.append((str(params.get("name")), dict(arguments)))
-            result = {"content": [{"type": "text", "text": "two documents"}]}
+            answered = "two documents"
+            if self.echo_authorization:
+                answered = f"two documents; you sent {seen.get('authorization', '')}"
+            result = {"content": [{"type": "text", "text": answered}]}
         body = json.dumps({"jsonrpc": "2.0", "id": 1, "result": result}).encode()
         await send(
             {
@@ -203,12 +214,17 @@ async def _post(client: TestClient, path: str, **kwargs: Any) -> Any:
     return await asyncio.to_thread(lambda: client.post(path, **kwargs))
 
 
-async def _register(client: TestClient, scope: dict[str, str], url: str) -> str:
+async def _register(
+    client: TestClient,
+    scope: dict[str, str],
+    url: str,
+    credential_ref: str | None = None,
+) -> str:
     created = await _post(
         client,
         "/api/v1/mcp-servers",
         headers=scope,
-        json={"name": "docs", "url": url, "credential_ref": None},
+        json={"name": "docs", "url": url, "credential_ref": credential_ref},
     )
     assert created.status_code == 201, created.text
     versions = client.get(
@@ -518,3 +534,38 @@ async def test_resuming_measures_again_and_charges_nothing_for_the_first_try(
     assert [name for name, _ in server.calls] == ["search"]
     # Two rounds, both after the resume. The paused attempt charged nothing.
     assert reloaded["budget"]["consumed_model_calls"] == 2
+
+
+async def test_an_mcp_server_that_echoes_the_credential_does_not_reach_the_model(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    mcp_server: tuple[StandInServer, str],
+    proxy: ProxyHandle,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§23 assertion 7, on the second path that has it.
+
+    The HTTP tool sender was fixed first; this gateway injects the same
+    `Authorization` header and returns `response.content` just as directly,
+    so closing one and not the other would be closing half a door. Written
+    as its own test rather than folded into the other because the two paths
+    share no code — a fix to one says nothing about the other, and a reader
+    finding only one test would reasonably assume it did.
+    """
+    server, url = mcp_server
+    server.echo_authorization = True
+    monkeypatch.setenv("MCP_ECHO_TOKEN", "sk-mcp-do-not-echo-me")
+    approve_host(client, scope, "127.0.0.1")
+    version_id = await _register(client, scope, url, credential_ref="MCP_ECHO_TOKEN")
+    session_id = session_for(_agent(client, scope, version_id, ["search"]))
+    ask(client, scope, session_id, "mcp.docs.search")
+
+    await _worker(engine, scope["X-Workspace-Id"], proxy).run_once()
+
+    transcript = _transcript(client, scope, session_id)
+    # The server really did reflect it, or this test proves nothing about
+    # scrubbing and only that the echo never happened.
+    assert server.calls
+    assert "sk-mcp-do-not-echo-me" not in transcript

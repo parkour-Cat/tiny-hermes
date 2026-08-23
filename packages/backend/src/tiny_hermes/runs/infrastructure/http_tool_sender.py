@@ -38,6 +38,7 @@ from tiny_hermes.outbound.errors import (
     OutboundTooManyRedirects,
     OutboundUnreachable,
 )
+from tiny_hermes.runs.infrastructure.credential_echo import without_credential
 from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolAnswer
 from tiny_hermes.secrets.infrastructure.sql_store import SqlSecretStore
 from tiny_hermes.tools.domain.http_calls import MAX_RESPONSE_BYTES, HttpRequestPlan
@@ -63,6 +64,9 @@ class OutboundHttpToolSender:
         claim: EgressClaim,
     ) -> HttpToolAnswer:
         headers = dict(plan.headers)
+        # `None` when this tool carries no credential, which is also the
+        # value `without_credential` reads as "nothing to look for".
+        token: str | None = None
         if credential_ref is not None:
             async with self._sessions() as session:
                 resolver = CredentialResolver(SqlSecretStore(session), self._kek)
@@ -112,5 +116,5 @@ class OutboundHttpToolSender:
             # `errors="replace"` rather than a refusal: an endpoint answering in
             # an encoding this platform did not expect still said something, and
             # a mangled character is more use to the model than nothing.
-            body=body.decode("utf-8", errors="replace"),
+            body=without_credential(body.decode("utf-8", errors="replace"), token),
         )
