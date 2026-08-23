@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Descriptions, Empty, Modal, Space, Tag, Timeline, Typography } from "antd";
+import { Alert, Button, Card, Descriptions, Empty, Form, InputNumber, Modal, Space, Tag, Timeline, Typography } from "antd";
 import type { DescriptionsProps } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -7,7 +7,13 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { downloadArtifact } from "../api/artifacts";
 import { ApiError, api } from "../api/client";
 import { problemMessage } from "../api/messages";
-import type { ArtifactResponse, BudgetDocument, CanonicalMessage, RunResponse } from "../api/types";
+import type {
+  ArtifactResponse,
+  BudgetDocument,
+  CanonicalMessage,
+  RunResponse,
+  RunTreeResponse,
+} from "../api/types";
 import { moment } from "../i18n/moment";
 import { useT } from "../i18n/locale";
 import type { MessageKey } from "../i18n/zh-CN";
@@ -98,6 +104,20 @@ function budgetRows(budget: BudgetDocument, t: (key: MessageKey) => string): Row
   ];
 }
 
+/** A relation in the reader's language, falling back to its own name. */
+function relationKey(
+  relation: string,
+): "taskTreeRoot" | "taskTreeChild" | "taskTreeRetry" {
+  switch (relation) {
+    case "child":
+      return "taskTreeChild";
+    case "retry":
+      return "taskTreeRetry";
+    default:
+      return "taskTreeRoot";
+  }
+}
+
 export function RunDetailPage() {
   const t = useT();
   const workspaceId = useWorkspaceId();
@@ -125,6 +145,40 @@ export function RunDetailPage() {
     queryKey: ["run-artifacts", workspaceId, runId] as const,
     queryFn: () => api<ArtifactResponse[]>(`/api/v1/runs/${runId}/artifacts`, scope),
     enabled,
+  });
+  // Its own request rather than fields on the Run: the tree is the same
+  // answer from every node, so asking per node would fetch it once for each
+  // link the page draws.
+  const tree = useQuery({
+    queryKey: ["run-tree", workspaceId, runId] as const,
+    queryFn: () => api<RunTreeResponse>(`/api/v1/runs/${runId}/tree`, scope),
+    enabled,
+  });
+
+  const [widening, setWidening] = useState(false);
+  const [widenForm] = Form.useForm<{ maxModelCalls: number }>();
+  const widen = useMutation({
+    mutationFn: (input: { maxModelCalls: number; expected: number }) =>
+      api<RunResponse>(`/api/v1/runs/${runId}/budget`, {
+        ...scope,
+        method: "POST",
+        body: JSON.stringify({
+          expected_state_version: input.expected,
+          max_model_calls: input.maxModelCalls,
+        }),
+      }),
+    onSuccess: (updated) => {
+      setWidening(false);
+      widenForm.resetFields();
+      queryClient.setQueryData(options.queryKey, updated);
+      // The ceiling belongs to the tree, so every Run under it just changed.
+      void queryClient.invalidateQueries({ queryKey: ["run-tree"] });
+    },
+    onError: (caught) => {
+      widenForm.setFields([
+        { name: "maxModelCalls", errors: [problemMessage(caught, t)] },
+      ]);
+    },
   });
 
   useEffect(() => {
@@ -225,6 +279,11 @@ export function RunDetailPage() {
   function runLink(id: string) {
     return <Link to={`/workspaces/${workspaceId ?? ""}/runs/${id}`}>{id}</Link>;
   }
+
+  const treeNodes = tree.data?.nodes ?? [];
+  // A Run alone in its tree is most Runs. A card saying so would be noise on
+  // nearly every page in the console.
+  const hasTree = treeNodes.length > 1;
 
   const situation = statusNote(run);
   const outcome = outcomeLabel(run.goal.outcome);
@@ -359,6 +418,12 @@ export function RunDetailPage() {
           <Typography.Paragraph type="secondary">{run.id}</Typography.Paragraph>
         </div>
         <Space wrap>
+          {run.available_actions.includes("widen_budget") && (
+            // Not routed through `RUN_ACTIONS`: every entry in that table is
+            // a bare POST, and this one carries a number a person has to
+            // choose. A generic button here would send a guess.
+            <Button onClick={() => setWidening(true)}>{t("widenBudget")}</Button>
+          )}
           {run.available_actions.map((action) => {
             const offer = RUN_ACTIONS[action];
             return offer === undefined ? null : (
@@ -386,18 +451,33 @@ export function RunDetailPage() {
       <Card title={t("summarySection")} variant="borderless" className="page-alert">
         <Descriptions column={{ xs: 1, sm: 2 }} size="small" items={facts} />
         <Typography.Title level={5}>{t("budgetSection")}</Typography.Title>
+        {hasTree && (
+          // §669: the whole tree spends one budget, and these numbers come
+          // from `run_budget_scopes` by `budget_root_run_id` — they are the
+          // tree's on every node. Unlabelled, a child's page reports the
+          // tree's spend as this Run's.
+          <Typography.Paragraph type="secondary">{t("budgetSharedNote")}</Typography.Paragraph>
+        )}
         <Descriptions column={{ xs: 1, sm: 2 }} size="small" items={budgetRows(run.budget, t)} />
       </Card>
-      {run.children.length > 0 && (
-        // Only when there are any. The full task tree is a later milestone;
-        // what this has to do is make it visible that this Run is one of
-        // several and let somebody click through to the others.
-        <Card title={t("childRunsSection")} variant="borderless" className="page-alert">
-          <Space direction="vertical" size="small">
-            {run.children.map((child) => (
-              <Space key={child.id} size="small">
-                <Tag>{child.status}</Tag>
-                {runLink(child.id)}
+      {hasTree && (
+        // §952's 完整父子任务树, drawn from whichever node was opened. A
+        // child used to carry only `parent_run_id`, so somebody reading the
+        // child that failed could not see that its siblings succeeded.
+        <Card title={t("taskTreeSection")} variant="borderless" className="page-alert">
+          <Space direction="vertical" size="small" style={{ width: "100%" }}>
+            <Typography.Paragraph type="secondary">{t("taskTreeIntro")}</Typography.Paragraph>
+            {treeNodes.map((node) => (
+              <Space key={node.id} size="small" style={{ paddingLeft: node.depth * 24 }}>
+                <Tag>{node.status}</Tag>
+                <Tag>{t(relationKey(node.relation))}</Tag>
+                {node.id === runId ? (
+                  // Marked rather than left to the reader to match ids: a
+                  // column of uuids does not say which one is open.
+                  <Typography.Text strong>{t("taskTreeYouAreHere")}</Typography.Text>
+                ) : (
+                  runLink(node.id)
+                )}
               </Space>
             ))}
           </Space>
@@ -471,6 +551,51 @@ export function RunDetailPage() {
           <Timeline items={timeline} />
         )}
       </Card>
+      <Modal
+        open={widening}
+        title={t("widenBudget")}
+        okText={t("confirm")}
+        cancelText={t("cancel")}
+        confirmLoading={widen.isPending}
+        onCancel={() => setWidening(false)}
+        onOk={() => void widenForm.submit()}
+      >
+        <Form<{ maxModelCalls: number }>
+          form={widenForm}
+          layout="vertical"
+          requiredMark={false}
+          initialValues={{ maxModelCalls: run.budget.max_model_calls }}
+          onFinish={(values) =>
+            widen.mutate({
+              maxModelCalls: values.maxModelCalls,
+              expected: run.state_version,
+            })
+          }
+        >
+          <Typography.Paragraph type="secondary">
+            {/* Said here, not only on the budget card: the person raising a
+                ceiling is deciding for every Run under this budget root. */}
+            {t("widenBudgetHint")}
+          </Typography.Paragraph>
+          <Form.Item
+            name="maxModelCalls"
+            label={t("widenBudgetField")}
+            rules={[
+              {
+                validator: (_rule, value: number) =>
+                  typeof value === "number" && value > run.budget.max_model_calls
+                    ? Promise.resolve()
+                    : // Checked here rather than left to the API, which
+                      // refuses it *and* writes `run.budget_widen_denied`:
+                      // a typo should not spend an audit row.
+                      Promise.reject(new Error(t("widenBudgetMustRise"))),
+              },
+            ]}
+          >
+            <InputNumber min={1} style={{ width: "100%" }} />
+          </Form.Item>
+        </Form>
+      </Modal>
     </>
   );
 }

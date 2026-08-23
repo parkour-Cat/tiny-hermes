@@ -457,10 +457,10 @@ test("a Run whose endpoint has no price says unknown, never zero", async () => {
 });
 
 test("a Run that delegated shows its children and each one is a link", async () => {
-  // The minimal task tree: the full one is a later milestone, so what this has
-  // to do is make it visible that this Run is one of several and let somebody
-  // get to the others. A status beside each, because "two children, one of
-  // which failed" is the shape of the question a person opens this page with.
+  // A status beside each, because "two children, one of which failed" is the
+  // shape of the question a person opens this page with. Drawn from the tree
+  // route rather than `children` on the Run: the same card has to work when
+  // it is a *child* that was opened, and a child's `children` is empty.
   server.use(
     http.get(`/api/v1/runs/${RUN}`, () =>
       HttpResponse.json(
@@ -473,6 +473,17 @@ test("a Run that delegated shows its children and each one is a link", async () 
           ],
         }),
       ),
+    ),
+    http.get(`/api/v1/runs/${RUN}/tree`, () =>
+      HttpResponse.json({
+        budget_root_run_id: RUN,
+        budget: BUDGET,
+        nodes: [
+          { id: RUN, status: "waiting_external", depth: 0, parent_run_id: null, relation: "root", created_at: "2026-08-10T02:00:00Z", finished_at: null },
+          { id: OTHER_RUN, status: "completed", depth: 1, parent_run_id: RUN, relation: "child", created_at: "2026-08-10T02:01:00Z", finished_at: null },
+          { id: THIRD_RUN, status: "running", depth: 1, parent_run_id: RUN, relation: "child", created_at: "2026-08-10T02:01:00Z", finished_at: null },
+        ],
+      }),
     ),
   );
   stream();
@@ -507,14 +518,147 @@ test("a delegated Run says who delegated it", async () => {
 });
 
 test("an ordinary Run shows no tree at all", async () => {
-  // Most Runs are not part of one, and a card saying "no children" on every
-  // Run detail page would be a permanent reminder of a feature nobody used.
-  server.use(http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run())));
+  // Most Runs are alone in their tree, and a card saying so on every Run
+  // detail page would be a permanent reminder of a feature nobody used.
+  //
+  // The tree route is stubbed with the one node it really returns, so this
+  // tests the page's decision rather than a request that happened to fail.
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run())),
+    http.get(`/api/v1/runs/${RUN}/tree`, () =>
+      HttpResponse.json({
+        budget_root_run_id: RUN,
+        budget: BUDGET,
+        nodes: [
+          { id: RUN, status: "running", depth: 0, parent_run_id: null, relation: "root", created_at: "2026-08-10T02:00:00Z", finished_at: null },
+        ],
+      }),
+    ),
+  );
   stream();
 
   renderRun();
   await summary();
 
-  expect(screen.queryByText(t("childRunsSection"))).not.toBeInTheDocument();
+  expect(screen.queryByText(t("taskTreeSection"))).not.toBeInTheDocument();
   expect(screen.queryByText(t("runParent"))).not.toBeInTheDocument();
+  // And no note claiming the budget is shared, because it is not.
+  expect(screen.queryByText(t("budgetSharedNote"))).not.toBeInTheDocument();
+});
+
+const SIBLING = "77777777-1111-4222-8333-444444444444";
+const PARENT = "66666666-1111-4222-8333-444444444444";
+
+function tree(nodes: object[]) {
+  return http.get(`/api/v1/runs/${RUN}/tree`, () =>
+    HttpResponse.json({ budget_root_run_id: PARENT, nodes, budget: BUDGET }),
+  );
+}
+
+test("a child Run can see the siblings it was delegated alongside", async () => {
+  // §952's 完整父子任务树. Before the tree route, a child carried
+  // `parent_run_id` and nothing else — so somebody who opened the child that
+  // failed had no way to learn that three siblings succeeded without walking
+  // up to the parent and back down by hand.
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () =>
+      HttpResponse.json(run({ parent_run_id: PARENT, depth: 1, budget_root_run_id: PARENT })),
+    ),
+    tree([
+      { id: PARENT, status: "completed", depth: 0, parent_run_id: null, relation: "root", created_at: "2026-08-10T02:00:00Z", finished_at: "2026-08-10T02:09:00Z" },
+      { id: RUN, status: "running", depth: 1, parent_run_id: PARENT, relation: "child", created_at: "2026-08-10T02:01:00Z", finished_at: null },
+      { id: SIBLING, status: "failed", depth: 1, parent_run_id: PARENT, relation: "child", created_at: "2026-08-10T02:01:00Z", finished_at: "2026-08-10T02:03:00Z" },
+    ]),
+  );
+
+  renderRun();
+
+  const section = (await screen.findByText(t("taskTreeSection"))).closest(".ant-card") as HTMLElement;
+  expect(within(section).getByRole("link", { name: SIBLING })).toBeVisible();
+  // And the Run being read is marked, because a tree of ids all looking alike
+  // does not tell you which one you opened.
+  expect(within(section).getByText(t("taskTreeYouAreHere"))).toBeVisible();
+});
+
+test("the budget is labelled as the tree's, because that is whose it is", async () => {
+  // `budget` on a Run response is read from `run_budget_scopes` by
+  // `budget_root_run_id` — it is the whole tree's consumption on every node.
+  // A child's page heading it "Budget" tells an administrator this child made
+  // the calls the tree made.
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () =>
+      HttpResponse.json(run({ parent_run_id: PARENT, depth: 1, budget_root_run_id: PARENT })),
+    ),
+    tree([
+      { id: PARENT, status: "completed", depth: 0, parent_run_id: null, relation: "root", created_at: "2026-08-10T02:00:00Z", finished_at: null },
+      { id: RUN, status: "running", depth: 1, parent_run_id: PARENT, relation: "child", created_at: "2026-08-10T02:01:00Z", finished_at: null },
+    ]),
+  );
+
+  renderRun();
+
+  expect(await screen.findByText(t("budgetSharedNote"))).toBeVisible();
+});
+
+
+test("a Run stopped by its ceiling offers the one action that can move it", async () => {
+  // §26's 安全阀管理. Widening has worked since M2 and nothing in the console
+  // said so, so a Run stopped by its budget drew `cancel` and a dead end.
+  let sent: unknown = null;
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () =>
+      HttpResponse.json(
+        run({
+          status: "paused",
+          pause_reason: "limit",
+          available_actions: ["widen_budget", "cancel"],
+        }),
+      ),
+    ),
+    http.post(`/api/v1/runs/${RUN}/budget`, async ({ request }) => {
+      sent = await request.json();
+      return HttpResponse.json(run({ status: "paused", available_actions: ["resume", "cancel"] }));
+    }),
+  );
+  stream();
+
+  renderRun();
+  await userEvent.click(await screen.findByRole("button", { name: t("widenBudget") }));
+  const field = await screen.findByLabelText(t("widenBudgetField"));
+  await userEvent.clear(field);
+  await userEvent.type(field, "30");
+  await userEvent.click(screen.getByRole("button", { name: t("confirm") }));
+
+  await waitFor(() =>
+    // `expected_state_version` and not a bare number: this is a control like
+    // any other, and a stale version has to be refused rather than applied to
+    // whatever the Run became while the dialog was open.
+    expect(sent).toEqual({ expected_state_version: 4, max_model_calls: 30 }),
+  );
+});
+
+test("the dialog will not send a ceiling that is not a rise", async () => {
+  // The API refuses it and writes `run.budget_widen_denied`. Letting the
+  // console send it anyway spends an audit row on a typo, and answers the
+  // administrator with a refusal instead of the field they mistyped.
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () =>
+      HttpResponse.json(
+        run({ status: "paused", pause_reason: "limit", available_actions: ["widen_budget"] }),
+      ),
+    ),
+    http.post(`/api/v1/runs/${RUN}/budget`, () => {
+      throw new Error("the console should not have sent this");
+    }),
+  );
+  stream();
+
+  renderRun();
+  await userEvent.click(await screen.findByRole("button", { name: t("widenBudget") }));
+  const field = await screen.findByLabelText(t("widenBudgetField"));
+  await userEvent.clear(field);
+  await userEvent.type(field, "3");
+  await userEvent.click(screen.getByRole("button", { name: t("confirm") }));
+
+  expect(await screen.findByText(t("widenBudgetMustRise"))).toBeVisible();
 });

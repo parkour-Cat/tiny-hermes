@@ -533,6 +533,11 @@ class CallerIdentity:
 class RunCapabilities:
     can_control: bool
     can_retry: bool
+    #: §4.6 gives the spend ceiling to a workspace administrator alone.
+    #: Separate from `can_control` because pausing a Run and raising what it
+    #: may spend are not the same power, and a developer holds only the first.
+    #: Defaulted so every existing construction keeps meaning what it meant.
+    can_hold_budget: bool = False
 
 
 @dataclass(frozen=True)
@@ -712,13 +717,69 @@ class SessionSnapshot:
 
 
 @dataclass(frozen=True)
+class TreeNode:
+    """One Run in a task tree, as much of it as the tree view needs.
+
+    `relation` is why this Run is in the tree, and it is load-bearing. A tree
+    anchored at `budget_root_run_id` holds the root, the Runs it delegated
+    **and its retry chain** (§383) — because those three are what share one
+    budget. A view that showed them all as "children" would tell a reader
+    that a retried Run delegated to itself.
+    """
+
+    id: UUID
+    status: RunState
+    depth: int
+    parent_run_id: UUID | None
+    relation: str
+    created_at: datetime
+    finished_at: datetime | None
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "id": str(self.id),
+            "status": self.status.value,
+            "depth": self.depth,
+            "parent_run_id": _optional_id(self.parent_run_id),
+            "relation": self.relation,
+            "created_at": self.created_at.isoformat(),
+            "finished_at": None if self.finished_at is None else self.finished_at.isoformat(),
+        }
+
+
+@dataclass(frozen=True)
+class RunTree:
+    """Every Run that shares one budget, and the budget they share.
+
+    The budget is carried once, on the tree, rather than repeated on each
+    node. It is already tree-wide on every Run response — read from
+    `run_budget_scopes` by `budget_root_run_id` — and repeating it per node
+    would make it look like each Run's own.
+    """
+
+    budget_root_run_id: UUID
+    nodes: tuple[TreeNode, ...]
+    budget: "BudgetSummary"
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "budget_root_run_id": str(self.budget_root_run_id),
+            "nodes": [node.document() for node in self.nodes],
+            "budget": self.budget.document(),
+        }
+
+
+@dataclass(frozen=True)
 class ChildRunRef:
     """One delegated Run, as much of it as a task tree needs.
 
-    Id and status and nothing else. The full tree is M3; what a person needs
-    here is to see that this Run is one of several and to be able to click
-    through — and a summary that carried more would be a second place the
-    child's state is written down.
+    Id and status and nothing else — a summary that carried more would be a
+    second place the child's state is written down.
+
+    Kept alongside `RunTree` rather than replaced by it. This says "what this
+    Run delegated", which is a fact about the Run and belongs on it; the tree
+    says "everything sharing one budget", which is the same answer from every
+    node and would be fetched once per link if it lived here.
     """
 
     id: UUID

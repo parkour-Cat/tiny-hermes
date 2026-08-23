@@ -21,9 +21,11 @@ from tiny_hermes.artifacts.application.service import ArtifactService
 from tiny_hermes.artifacts.infrastructure.sql_store import SqlArtifactStore
 from tiny_hermes.audit.application.audit_service import AuditService
 from tiny_hermes.audit.infrastructure.sql_audit_store import SqlAuditStore
+from tiny_hermes.channels.application.binding_service import ChannelBindingService
 from tiny_hermes.channels.application.feishu_service import FeishuChannelService
 from tiny_hermes.channels.application.ingestion import ChannelIngestion
 from tiny_hermes.channels.application.webhook_service import FeishuWebhookService
+from tiny_hermes.channels.infrastructure.sql_binding_store import SqlChannelBindingStore
 from tiny_hermes.channels.infrastructure.sql_channel_store import SqlChannelStore
 from tiny_hermes.http_tools.application.service import HttpToolCatalog
 from tiny_hermes.http_tools.infrastructure.sql_store import SqlHttpToolStore
@@ -535,6 +537,24 @@ class ApplicationResources:
                 yield PricingService(SqlPricingStore(session))
             except AuditedDenial:
                 await session.commit()
+                raise
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
+
+    async def channel_binding_service(
+        self,
+    ) -> AsyncGenerator[ChannelBindingService]:
+        async with self.session_factory()() as session:
+            try:
+                yield ChannelBindingService(SqlChannelBindingStore(session))
+            except AppError as error:
+                if error.audited:
+                    await session.commit()
+                else:
+                    await session.rollback()
                 raise
             except BaseException:
                 await session.rollback()
