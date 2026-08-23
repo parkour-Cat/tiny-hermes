@@ -87,10 +87,10 @@ export function HttpToolsPage() {
     onError: (caught) => {
       setMissingHost(
         caught instanceof ApiError && caught.code === "host_outside_workspace_scope"
-          ? problemMessage(caught)
+          ? problemMessage(caught, t)
           : null,
       );
-      setError(problemMessage(caught));
+      setError(problemMessage(caught, t));
     },
   });
 
@@ -101,14 +101,14 @@ export function HttpToolsPage() {
         { ...scope, method: "POST" },
       ),
     onSuccess: refresh,
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   if (tools.isError) {
     return (
       <Alert
         type="error"
-        title={problemMessage(tools.error)}
+        title={problemMessage(tools.error, t)}
         action={<Button onClick={() => void tools.refetch()}>{t("retry")}</Button>}
         showIcon
       />

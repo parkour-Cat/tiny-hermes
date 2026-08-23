@@ -303,19 +303,34 @@ test("the builder binds a tool, playground sends, and rollback restores v1", asy
   await expect(page.getByText("当前版本 v1")).toBeVisible();
 });
 
-test("the locale switcher changes chrome and can switch back", async ({ page }) => {
+test("the locale switcher changes the page, not only the chrome", async ({ page }) => {
+  /**
+   * This test used to be called "changes chrome", and that name was honest:
+   * it asserted the navigation links and nothing else. It could not have
+   * been stronger, because sixteen files imported the Chinese strings
+   * directly, so switching to English moved the shell around a page that
+   * never changed a word.
+   *
+   * The empty-state line is asserted alongside the links now. It comes from
+   * page content rather than the layout, so a regression that reintroduces a
+   * hardcoded `t` shows up here rather than in a screenshot somebody
+   * happens to look at.
+   */
   await openWorkspace(page);
   await expect(page.getByRole("link", { name: "任务" })).toBeVisible();
+  await expect(page.getByText("还没有 Agent")).toBeVisible();
   await page.getByLabel("语言").click();
   await page
     .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
     .locator('.ant-select-item-option[title="English"]')
     .click();
   await expect(page.getByRole("link", { name: "Runs" })).toBeVisible();
+  await expect(page.getByText("No agents yet")).toBeVisible();
   await page.getByLabel("Language").click();
   await page
     .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
     .locator('.ant-select-item-option[title="中文"]')
     .click();
   await expect(page.getByRole("link", { name: "任务" })).toBeVisible();
+  await expect(page.getByText("还没有 Agent")).toBeVisible();
 });

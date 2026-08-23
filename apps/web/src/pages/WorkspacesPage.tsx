@@ -17,8 +17,8 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
+import { useT } from "../i18n/locale";
 import { useAuth } from "../auth/AuthProvider";
-import { t } from "../i18n/zh-CN";
 
 type Workspace = {
   id: string;
@@ -33,6 +33,7 @@ type WorkspaceValues = {
 const WORKSPACES_QUERY = ["workspaces"] as const;
 
 export function WorkspacesPage() {
+  const t = useT();
   const auth = useAuth();
   const queryClient = useQueryClient();
   const [form] = Form.useForm<WorkspaceValues>();

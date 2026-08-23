@@ -60,14 +60,14 @@ export function ApprovalsPage() {
       // showing it is stale the moment this returns.
       void queryClient.invalidateQueries({ queryKey: ["runs"] });
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   if (approvals.isError) {
     return (
       <Alert
         type="error"
-        title={problemMessage(approvals.error)}
+        title={problemMessage(approvals.error, t)}
         action={<Button onClick={() => void approvals.refetch()}>{t("retry")}</Button>}
         showIcon
       />

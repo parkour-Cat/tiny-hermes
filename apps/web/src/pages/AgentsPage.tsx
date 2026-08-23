@@ -51,7 +51,7 @@ export function AgentsPage() {
       // alias is something the user can edit; throwing the input away would
       // make a recoverable refusal cost a retype.
       const field: keyof AgentValues = problemField(caught) === "name" ? "name" : "alias";
-      form.setFields([{ name: field, errors: [problemMessage(caught)] }]);
+      form.setFields([{ name: field, errors: [problemMessage(caught, t)] }]);
     },
   });
 
@@ -59,7 +59,7 @@ export function AgentsPage() {
     return (
       <Alert
         type="error"
-        title={problemMessage(agents.error)}
+        title={problemMessage(agents.error, t)}
         action={<Button onClick={() => void agents.refetch()}>{t("retry")}</Button>}
         showIcon
       />

@@ -81,7 +81,7 @@ export function McpServersPage() {
     },
     onError: (caught) => {
       setNote(null);
-      setError(problemMessage(caught));
+      setError(problemMessage(caught, t));
     },
   });
 
@@ -98,14 +98,14 @@ export function McpServersPage() {
       setNote(result.status === 200 ? t("mcpServerUnchanged") : null);
       refresh();
     },
-    onError: (caught) => setError(problemMessage(caught)),
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   if (servers.isError) {
     return (
       <Alert
         type="error"
-        title={problemMessage(servers.error)}
+        title={problemMessage(servers.error, t)}
         action={<Button onClick={() => void servers.refetch()}>{t("retry")}</Button>}
         showIcon
       />
