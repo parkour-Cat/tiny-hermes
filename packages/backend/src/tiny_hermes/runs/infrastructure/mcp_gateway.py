@@ -30,6 +30,7 @@ from tiny_hermes.model_catalog.infrastructure.credentials import (
 )
 from tiny_hermes.outbound.client import SafeOutboundClient
 from tiny_hermes.outbound.errors import OutboundError, OutboundRefused
+from tiny_hermes.runs.infrastructure.credential_echo import without_credential
 from tiny_hermes.runs.ports.http_calls import EgressClaim
 from tiny_hermes.runs.ports.mcp import BoundMcpTool, McpAnswer, McpRevalidation
 from tiny_hermes.secrets.infrastructure.sql_store import SqlSecretStore
@@ -145,12 +146,14 @@ class OutboundMcpGateway:
         params: dict[str, object],
     ) -> bytes:
         headers = {"Accept": "application/json"}
+        # `None` when this server carries no credential, which is what
+        # `without_credential` reads as "nothing to look for".
+        token: str | None = None
         if credential_ref is not None:
             async with self._sessions() as session:
                 resolver = CredentialResolver(SqlSecretStore(session), self._kek)
-                headers["Authorization"] = (
-                    f"Bearer {await resolver.resolve(credential_ref)}"
-                )
+                token = await resolver.resolve(credential_ref)
+            headers["Authorization"] = f"Bearer {token}"
         async with self._client_factory(claim) as client:
             response = await client.request(
                 "POST",
@@ -160,7 +163,11 @@ class OutboundMcpGateway:
             )
         if response.status_code >= 400:
             raise OutboundError(f"the server answered {response.status_code}")
-        return response.content
+        # §23 assertion 7: a server that reflects the header it was sent would
+        # otherwise hand the credential to the model. See `credential_echo`.
+        return without_credential(
+            response.content.decode("utf-8", errors="replace"), token
+        ).encode("utf-8")
 
     async def _server_of(self, version_id: UUID) -> tuple[str, str, str | None] | None:
         async with self._sessions() as session:
