@@ -12,7 +12,10 @@ from typing import Any, Protocol, cast
 from uuid import UUID
 
 from tiny_hermes.channels.domain.events import ChannelEvent, MalformedChannelEvent
-from tiny_hermes.channels.domain.feishu import event_from_envelope
+from tiny_hermes.channels.domain.feishu import (
+    UnsupportedMessageType,
+    event_from_envelope,
+)
 from tiny_hermes.channels.domain.webhook import (
     WebhookRefused,
     decrypt_payload,
@@ -69,6 +72,20 @@ def _unsigned_handshake(body: bytes, encrypt_key: str) -> Challenge:
 
 
 @dataclass(frozen=True)
+class Unreadable:
+    """A verified delivery this build cannot read, and who to tell.
+
+    Claimed like any other, because Feishu retries at-least-once and a
+    refusal sent per retry would tell one person four times that photos are
+    unsupported — a worse failure than the silence it replaces.
+    """
+
+    kind: str
+    external_user_id: str
+    claim_id: UUID | None
+
+
+@dataclass(frozen=True)
 class Claimed:
     event: ChannelEvent
     #: `None` when this delivery was a duplicate. Not an error — Feishu
@@ -100,7 +117,7 @@ class FeishuWebhookService:
         timestamp: str | None,
         nonce: str | None,
         signature: str | None,
-    ) -> Challenge | Claimed:
+    ) -> Challenge | Claimed | Unreadable:
         """Verify, decrypt, normalize, claim — in that order, and no other.
 
         Verification comes first because everything after it treats the
@@ -142,6 +159,19 @@ class FeishuWebhookService:
 
         try:
             event = event_from_envelope(envelope)
+        except UnsupportedMessageType as unreadable:
+            # Not an error to log and drop. §19.2 forbids swallowing a
+            # message quietly, and this one has a sender to answer — which
+            # is exactly what `UnsupportedMessageType` carries and a plain
+            # `MalformedChannelEvent` does not.
+            claim_id = await self._store.claim_delivery(
+                secrets.binding_id, unreadable.channel_event_id, datetime.now(UTC)
+            )
+            return Unreadable(
+                kind=unreadable.kind,
+                external_user_id=unreadable.external_user_id,
+                claim_id=claim_id,
+            )
         except MalformedChannelEvent as error:
             # A 400 rather than a refusal: the sender proved it was Feishu,
             # so this is a payload this platform does not understand, not an

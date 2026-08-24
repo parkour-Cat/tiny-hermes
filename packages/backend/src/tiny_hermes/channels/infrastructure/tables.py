@@ -83,6 +83,14 @@ class ChannelEventRow(IdMixin, Base):
                 "blocked_notice IS NOT NULL AND blocked_notified_at IS NULL"
             ),
         ),
+        # The refusal scan's — migration 0042.
+        Index(
+            "ix_channel_events_awaiting_refusal",
+            "received_at",
+            postgresql_where=text(
+                "unsupported_kind IS NOT NULL AND replied_at IS NULL"
+            ),
+        ),
     )
 
     channel_binding_id: Mapped[UUID] = mapped_column(
@@ -121,6 +129,16 @@ class ChannelEventRow(IdMixin, Base):
     #: person is waiting for had been written.
     blocked_notified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    #: The message type this build could not read, or NULL for a readable
+    #: delivery. It reuses `replied_at`/`reply_note` to settle, because a
+    #: refusal is an answer — see migration 0042.
+    unsupported_kind: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: Who to answer. Kept here rather than looked up, because a first-ever
+    #: message that happens to be a photo has no `channel_conversations`
+    #: row — and that person is the one most in need of an answer.
+    unsupported_open_id: Mapped[str | None] = mapped_column(
+        String(200), nullable=True
     )
 
 

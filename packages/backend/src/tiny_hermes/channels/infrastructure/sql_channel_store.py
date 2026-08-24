@@ -31,6 +31,16 @@ from tiny_hermes.runs.infrastructure.tables import RunRow, SessionMessageRow
 
 
 @dataclass(frozen=True)
+class PendingRefusal:
+    """A delivery this build could not read, and the person owed the news."""
+
+    event_row_id: UUID
+    binding_id: UUID
+    kind: str
+    external_user_id: str
+
+
+@dataclass(frozen=True)
 class PendingNotice:
     """A delivery that landed behind a blocked head and has not been told."""
 
@@ -254,6 +264,93 @@ class SqlChannelStore:
             .values(blocked_notice=notice.document())
         )
         await self._session.flush()
+
+    async def record_unsupported(
+        self, event_row_id: UUID, kind: str, external_user_id: str
+    ) -> None:
+        """Mark a claimed delivery as one this build could not read, and who
+        sent it. Both, because the refusal needs to say what and reach whom."""
+        await self._session.execute(
+            update(ChannelEventRow)
+            .where(ChannelEventRow.id == event_row_id)
+            .values(
+                unsupported_kind=kind[:64],
+                unsupported_open_id=external_user_id[:200],
+            )
+        )
+        await self._session.flush()
+
+    async def pending_refusals(self, limit: int = 50) -> list["PendingRefusal"]:
+        """Unreadable deliveries still owed an answer.
+
+        No join to `runs` — an unreadable message starts none. That is why
+        this is its own scan rather than a branch inside `pending_replies`:
+        the reply scan's whole predicate is "the Run finished", and there is
+        no Run here to have finished.
+
+        The recipient comes from `channel_conversations` when the sender has
+        talked to this Agent before, and from the delivery itself when they
+        have not. A first-ever message that happens to be a photo is exactly
+        the case with no conversation row, and it is the one most in need of
+        an answer.
+        """
+        rows = (
+            await self._session.execute(
+                select(
+                    ChannelEventRow.id,
+                    ChannelEventRow.channel_binding_id,
+                    ChannelEventRow.unsupported_kind,
+                    ChannelEventRow.unsupported_open_id,
+                )
+                .where(
+                    ChannelEventRow.unsupported_kind.is_not(None),
+                    ChannelEventRow.replied_at.is_(None),
+                )
+                .order_by(ChannelEventRow.received_at, ChannelEventRow.id)
+                .limit(limit)
+            )
+        ).all()
+        return [
+            PendingRefusal(
+                event_row_id=row.id,
+                binding_id=row.channel_binding_id,
+                kind=row.unsupported_kind,
+                external_user_id=row.unsupported_open_id,
+            )
+            for row in rows
+            if row.unsupported_open_id
+        ]
+
+    async def binding_target(self, binding_id: UUID) -> "DeliveryTarget | None":
+        """The reply credentials for a binding, with no conversation needed.
+
+        `delivery_target_for` starts from a session; a refusal has none. The
+        columns are the same, so the same type comes back — with the
+        recipient left to the caller, who got it from the delivery.
+        """
+        row = (
+            await self._session.execute(
+                select(
+                    ChannelBindingRow.id,
+                    ChannelBindingRow.workspace_id,
+                    ChannelBindingRow.channel,
+                    ChannelBindingRow.app_id,
+                    ChannelBindingRow.app_secret_ref,
+                    ChannelBindingRow.status,
+                ).where(ChannelBindingRow.id == binding_id)
+            )
+        ).first()
+        if row is None:
+            return None
+        return DeliveryTarget(
+            binding_id=row.id,
+            workspace_id=row.workspace_id,
+            channel=row.channel,
+            external_user_id="",
+            app_id=row.app_id,
+            app_secret_ref=row.app_secret_ref,
+            binding_active=row.status == "active",
+        )
 
     async def pending_blocked_notices(
         self, limit: int = 50

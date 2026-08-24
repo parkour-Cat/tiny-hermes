@@ -23,6 +23,7 @@ from tiny_hermes.channels.application.webhook_service import (
     BindingSecrets,
     Challenge,
     FeishuWebhookService,
+    Unreadable,
 )
 from tiny_hermes.channels.domain.blocked import BlockedNotice
 from tiny_hermes.channels.domain.feishu import CHANNEL
@@ -42,6 +43,10 @@ class BindingDirectory(Protocol):
 
     async def record_blocked_notice(
         self, event_row_id: UUID, notice: BlockedNotice
+    ) -> None: ...
+
+    async def record_unsupported(
+        self, event_row_id: UUID, kind: str, external_user_id: str
     ) -> None: ...
 
 
@@ -106,6 +111,18 @@ class FeishuChannelService:
         )
         if isinstance(outcome, Challenge):
             return outcome
+
+        if isinstance(outcome, Unreadable):
+            # No Run — there is nothing this build could hand an Agent. But
+            # there is a person waiting, so the delivery is marked for a
+            # refusal the scan will send. `claim_id` is None for a retry of
+            # a photo already answered, and then nothing is marked: one
+            # message, one refusal.
+            if outcome.claim_id is not None:
+                await self._bindings.record_unsupported(
+                    outcome.claim_id, outcome.kind, outcome.external_user_id
+                )
+            return Accepted(delivered=None)
 
         if outcome.claim_id is None:
             # The claim went to another delivery of the same event. Doing

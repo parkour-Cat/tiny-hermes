@@ -154,17 +154,25 @@ def feishu_webhook_router(resources: ApplicationResources) -> APIRouter:
             # once existed and was erased is itself disclosure.
             raise _refused() from error
         except MalformedChannelEvent as error:
-            # Verified, so this really is Feishu — just a message this
-            # platform does not handle. Answered 200 rather than 4xx:
-            # retries are finite and would not make an unsupported message
-            # type supported, so refusing only produces four more copies of
-            # something already understood.
-            # Answered 200 (see above), but never silently: a delivery that
-            # verified and then produced no Run is indistinguishable, from
-            # the outside, from one that worked — and the person who sent
-            # the message is staring at a chat with no reply.
+            # An envelope with no sender or no event id — genuinely broken,
+            # and the only case left here. A message type this build cannot
+            # read no longer reaches this branch: `webhook_service` claims
+            # it and marks it for a refusal the scan sends, because that one
+            # has somebody to answer.
+            #
+            # This one does not. **Silent to any person, and it has to be**:
+            # there is no sender named in the envelope, so a reply would go
+            # to whoever the platform guessed. An earlier version of this
+            # comment claimed `never silently` on the strength of the log
+            # line below — which is read by operators and not by anybody
+            # waiting for an answer.
+            #
+            # Answered 200 rather than 4xx: retries are finite and would not
+            # make a broken envelope readable, so refusing only produces
+            # four more copies of something already understood.
             logger.warning(
-                "feishu delivery understood but unsupported: binding=%s reason=%r",
+                "feishu delivery could not be read and names nobody to tell: "
+                "binding=%s reason=%r",
                 binding_id,
                 error,
             )

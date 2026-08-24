@@ -64,4 +64,32 @@ def _truncated(words: str) -> str:
     return words[: MAX_REPLY_CHARS - len(_TRUNCATED)] + _TRUNCATED
 
 
-__all__ = ["MAX_REPLY_CHARS", "reply_for"]
+#: How each unreadable type is named to the person who sent it. A type not
+#: listed falls back to a general sentence — a new Feishu message type is a
+#: reason to say less, never to guess.
+_KINDS = {
+    "image": "图片",
+    "audio": "语音",
+    "media": "视频",
+    "file": "文件",
+    "sticker": "表情",
+    "post": "富文本",
+    "share_chat": "群名片",
+}
+
+
+def refusal_for(kind: str) -> str:
+    """What to say when a message arrives in a form this build cannot read.
+
+    §19.2 forbids swallowing a message quietly, and this path used to do
+    exactly that: a 200, a log line, and nothing for the person holding the
+    phone. Saying "I can only read text" is a small thing to send, and it is
+    the difference between a platform that is limited and one that is broken
+    — from the outside those look identical until somebody says which.
+    """
+    named = _KINDS.get(kind)
+    what = f"{named}消息" if named is not None else "这种类型的消息"
+    return f"我暂时还处理不了{what},目前只能读文字。麻烦你用文字再说一遍。"
+
+
+__all__ = ["MAX_REPLY_CHARS", "refusal_for", "reply_for"]

@@ -24,11 +24,12 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from tiny_hermes.channels.domain.feishu import CHANNEL
-from tiny_hermes.channels.domain.reply import reply_for
+from tiny_hermes.channels.domain.reply import refusal_for, reply_for
 from tiny_hermes.channels.infrastructure.feishu_card import blocked_card
 from tiny_hermes.channels.infrastructure.sql_channel_store import (
     DeliveryTarget,
     PendingNotice,
+    PendingRefusal,
     PendingReply,
 )
 
@@ -60,6 +61,8 @@ class ReplyOutcome:
     NO_CREDENTIAL = "no_credential"
     BINDING_DISABLED = "binding_disabled"
     UNSUPPORTED_CHANNEL = "unsupported_channel"
+    #: A message this build could not read; the sender was told so.
+    UNSUPPORTED_MESSAGE = "unsupported_message"
     #: Prefix. The vendor's own refusal is appended, because "it was
     #: refused" and "it was refused because the bot is not in that chat" are
     #: different problems with different fixes.
@@ -134,6 +137,10 @@ class ReplyQueue(Protocol):
         self, limit: int = 50
     ) -> list[PendingNotice]: ...
 
+    async def pending_refusals(self, limit: int = 50) -> list[PendingRefusal]: ...
+
+    async def binding_target(self, binding_id: UUID) -> DeliveryTarget | None: ...
+
     async def settle_blocked_notice(
         self, event_row_id: UUID, now: datetime
     ) -> None: ...
@@ -183,6 +190,9 @@ class ChannelReplyDispatcher:
         not sending it at all.
         """
         sent = 0
+        for unreadable in await self._store.pending_refusals(self._batch_size):
+            if await self._refuse(unreadable):
+                sent += 1
         for waiting in await self._store.pending_blocked_notices(self._batch_size):
             if await self._notify(waiting):
                 sent += 1
@@ -190,6 +200,58 @@ class ChannelReplyDispatcher:
             if await self._dispatch(pending):
                 sent += 1
         return sent
+
+    async def _refuse(self, unreadable: PendingRefusal) -> bool:
+        """Tell somebody their photo could not be read.
+
+        Its recipient comes off the delivery rather than from a session:
+        there is no Run and often no conversation either, because a first
+        message that happens to be a photo is exactly the case with nothing
+        stored yet.
+
+        Settled whether or not it goes out, and with no retry — same
+        reasoning as the queue notice. A refusal that arrives late, after
+        the person has already given up and typed the message again, is
+        noise; one retried every scan is worse.
+        """
+        target = await self._store.binding_target(unreadable.binding_id)
+        recipient = self._sendable(target)
+        if isinstance(recipient, str):
+            logger.info(
+                "channel refusal not sent: binding=%s reason=%s",
+                unreadable.binding_id,
+                recipient,
+            )
+            await self._store.settle_reply(
+                unreadable.event_row_id, recipient, _now()
+            )
+            return False
+        try:
+            secret = await self._resolve_secret(recipient.app_secret_ref)
+            await self._senders(recipient.workspace_id).send_text(
+                app_id=recipient.app_id,
+                app_secret=secret,
+                # From the delivery, not from `recipient` — `binding_target`
+                # leaves that field empty precisely because a binding serves
+                # everybody and cannot know who this one is for.
+                open_id=unreadable.external_user_id,
+                text=refusal_for(unreadable.kind),
+                delivery_key=str(unreadable.event_row_id),
+            )
+        except Exception:
+            logger.warning(
+                "channel refusal failed: binding=%s",
+                unreadable.binding_id,
+                exc_info=True,
+            )
+            await self._store.settle_reply(
+                unreadable.event_row_id, ReplyOutcome.REFUSED, _now()
+            )
+            return False
+        await self._store.settle_reply(
+            unreadable.event_row_id, ReplyOutcome.UNSUPPORTED_MESSAGE, _now()
+        )
+        return True
 
     async def _notify(self, waiting: PendingNotice) -> bool:
         """§19.2's status card, sent once.
