@@ -65,57 +65,64 @@ export function ConsoleLayout() {
   return (
     <Layout className="app-layout">
       <Layout.Header className="app-header">
-        <div className="console-identity">
-          <Link to="/workspaces" className="header-brand">
-            {t("appName")}
-          </Link>
-          <Typography.Text className="console-workspace" ellipsis>
-            {current?.name ?? workspaceId}
-          </Typography.Text>
-          <nav className="console-nav">
-            <NavLink to={`/workspaces/${workspaceId}/agents`}>{t("agents")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/runs`}>{t("runs")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/usage`}>{t("usage")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/members`}>{t("members")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/model-endpoints`}>{t("modelEndpoints")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/api-keys`}>{t("apiKeys")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/skills`}>{t("skills")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/skill-proposals`}>{t("proposals")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/approvals`}>{t("approvals")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/memory`}>{t("memoryReview")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/subjects`}>{t("subjectData")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/http-tools`}>{t("httpTools")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/mcp-servers`}>{t("mcpServers")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/channels`}>{t("channels")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/identity-providers`}>
-              {t("identityProviders")}
-            </NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/outbound`}>{t("outboundScopes")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/secrets`}>{t("secrets")}</NavLink>
-            <NavLink to={`/workspaces/${workspaceId}/audit`}>{t("audit")}</NavLink>
-          </nav>
-        </div>
-        <Space wrap>
-          <Select
-            aria-label={t("language")}
-            value={locale}
-            onChange={(next) => setLocale(next)}
-            options={[
-              { value: "zh-CN", label: t("localeZh") },
-              { value: "en-US", label: t("localeEn") },
-            ]}
-            popupMatchSelectWidth={false}
-          />
-          <Button onClick={() => theme.toggle()}>
-            {theme.dark ? t("themeLight") : t("themeDark")}
-          </Button>
-          <Avatar>{auth.user?.display_name.slice(0, 1).toUpperCase()}</Avatar>
-          <div className="user-summary">
-            <Typography.Text>{auth.user?.display_name}</Typography.Text>
-            <Typography.Text type="secondary">{auth.user?.subject}</Typography.Text>
+        {/* Two rows. One row could not hold a brand, a workspace name,
+            eighteen destinations and the account controls without every one
+            of them shrinking below its own text: the brand came out as
+            "TINY-" above "HERMES" and the workspace name as "fe…". The nav
+            takes the second row alone because it is the part that grows. */}
+        <div className="header-top">
+          <div className="console-identity">
+            <Link to="/workspaces" className="header-brand">
+              {t("appName")}
+            </Link>
+            <Typography.Text className="console-workspace" ellipsis>
+              {current?.name ?? workspaceId}
+            </Typography.Text>
           </div>
-          <Button onClick={() => void logout()}>{t("logout")}</Button>
-        </Space>
+          <Space wrap>
+            <Select
+              aria-label={t("language")}
+              value={locale}
+              onChange={(next) => setLocale(next)}
+              options={[
+                { value: "zh-CN", label: t("localeZh") },
+                { value: "en-US", label: t("localeEn") },
+              ]}
+              popupMatchSelectWidth={false}
+            />
+            <Button onClick={() => theme.toggle()}>
+              {theme.dark ? t("themeLight") : t("themeDark")}
+            </Button>
+            <Avatar>{auth.user?.display_name.slice(0, 1).toUpperCase()}</Avatar>
+            <div className="user-summary">
+              <Typography.Text>{auth.user?.display_name}</Typography.Text>
+              <Typography.Text type="secondary">{auth.user?.subject}</Typography.Text>
+            </div>
+            <Button onClick={() => void logout()}>{t("logout")}</Button>
+          </Space>
+        </div>
+        <nav className="console-nav">
+          <NavLink to={`/workspaces/${workspaceId}/agents`}>{t("agents")}</NavLink>
+          <NavLink to={`/workspaces/${workspaceId}/runs`}>{t("runs")}</NavLink>
+          <NavLink to={`/workspaces/${workspaceId}/usage`}>{t("usage")}</NavLink>
+          <NavLink to={`/workspaces/${workspaceId}/members`}>{t("members")}</NavLink>
+          <NavLink to={`/workspaces/${workspaceId}/model-endpoints`}>{t("modelEndpoints")}</NavLink>
+          <NavLink to={`/workspaces/${workspaceId}/api-keys`}>{t("apiKeys")}</NavLink>
+          <NavLink to={`/workspaces/${workspaceId}/skills`}>{t("skills")}</NavLink>
+          <NavLink to={`/workspaces/${workspaceId}/skill-proposals`}>{t("proposals")}</NavLink>
+          <NavLink to={`/workspaces/${workspaceId}/approvals`}>{t("approvals")}</NavLink>
+          <NavLink to={`/workspaces/${workspaceId}/memory`}>{t("memoryReview")}</NavLink>
+          <NavLink to={`/workspaces/${workspaceId}/subjects`}>{t("subjectData")}</NavLink>
+          <NavLink to={`/workspaces/${workspaceId}/http-tools`}>{t("httpTools")}</NavLink>
+          <NavLink to={`/workspaces/${workspaceId}/mcp-servers`}>{t("mcpServers")}</NavLink>
+          <NavLink to={`/workspaces/${workspaceId}/channels`}>{t("channels")}</NavLink>
+          <NavLink to={`/workspaces/${workspaceId}/identity-providers`}>
+            {t("identityProviders")}
+          </NavLink>
+          <NavLink to={`/workspaces/${workspaceId}/outbound`}>{t("outboundScopes")}</NavLink>
+          <NavLink to={`/workspaces/${workspaceId}/secrets`}>{t("secrets")}</NavLink>
+          <NavLink to={`/workspaces/${workspaceId}/audit`}>{t("audit")}</NavLink>
+        </nav>
       </Layout.Header>
       <Layout.Content className="workspace-content">
         {actionError === null ? null : (

@@ -43,7 +43,17 @@ body {
 }
 
 .brand-kicker,
+.header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+
 .header-brand {
+  /* The product's name is one word. Without this it broke at the hyphen and
+     rendered as "TINY-" above "HERMES". */
+  white-space: nowrap;
   color: #155e75;
   font-size: 15px;
   font-weight: 800;
@@ -64,10 +74,12 @@ body {
 .app-header {
   height: auto;
   min-height: 72px;
+  /* A column of two rows, not one row of three blocks. See the comment in
+     ConsoleLayout.tsx: the single row made every child shrink below its own
+     text rather than letting the tallest one wrap. */
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 24px;
+  flex-direction: column;
+  gap: 10px;
   padding: 12px clamp(20px, 5vw, 72px);
   background: rgb(255 255 255 / 92%);
   border-bottom: 1px solid #dde5e8;
@@ -81,20 +93,33 @@ body {
 }
 
 .console-workspace {
-  max-width: 220px;
+  /* Wide enough for a name to be read. It shared a row with the whole nav
+     before, which left it showing "fe…". */
+  max-width: 320px;
   font-size: 16px;
   font-weight: 600;
 }
 
+/* Wraps to a second line rather than squeezing. Eighteen entries do not
+   fit one row on a laptop, and without `wrap` flex shrinks each link below
+   its text width — which makes a two-character label render as two lines of
+   one character. The nav looked like a ransom note. */
 .console-nav {
   display: flex;
-  gap: 20px;
+  flex-wrap: wrap;
+  gap: 4px 20px;
+  /* Without this a flex item refuses to shrink past its content, which is
+     what pushed the row past the header's width in the first place. */
+  min-width: 0;
 }
 
 .console-nav a {
   padding: 4px 0;
   border-bottom: 2px solid transparent;
   color: inherit;
+  /* A label is one word even when it is four characters of Chinese. This is
+     the line that stops "任务" from becoming "任" over "务". */
+  white-space: nowrap;
 }
 
 .console-nav a.active {
