@@ -11,6 +11,34 @@ from tiny_hermes.channels.domain.events import ChannelEvent, MalformedChannelEve
 
 CHANNEL = "feishu"
 
+#: The message types §19.2's first version reads. A type outside this set is
+#: refused *answerably* — see `UnsupportedMessageType`. Absent is read as
+#: text: Feishu's v1 schema omitted the field on text messages.
+_READABLE = frozenset({"text", ""})
+
+
+class UnsupportedMessageType(MalformedChannelEvent):
+    """A message this build cannot read, from somebody who can be told so.
+
+    Subclassed rather than parallel so a transport that has not learned
+    about it keeps refusing the delivery, instead of letting an unreadable
+    message through as if it were text.
+
+    It carries the sender and the event id because that is the whole point:
+    a photo is not a broken envelope, it is a person who sent something and
+    is now looking at their phone. §19.2 forbids swallowing that quietly,
+    and the branch that used to handle it wrote a log line — which is not
+    read by the only person who needed telling.
+    """
+
+    def __init__(
+        self, kind: str, *, channel_event_id: str, external_user_id: str
+    ) -> None:
+        super().__init__(f"message type {kind!r} is not supported")
+        self.kind = kind
+        self.channel_event_id = channel_event_id
+        self.external_user_id = external_user_id
+
 
 def _text_of(message: dict[str, Any]) -> str:
     """The message body, for the one message type §19.2's first version
@@ -56,6 +84,16 @@ def event_from_envelope(payload: dict[str, Any]) -> ChannelEvent:
     message = object_at(event, "message")
     if message is None:
         raise MalformedChannelEvent("no message")
+
+    # Checked before the content is read, so a photo is refused for being a
+    # photo rather than for "carrying no text" — the second is true of a
+    # photo but says nothing a person could act on, and it is also what a
+    # genuinely broken text message looks like.
+    kind = string_at(message, "message_type") or ""
+    if kind not in _READABLE:
+        raise UnsupportedMessageType(
+            kind, channel_event_id=event_id, external_user_id=open_id
+        )
 
     return ChannelEvent(
         channel=CHANNEL,

@@ -688,3 +688,133 @@ async def test_the_notice_and_the_reply_do_not_share_a_deduplication_key(
     keys = [entry["delivery_key"] for entry in sender.sent]
     assert len(set(keys)) == 2
     assert all(key != "" for key in keys)
+
+
+def _photo(event_id: str = "om_photo") -> dict[str, Any]:
+    return {
+        "header": {"event_id": event_id},
+        "event": {
+            "sender": {"sender_id": {"open_id": "ou_zhang"}},
+            "message": {
+                "message_type": "image",
+                "content": json.dumps({"image_key": "img_v2_1"}),
+            },
+        },
+    }
+
+
+def _deliver_raw(
+    client: TestClient, binding_id: UUID, envelope: dict[str, Any]
+) -> Any:
+    body = _encrypt(envelope)
+    return client.post(
+        f"/api/v1/channels/feishu/{binding_id}/webhook",
+        content=body,
+        headers=_headers(body),
+    )
+
+
+async def test_a_photo_gets_an_answer_instead_of_silence(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§19.2's `不能静默吞入新消息`, on the path that never honoured it.
+
+    An unreadable message produced a 200 and a log line. The comment on that
+    branch said `never silently` — true of the platform's records, false of
+    the person who sent the photo and got nothing.
+    """
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+
+    posted = _deliver_raw(client, binding_id, _photo())
+    assert posted.status_code == 200, posted.text
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+
+    assert len(sender.sent) == 1
+    assert sender.sent[0]["open_id"] == "ou_zhang"
+    assert "文字" in sender.sent[0]["text"]
+
+
+async def test_a_photo_starts_no_run(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Answering is not the same as understanding. Nothing is submitted to
+    an Agent, because there is nothing this build could hand it."""
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+
+    _deliver_raw(client, binding_id, _photo())
+
+    async with engine.connect() as connection:
+        runs = await connection.execute(text("SELECT count(*) FROM runs"))
+    assert runs.scalar_one() == 0
+
+
+async def test_the_same_photo_delivered_twice_is_answered_once(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§574's claim has to cover this path too.
+
+    Feishu delivers at-least-once. Without a claim, a refusal would be sent
+    for every retry — so the person who sent one photo would be told four
+    times that photos are not supported, which is a worse failure than the
+    silence it replaces.
+    """
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+
+    _deliver_raw(client, binding_id, _photo())
+    _deliver_raw(client, binding_id, _photo())
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+    await _dispatch(engine, sender)
+
+    assert len(sender.sent) == 1
+
+
+async def test_a_broken_envelope_is_answered_to_nobody(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No sender in the envelope means no recipient for a refusal. Guessing
+    one would send somebody else's inbox an explanation for a message they
+    never sent."""
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+
+    posted = _deliver_raw(
+        client,
+        binding_id,
+        {
+            "header": {"event_id": "om_broken"},
+            "event": {"message": {"message_type": "image", "content": "{}"}},
+        },
+    )
+    assert posted.status_code == 200, posted.text
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+
+    assert sender.sent == []
