@@ -19,16 +19,21 @@ lock — so the dispatcher runs there.
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from uuid import UUID
 
 from tiny_hermes.channels.domain.feishu import CHANNEL
-from tiny_hermes.channels.domain.reply import refusal_for, reply_for
+from tiny_hermes.channels.domain.reply import (
+    progress_note,
+    refusal_for,
+    reply_for,
+)
 from tiny_hermes.channels.infrastructure.feishu_card import blocked_card
 from tiny_hermes.channels.infrastructure.sql_channel_store import (
     DeliveryTarget,
     PendingNotice,
+    PendingProgress,
     PendingRefusal,
     PendingReply,
 )
@@ -44,6 +49,16 @@ DEFAULT_MAX_ATTEMPTS = 5
 #: Appended to a delivery's row id for the queue notice, so the notice and
 #: the answer are two different keys to Feishu's deduplication.
 _NOTICE_KEY_SUFFIX = ":q"
+
+#: And for the progress note, so one delivery's three possible sends are
+#: three distinct keys to Feishu's deduplication.
+_PROGRESS_KEY_SUFFIX = ":p"
+
+#: How long a Run may go before its sender is told it is still working.
+#: Long enough that an ordinary Run — the live ones measure about five
+#: seconds — never triggers it, because a notice on every message is noise,
+#: and noise is what makes people stop reading the messages that matter.
+DEFAULT_PROGRESS_AFTER_SECONDS = 20
 
 
 class ReplyOutcome:
@@ -139,6 +154,14 @@ class ReplyQueue(Protocol):
 
     async def pending_refusals(self, limit: int = 50) -> list[PendingRefusal]: ...
 
+    async def pending_progress_notices(
+        self, older_than: datetime, limit: int = 50
+    ) -> list[PendingProgress]: ...
+
+    async def settle_progress_notice(
+        self, event_row_id: UUID, now: datetime
+    ) -> None: ...
+
     async def binding_target(self, binding_id: UUID) -> DeliveryTarget | None: ...
 
     async def settle_blocked_notice(
@@ -166,6 +189,7 @@ class ChannelReplyDispatcher:
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         batch_size: int = 50,
         console_url: str | None = None,
+        progress_after_seconds: int = DEFAULT_PROGRESS_AFTER_SECONDS,
     ) -> None:
         self._store = store
         self._resolve_secret = resolve_secret
@@ -176,6 +200,7 @@ class ChannelReplyDispatcher:
         # address. The card then offers no button rather than a guessed URL,
         # which would be a dead link in front of a user.
         self._console_url = console_url
+        self._progress_after_seconds = progress_after_seconds
 
     async def dispatch_once(self) -> int:
         """One bounded pass. Returns how many messages were actually sent.
@@ -196,10 +221,55 @@ class ChannelReplyDispatcher:
         for waiting in await self._store.pending_blocked_notices(self._batch_size):
             if await self._notify(waiting):
                 sent += 1
+        slow = await self._store.pending_progress_notices(
+            _now() - timedelta(seconds=self._progress_after_seconds), self._batch_size
+        )
+        for working in slow:
+            if await self._report_progress(working):
+                sent += 1
         for pending in await self._store.pending_replies(self._batch_size):
             if await self._dispatch(pending):
                 sent += 1
         return sent
+
+    async def _report_progress(self, working: PendingProgress) -> bool:
+        """Tell somebody their Run is taking a while — once.
+
+        Settled whether or not it goes out, and never retried. There is no
+        second notice to schedule, which is what keeps a ten-minute Run from
+        producing thirty messages: the stamp is the whole mechanism, so
+        there is no interval to tune and no counter to get wrong.
+        """
+        target = await self._store.delivery_target_for(working.session_id)
+        recipient = self._sendable(target)
+        if isinstance(recipient, str):
+            logger.info(
+                "channel progress not sent: run=%s reason=%s",
+                working.run_id,
+                recipient,
+            )
+            await self._store.settle_progress_notice(working.event_row_id, _now())
+            return False
+        try:
+            secret = await self._resolve_secret(recipient.app_secret_ref)
+            await self._senders(recipient.workspace_id).send_text(
+                app_id=recipient.app_id,
+                app_secret=secret,
+                open_id=recipient.open_id,
+                text=progress_note(),
+                # A third distinct key for this delivery. Sharing any of
+                # them would let Feishu's deduplication drop whichever
+                # arrived second — and one of those is the answer.
+                delivery_key=f"{working.event_row_id}{_PROGRESS_KEY_SUFFIX}",
+            )
+        except Exception:
+            logger.warning(
+                "channel progress failed: run=%s", working.run_id, exc_info=True
+            )
+            await self._store.settle_progress_notice(working.event_row_id, _now())
+            return False
+        await self._store.settle_progress_notice(working.event_row_id, _now())
+        return True
 
     async def _refuse(self, unreadable: PendingRefusal) -> bool:
         """Tell somebody their photo could not be read.

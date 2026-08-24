@@ -29,6 +29,24 @@ from tiny_hermes.runs.domain.models import (
 )
 from tiny_hermes.runs.infrastructure.tables import RunRow, SessionMessageRow
 
+#: The states in which "还在处理" is a true sentence. A whitelist rather than
+#: "not terminal", because the difference is not cosmetic: a `paused` or
+#: `waiting_approval` Run is **not** working — it is stopped, waiting for a
+#: person — and telling its sender it is still being worked on is a
+#: statement the platform knows to be false. `queued` is included because
+#: from the sender's side waiting for a worker is indistinguishable from
+#: being worked on, and both mean "it is coming".
+_WORKING = (RunState.QUEUED.value, RunState.RUNNING.value)
+
+
+@dataclass(frozen=True)
+class PendingProgress:
+    """A Run still going, whose sender has been told nothing yet."""
+
+    event_row_id: UUID
+    run_id: UUID
+    session_id: UUID
+
 
 @dataclass(frozen=True)
 class PendingRefusal:
@@ -277,6 +295,61 @@ class SqlChannelStore:
                 unsupported_kind=kind[:64],
                 unsupported_open_id=external_user_id[:200],
             )
+        )
+        await self._session.flush()
+
+    async def pending_progress_notices(
+        self, older_than: datetime, limit: int = 50
+    ) -> list["PendingProgress"]:
+        """Deliveries whose Run is still going and whose sender has not been
+        told so.
+
+        Two separate exclusions, and the tests needed both. `blocked_notice
+        IS NULL` drops the message that landed *behind* a blocked head — the
+        card already told that person, with the reason. `_WORKING` drops the
+        blocking head **itself**, which is not terminal and so passed a
+        "not finished" predicate while being paused rather than working.
+        The first version used that predicate and told the person whose Run
+        somebody had paused that it was still being worked on.
+
+        The Run's state is read here rather than trusted from the row,
+        because it is the one fact that changes while the row sits there.
+        """
+        rows = (
+            await self._session.execute(
+                select(
+                    ChannelEventRow.id,
+                    ChannelEventRow.run_id,
+                    RunRow.session_id,
+                )
+                .join(RunRow, RunRow.id == ChannelEventRow.run_id)
+                .where(
+                    ChannelEventRow.run_id.is_not(None),
+                    ChannelEventRow.replied_at.is_(None),
+                    ChannelEventRow.progress_notified_at.is_(None),
+                    ChannelEventRow.blocked_notice.is_(None),
+                    ChannelEventRow.received_at < older_than,
+                    RunRow.status.in_(_WORKING),
+                )
+                .order_by(ChannelEventRow.received_at, ChannelEventRow.id)
+                .limit(limit)
+            )
+        ).all()
+        return [
+            PendingProgress(
+                event_row_id=row.id, run_id=row.run_id, session_id=row.session_id
+            )
+            for row in rows
+        ]
+
+    async def settle_progress_notice(
+        self, event_row_id: UUID, now: datetime
+    ) -> None:
+        """Its own stamp, never `replied_at` — the answer still has to go."""
+        await self._session.execute(
+            update(ChannelEventRow)
+            .where(ChannelEventRow.id == event_row_id)
+            .values(progress_notified_at=now)
         )
         await self._session.flush()
 

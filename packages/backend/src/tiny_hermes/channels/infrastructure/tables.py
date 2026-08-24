@@ -83,6 +83,15 @@ class ChannelEventRow(IdMixin, Base):
                 "blocked_notice IS NOT NULL AND blocked_notified_at IS NULL"
             ),
         ),
+        # The progress scan's — migration 0043.
+        Index(
+            "ix_channel_events_awaiting_progress",
+            "received_at",
+            postgresql_where=text(
+                "run_id IS NOT NULL AND replied_at IS NULL"
+                " AND progress_notified_at IS NULL AND blocked_notice IS NULL"
+            ),
+        ),
         # The refusal scan's — migration 0042.
         Index(
             "ix_channel_events_awaiting_refusal",
@@ -139,6 +148,12 @@ class ChannelEventRow(IdMixin, Base):
     #: row — and that person is the one most in need of an answer.
     unsupported_open_id: Mapped[str | None] = mapped_column(
         String(200), nullable=True
+    )
+    #: When the sender was told the Run is taking a while. Its own stamp for
+    #: the same reason as `blocked_notified_at`, and a stamp rather than a
+    #: counter because it is said exactly once — migration 0043.
+    progress_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
 

@@ -92,4 +92,16 @@ def refusal_for(kind: str) -> str:
     return f"我暂时还处理不了{what},目前只能读文字。麻烦你用文字再说一遍。"
 
 
-__all__ = ["MAX_REPLY_CHARS", "refusal_for", "reply_for"]
+def progress_note() -> str:
+    """What to say when a Run is taking a while.
+
+    Says nothing about *what* it is doing, on purpose. That is tool names
+    and internal state, which §19.1 keeps off an end-user surface — and a
+    person waiting does not need the step list, they need to know the thing
+    is alive. Sent exactly once, so it cannot become a chat that scrolls
+    itself.
+    """
+    return "还在处理,这条要花点时间,完成后我会把结果发过来。"
+
+
+__all__ = ["MAX_REPLY_CHARS", "progress_note", "refusal_for", "reply_for"]
