@@ -41,6 +41,7 @@ COMPAT = "compat_timeouts"
 RETENTION = "retention"
 UPLOADS = "workspace_uploads"
 ARTIFACTS = "artifact_retention"
+CHANNEL_REPLIES = "channel_replies"
 
 _PLATFORM = RunCapabilities(can_control=True, can_retry=True)
 
@@ -63,6 +64,22 @@ class SandboxCleanup(Protocol):
     async def cleanup(self, *, run_id: UUID, sandbox_id: UUID) -> None: ...
 
 
+class ChannelReplies(Protocol):
+    """One pass of the channel reply queue, built per session.
+
+    A factory rather than an object, because the dispatcher reads and writes
+    rows and must do so inside the Scheduler's own transaction — handing it
+    a long-lived session would put channel writes on a connection this class
+    does not control.
+    """
+
+    def __call__(self, session: AsyncSession, /) -> "ReplyPass": ...
+
+
+class ReplyPass(Protocol):
+    async def dispatch_once(self) -> int: ...
+
+
 class SchedulerRuntime:
     """Reclaims abandoned work and repairs invariants no request owns.
 
@@ -78,6 +95,7 @@ class SchedulerRuntime:
         settings: SchedulerSettings,
         sandbox: SandboxCleanup | None = None,
         objects: ObjectStore | None = None,
+        replies: ChannelReplies | None = None,
     ) -> None:
         self._sessions = session_factory
         self._notifier = notifier
@@ -88,6 +106,11 @@ class SchedulerRuntime:
         # Absent likewise: workspace and artifact garbage only exists where an
         # object store does.
         self._objects = objects
+        # Absent where no channel can be replied through — no egress route,
+        # so nothing could be sent anyway. A deployment without one still
+        # receives Feishu messages and runs them; the answers settle in the
+        # queue unsent rather than the Scheduler pretending to deliver them.
+        self._replies = replies
 
     async def run_once(self) -> None:
         now = datetime.now(UTC)
@@ -110,6 +133,7 @@ class SchedulerRuntime:
         await self._collect_expired_records(now)
         await self._collect_upload_garbage(now)
         await self._expire_artifacts(now)
+        await self._dispatch_channel_replies()
 
     async def run_forever(self, stop: asyncio.Event, interval_seconds: int) -> None:
         while not stop.is_set():
@@ -482,6 +506,28 @@ class SchedulerRuntime:
         if removed:
             # Identifiers and counts, never content (design §13).
             logger.info("expired artifacts removed", extra={"count": removed})
+
+    async def _dispatch_channel_replies(self) -> None:
+        """§19.3's fourth job: the result goes back to whoever asked for it.
+
+        Here rather than in the Worker because a Worker that finished a Run
+        and died before telling anybody would lose the reply exactly when it
+        mattered, with nothing left to say so. The row in `channel_events`
+        outlives the process, and this scan finding it again is a retry
+        nobody had to write.
+
+        Under the same scan lock as every other scan: two Scheduler replicas
+        would otherwise both read the queue, and Feishu would deliver the
+        answer twice.
+        """
+        if self._replies is None:
+            return
+        async with self._sessions.begin() as session:
+            if not await SqlRunStore(session).try_scan_lock(CHANNEL_REPLIES):
+                return
+            sent = await self._replies(session).dispatch_once()
+            if sent:
+                logger.info("channel replies delivered", extra={"replies": sent})
 
     async def _announce(self, run_id: UUID) -> None:
         async with self._sessions() as session:

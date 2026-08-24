@@ -31,7 +31,10 @@ from tiny_hermes.model_catalog.infrastructure.credentials import CredentialResol
 from tiny_hermes.secrets.infrastructure.sql_store import SqlSecretStore
 
 KEY = "tenant-encrypt-key"
-SECRET_ENV = "FEISHU_APP_SECRET_FOR_TEST"
+# The *name* of an environment variable, which is what a
+# `credential_ref` may be. Never a secret — that distinction is the
+# whole point of the `_ref` columns.
+SECRET_ENV = "FEISHU_APP_SECRET_FOR_TEST"  # noqa: S105
 
 
 def _encrypt(envelope: dict[str, Any]) -> bytes:

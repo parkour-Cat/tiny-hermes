@@ -8,9 +8,10 @@ than once and can arrive twice in the same instant.
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, true, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +21,57 @@ from tiny_hermes.channels.infrastructure.tables import (
     ChannelConversationRow,
     ChannelEventRow,
 )
+from tiny_hermes.runs.domain.models import (
+    TERMINAL_STATES,
+    RunState,
+    message_from_document,
+)
+from tiny_hermes.runs.infrastructure.tables import RunRow, SessionMessageRow
+
+
+@dataclass(frozen=True)
+class PendingReply:
+    """A finished Run whose channel sender has not been answered yet."""
+
+    event_row_id: UUID
+    run_id: UUID
+    session_id: UUID
+    state: RunState
+    #: The Agent's last words, already flattened out of the stored message
+    #: document. Empty is a real answer — a Run can complete having said
+    #: nothing — and the domain decides what to tell a person about that.
+    said: str
+    failure_reason: str | None
+    attempts: int
+
+
+def _text_of(content: Any) -> str:
+    """The words of a stored assistant turn, through the one parser there is.
+
+    `CanonicalMessage.text` already drops tool calls and results and joins
+    what is left; re-deriving that here would be a second answer to "what
+    did the Agent say", and the two would part company the first time a
+    block type was added.
+
+    `None` when the lateral found no assistant turn — a Run can complete
+    having written nothing, and the domain decides what to say about that.
+    """
+    if not isinstance(content, dict):
+        return ""
+    return message_from_document({"role": "assistant", **cast(dict[str, Any], content)}).text
+
+
+def _failure_in(checkpoint: dict[str, Any] | None) -> str | None:
+    """Why the Run failed, out of the checkpoint the Worker writes.
+
+    Deliberately the same key `runs/infrastructure/sql_store._failure_reason`
+    reads. Two readers of one field is already one too many; a channel that
+    invented its own would drift the first time the Worker changed shape.
+    """
+    if not checkpoint:
+        return None
+    value: Any = checkpoint.get("failure")
+    return str(value) if isinstance(value, str) and value else None
 
 
 @dataclass(frozen=True)
@@ -175,9 +227,124 @@ class SqlChannelStore:
         await self._session.flush()
 
     async def attach_run(self, event_row_id: UUID, run_id: UUID) -> None:
+        """Records which Run this delivery produced.
+
+        Had no caller for a whole milestone: a live deployment's
+        `channel_events` held two rows with `run_id` NULL while both Runs
+        existed and had completed. Nothing noticed because nothing read the
+        column. It is the outbound queue's key now, so a regression here
+        stops replies rather than quietly losing an audit link.
+        """
         row = await self._session.get(ChannelEventRow, event_row_id)
         if row is not None:
             row.run_id = run_id
+        await self._session.flush()
+
+    async def pending_replies(self, limit: int = 50) -> list[PendingReply]:
+        """Deliveries whose Run has finished and whose sender is still waiting.
+
+        Ordered oldest-first so a backlog drains in the order people sent
+        their messages. `received_at` alone is not a total order — two
+        deliveries can share a timestamp — so `id` breaks the tie, per this
+        repository's rule about ordering without one.
+
+        The Agent's last turn is read here, in the same query, by a lateral
+        over `session_messages`. Fetching it per row afterwards would be a
+        second round trip for every reply and would let the two reads see
+        different states of the same Run.
+
+        The stored document comes back whole and is flattened by
+        `message_from_document` rather than by a `jsonb_path_query` — the
+        first version did the latter, and it was a second place that decided
+        what the text of a message is. Two such places drift the moment a
+        block type is added, and this one would drift silently: an
+        unrecognised block would come back as an empty reply, not an error.
+        """
+        said = (
+            select(SessionMessageRow.content.label("content"))
+            .where(
+                SessionMessageRow.source_run_id == RunRow.id,
+                SessionMessageRow.role == "assistant",
+            )
+            .order_by(SessionMessageRow.sequence.desc())
+            .limit(1)
+            .lateral("said")
+        )
+        rows = (
+            await self._session.execute(
+                select(
+                    ChannelEventRow.id,
+                    ChannelEventRow.run_id,
+                    ChannelEventRow.reply_attempts,
+                    RunRow.session_id,
+                    RunRow.status,
+                    RunRow.checkpoint,
+                    said.c.content,
+                )
+                .join(RunRow, RunRow.id == ChannelEventRow.run_id)
+                .outerjoin(said, true())
+                .where(
+                    ChannelEventRow.run_id.is_not(None),
+                    ChannelEventRow.replied_at.is_(None),
+                    RunRow.status.in_([state.value for state in TERMINAL_STATES]),
+                )
+                .order_by(ChannelEventRow.received_at, ChannelEventRow.id)
+                .limit(limit)
+            )
+        ).all()
+        return [
+            PendingReply(
+                event_row_id=row.id,
+                run_id=row.run_id,
+                session_id=row.session_id,
+                state=RunState(row.status),
+                said=_text_of(row.content),
+                failure_reason=_failure_in(row.checkpoint),
+                attempts=row.reply_attempts,
+            )
+            for row in rows
+        ]
+
+    async def settle_reply(self, event_row_id: UUID, note: str, now: datetime) -> None:
+        """The delivery is done being owed an answer, however it ended.
+
+        One method for "sent" and for "deliberately not sent", because the
+        queue has to drain either way. `note` is the difference, and it is
+        the thing an operator reads when somebody says no reply arrived.
+        """
+        await self._session.execute(
+            update(ChannelEventRow)
+            .where(ChannelEventRow.id == event_row_id)
+            .values(replied_at=now, reply_note=note[:200])
+        )
+        await self._session.flush()
+
+    async def record_reply_attempt(self, event_row_id: UUID) -> None:
+        """One try about to be spent, counted **before** it is spent.
+
+        Counted first because a send that hangs or kills the process would
+        otherwise cost nothing, and a target that reliably crashes the
+        dispatcher would be retried forever — the bound would hold only for
+        failures polite enough to raise.
+
+        Incremented in SQL rather than read-modify-written: two dispatcher
+        replicas scanning at once would both read the same count and both
+        write the same successor, and the bound would quietly stop being one.
+        """
+        await self._session.execute(
+            update(ChannelEventRow)
+            .where(ChannelEventRow.id == event_row_id)
+            .values(reply_attempts=ChannelEventRow.reply_attempts + 1)
+        )
+        await self._session.flush()
+
+    async def note_reply_failure(self, event_row_id: UUID, note: str) -> None:
+        """Why the last try failed, with no stamp — this row comes back."""
+        await self._session.execute(
+            update(ChannelEventRow)
+            .where(ChannelEventRow.id == event_row_id)
+            .values(reply_note=note[:200])
+        )
         await self._session.flush()
 
     async def forget_deliveries_before(self, cutoff: datetime) -> int:

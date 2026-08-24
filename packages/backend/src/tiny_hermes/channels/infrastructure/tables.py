@@ -12,8 +12,10 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -61,8 +63,16 @@ class ChannelEventRow(IdMixin, Base):
         UniqueConstraint(
             "channel_binding_id", "channel_event_id", name="uq_channel_events_delivery"
         ),
+        CheckConstraint("reply_attempts >= 0", name="ck_channel_events_reply_attempts"),
         # The sweep's only access path: everything older than a cutoff.
         Index("ix_channel_events_received_at", "received_at"),
+        # The reply scan's, and it matches that predicate exactly — see
+        # migration 0040.
+        Index(
+            "ix_channel_events_awaiting_reply",
+            "run_id",
+            postgresql_where=text("run_id IS NOT NULL AND replied_at IS NULL"),
+        ),
     )
 
     channel_binding_id: Mapped[UUID] = mapped_column(
@@ -73,7 +83,22 @@ class ChannelEventRow(IdMixin, Base):
     #: Nullable because the row is claimed *before* the Run exists — claiming
     #: first is what makes the claim exclusive. A Run created before the claim
     #: would be the duplicate this table exists to prevent.
+    #:
+    #: It is also the outbound queue's key: a row with a `run_id` and no
+    #: `replied_at` is a delivery still owed an answer. That is why the
+    #: column stopped being decorative — it went unwritten for a whole
+    #: milestone and nothing noticed, because nothing read it.
     run_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    #: Set once the reply is settled — sent, or deliberately not sent. Not
+    #: "sent at": a binding that was disabled or has no credential settles
+    #: too, and a queue that only drains on success never drains.
+    replied_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reply_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    #: How it settled, for whoever is asked why a reply never arrived. See
+    #: migration 0040 for why this exists rather than only a log line.
+    reply_note: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
 
 class ChannelConversationRow(IdMixin, CreatedAtMixin, Base):

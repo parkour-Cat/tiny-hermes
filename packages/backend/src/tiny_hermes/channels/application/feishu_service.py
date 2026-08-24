@@ -30,12 +30,14 @@ logger = logging.getLogger(__name__)
 
 
 class BindingDirectory(Protocol):
-    """The two questions this service asks about a binding. Narrow so the
-    endpoint cannot reach past it into anything else the store can do."""
+    """What this service asks of storage. Narrow so the endpoint cannot
+    reach past it into anything else the store can do."""
 
     async def active_binding(self, binding_id: UUID) -> ChannelBindingRecord | None: ...
 
     async def encrypt_key_ref_of(self, binding_id: UUID) -> str | None: ...
+
+    async def attach_run(self, event_row_id: UUID, run_id: UUID) -> None: ...
 
 
 class UnknownChannelBinding(Exception):
@@ -109,6 +111,16 @@ class FeishuChannelService:
         delivered = await self._ingestion.run_for(
             binding=binding, event=outcome.event, request_id=request_id
         )
+        # The claim and the Run, joined. This call was missing for a whole
+        # milestone: a live deployment held two claims with `run_id` NULL
+        # beside two completed Runs, and nothing failed, because nothing
+        # read the column. It is the outbound queue's key now — a delivery
+        # with no Run attached is a person who never gets an answer — so
+        # losing this line stops replies instead of quietly losing a link.
+        #
+        # Same session as the claim (see `resources.feishu_channel_service`),
+        # so the Run and its attachment commit together.
+        await self._bindings.attach_run(outcome.claim_id, delivered.run.run_id)
         return Accepted(delivered=delivered)
 
     async def _binding(self, binding_id: UUID) -> ChannelBindingRecord:

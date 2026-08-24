@@ -4,11 +4,17 @@ import logging
 import signal
 import socket
 import uuid
+from collections.abc import Callable
 
 import uvicorn
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from tiny_hermes.channels.application.outbound import ChannelReplyDispatcher
+from tiny_hermes.channels.infrastructure.feishu_sender import FeishuSender
+from tiny_hermes.channels.infrastructure.sql_channel_store import SqlChannelStore
 from tiny_hermes.memory.infrastructure.run_searches import SqlRunSessionSearches
 from tiny_hermes.memory.infrastructure.sql_candidates import SqlMemoryCandidates
+from tiny_hermes.model_catalog.infrastructure.credentials import CredentialResolver
 from tiny_hermes.outbound.client import EgressRoute, SafeOutboundClient
 from tiny_hermes.runs.application.model_router import ModelRouter
 from tiny_hermes.runs.application.scheduler import (
@@ -38,6 +44,7 @@ from tiny_hermes.runs.ports.notifier import WakeUpNotifier
 from tiny_hermes.sandbox.transport.adapter import SandboxClient
 from tiny_hermes.sandbox.transport.client import ControllerClient
 from tiny_hermes.secrets.domain.envelope import optional_kek
+from tiny_hermes.secrets.infrastructure.sql_store import SqlSecretStore
 from tiny_hermes.session_workspace.domain.models import WorkspaceQuota
 from tiny_hermes.session_workspace.infrastructure.minio_store import MinioObjectStore
 from tiny_hermes.shared.config import Settings, get_settings
@@ -254,11 +261,13 @@ async def _scheduler() -> None:
     notifier = _notifier(settings)
     workspace = _workspace(settings)
     await _ensure_bucket(workspace)
+    outbound = SafeOutboundClient(egress=_egress(settings))
     runtime = SchedulerRuntime(
         session_factory=build_session_factory(settings),
         notifier=notifier,
         sandbox=_controller(settings),
         objects=None if workspace is None else workspace.objects,
+        replies=_channel_replies(settings, outbound),
         settings=SchedulerSettings(
             max_recovery_attempts=settings.max_recovery_attempts,
             event_retention_hours=settings.event_retention_hours,
@@ -270,7 +279,38 @@ async def _scheduler() -> None:
         await runtime.run_forever(stop, settings.scheduler_interval_seconds)
     finally:
         await notifier.close()
+        await outbound.aclose()
     logger.info("scheduler stopped")
+
+
+def _channel_replies(
+    settings: Settings, outbound: SafeOutboundClient
+) -> Callable[[AsyncSession], ChannelReplyDispatcher] | None:
+    """The reply dispatcher, when this deployment can send anything at all.
+
+    `None` without an egress route, and that is not a silent downgrade: a
+    client built without a route refuses every call, so wiring one anyway
+    would produce a queue whose every row failed five times and settled
+    `refused`. Absent is the honest state — the answers wait in the queue,
+    and `reply_note` stays empty rather than blaming Feishu.
+
+    The token cache lives on the sender, so the sender is built once here
+    and shared across passes; everything session-scoped is built per call.
+    """
+    if _egress(settings) is None:
+        logger.warning("no egress route: channel replies will not be sent")
+        return None
+    sender = FeishuSender(outbound)
+    kek = optional_kek(settings.tiny_hermes_kek)
+
+    def build(session: AsyncSession) -> ChannelReplyDispatcher:
+        return ChannelReplyDispatcher(
+            store=SqlChannelStore(session),
+            resolve_secret=CredentialResolver(SqlSecretStore(session), kek).resolve,
+            sender=sender,
+        )
+
+    return build
 
 
 def _notifier(settings: Settings) -> WakeUpNotifier:

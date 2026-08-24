@@ -139,14 +139,24 @@ async def test_a_second_message_reuses_the_token_it_already_holds() -> None:
 
 
 async def test_a_token_is_fetched_again_once_it_has_expired() -> None:
-    ticks = iter([0.0, 0.0, 10_000.0, 10_000.0, 10_000.0])
-    feishu = _Feishu(_ok_token(expire=7200), {"code": 0}, _ok_token(), {"code": 0})
-    sender = FeishuSender(feishu, now=lambda: next(ticks))
+    """A clock that is *set* rather than a scripted sequence of ticks.
 
-    for _ in range(2):
-        await sender.send_text(
-            app_id="cli_x", app_secret="s3cret", open_id="ou_zhang", text="hi"  # noqa: S106
-        )
+    The first version scripted the ticks and asserted the wrong thing —
+    it counted how many times the sender reads the clock, which is an
+    implementation detail, not the behaviour. Moving the clock forward past
+    the lifetime says what the test means.
+    """
+    clock = [0.0]
+    feishu = _Feishu(_ok_token(expire=7200), {"code": 0}, _ok_token(), {"code": 0})
+    sender = FeishuSender(feishu, now=lambda: clock[0])
+
+    await sender.send_text(
+        app_id="cli_x", app_secret="s3cret", open_id="ou_zhang", text="hi"  # noqa: S106
+    )
+    clock[0] = 10_000.0
+    await sender.send_text(
+        app_id="cli_x", app_secret="s3cret", open_id="ou_zhang", text="hi"  # noqa: S106
+    )
 
     urls = [url for url, _, _ in feishu.sent]
     assert sum("tenant_access_token" in url for url in urls) == 2
