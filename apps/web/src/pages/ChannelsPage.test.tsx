@@ -270,7 +270,7 @@ test("a binding shows whether it can reply at all", async () => {
 
   renderChannels();
 
-  expect(await screen.findByText(t.channelReceiveOnly)).toBeVisible();
+  expect(await screen.findByText(t("channelReceiveOnly"))).toBeVisible();
 });
 
 test("an existing binding can be given the app secret it was made without", async () => {
@@ -296,10 +296,10 @@ test("an existing binding can be given the app secret it was made without", asyn
   );
 
   renderChannels();
-  await userEvent.click(await screen.findByRole("button", { name: t.channelEdit }));
-  await userEvent.click(await screen.findByLabelText(t.channelAppSecretRef));
+  await userEvent.click(await screen.findByRole("button", { name: t("channelEdit") }));
+  await userEvent.click(await screen.findByLabelText(t("channelAppSecretRef")));
   await userEvent.click(await screen.findByTitle("feishu-app-secret"));
-  await userEvent.click(screen.getByRole("button", { name: t.channelEditConfirm }));
+  await userEvent.click(screen.getByRole("button", { name: t("channelEditConfirm") }));
 
   await waitFor(() => expect(patched).not.toBeNull());
   // The id, and only the field that was changed. Sending the whole form
