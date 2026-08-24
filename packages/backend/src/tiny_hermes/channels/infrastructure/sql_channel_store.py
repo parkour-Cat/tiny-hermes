@@ -6,6 +6,7 @@ schedule: 15s, 5min, 1h, 6h), so the same `channel_event_id` arrives more
 than once and can arrive twice in the same instant.
 """
 
+from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -19,6 +20,22 @@ from tiny_hermes.channels.infrastructure.tables import (
     ChannelConversationRow,
     ChannelEventRow,
 )
+
+
+@dataclass(frozen=True)
+class DeliveryTarget:
+    """Everything the outbound consumer needs to reply to one participant."""
+
+    binding_id: UUID
+    workspace_id: UUID
+    channel: str
+    external_user_id: str
+    app_id: str | None
+    #: `None` for a receive-only binding — the consumer sends nothing.
+    app_secret_ref: str | None
+    #: A disabled binding still maps a session, but its channel is closed;
+    #: the consumer must not reply through a door an administrator shut.
+    binding_active: bool
 
 
 class SqlChannelStore:
@@ -91,6 +108,52 @@ class SqlChannelStore:
                 ChannelConversationRow.channel_binding_id == binding_id,
                 ChannelConversationRow.external_user_id == external_user_id,
             )
+        )
+
+    async def delivery_target_for(
+        self, session_id: UUID
+    ) -> "DeliveryTarget | None":
+        """Where a finished Run's result goes, or `None` if it goes nowhere.
+
+        The reverse of `session_for`: a Run carries a `session_id`, and the
+        outbound consumer needs to know which channel — and which participant
+        on it — that session belongs to. `None` is the common case and not an
+        error: an ordinary console Run has no channel conversation, and its
+        result is read on the web, not pushed to Feishu.
+
+        Returns the reply credentials alongside the recipient so the consumer
+        makes one query rather than three. `app_secret_ref` may be `None` —
+        a receive-only binding — and the consumer treats that as "nowhere to
+        reply", which is the whole reason it is nullable.
+        """
+        row = (
+            await self._session.execute(
+                select(
+                    ChannelConversationRow.channel_binding_id,
+                    ChannelConversationRow.external_user_id,
+                    ChannelBindingRow.workspace_id,
+                    ChannelBindingRow.channel,
+                    ChannelBindingRow.app_id,
+                    ChannelBindingRow.app_secret_ref,
+                    ChannelBindingRow.status,
+                )
+                .join(
+                    ChannelBindingRow,
+                    ChannelBindingRow.id == ChannelConversationRow.channel_binding_id,
+                )
+                .where(ChannelConversationRow.session_id == session_id)
+            )
+        ).first()
+        if row is None:
+            return None
+        return DeliveryTarget(
+            binding_id=row.channel_binding_id,
+            workspace_id=row.workspace_id,
+            channel=row.channel,
+            external_user_id=row.external_user_id,
+            app_id=row.app_id,
+            app_secret_ref=row.app_secret_ref,
+            binding_active=row.status == "active",
         )
 
     async def remember_session(
