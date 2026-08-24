@@ -110,6 +110,46 @@ class SqlChannelBindingStore:
         ).all()
         return tuple(_view(row) for row in rows)
 
+    async def binding(
+        self, workspace_id: UUID, binding_id: UUID
+    ) -> ChannelBindingView | None:
+        row = await self._session.scalar(
+            select(ChannelBindingRow).where(
+                ChannelBindingRow.id == binding_id,
+                ChannelBindingRow.workspace_id == workspace_id,
+            )
+        )
+        return None if row is None else _view(row)
+
+    async def update_binding(
+        self,
+        workspace_id: UUID,
+        binding_id: UUID,
+        changes: dict[str, str | None],
+    ) -> ChannelBindingView | None:
+        """Only the columns named in `changes`, and nothing else.
+
+        The caller decides what "named" means — a PATCH that could not tell
+        an absent field from an explicit null would either strip the encrypt
+        key on every update or make a receive-only binding unreachable. That
+        decision belongs at the route, where the request body is, so this
+        takes a settled mapping rather than a pile of optionals.
+        """
+        if not changes:
+            return await self.binding(workspace_id, binding_id)
+        updated = (
+            await self._session.execute(
+                update(ChannelBindingRow)
+                .where(
+                    ChannelBindingRow.id == binding_id,
+                    ChannelBindingRow.workspace_id == workspace_id,
+                )
+                .values(**changes)
+                .returning(ChannelBindingRow)
+            )
+        ).scalar_one_or_none()
+        return None if updated is None else _view(updated)
+
     async def disable_binding(
         self, workspace_id: UUID, binding_id: UUID
     ) -> ChannelBindingView | None:

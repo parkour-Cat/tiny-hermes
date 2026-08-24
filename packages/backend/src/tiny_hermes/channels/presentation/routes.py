@@ -203,6 +203,23 @@ class CreateChannelBindingRequest(BaseModel):
     app_secret_ref: str | None = Field(default=None, max_length=200)
 
 
+class UpdateChannelBindingRequest(BaseModel):
+    """Credentials and `app_id`, and deliberately nothing else.
+
+    A field left out is unchanged; a field sent as `null` is cleared. The
+    route reads `model_fields_set` to tell them apart, which is the whole
+    reason this model exists rather than reusing the create request.
+
+    `agent_id` and `channel` are absent on purpose: moving a binding to
+    another Agent would silently redirect every conversation already mapped
+    in `channel_conversations`, and that is not a credential fix.
+    """
+
+    app_id: str | None = Field(default=None, max_length=120)
+    encrypt_key_ref: str | None = Field(default=None, max_length=200)
+    app_secret_ref: str | None = Field(default=None, max_length=200)
+
+
 class ChannelBindingResponse(BaseModel):
     id: UUID
     channel: str
@@ -333,6 +350,46 @@ def channel_binding_router(resources: ApplicationResources) -> APIRouter:
         except ForbiddenChannelAction as error:
             raise _binding_error(error) from error
         return [ChannelBindingResponse.of(item) for item in listed]
+
+    @router.patch("/{binding_id}", response_model=ChannelBindingResponse)
+    async def update_binding(  # pyright: ignore[reportUnusedFunction]
+        binding_id: UUID,
+        payload: UpdateChannelBindingRequest,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        service: Annotated[
+            ChannelBindingService, Depends(service_dependency, scope="function")
+        ],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> ChannelBindingResponse:
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            updated = await service.update(
+                _actor(user),
+                workspace_id,
+                binding_id,
+                # `model_fields_set` rather than the values: a field absent
+                # from the body and one sent as `null` are different
+                # requests, and Pydantic's default would render both as
+                # `None`. Without this an update that fixed the app secret
+                # would strip the encrypt key and break inbound.
+                changes={
+                    name: getattr(payload, name)
+                    for name in payload.model_fields_set
+                },
+                request_id=request.state.request_id,
+            )
+        except (
+            ForbiddenChannelAction,
+            ChannelKeyRequired,
+            ChannelKeyUnknown,
+            UnknownChannel,
+        ) as error:
+            raise _binding_error(error) from error
+        return ChannelBindingResponse.of(updated)
 
     @router.post("/{binding_id}/disable", response_model=ChannelBindingResponse)
     async def disable_binding(  # pyright: ignore[reportUnusedFunction]

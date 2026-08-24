@@ -256,3 +256,54 @@ test("registering an issuer sends the key reference shape the API takes", async 
     allowed_origins: ["https://portal.example.com"],
   });
 });
+
+test("a binding shows whether it can reply at all", async () => {
+  // Without this column an operator cannot tell a receive-only binding from
+  // one wired to reply, and "the Agent answered but Feishu showed nothing"
+  // has no visible cause on the page that is supposed to explain it.
+  server.use(
+    http.get("/api/v1/channel-bindings", () =>
+      HttpResponse.json([binding({ app_secret_ref: null })]),
+    ),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+  );
+
+  renderChannels();
+
+  expect(await screen.findByText(t.channelReceiveOnly)).toBeVisible();
+});
+
+test("an existing binding can be given the app secret it was made without", async () => {
+  // The gap that made the whole reply path unusable: one binding per
+  // (workspace, channel, agent), a constraint `disable` does not release,
+  // so a binding created before outbound existed could never acquire a
+  // secret and could never be replaced.
+  let patched: Record<string, unknown> | null = null;
+  server.use(
+    http.get("/api/v1/channel-bindings", () =>
+      HttpResponse.json([binding({ app_secret_ref: null })]),
+    ),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/secrets", () =>
+      HttpResponse.json([
+        { id: "s2", name: "feishu-app-secret", scope: "workspace", status: "active" },
+      ]),
+    ),
+    http.patch("/api/v1/channel-bindings/b1", async ({ request }) => {
+      patched = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json(binding({ app_secret_ref: "s2" }));
+    }),
+  );
+
+  renderChannels();
+  await userEvent.click(await screen.findByRole("button", { name: t.channelEdit }));
+  await userEvent.click(await screen.findByLabelText(t.channelAppSecretRef));
+  await userEvent.click(await screen.findByTitle("feishu-app-secret"));
+  await userEvent.click(screen.getByRole("button", { name: t.channelEditConfirm }));
+
+  await waitFor(() => expect(patched).not.toBeNull());
+  // The id, and only the field that was changed. Sending the whole form
+  // would resubmit `encrypt_key_ref` on every edit, and a stale value there
+  // breaks inbound while fixing outbound.
+  expect(patched).toEqual({ app_secret_ref: "s2" });
+});
