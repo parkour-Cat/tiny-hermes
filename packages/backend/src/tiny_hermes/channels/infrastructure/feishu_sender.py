@@ -109,15 +109,58 @@ class FeishuSender:
         would differ per attempt and deduplicate nothing while looking like
         it did.
         """
+        await self._send(
+            app_id=app_id,
+            app_secret=app_secret,
+            open_id=open_id,
+            msg_type="text",
+            # A JSON *string*, not an object. Feishu's own encoding, and
+            # getting it wrong is a 200 with a non-zero code.
+            content=json.dumps({"text": text}, ensure_ascii=False),
+            delivery_key=delivery_key,
+        )
+
+    async def send_card(
+        self,
+        *,
+        app_id: str,
+        app_secret: str,
+        open_id: str,
+        card: dict[str, Any],
+        delivery_key: str | None = None,
+    ) -> None:
+        """An `interactive` message — §19.2's status card.
+
+        Same envelope as a text message with a different `msg_type`, which
+        is why both go through `_send`: the token exchange, the `uuid`
+        deduplication and the "a 200 is not a success" check are not
+        specific to what is being sent, and a second copy of them would be a
+        second place to get that wrong.
+        """
+        await self._send(
+            app_id=app_id,
+            app_secret=app_secret,
+            open_id=open_id,
+            msg_type="interactive",
+            content=json.dumps(card, ensure_ascii=False),
+            delivery_key=delivery_key,
+        )
+
+    async def _send(
+        self,
+        *,
+        app_id: str,
+        app_secret: str,
+        open_id: str,
+        msg_type: str,
+        content: str,
+        delivery_key: str | None,
+    ) -> None:
         token = await self._token(app_id, app_secret)
         message: dict[str, Any] = {
             "receive_id": open_id,
-            "msg_type": "text",
-            # A JSON *string*, not an object. Feishu's own encoding, and
-            # getting it wrong is a 200 with a non-zero code — which is
-            # precisely why `_envelope` reads the body rather than the
-            # status.
-            "content": json.dumps({"text": text}, ensure_ascii=False),
+            "msg_type": msg_type,
+            "content": content,
         }
         if delivery_key is not None:
             message["uuid"] = delivery_key[:MAX_DELIVERY_KEY_CHARS]

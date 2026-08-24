@@ -44,6 +44,10 @@ x-base-env: &base-env
   # The network a sandbox is attached to. Empty leaves a sandbox with no
   # network at all, which is §16.4's default and what a deployment running no
   # proxy gets.
+  # Where the console can be reached from outside, for links the platform
+  # puts inside messages it sends (§19.2's status card). Empty renders no
+  # button rather than a guessed URL, which would be a dead link.
+  CONSOLE_BASE_URL: ${CONSOLE_BASE_URL:-}
   SANDBOX_EGRESS_NETWORK: ${SANDBOX_EGRESS_NETWORK:-}
   SANDBOX_IDLE_TTL_SECONDS: ${SANDBOX_IDLE_TTL_SECONDS:-300}
   # Present-but-empty for the controller: Settings requires the fields so a

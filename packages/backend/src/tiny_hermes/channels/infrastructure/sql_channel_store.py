@@ -16,6 +16,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.channels.application.ingestion import ChannelBindingRecord
+from tiny_hermes.channels.domain.blocked import BlockedNotice, notice_from_stored
 from tiny_hermes.channels.infrastructure.tables import (
     ChannelBindingRow,
     ChannelConversationRow,
@@ -27,6 +28,16 @@ from tiny_hermes.runs.domain.models import (
     message_from_document,
 )
 from tiny_hermes.runs.infrastructure.tables import RunRow, SessionMessageRow
+
+
+@dataclass(frozen=True)
+class PendingNotice:
+    """A delivery that landed behind a blocked head and has not been told."""
+
+    event_row_id: UUID
+    run_id: UUID
+    session_id: UUID
+    notice: BlockedNotice
 
 
 @dataclass(frozen=True)
@@ -223,6 +234,80 @@ class SqlChannelStore:
                 session_id=session_id,
             )
             .on_conflict_do_nothing(constraint="uq_channel_conversations_participant")
+        )
+        await self._session.flush()
+
+    async def record_blocked_notice(
+        self, event_row_id: UUID, notice: BlockedNotice
+    ) -> None:
+        """§497's facts, kept as they were when this message landed.
+
+        Written in the inbound transaction beside `attach_run`, so the
+        notice and the Run it describes commit together. Re-deriving it when
+        the scan gets there would read a queue that has usually already
+        moved — and in the common case where the head unblocks quickly, that
+        means saying nothing at all to somebody who really was made to wait.
+        """
+        await self._session.execute(
+            update(ChannelEventRow)
+            .where(ChannelEventRow.id == event_row_id)
+            .values(blocked_notice=notice.document())
+        )
+        await self._session.flush()
+
+    async def pending_blocked_notices(
+        self, limit: int = 50
+    ) -> list["PendingNotice"]:
+        """Deliveries that landed in a queue and have not been told so.
+
+        Oldest first with `id` breaking the tie, like `pending_replies` and
+        for the same reason: `received_at` is not a total order.
+        """
+        rows = (
+            await self._session.execute(
+                select(
+                    ChannelEventRow.id,
+                    ChannelEventRow.run_id,
+                    ChannelEventRow.blocked_notice,
+                    RunRow.session_id,
+                )
+                .join(RunRow, RunRow.id == ChannelEventRow.run_id)
+                .where(
+                    ChannelEventRow.blocked_notice.is_not(None),
+                    ChannelEventRow.blocked_notified_at.is_(None),
+                )
+                .order_by(ChannelEventRow.received_at, ChannelEventRow.id)
+                .limit(limit)
+            )
+        ).all()
+        found: list[PendingNotice] = []
+        for row in rows:
+            notice = notice_from_stored(row.blocked_notice)
+            if notice is None:
+                continue
+            found.append(
+                PendingNotice(
+                    event_row_id=row.id,
+                    run_id=row.run_id,
+                    session_id=row.session_id,
+                    notice=notice,
+                )
+            )
+        return found
+
+    async def settle_blocked_notice(
+        self, event_row_id: UUID, now: datetime
+    ) -> None:
+        """Its own stamp, never `replied_at`.
+
+        Settling the reply here would end the delivery before the answer
+        exists — the person would be told they are queued and then never
+        hear the result, which is the silence this whole path exists to end.
+        """
+        await self._session.execute(
+            update(ChannelEventRow)
+            .where(ChannelEventRow.id == event_row_id)
+            .values(blocked_notified_at=now)
         )
         await self._session.flush()
 

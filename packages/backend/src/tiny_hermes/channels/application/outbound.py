@@ -20,13 +20,15 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 from tiny_hermes.channels.domain.feishu import CHANNEL
 from tiny_hermes.channels.domain.reply import reply_for
+from tiny_hermes.channels.infrastructure.feishu_card import blocked_card
 from tiny_hermes.channels.infrastructure.sql_channel_store import (
     DeliveryTarget,
+    PendingNotice,
     PendingReply,
 )
 
@@ -37,6 +39,10 @@ logger = logging.getLogger(__name__)
 #: "bot is not in the chat" never does, and a row retried forever is a scan
 #: that never drains.
 DEFAULT_MAX_ATTEMPTS = 5
+
+#: Appended to a delivery's row id for the queue notice, so the notice and
+#: the answer are two different keys to Feishu's deduplication.
+_NOTICE_KEY_SUFFIX = ":q"
 
 
 class ReplyOutcome:
@@ -89,6 +95,16 @@ class ChannelSender(Protocol):
         delivery_key: str | None = None,
     ) -> None: ...
 
+    async def send_card(
+        self,
+        *,
+        app_id: str,
+        app_secret: str,
+        open_id: str,
+        card: dict[str, Any],
+        delivery_key: str | None = None,
+    ) -> None: ...
+
 
 class ChannelSenders(Protocol):
     """A sender for one workspace's traffic.
@@ -114,6 +130,14 @@ class ReplyQueue(Protocol):
 
     async def pending_replies(self, limit: int = 50) -> list[PendingReply]: ...
 
+    async def pending_blocked_notices(
+        self, limit: int = 50
+    ) -> list[PendingNotice]: ...
+
+    async def settle_blocked_notice(
+        self, event_row_id: UUID, now: datetime
+    ) -> None: ...
+
     async def delivery_target_for(self, session_id: UUID) -> DeliveryTarget | None: ...
 
     async def settle_reply(
@@ -134,25 +158,81 @@ class ChannelReplyDispatcher:
         senders: ChannelSenders,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         batch_size: int = 50,
+        console_url: str | None = None,
     ) -> None:
         self._store = store
         self._resolve_secret = resolve_secret
         self._senders = senders
         self._max_attempts = max_attempts
         self._batch_size = batch_size
+        # `None` on a deployment that has not been told its own console
+        # address. The card then offers no button rather than a guessed URL,
+        # which would be a dead link in front of a user.
+        self._console_url = console_url
 
     async def dispatch_once(self) -> int:
-        """One bounded pass. Returns how many replies were actually sent.
+        """One bounded pass. Returns how many messages were actually sent.
 
         The count is sends, not rows touched: a pass that settled six rows
-        because their bindings were disabled has replied to nobody, and a
+        because their bindings were disabled has told nobody anything, and a
         metric that called that six would say the channel was healthy.
+
+        Notices go before replies, deliberately. Both can be due in the same
+        pass — a Run can queue and finish between two scans — and "your
+        message is queued" arriving *after* the answer would be worse than
+        not sending it at all.
         """
         sent = 0
+        for waiting in await self._store.pending_blocked_notices(self._batch_size):
+            if await self._notify(waiting):
+                sent += 1
         for pending in await self._store.pending_replies(self._batch_size):
             if await self._dispatch(pending):
                 sent += 1
         return sent
+
+    async def _notify(self, waiting: PendingNotice) -> bool:
+        """§19.2's status card, sent once.
+
+        Settled whether or not it goes out, like a reply: a notice that only
+        drained on success would be retried every scan for as long as the
+        row survives the seven-day sweep.
+
+        No retry bound of its own, because there is nothing to bound — this
+        is told once and then the row is done. A notice that failed to send
+        is a person who does not know they are queued, which is bad; a
+        notice retried until it lands beside an answer that already arrived
+        is worse.
+        """
+        target = await self._store.delivery_target_for(waiting.session_id)
+        recipient = self._sendable(target)
+        if isinstance(recipient, str):
+            logger.info(
+                "channel notice not sent: run=%s reason=%s", waiting.run_id, recipient
+            )
+            await self._store.settle_blocked_notice(waiting.event_row_id, _now())
+            return False
+        try:
+            secret = await self._resolve_secret(recipient.app_secret_ref)
+            await self._senders(recipient.workspace_id).send_card(
+                app_id=recipient.app_id,
+                app_secret=secret,
+                open_id=recipient.open_id,
+                card=blocked_card(waiting.notice, console_url=self._console_url),
+                # Suffixed, so the notice and the answer for one delivery
+                # never share a key. Sharing it would let Feishu's own
+                # deduplication swallow the second — and the second is the
+                # answer the person is actually waiting for.
+                delivery_key=f"{waiting.event_row_id}{_NOTICE_KEY_SUFFIX}",
+            )
+        except Exception:
+            logger.warning(
+                "channel notice failed: run=%s", waiting.run_id, exc_info=True
+            )
+            await self._store.settle_blocked_notice(waiting.event_row_id, _now())
+            return False
+        await self._store.settle_blocked_notice(waiting.event_row_id, _now())
+        return True
 
     async def _dispatch(self, pending: PendingReply) -> bool:
         text = reply_for(

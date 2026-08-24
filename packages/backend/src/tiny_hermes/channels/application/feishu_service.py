@@ -24,6 +24,7 @@ from tiny_hermes.channels.application.webhook_service import (
     Challenge,
     FeishuWebhookService,
 )
+from tiny_hermes.channels.domain.blocked import BlockedNotice
 from tiny_hermes.channels.domain.feishu import CHANNEL
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,10 @@ class BindingDirectory(Protocol):
     async def encrypt_key_ref_of(self, binding_id: UUID) -> str | None: ...
 
     async def attach_run(self, event_row_id: UUID, run_id: UUID) -> None: ...
+
+    async def record_blocked_notice(
+        self, event_row_id: UUID, notice: BlockedNotice
+    ) -> None: ...
 
 
 class UnknownChannelBinding(Exception):
@@ -121,6 +126,15 @@ class FeishuChannelService:
         # Same session as the claim (see `resources.feishu_channel_service`),
         # so the Run and its attachment commit together.
         await self._bindings.attach_run(outcome.claim_id, delivered.run.run_id)
+        if delivered.blocked is not None:
+            # §19.2: a blocked Session may not swallow the message quietly.
+            # Recorded here rather than sent here — sending inside this
+            # transaction would make an inbound delivery depend on
+            # `open.feishu.cn` being reachable, and a timeout would leave
+            # Feishu retrying a delivery whose claim is already taken.
+            await self._bindings.record_blocked_notice(
+                outcome.claim_id, delivered.blocked
+            )
         return Accepted(delivered=delivered)
 
     async def _binding(self, binding_id: UUID) -> ChannelBindingRecord:

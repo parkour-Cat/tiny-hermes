@@ -359,6 +359,7 @@ def _channel_replies(
             store=SqlChannelStore(session),
             resolve_secret=CredentialResolver(SqlSecretStore(session), kek).resolve,
             senders=senders,
+            console_url=settings.console_base_url or None,
         )
 
     return build

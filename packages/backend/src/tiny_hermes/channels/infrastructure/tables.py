@@ -5,6 +5,7 @@ constraint rather than for its rows.
 """
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
@@ -17,6 +18,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from tiny_hermes.shared.database import Base, CreatedAtMixin, IdMixin
@@ -73,6 +75,14 @@ class ChannelEventRow(IdMixin, Base):
             "run_id",
             postgresql_where=text("run_id IS NOT NULL AND replied_at IS NULL"),
         ),
+        # The notice scan's, matching its predicate exactly — migration 0041.
+        Index(
+            "ix_channel_events_awaiting_notice",
+            "received_at",
+            postgresql_where=text(
+                "blocked_notice IS NOT NULL AND blocked_notified_at IS NULL"
+            ),
+        ),
     )
 
     channel_binding_id: Mapped[UUID] = mapped_column(
@@ -99,6 +109,19 @@ class ChannelEventRow(IdMixin, Base):
     #: How it settled, for whoever is asked why a reply never arrived. See
     #: migration 0040 for why this exists rather than only a log line.
     reply_note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    #: §497's facts as they were **at the moment this message landed**, or
+    #: NULL for the ordinary unblocked delivery. Stored rather than
+    #: re-derived because the inbound moment is the only accurate one — see
+    #: migration 0041.
+    blocked_notice: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True
+    )
+    #: Separate from `replied_at` on purpose: one delivery produces two
+    #: sends, and a shared stamp would settle the row before the answer the
+    #: person is waiting for had been written.
+    blocked_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class ChannelConversationRow(IdMixin, CreatedAtMixin, Base):

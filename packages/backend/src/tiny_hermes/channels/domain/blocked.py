@@ -50,6 +50,43 @@ class BlockedNotice:
     #: is worth telling them rather than offering nothing and no explanation.
     available_actions: tuple[str, ...]
 
+    def document(self) -> dict[str, Any]:
+        """The notice as it is stored, so the card can be sent later.
+
+        Stored rather than re-derived at send time, and that is the whole
+        design: the inbound moment is the **only** accurate one. A Run can
+        stop being blocked two seconds later, but "your message landed
+        second in the queue" was true when it landed, and that is what the
+        person needs told. Re-reading the queue when the scan gets there
+        would describe a world that has already moved.
+        """
+        return {
+            "blocked_by_run_id": (
+                None if self.blocked_by_run_id is None else str(self.blocked_by_run_id)
+            ),
+            "head_status": self.head_status,
+            "pause_reason": self.pause_reason,
+            "wait_kind": self.wait_kind,
+            "position": self.position,
+            "available_actions": list(self.available_actions),
+        }
+
+
+def notice_from_stored(document: dict[str, Any] | None) -> BlockedNotice | None:
+    """Read back what `document` wrote. `None` for a delivery that was never
+    blocked, which is the ordinary case."""
+    if not document:
+        return None
+    blocking = string_at(document, "blocked_by_run_id")
+    return BlockedNotice(
+        blocked_by_run_id=UUID(blocking) if blocking is not None else None,
+        head_status=string_at(document, "head_status"),
+        pause_reason=string_at(document, "pause_reason"),
+        wait_kind=string_at(document, "wait_kind"),
+        position=int_at(document, "position", 0),
+        available_actions=strings_at(document, "available_actions"),
+    )
+
 
 def notice_from_document(document: dict[str, Any]) -> BlockedNotice | None:
     """`None` when the Run was accepted normally.

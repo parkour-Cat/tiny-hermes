@@ -13,10 +13,10 @@ This is the rendering that gets it in front of the person who typed.
 """
 
 import json
+from uuid import UUID
 
 from tiny_hermes.channels.domain.blocked import BlockedNotice
 from tiny_hermes.channels.infrastructure.feishu_card import blocked_card
-from uuid import UUID
 
 BLOCKER = UUID("11111111-2222-4333-8444-555555555555")
 
