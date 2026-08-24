@@ -33,17 +33,27 @@ class SqlChannelBindingStore:
         )
         return Role(value) if value else None
 
-    async def secret_exists(self, workspace_id: UUID, name: str) -> bool:
-        """Scoped to this workspace on purpose.
+    async def secret_exists(self, workspace_id: UUID, reference: str) -> bool:
+        """By **id**, because that is what resolves it later.
 
-        A platform-scoped secret would resolve at delivery time, but naming
-        one here would let a workspace administrator bind a channel to a
-        secret they cannot see and did not create.
+        `CredentialResolver` reads a Secret id, or else an
+        environment-variable name; a secret's *name* is neither. This used to
+        check the name, so a binding validated cleanly and then failed at the
+        first real delivery with `CredentialMissing` — validation and use
+        were asking different questions, and only the second one counted.
+
+        Scoped to this workspace on purpose: a platform-scoped secret would
+        resolve at delivery time, but naming one here would let a workspace
+        administrator bind a channel to a secret they cannot see.
         """
+        try:
+            secret_id = UUID(reference)
+        except ValueError:
+            return False
         found = await self._session.scalar(
             select(SecretRow.id).where(
                 SecretRow.workspace_id == workspace_id,
-                SecretRow.name == name,
+                SecretRow.id == secret_id,
                 SecretRow.status == "active",
             )
         )

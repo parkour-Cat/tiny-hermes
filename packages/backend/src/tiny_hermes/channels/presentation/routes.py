@@ -11,6 +11,7 @@ end-user cookie, which has nothing to do with this caller. Feishu arrives
 with no cookies at all.
 """
 
+import logging
 from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
@@ -47,6 +48,8 @@ from tiny_hermes.identity.presentation.dependencies import (
 )
 from tiny_hermes.shared.errors import AppError
 from tiny_hermes.tenancy.domain.models import Actor
+
+logger = logging.getLogger(__name__)
 
 WorkspaceHeader = Annotated[str | None, Header(alias="X-Workspace-Id")]
 CsrfHeader = Annotated[str | None, Header(alias="X-CSRF-Token")]
@@ -111,12 +114,13 @@ def feishu_webhook_router(resources: ApplicationResources) -> APIRouter:
         # it. FastAPI would happily have given a typed body here and the
         # signature would then fail for well-formed requests.
         body = await request.body()
-        if (
-            x_lark_request_timestamp is None
-            or x_lark_request_nonce is None
-            or x_lark_signature is None
-        ):
-            raise _refused()
+        # Not refused here any more. Feishu sends the registration handshake
+        # unsigned, so this route cannot tell "unsigned" from "unacceptable"
+        # on its own; `webhook_service` decides, and it lets exactly one kind
+        # of unsigned body through — a `url_verification`. Everything else
+        # still needs a signature that verifies.
+        if x_lark_signature is None:
+            logger.info("feishu delivery arrived unsigned: binding=%s", binding_id)
 
         try:
             outcome = await service.deliver(
@@ -128,6 +132,21 @@ def feishu_webhook_router(resources: ApplicationResources) -> APIRouter:
                 request_id=request.state.request_id,
             )
         except (WebhookRefused, UnknownChannelBinding) as error:
+            # The caller's answer stays uniform (see `_refused`), but an
+            # operator watching their own deployment needs the reason:
+            # "signature does not match" points at an Encrypt Key differing
+            # from the one this binding names, which is a different fix from
+            # an unknown binding or a malformed body.
+            logger.warning(
+                "feishu delivery refused: binding=%s reason=%r ts=%s nonce=%s "
+                "sig=%s body=%s",
+                binding_id,
+                error,
+                x_lark_request_timestamp,
+                x_lark_request_nonce,
+                x_lark_signature,
+                body[:200],
+            )
             raise _refused() from error
         except ErasedSubjectRefused as error:
             # §344 holds across transports. Refused like any unverified
@@ -140,7 +159,15 @@ def feishu_webhook_router(resources: ApplicationResources) -> APIRouter:
             # retries are finite and would not make an unsupported message
             # type supported, so refusing only produces four more copies of
             # something already understood.
-            del error
+            # Answered 200 (see above), but never silently: a delivery that
+            # verified and then produced no Run is indistinguishable, from
+            # the outside, from one that worked — and the person who sent
+            # the message is staring at a chat with no reply.
+            logger.warning(
+                "feishu delivery understood but unsupported: binding=%s reason=%r",
+                binding_id,
+                error,
+            )
             return DeliveryAccepted()
 
         if isinstance(outcome, Challenge):

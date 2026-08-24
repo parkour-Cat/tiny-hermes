@@ -346,7 +346,11 @@ export function ChannelsPage() {
                 reference is how you end up with a binding pointing at a
                 secret that does not exist, which fails in a webhook hours
                 later where nobody is watching. */}
-            <Select options={usable.map((secret) => ({ value: secret.name, label: secret.name }))} />
+            {/* Value is the id, label is the name. `CredentialResolver`
+                resolves a Secret by id; a name is neither an id nor an
+                environment variable, so a binding storing one validated
+                cleanly and then failed at the first delivery. */}
+            <Select options={usable.map((secret) => ({ value: secret.id, label: secret.name }))} />
           </Form.Item>
           <Form.Item name="appId" label={t("channelAppId")}>
             <Input />
@@ -362,7 +366,7 @@ export function ChannelsPage() {
                 combobox's accessible name and hides the field's label. */}
             <Select
               allowClear
-              options={usable.map((secret) => ({ value: secret.name, label: secret.name }))}
+              options={usable.map((secret) => ({ value: secret.id, label: secret.name }))}
             />
           </Form.Item>
         </Form>

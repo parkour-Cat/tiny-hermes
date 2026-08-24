@@ -8,6 +8,7 @@ the network — which is the shape of failure this project has produced five
 times already and named in its own verification records.
 """
 
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol
@@ -24,6 +25,8 @@ from tiny_hermes.channels.application.webhook_service import (
     FeishuWebhookService,
 )
 from tiny_hermes.channels.domain.feishu import CHANNEL
+
+logger = logging.getLogger(__name__)
 
 
 class BindingDirectory(Protocol):
@@ -69,14 +72,24 @@ class FeishuChannelService:
         *,
         binding_id: UUID,
         body: bytes,
-        timestamp: str,
-        nonce: str,
-        signature: str,
+        #: `None` when Feishu sent no signature. Only a registration
+        #: handshake may arrive that way — `webhook_service` enforces it.
+        timestamp: str | None,
+        nonce: str | None,
+        signature: str | None,
         request_id: str,
     ) -> Challenge | Accepted:
         binding = await self._binding(binding_id)
         key = await self._key_for(binding_id)
 
+        # Logged before the attempt so a refusal below has context: which
+        # binding, and which secret its key came from. Never the key.
+        logger.info(
+            "feishu delivery: binding=%s key_ref=%s bytes=%d",
+            binding_id,
+            await self._bindings.encrypt_key_ref_of(binding_id),
+            len(body),
+        )
         outcome = await self._webhooks.accept(
             secrets=BindingSecrets(binding_id=binding_id, encrypt_key=key),
             body=body,
