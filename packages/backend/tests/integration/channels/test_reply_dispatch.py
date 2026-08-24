@@ -818,3 +818,168 @@ async def test_a_broken_envelope_is_answered_to_nobody(
     await _dispatch(engine, sender)
 
     assert sender.sent == []
+
+
+async def _age_delivery(engine: AsyncEngine, seconds: int) -> None:
+    """Backdate every delivery, so "it has been a while" is true without
+    the test having to wait it out."""
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "UPDATE channel_events"
+                " SET received_at = received_at - make_interval(secs => :s)"
+            ),
+            {"s": seconds},
+        )
+
+
+async def test_a_slow_run_says_it_is_still_working(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§19.2's `流式能力受渠道限制时的进度更新`.
+
+    Feishu has no streaming, so a Run that takes two minutes shows the
+    person nothing at all. They conclude it broke and send the message
+    again — which is the same conclusion, and the same second message, that
+    silence produced on every other path in this module.
+    """
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    _deliver(client, binding_id)
+    await _age_delivery(engine, 60)
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+
+    assert len(sender.sent) == 1
+    assert sender.sent[0]["open_id"] == "ou_zhang"
+    assert "还在" in sender.sent[0]["text"]
+
+
+async def test_a_run_that_has_only_just_started_says_nothing(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A notice on every message would be noise on the ordinary five-second
+    Run — and noise in a chat is what makes people stop reading the
+    messages that matter."""
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    _deliver(client, binding_id)
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+
+    assert sender.sent == []
+
+
+async def test_a_run_that_already_finished_gets_its_answer_not_a_progress_note(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slow *and* done by the time the scan looked. Telling somebody "still
+    working" and then immediately answering reads as a platform talking to
+    itself."""
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    run_id = _deliver(client, binding_id)
+    await _age_delivery(engine, 60)
+    await _finish(engine, run_id, said="慢是慢,做完了")
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+
+    assert len(sender.sent) == 1
+    assert sender.sent[0]["text"] == "慢是慢,做完了"
+
+
+async def test_the_progress_note_is_sent_once_however_long_it_runs(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deliberately once, not once per interval.
+
+    A ten-minute Run must not produce thirty "still working" messages. This
+    build does not do step-by-step progress at all: what a Run is doing is
+    tool names and internal state, which §19.1 keeps off an end-user
+    surface, and a chat that scrolls itself is worse than one that waits.
+    """
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    _deliver(client, binding_id)
+    await _age_delivery(engine, 60)
+
+    sender = _Sender()
+    for _ in range(4):
+        await _dispatch(engine, sender)
+
+    assert len(sender.sent) == 1
+
+
+async def test_a_queued_message_gets_the_card_and_not_a_progress_note(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """"Still working" would be false — nothing is working on it yet, it is
+    queued — and the card already told them that, with the reason."""
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    first = _deliver(client, binding_id, event_id="om_head")
+    await _block_head(engine, first)
+    _deliver(client, binding_id, event_id="om_queued")
+    await _age_delivery(engine, 60)
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+
+    kinds = [entry["kind"] for entry in sender.sent]
+    assert kinds.count("card") == 1
+    assert "text" not in kinds
+
+
+async def test_a_slow_run_still_delivers_its_answer_afterwards(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The progress note must not settle the delivery. Same failure the
+    queue notice would have had with a shared stamp: told it is coming,
+    then never told what it was."""
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    run_id = _deliver(client, binding_id)
+    await _age_delivery(engine, 60)
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+    await _finish(engine, run_id, said="终于好了")
+    await _dispatch(engine, sender)
+
+    assert len(sender.sent) == 2
+    assert "还在" in sender.sent[0]["text"]
+    assert sender.sent[1]["text"] == "终于好了"
+    assert len({entry["delivery_key"] for entry in sender.sent}) == 2
