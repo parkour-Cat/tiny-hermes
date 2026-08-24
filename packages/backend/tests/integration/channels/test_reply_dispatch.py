@@ -99,10 +99,35 @@ class _Sender:
     ) -> None:
         self.sent.append(
             {
+                "kind": "text",
                 "app_id": app_id,
                 "app_secret": app_secret,
                 "open_id": open_id,
                 "text": text,
+                "delivery_key": delivery_key or "",
+            }
+        )
+        if self.refusing is not None:
+            raise self.refusing
+
+    async def send_card(
+        self,
+        *,
+        app_id: str,
+        app_secret: str,
+        open_id: str,
+        card: dict[str, Any],
+        delivery_key: str | None = None,
+    ) -> None:
+        self.sent.append(
+            {
+                "kind": "card",
+                "app_id": app_id,
+                "app_secret": app_secret,
+                "open_id": open_id,
+                # Flattened, because these tests ask what a person can read
+                # rather than which element it landed in.
+                "text": json.dumps(card, ensure_ascii=False),
                 "delivery_key": delivery_key or "",
             }
         )
@@ -516,3 +541,150 @@ async def test_every_retry_of_one_reply_carries_the_same_deduplication_key(
     assert len(sender.sent) == 3
     assert len(keys) == 1
     assert "" not in keys
+
+
+async def _block_head(engine: AsyncEngine, run_id: UUID) -> None:
+    """Put the Session's head Run into `paused`, the way a person pausing it
+    from the console would. Everything after this arrives behind it."""
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "UPDATE runs SET status = 'paused', pause_reason = 'manual'"
+                " WHERE id = :r"
+            ),
+            {"r": run_id},
+        )
+
+
+async def test_a_queued_message_is_told_it_is_queued(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§19.2's `不能静默吞入新消息`, which was false until now.
+
+    Every fact §497 requires was computed on the inbound path and written
+    into the webhook's HTTP response — a body Feishu's server discards the
+    moment it reads the 200. The person who sent the message saw an empty
+    chat, which is what a dropped message also looks like.
+    """
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    first = _deliver(client, binding_id, event_id="om_head")
+    await _block_head(engine, first)
+
+    _deliver(client, binding_id, event_id="om_queued")
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+
+    cards = [entry for entry in sender.sent if entry["kind"] == "card"]
+    assert len(cards) == 1
+    assert cards[0]["open_id"] == "ou_zhang"
+    assert "排队" in cards[0]["text"]
+
+
+async def test_the_queue_notice_is_sent_once(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scan runs every second for as long as the head stays paused. A
+    notice without its own stamp would be re-sent every one of them."""
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    first = _deliver(client, binding_id, event_id="om_head")
+    await _block_head(engine, first)
+    _deliver(client, binding_id, event_id="om_queued")
+
+    sender = _Sender()
+    for _ in range(3):
+        await _dispatch(engine, sender)
+
+    assert len([e for e in sender.sent if e["kind"] == "card"]) == 1
+
+
+async def test_a_message_that_was_never_queued_gets_no_notice(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordinary case. A card saying "you are queued" in front of
+    somebody who was not queued is noise, and noise in a chat is the thing
+    that makes people stop reading the cards that matter."""
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    run_id = _deliver(client, binding_id)
+    await _finish(engine, run_id, said="做完了")
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+
+    assert [e for e in sender.sent if e["kind"] == "card"] == []
+
+
+async def test_a_queued_message_still_gets_its_answer_afterwards(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two sends for one delivery, and the notice must not consume the reply.
+
+    A single `replied_at` could not carry both — stamping it for the queue
+    notice would settle the row, and the answer the person is actually
+    waiting for would never be sent. That is why the notice has its own
+    stamp rather than sharing one.
+    """
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    first = _deliver(client, binding_id, event_id="om_head")
+    await _block_head(engine, first)
+    queued = _deliver(client, binding_id, event_id="om_queued")
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+    await _finish(engine, queued, said="终于轮到我了")
+    await _dispatch(engine, sender)
+
+    kinds = [entry["kind"] for entry in sender.sent]
+    assert kinds == ["card", "text"]
+    assert sender.sent[1]["text"] == "终于轮到我了"
+
+
+async def test_the_notice_and_the_reply_do_not_share_a_deduplication_key(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both are sends for one `channel_events` row. Sharing the key would
+    make Feishu's own deduplication swallow the second one — the reply — and
+    the person would keep the queue notice and never get the answer."""
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    first = _deliver(client, binding_id, event_id="om_head")
+    await _block_head(engine, first)
+    queued = _deliver(client, binding_id, event_id="om_queued")
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+    await _finish(engine, queued, said="终于轮到我了")
+    await _dispatch(engine, sender)
+
+    keys = [entry["delivery_key"] for entry in sender.sent]
+    assert len(set(keys)) == 2
+    assert all(key != "" for key in keys)
