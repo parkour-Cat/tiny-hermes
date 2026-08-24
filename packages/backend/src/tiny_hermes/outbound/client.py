@@ -208,8 +208,21 @@ class SafeOutboundClient:
             # client the OIDC flow builds for itself.
             content = urlencode(data).encode("ascii")
             sending.setdefault("Content-Type", "application/x-www-form-urlencoded")
+        elif json is not None:
+            # `httpx.Request(...).content` gives the encoded bytes and leaves
+            # the header httpx would have sent with them behind. Declaring it
+            # here is not cosmetic: a server is entitled to refuse a body it
+            # was not told the type of, and one did — every model call went
+            # out untyped and came back `415 Unsupported Media Type`, which
+            # the Run reported as `endpoint_status:415`, pointing at the
+            # endpoint rather than at this client.
+            #
+            # `setdefault`, so a caller that meant a vendor media type keeps
+            # it.
+            content = httpx.Request("POST", url, json=json).content
+            sending.setdefault("Content-Type", "application/json")
         else:
-            content = None if json is None else httpx.Request("POST", url, json=json).content
+            content = None
         for _ in range(self._max_redirects + 1):
             response = await self._send(method, url, content, sending)
             if response.status_code not in REDIRECT_STATUSES:

@@ -231,11 +231,19 @@ test("the credential is chosen from stored secrets, not typed as a uuid", async 
   server.use(
     http.get("/api/v1/auth/me", () => HttpResponse.json(user(true))),
     http.get("/api/v1/model-endpoints", () => HttpResponse.json([])),
-    http.get("/api/v1/secrets", () =>
-      HttpResponse.json([
+    // The stub refuses without `X-Workspace-Id`, because the real route
+    // does (`require_workspace_id`). A stub that answered regardless is how
+    // the first version of this picker shipped with an empty dropdown and a
+    // green test: the page asked without the header and was refused, and
+    // nothing in the suite could tell.
+    http.get("/api/v1/secrets", ({ request }) => {
+      if (request.headers.get("X-Workspace-Id") === null) {
+        return HttpResponse.json({ code: "workspace_required", detail: "" }, { status: 400 });
+      }
+      return HttpResponse.json([
         { id: "11111111-2222-4333-8444-555555555555", name: "openai-api-key", scope: "workspace", status: "active" },
-      ]),
-    ),
+      ]);
+    }),
     http.post("/api/v1/model-endpoints", async ({ request }) => {
       sent = (await request.json()) as Record<string, unknown>;
       return HttpResponse.json({ ...SUMMARY, kind: "openai_compatible", base_url: "https://x/v1", credential_available: true }, { status: 201 });

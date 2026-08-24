@@ -184,11 +184,15 @@ def test_a_transcript_with_a_call_and_a_result_is_sent_whole() -> None:
     assert messages[0] == {"role": "user", "content": "list the files"}
     assert messages[1]["role"] == "assistant"
     assert messages[1]["content"] == "Listing."
+    # `shell__exec`, not `shell.exec`: an OpenAI-compatible endpoint refuses a
+    # function name with a dot in it. This assertion used to pin the dotted
+    # name, which is why the refusal was never noticed — the test agreed with
+    # the adapter and both disagreed with every real endpoint.
     assert messages[1]["tool_calls"] == [
         {
             "id": "call_1",
             "type": "function",
-            "function": {"name": "shell.exec", "arguments": json.dumps({"command": "ls"})},
+            "function": {"name": "shell__exec", "arguments": json.dumps({"command": "ls"})},
         }
     ]
     assert messages[2] == {
@@ -239,7 +243,15 @@ def test_a_bound_tool_is_advertised() -> None:
     payload = sent(
         CanonicalMessage(role="user", blocks=(TextBlock(text="hi"),)), tools=[schema]
     )
-    assert payload["tools"] == [schema]
+    # Advertised under the wire name. Everything else about the schema is
+    # passed through untouched, including `parameters`.
+    assert payload["tools"] == [
+        {"type": "function", "function": {"name": "shell__exec", "parameters": {}}}
+    ]
+    # And the caller's own dict was not mutated — the registry hands out
+    # module-level constants, so renaming in place would rename them for
+    # every later request, including the deterministic provider's.
+    assert schema["function"]["name"] == "shell.exec"
 
 
 @pytest.mark.parametrize("failed", [True, False])
@@ -257,3 +269,73 @@ def test_a_failed_result_still_reaches_the_model(failed: bool) -> None:
         )
     )
     assert payload["messages"][2]["content"] == "not authorized"
+
+
+# --- the wire name, which is not this platform's name --------------------
+
+WIRE_PATTERN = __import__("re").compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def test_every_advertised_tool_name_is_one_the_wire_accepts() -> None:
+    """OpenAI-compatible endpoints constrain a function name to
+    `^[a-zA-Z0-9_-]+$`. Every tool this platform implements has a dot in it —
+    `shell.exec`, `file.read` — so every request advertising one was refused:
+
+        Invalid 'tools[0].function.name': string does not match pattern.
+
+    DeepSeek answered `400` to every call from an Agent with tools bound.
+    Nothing caught it because the whole suite runs against the deterministic
+    provider and no e2e walk ever pointed at a real OpenAI-compatible
+    endpoint — the request was well-formed by our lights and rejected by
+    theirs.
+    """
+    from tiny_hermes.tools.domain.registry import IMPLEMENTED_TOOLS, schemas_for
+
+    # Through `build_payload`, not the registry directly: the registry keeps
+    # this platform's own names — dots and all — and the rename belongs to
+    # the OpenAI adapter, which is the only place the constraint exists.
+    payload = sent(
+        CanonicalMessage(role="user", blocks=(TextBlock(text="hi"),)),
+        tools=schemas_for(IMPLEMENTED_TOOLS),
+    )
+
+    advertised = [entry["function"]["name"] for entry in payload["tools"]]
+    assert len(advertised) == len(IMPLEMENTED_TOOLS)
+    for name in advertised:
+        assert WIRE_PATTERN.fullmatch(name), name
+
+
+def test_a_tool_call_comes_back_under_the_platform_s_own_name() -> None:
+    """The other half, and the half that fails silently if forgotten.
+
+    Renaming on the way out without renaming on the way back leaves the
+    model asking for `file_read`, a name no part of this platform
+    dispatches — authorisation would refuse a tool the Agent genuinely
+    bound.
+    """
+    body = answer()
+    # `__`, not `_`: a single underscore could not be reversed, because a
+    # platform name may legitimately contain one.
+    body["choices"][0]["message"]["tool_calls"][0]["function"]["name"] = "shell__exec"
+
+    response = normalize(body)
+
+    assert response.stop_reason is StopReason.TOOL_CALL
+    assert [call.name for call in response.tool_calls] == ["shell.exec"]
+
+
+def test_a_replayed_tool_call_goes_out_under_the_wire_name() -> None:
+    """History is sent back to the model on the next round. A call replayed
+    under the dotted name is the same 400, one turn later."""
+    payload = sent(
+        CanonicalMessage(
+            role="assistant",
+            blocks=(
+                ToolCallBlock(call_id="call_1", name="shell.exec", arguments={"command": "ls"}),
+            ),
+        )
+    )
+
+    replayed = [m for m in payload["messages"] if m.get("tool_calls")]
+    assert replayed, "the tool call was not replayed at all"
+    assert replayed[0]["tool_calls"][0]["function"]["name"] == "shell__exec"

@@ -12,6 +12,7 @@ import type {
   SecretResponse,
 } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
+import { useWorkspaceId } from "../workspace/useWorkspaceId";
 import { useT } from "../i18n/locale";
 
 type RegisterValues = {
@@ -42,10 +43,16 @@ export function ModelEndpointsPage() {
   // binding form already argued why: a free-text reference is how you point
   // at a secret that does not exist and find out hours later, inside a call
   // nobody is watching. This field was the console's last free-text one.
+  // `/api/v1/secrets` is workspace-scoped — it calls `require_workspace_id`
+  // and refuses without the header. This page is otherwise platform-level,
+  // so the header is easy to forget; forgetting it produced an empty
+  // dropdown and no error a person could see.
+  const workspaceId = useWorkspaceId();
   const secrets = useQuery({
-    queryKey: ["secrets"] as const,
-    queryFn: () => api<SecretResponse[]>("/api/v1/secrets"),
-    enabled: admin,
+    queryKey: ["secrets", workspaceId] as const,
+    queryFn: () =>
+      api<SecretResponse[]>("/api/v1/secrets", { workspace: workspaceId ?? "" }),
+    enabled: admin && workspaceId !== null,
   });
 
   const listed = useQuery({
