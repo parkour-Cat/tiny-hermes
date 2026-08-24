@@ -66,6 +66,7 @@ class SqlChannelBindingStore:
         created_by: UUID,
         app_id: str | None,
         encrypt_key_ref: str | None,
+        app_secret_ref: str | None,
     ) -> ChannelBindingView | None:
         row = ChannelBindingRow(
             workspace_id=workspace_id,
@@ -75,6 +76,7 @@ class SqlChannelBindingStore:
             created_by=created_by,
             app_id=app_id,
             encrypt_key_ref=encrypt_key_ref,
+            app_secret_ref=app_secret_ref,
         )
         self._session.add(row)
         try:
@@ -152,6 +154,7 @@ def _view(row: ChannelBindingRow) -> ChannelBindingView:
         status=row.status,
         app_id=row.app_id,
         encrypt_key_ref=row.encrypt_key_ref,
+        app_secret_ref=row.app_secret_ref,
         created_by=row.created_by,
         created_at=row.created_at,
     )

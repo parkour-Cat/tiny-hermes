@@ -228,6 +228,8 @@ export const zhCN = {
   channelKind: "渠道",
   channelAgent: "Agent",
   channelAppId: "应用 ID",
+  channelAppSecretRef: "应用密钥",
+  channelAppSecretRefHint: "只接收不回复的绑定可以留空",
   channelKeyRef: "加密密钥",
   channelStatus: "状态",
   channelBoundAt: "绑定时间",

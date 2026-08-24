@@ -69,6 +69,53 @@ test("the form sends the secret's name, never a key", async () => {
     http.get("/api/v1/channel-bindings", () => HttpResponse.json([])),
     http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
     http.get("/api/v1/secrets", () =>
+      HttpResponse.json([
+        { id: "s1", name: "feishu-encrypt-key", scope: "workspace", status: "active" },
+        { id: "s2", name: "feishu-app-secret", scope: "workspace", status: "active" },
+      ]),
+    ),
+    http.post("/api/v1/channel-bindings", async ({ request }) => {
+      sent = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json(binding(), { status: 201 });
+    }),
+  );
+
+  renderChannels();
+  await userEvent.click(await screen.findByRole("button", { name: /绑定渠道|Bind a channel/i }));
+  await userEvent.click(await screen.findByLabelText(/Agent/));
+  await userEvent.click(await screen.findByTitle("Support"));
+  await userEvent.click(screen.getByLabelText(/加密密钥|Encrypt key/i));
+  await userEvent.click(await screen.findByTitle("feishu-encrypt-key"));
+  await userEvent.click(screen.getByLabelText(/应用密钥|App secret/i));
+  // Both selects list every stored secret, so the option title appears more
+  // than once. Click the one in the dropdown that is actually open.
+  const options = await screen.findAllByTitle("feishu-app-secret");
+  const open = options.find(
+    (node) => node.closest(".ant-select-dropdown:not(.ant-select-dropdown-hidden)") !== null,
+  );
+  expect(open).toBeDefined();
+  await userEvent.click(open!);
+  await userEvent.type(screen.getByLabelText(/应用 ID|App ID/i), "cli_zzz");
+  await userEvent.click(screen.getByRole("button", { name: /^绑定$|^Bind$/ }));
+
+  await waitFor(() => expect(sent).not.toBeNull());
+  expect(sent).toEqual({
+    channel: "feishu",
+    agent_id: AGENT,
+    app_id: "cli_zzz",
+    encrypt_key_ref: "feishu-encrypt-key",
+    app_secret_ref: "feishu-app-secret",
+  });
+});
+
+test("the app secret is optional — a receive-only binding is allowed", async () => {
+  // §929's drill needs one: it counts inbound events and never replies.
+  // Leaving the app secret unset must not block binding.
+  let sent: Record<string, unknown> | null = null;
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json([])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/secrets", () =>
       HttpResponse.json([{ id: "s1", name: "feishu-encrypt-key", scope: "workspace", status: "active" }]),
     ),
     http.post("/api/v1/channel-bindings", async ({ request }) => {
@@ -83,16 +130,10 @@ test("the form sends the secret's name, never a key", async () => {
   await userEvent.click(await screen.findByTitle("Support"));
   await userEvent.click(screen.getByLabelText(/加密密钥|Encrypt key/i));
   await userEvent.click(await screen.findByTitle("feishu-encrypt-key"));
-  await userEvent.type(screen.getByLabelText(/应用 ID|App ID/i), "cli_zzz");
   await userEvent.click(screen.getByRole("button", { name: /^绑定$|^Bind$/ }));
 
   await waitFor(() => expect(sent).not.toBeNull());
-  expect(sent).toEqual({
-    channel: "feishu",
-    agent_id: AGENT,
-    app_id: "cli_zzz",
-    encrypt_key_ref: "feishu-encrypt-key",
-  });
+  expect(sent).not.toHaveProperty("app_secret_ref");
 });
 
 test("with no secret stored, the empty page says what to make first", async () => {

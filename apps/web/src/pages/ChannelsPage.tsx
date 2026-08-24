@@ -106,7 +106,12 @@ export function ChannelsPage() {
   });
 
   const bind = useMutation({
-    mutationFn: (values: { agentId: string; encryptKeyRef: string; appId: string }) =>
+    mutationFn: (values: {
+      agentId: string;
+      encryptKeyRef: string;
+      appId: string;
+      appSecretRef?: string;
+    }) =>
       api<ChannelBindingResponse>("/api/v1/channel-bindings", {
         ...scope,
         method: "POST",
@@ -115,6 +120,10 @@ export function ChannelsPage() {
           agent_id: values.agentId,
           app_id: values.appId,
           encrypt_key_ref: values.encryptKeyRef,
+          // Omitted, not sent as null, when unset: a binding with no app
+          // secret is receive-only (§929's drill), and the key's absence is
+          // what says so.
+          ...(values.appSecretRef ? { app_secret_ref: values.appSecretRef } : {}),
         }),
       }),
     onSuccess: () => {
@@ -341,6 +350,20 @@ export function ChannelsPage() {
           </Form.Item>
           <Form.Item name="appId" label={t("channelAppId")}>
             <Input />
+          </Form.Item>
+          <Form.Item
+            name="appSecretRef"
+            label={t("channelAppSecretRef")}
+            extra={t("channelAppSecretRefHint")}
+          >
+            {/* Optional — a receive-only binding needs none. The same Select
+                of stored secrets, so an unknown reference cannot be typed.
+                No placeholder: on an antd Select a placeholder becomes the
+                combobox's accessible name and hides the field's label. */}
+            <Select
+              allowClear
+              options={usable.map((secret) => ({ value: secret.name, label: secret.name }))}
+            />
           </Form.Item>
         </Form>
       </Modal>

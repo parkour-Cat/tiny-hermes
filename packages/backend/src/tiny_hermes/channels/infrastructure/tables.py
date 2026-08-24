@@ -48,6 +48,11 @@ class ChannelBindingRow(IdMixin, CreatedAtMixin, Base):
     #: it required for the channel that does.
     encrypt_key_ref: Mapped[str | None] = mapped_column(String(200), nullable=True)
     app_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    #: The app secret, by reference (migration 0039). Nullable with no
+    #: CHECK, unlike `encrypt_key_ref`: a receive-only binding is a valid
+    #: state — §929's drill needs one — and the outbound sender refuses when
+    #: this is absent rather than the schema forbidding the binding.
+    app_secret_ref: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
 
 class ChannelEventRow(IdMixin, Base):

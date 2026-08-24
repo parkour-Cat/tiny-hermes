@@ -93,6 +93,47 @@ def _create(
     return client.post("/api/v1/channel-bindings", headers=headers, json=body)
 
 
+def test_a_binding_carries_the_app_secret_reference_it_replies_with(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """Replying to a Feishu message needs the app secret (exchanged for a
+    tenant token). It is a **reference**, like the encrypt key — the value
+    never touches this table — and it is returned so a console can show
+    which secret a binding was wired to."""
+    created = _create(
+        client, scope, published_agent, secret_ref, app_secret_ref=secret_ref
+    )
+
+    assert created.status_code == 201, created.text
+    assert created.json()["app_secret_ref"] == secret_ref
+    assert "s" * 32 not in created.text  # the value, never
+
+
+def test_a_binding_without_an_app_secret_is_allowed(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """§929's drill needs a receive-only binding — it counts inbound events
+    and never replies. A binding with no app secret is that, not an error."""
+    created = _create(client, scope, published_agent, secret_ref)
+
+    assert created.status_code == 201, created.text
+    assert created.json()["app_secret_ref"] is None
+
+
+def test_an_app_secret_naming_no_workspace_secret_is_refused(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """Same reasoning as the encrypt key: a reference to a secret that does
+    not exist fails when it is used — inside an outbound call nobody is
+    watching — instead of here, where the person who typed it is."""
+    refused = _create(
+        client, scope, published_agent, secret_ref, app_secret_ref="no-such-secret"
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["code"] == "channel_key_unknown"
+
+
 def test_a_binding_can_be_created_and_then_listed(
     client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
 ) -> None:

@@ -72,6 +72,9 @@ class ChannelBindingView:
     status: str
     app_id: str | None
     encrypt_key_ref: str | None
+    #: The app secret this binding replies with, by reference. Absent for a
+    #: receive-only binding.
+    app_secret_ref: str | None
     created_by: UUID
     created_at: datetime
 
@@ -92,6 +95,7 @@ class ChannelBindingStore(Protocol):
         created_by: UUID,
         app_id: str | None,
         encrypt_key_ref: str | None,
+        app_secret_ref: str | None,
     ) -> ChannelBindingView | None: ...
 
     async def list_bindings(
@@ -126,6 +130,7 @@ class ChannelBindingService:
         agent_id: UUID,
         app_id: str | None,
         encrypt_key_ref: str | None,
+        app_secret_ref: str | None,
         request_id: str,
     ) -> ChannelBindingView:
         await self._require_role(
@@ -136,6 +141,13 @@ class ChannelBindingService:
             raise ChannelKeyRequired
         if encrypt_key_ref and not await self.store.secret_exists(
             workspace_id, encrypt_key_ref
+        ):
+            raise ChannelKeyUnknown
+        # Same check for the app secret, and the same reason: a reference to
+        # a secret that does not exist fails inside an outbound call nobody
+        # is watching, not here where the person who typed it is.
+        if app_secret_ref and not await self.store.secret_exists(
+            workspace_id, app_secret_ref
         ):
             raise ChannelKeyUnknown
         if not await self.store.agent_exists(workspace_id, agent_id):
@@ -151,6 +163,7 @@ class ChannelBindingService:
             created_by=actor.id,
             app_id=app_id,
             encrypt_key_ref=encrypt_key_ref,
+            app_secret_ref=app_secret_ref,
         )
         if created is None:
             raise ChannelAlreadyBound

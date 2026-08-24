@@ -239,6 +239,8 @@ export const enUS: Record<MessageKey, string> = {
   channelKind: "Channel",
   channelAgent: "Agent",
   channelAppId: "App ID",
+  channelAppSecretRef: "App secret",
+  channelAppSecretRefHint: "Leave empty for a receive-only binding",
   channelKeyRef: "Encrypt key secret",
   channelStatus: "Status",
   channelBoundAt: "Bound",

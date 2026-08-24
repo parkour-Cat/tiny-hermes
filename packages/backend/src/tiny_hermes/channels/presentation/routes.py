@@ -171,6 +171,9 @@ class CreateChannelBindingRequest(BaseModel):
     #: administrator manage this metadata without ever seeing plaintext, and
     #: a field that took the key itself would make that impossible to keep.
     encrypt_key_ref: str | None = Field(default=None, max_length=200)
+    #: The name of the workspace secret holding the app secret, used to
+    #: reply. Optional: a binding with none is receive-only.
+    app_secret_ref: str | None = Field(default=None, max_length=200)
 
 
 class ChannelBindingResponse(BaseModel):
@@ -180,6 +183,7 @@ class ChannelBindingResponse(BaseModel):
     status: str
     app_id: str | None
     encrypt_key_ref: str | None
+    app_secret_ref: str | None
     created_by: UUID
     created_at: datetime
 
@@ -192,6 +196,7 @@ class ChannelBindingResponse(BaseModel):
             status=view.status,
             app_id=view.app_id,
             encrypt_key_ref=view.encrypt_key_ref,
+            app_secret_ref=view.app_secret_ref,
             created_by=view.created_by,
             created_at=view.created_at,
         )
@@ -269,6 +274,7 @@ def channel_binding_router(resources: ApplicationResources) -> APIRouter:
                 agent_id=payload.agent_id,
                 app_id=payload.app_id,
                 encrypt_key_ref=payload.encrypt_key_ref,
+                app_secret_ref=payload.app_secret_ref,
                 request_id=request.state.request_id,
             )
         except (
