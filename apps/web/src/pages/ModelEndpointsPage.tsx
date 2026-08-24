@@ -9,6 +9,7 @@ import type {
   ModelEndpointDetail,
   ModelEndpointSummary,
   PricingVersionResponse,
+  SecretResponse,
 } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
 import { useT } from "../i18n/locale";
@@ -36,6 +37,16 @@ export function ModelEndpointsPage() {
   const [checkNote, setCheckNote] = useState<string | null>(null);
   const admin = auth.user?.is_platform_admin === true;
   const listQuery = ["model-endpoints"] as const;
+
+  // The credential is picked from what is stored, never typed. The channel
+  // binding form already argued why: a free-text reference is how you point
+  // at a secret that does not exist and find out hours later, inside a call
+  // nobody is watching. This field was the console's last free-text one.
+  const secrets = useQuery({
+    queryKey: ["secrets"] as const,
+    queryFn: () => api<SecretResponse[]>("/api/v1/secrets"),
+    enabled: admin,
+  });
 
   const listed = useQuery({
     queryKey: listQuery,
@@ -260,9 +271,22 @@ export function ModelEndpointsPage() {
             <Form.Item
               name="credential_ref"
               label={t("endpointCredentialRef")}
+              extra={t("endpointCredentialRefHint")}
               rules={[{ required: true, message: t("required") }]}
             >
-              <Input />
+              {/* Shows the name a person recognises and submits the id the
+                  resolver accepts. Both scopes are offered because
+                  `CredentialResolver` looks a Secret up by id and never asks
+                  which scope it came from — filtering here would hide
+                  credentials that work. */}
+              <Select
+                options={(secrets.data ?? [])
+                  .filter((secret) => secret.status === "active")
+                  .map((secret) => ({
+                    value: secret.id,
+                    label: `${secret.name} · ${secret.scope}`,
+                  }))}
+              />
             </Form.Item>
             <Button type="primary" htmlType="submit" loading={register.isPending}>
               {t("registerEndpoint")}

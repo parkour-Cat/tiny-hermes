@@ -217,3 +217,44 @@ test("setting a price sends decimal strings, never numbers", async () => {
   });
   expect(typeof sent!.input_per_million).toBe("string");
 });
+
+test("the credential is chosen from stored secrets, not typed as a uuid", async () => {
+  // The field was a bare text box labelled 「凭证环境变量」 that also — with
+  // nothing saying so — accepted a Secret's **UUID**. Not its name: the name
+  // is what the channel binding form takes, so one console had two shapes of
+  // reference and one of them was undiscoverable.
+  //
+  // The channel form's own comment already argued this: a free-text
+  // reference is how you point at a secret that does not exist and find out
+  // hours later, somewhere nobody is watching.
+  let sent: Record<string, unknown> | null = null;
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(user(true))),
+    http.get("/api/v1/model-endpoints", () => HttpResponse.json([])),
+    http.get("/api/v1/secrets", () =>
+      HttpResponse.json([
+        { id: "11111111-2222-4333-8444-555555555555", name: "openai-api-key", scope: "workspace", status: "active" },
+      ]),
+    ),
+    http.post("/api/v1/model-endpoints", async ({ request }) => {
+      sent = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json({ ...SUMMARY, kind: "openai_compatible", base_url: "https://x/v1", credential_available: true }, { status: 201 });
+    }),
+  );
+
+  renderEndpoints();
+
+  await userEvent.type(await screen.findByLabelText(t("endpointName")), "main");
+  await userEvent.type(screen.getByLabelText(t("endpointBaseUrl")), "https://api.openai.com/v1");
+  await userEvent.type(screen.getByLabelText(t("endpointModel")), "gpt-4o-mini");
+  // The secret is picked by the name a person recognises...
+  await userEvent.click(screen.getByLabelText(t("endpointCredentialRef")));
+  // The option shows the scope beside the name, so an operator can tell two
+  // secrets with the same name apart.
+  await userEvent.click(await screen.findByTitle("openai-api-key · workspace"));
+  await userEvent.click(screen.getByRole("button", { name: t("registerEndpoint") }));
+
+  await waitFor(() => expect(sent).not.toBeNull());
+  // ...and what crosses the wire is the id the resolver actually accepts.
+  expect(sent!.credential_ref).toBe("11111111-2222-4333-8444-555555555555");
+});
