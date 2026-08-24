@@ -115,6 +115,35 @@ def _reason(value: str) -> RefusalReason:
         return RefusalReason.EGRESS_UNAVAILABLE
 
 
+#: Headers that describe the bytes as they travelled, not as they end up here.
+#: `aiter_bytes()` yields **decoded** bytes, so carrying these onto the
+#: rebuilt response makes it lie about its own body.
+_TRANSFER_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
+
+
+def _describing_decoded(headers: httpx.Headers) -> httpx.Headers:
+    """The response's headers, minus the ones the decoding already spent.
+
+    Kept as its own function because the failure it prevents is silent and
+    delayed. `aiter_bytes()` decompresses; the first version handed the
+    decompressed bytes to a new `Response` while still telling it
+    `Content-Encoding: gzip`, so httpx decompressed a second time and every
+    `.json()` raised `DecodingError: incorrect header check`. The request had
+    succeeded — only reading it failed — so callers that treat an exception as
+    "it did not happen" retried something that had already happened. The Feishu
+    reply dispatcher did exactly that and sent one person five copies of the
+    same message.
+
+    `Content-Length` goes for the same reason: it counts the compressed bytes,
+    and it is wrong for the ones now attached.
+    """
+    kept = httpx.Headers()
+    for name, value in headers.multi_items():
+        if name.lower() not in _TRANSFER_HEADERS:
+            kept[name] = value
+    return kept
+
+
 def _origin(url: str) -> tuple[str, str, int]:
     parts = urlsplit(url)
     port = parts.port or (443 if parts.scheme == "https" else 80)
@@ -322,7 +351,7 @@ class SafeOutboundClient:
         # that were actually read is what makes `.json()` and `.text` usable.
         return httpx.Response(
             status_code=response.status_code,
-            headers=response.headers,
+            headers=_describing_decoded(response.headers),
             content=bytes(body),
             request=request,
         )

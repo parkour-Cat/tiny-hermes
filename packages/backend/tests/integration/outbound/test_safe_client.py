@@ -345,3 +345,32 @@ async def test_a_caller_may_still_choose_its_own_content_type(
         )
 
     assert app.last().headers.get("content-type") == "application/vnd.example+json"
+
+
+async def test_a_compressed_answer_can_actually_be_read(
+    stand_in: tuple[StandIn, str], proxy: ProxyHandle
+) -> None:
+    """`.json()` on a gzipped response, which every caller of this client does.
+
+    `stream=True` plus `aiter_bytes()` hands back **decoded** bytes, and the
+    rebuilt response carried the original `Content-Encoding: gzip` alongside
+    them — so httpx decompressed a second time and raised `DecodingError:
+    incorrect header check`. Every caller saw a transport failure for a
+    request that had completed perfectly.
+
+    Measured against a live tenant, and it cost more than an error: the Feishu
+    reply dispatcher read that as "the send failed", retried five times, and
+    sent the person five copies of the same message. The request had succeeded
+    every time.
+    """
+    app, url = stand_in
+    async with build(proxy) as client:
+        response = await client.request("GET", f"{url}/gzipped")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "said": "compressed"}
+    # The header is gone rather than kept, because the bytes it describes are
+    # not compressed any more. Leaving it would be a claim about the body that
+    # is false, and the next reader would meet the same failure.
+    assert "content-encoding" not in response.headers
+    assert app.last().path == "/gzipped"

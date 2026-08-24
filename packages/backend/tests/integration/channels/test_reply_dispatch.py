@@ -89,7 +89,13 @@ class _Sender:
         return self
 
     async def send_text(
-        self, *, app_id: str, app_secret: str, open_id: str, text: str
+        self,
+        *,
+        app_id: str,
+        app_secret: str,
+        open_id: str,
+        text: str,
+        delivery_key: str | None = None,
     ) -> None:
         self.sent.append(
             {
@@ -97,6 +103,7 @@ class _Sender:
                 "app_secret": app_secret,
                 "open_id": open_id,
                 "text": text,
+                "delivery_key": delivery_key or "",
             }
         )
         if self.refusing is not None:
@@ -475,3 +482,37 @@ async def test_the_reply_leaves_under_its_own_workspace_scope(
     await _dispatch(engine, sender)
 
     assert sender.asked_for == [UUID(workspace_id)]
+
+
+async def test_every_retry_of_one_reply_carries_the_same_deduplication_key(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The retry bound is not a delivery guarantee, and never was.
+
+    A failure after the request left this process is indistinguishable from
+    one before it — the platform cannot tell whether Feishu acted on it. A
+    live tenant proved what that costs: five retries, five real messages,
+    one of which the person had asked for.
+
+    So the key is the delivery's own row id, stable across every attempt, and
+    Feishu settles the question on its side. A key generated per attempt
+    would look like deduplication in the code and deduplicate nothing.
+    """
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    run_id = _deliver(client, binding_id)
+    await _finish(engine, run_id, said="做完了")
+
+    sender = _Sender(refusing=FeishuApiRefused(0, "read failed after sending"))
+    for _ in range(3):
+        await _dispatch(engine, sender, max_attempts=3)
+
+    keys = {attempt["delivery_key"] for attempt in sender.sent}
+    assert len(sender.sent) == 3
+    assert len(keys) == 1
+    assert "" not in keys

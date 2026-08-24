@@ -175,3 +175,41 @@ async def test_two_apps_do_not_share_one_token() -> None:
 
     urls = [url for url, _, _ in feishu.sent]
     assert sum("tenant_access_token" in url for url in urls) == 2
+
+
+async def test_a_message_carries_a_deduplication_key() -> None:
+    """Feishu's own `uuid`, so a retry cannot deliver twice.
+
+    Written after a live tenant received five copies of one reply. The send
+    had succeeded every time; only reading the response failed, and the
+    dispatcher read that as "it did not happen". The response bug is fixed
+    in `outbound/client.py`, but the shape stays: anything that fails after
+    the request left this process cannot be distinguished from something
+    that failed before, and only the vendor can settle it.
+    """
+    feishu = _Feishu(_ok_token(), {"code": 0})
+
+    await FeishuSender(feishu).send_text(
+        app_id="cli_x",
+        app_secret="s3cret",  # noqa: S106
+        open_id="ou_zhang",
+        text="hi",
+        delivery_key="7f1c3a2e-0000-4000-8000-000000000001",
+    )
+
+    _, message_body, _ = feishu.sent[1]
+    assert message_body["uuid"] == "7f1c3a2e-0000-4000-8000-000000000001"
+
+
+async def test_a_send_without_a_deduplication_key_still_works() -> None:
+    """Not every caller has one to give. Absent means absent — a generated
+    key would be a different value on every retry, which is worse than none:
+    it would look like deduplication while never deduplicating."""
+    feishu = _Feishu(_ok_token(), {"code": 0})
+
+    await FeishuSender(feishu).send_text(
+        app_id="cli_x", app_secret="s3cret", open_id="ou_zhang", text="hi"  # noqa: S106
+    )
+
+    _, message_body, _ = feishu.sent[1]
+    assert "uuid" not in message_body

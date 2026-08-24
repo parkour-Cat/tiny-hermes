@@ -80,7 +80,13 @@ class ChannelSender(Protocol):
     """
 
     async def send_text(
-        self, *, app_id: str, app_secret: str, open_id: str, text: str
+        self,
+        *,
+        app_id: str,
+        app_secret: str,
+        open_id: str,
+        text: str,
+        delivery_key: str | None = None,
     ) -> None: ...
 
 
@@ -181,6 +187,13 @@ class ChannelReplyDispatcher:
                 app_secret=secret,
                 open_id=recipient.open_id,
                 text=text,
+                # The delivery's own row id, stable across every attempt.
+                # The retry bound has never been a delivery guarantee: a
+                # failure after the request left this process cannot be told
+                # apart from one before it, so only the channel can settle
+                # whether a retry is a second message. A live tenant proved
+                # the cost — five attempts, five real messages.
+                delivery_key=str(pending.event_row_id),
             )
         except Exception as error:
             await self._failed(pending, error)

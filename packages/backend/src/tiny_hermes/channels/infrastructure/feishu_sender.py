@@ -27,6 +27,11 @@ logger = logging.getLogger(__name__)
 
 FEISHU_BASE_URL = "https://open.feishu.cn/open-apis"
 
+#: Feishu's documented ceiling on the `uuid` field. A key longer than this
+#: is truncated rather than refused: it stays stable across the retries of one
+#: delivery, which is the only property deduplication needs.
+MAX_DELIVERY_KEY_CHARS = 50
+
 #: Taken off a token's own `expire`, so a token is refreshed before Feishu
 #: stops honouring it. A request that raced the expiry would fail for a
 #: reason that looks like a bad secret.
@@ -85,20 +90,40 @@ class FeishuSender:
         self._tokens: dict[str, _Token] = {}
 
     async def send_text(
-        self, *, app_id: str, app_secret: str, open_id: str, text: str
+        self,
+        *,
+        app_id: str,
+        app_secret: str,
+        open_id: str,
+        text: str,
+        delivery_key: str | None = None,
     ) -> None:
+        """Send one text message as the bot.
+
+        `delivery_key` becomes Feishu's `uuid`, which is their own
+        deduplication: the same key sent twice delivers once. It matters
+        because a failure *after* the request left this process is
+        indistinguishable from one before it, so a retry can always be a
+        second delivery. A live tenant received five copies of one reply
+        that way. Absent when the caller has no stable key — a generated one
+        would differ per attempt and deduplicate nothing while looking like
+        it did.
+        """
         token = await self._token(app_id, app_secret)
+        message: dict[str, Any] = {
+            "receive_id": open_id,
+            "msg_type": "text",
+            # A JSON *string*, not an object. Feishu's own encoding, and
+            # getting it wrong is a 200 with a non-zero code — which is
+            # precisely why `_envelope` reads the body rather than the
+            # status.
+            "content": json.dumps({"text": text}, ensure_ascii=False),
+        }
+        if delivery_key is not None:
+            message["uuid"] = delivery_key[:MAX_DELIVERY_KEY_CHARS]
         answer = await self._client.post(
             f"{self._base_url}/im/v1/messages?receive_id_type=open_id",
-            json={
-                "receive_id": open_id,
-                "msg_type": "text",
-                # A JSON *string*, not an object. Feishu's own encoding, and
-                # getting it wrong is a 200 with a non-zero code — which is
-                # precisely why `_envelope` reads the body rather than the
-                # status.
-                "content": json.dumps({"text": text}, ensure_ascii=False),
-            },
+            json=message,
             headers={"Authorization": f"Bearer {token}"},
         )
         self._envelope(answer)
