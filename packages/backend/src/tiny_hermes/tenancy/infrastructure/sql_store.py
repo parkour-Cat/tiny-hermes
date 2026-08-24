@@ -37,7 +37,16 @@ class SqlWorkspaceStore:
     async def list_visible_workspaces(
         self, user_id: UUID, *, include_all: bool
     ) -> list[Workspace]:
-        statement = select(WorkspaceRow).order_by(WorkspaceRow.created_at, WorkspaceRow.id)
+        # Newest first: this list is a picker, and the workspace somebody
+        # just created is the one they are about to open. Oldest-first put it
+        # below every workspace that ever existed here.
+        #
+        # `id` breaks the tie in the same direction. Two workspaces can share
+        # a `created_at`, and an order left to the planner shows the list in a
+        # different shape on every read — worse than either order.
+        statement = select(WorkspaceRow).order_by(
+            WorkspaceRow.created_at.desc(), WorkspaceRow.id.desc()
+        )
         if not include_all:
             statement = statement.join(
                 MembershipRow, MembershipRow.workspace_id == WorkspaceRow.id

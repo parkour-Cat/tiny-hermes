@@ -42,6 +42,51 @@ from tiny_hermes.runs.ports.model import (
 
 logger = logging.getLogger(__name__)
 
+#: What an OpenAI-compatible endpoint accepts as a function name:
+#: `^[a-zA-Z0-9_-]+$`. This platform names its tools with a dot —
+#: `shell.exec`, `file.read` — because that is its own domain language, and
+#: `tools/domain/registry.py` is right to keep it. The constraint belongs to
+#: this one transport, so the rename lives here and nowhere else.
+#:
+#: A dot is the only character in any implemented name that the pattern
+#: rejects, so `.` ⇄ `__` is a total, reversible mapping over them:
+#: no platform name contains `__`, so nothing collides on the way back.
+#: Pinned by `test_openai_tool_calls.py`, in both directions — renaming
+#: outbound without renaming inbound leaves the model asking for a tool
+#: nothing dispatches, which fails as an authorisation refusal for a tool
+#: the Agent genuinely bound.
+_WIRE_SEPARATOR = "__"
+
+
+def _to_wire_name(name: str) -> str:
+    return name.replace(".", _WIRE_SEPARATOR)
+
+
+def _from_wire_name(name: str) -> str:
+    return name.replace(_WIRE_SEPARATOR, ".")
+
+
+def _renamed_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """One advertised tool, with its function name in wire form.
+
+    Copied rather than mutated: the schemas come from
+    `tools/domain/registry.py` as module-level constants, and renaming one in
+    place would rename it for every later request — including the
+    deterministic provider's, which speaks this platform's own names.
+    """
+    function = schema.get("function")
+    if not isinstance(function, dict):
+        return schema
+    signature = cast(dict[str, Any], function)
+    name = signature.get("name")
+    if not isinstance(name, str):
+        return schema
+    return {
+        **schema,
+        "function": {**signature, "name": _to_wire_name(name)},
+    }
+
+
 #: Statuses worth trying again. A rejection on the merits will be rejected
 #: again, and three attempts would turn one clear failure into a
 #: three-times-slower identical failure.
@@ -161,7 +206,7 @@ def _tool_round(body: dict[str, Any], message: Any) -> ModelResponse:
             calls.append(
                 ToolCallBlock(
                     call_id=str(call.get("id") or ""),
-                    name=str(signature.get("name") or ""),
+                    name=_from_wire_name(str(signature.get("name") or "")),
                     arguments=cast(dict[str, Any], arguments),
                 )
             )
@@ -223,7 +268,10 @@ def build_payload(
         "messages": messages,
         "max_tokens": spec.max_output_tokens,
     }
-    advertised = tools if tools is not None else list(request.tools)
+    advertised = [
+        _renamed_schema(schema)
+        for schema in (tools if tools is not None else list(request.tools))
+    ]
     if advertised:
         # §10.2's first step: a model told about no tool cannot correctly ask
         # for one, so an Agent that binds none advertises none.
@@ -309,7 +357,7 @@ def _as_messages(message: CanonicalMessage) -> list[dict[str, Any]]:
                     "id": block.call_id,
                     "type": "function",
                     "function": {
-                        "name": block.name,
+                        "name": _to_wire_name(block.name),
                         "arguments": json.dumps(block.arguments),
                     },
                 }
@@ -368,6 +416,21 @@ class OpenAICompatibleProvider:
             else:
                 if answer.status_code == 200:
                     return normalize(_json(answer.text))
+                # The endpoint's own words, kept. `endpoint_status:400` says
+                # somebody refused us and nothing about why, which leaves an
+                # operator with a number and no next step — the same failure
+                # shape this repository keeps writing down: an error nobody
+                # can explain reads much like one that never happened.
+                #
+                # Truncated because a body is attacker-influenced and a log
+                # line is not the place for an unbounded one. No credential
+                # is in a *response*; the request that carried one is not
+                # logged here.
+                logger.warning(
+                    "model endpoint refused: status=%s body=%s",
+                    answer.status_code,
+                    answer.text[:500],
+                )
                 if answer.status_code not in RETRYABLE_STATUSES:
                     return _failed(f"endpoint_status:{answer.status_code}")
                 last = _failed(f"endpoint_status:{answer.status_code}")

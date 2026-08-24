@@ -364,7 +364,8 @@ export const enUS: Record<MessageKey, string> = {
   endpointTokenizerNote:
     "The name is recorded, not honoured yet: this release counts with a conservative character bound and says so.",
   endpointWindowSummary: "{window} tokens, up to {output} out. {accounting}.",
-  endpointCredentialRef: "Credential environment variable",
+  endpointCredentialRef: "Credential",
+  endpointCredentialRefHint: "Chosen from the credential vault. Either scope works — the resolver looks it up by id and never asks which scope it came from.",
   setPricing: "Set the price",
   pricingHint: "Per million tokens, as written — 3.00 reaches the platform as 3.00. Usage is measured against the price in force when a Run ran.",
   pricingCurrency: "Currency",

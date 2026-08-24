@@ -305,3 +305,43 @@ async def test_a_refusal_from_the_boundary_is_not_the_target_saying_no(
 
     assert refusal.value.reason is RefusalReason.TARGET_NOT_IN_SCOPE
     assert app.requests == []
+
+
+async def test_a_json_body_arrives_declared_as_json(
+    stand_in: tuple[StandIn, str], proxy: ProxyHandle
+) -> None:
+    """A body sent as `json=` must carry `Content-Type: application/json`.
+
+    It did not. The client encodes the body with
+    `httpx.Request(...).content`, which returns the bytes and drops the
+    header httpx would have sent with them, and only the `data=` branch set
+    a content type of its own. Every JSON request this platform made went
+    out with no content type at all.
+
+    Servers are entitled to refuse that, and DeepSeek does: a real model
+    endpoint answered `415 Unsupported Media Type` to every call, which the
+    Run surfaced as `endpoint_status:415` — a message that points at the
+    endpoint rather than at the client that malformed the request.
+    """
+    app, url = stand_in
+    async with build(proxy) as client:
+        response = await client.post(f"{url}/ok", json={"say": "hello"})
+
+    assert response.status_code == 200
+    assert app.last().headers.get("content-type") == "application/json"
+
+
+async def test_a_caller_may_still_choose_its_own_content_type(
+    stand_in: tuple[StandIn, str], proxy: ProxyHandle
+) -> None:
+    """The default must not overwrite a caller that meant something else —
+    a JSON-shaped body with a vendor media type is somebody's real API."""
+    app, url = stand_in
+    async with build(proxy) as client:
+        await client.post(
+            f"{url}/ok",
+            json={"say": "hello"},
+            headers={"Content-Type": "application/vnd.example+json"},
+        )
+
+    assert app.last().headers.get("content-type") == "application/vnd.example+json"
