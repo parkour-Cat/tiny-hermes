@@ -71,11 +71,22 @@ def _message(event_id: str = "om_1") -> dict[str, Any]:
 
 
 class _Sender:
-    """A channel sender that records, and optionally refuses."""
+    """A channel sender that records, and optionally refuses.
+
+    Also records which workspace it was asked for: the dispatcher picks a
+    sender per workspace so the request leaves under that workspace's own
+    egress scope, and a factory that ignored the argument would look
+    identical from every other assertion here.
+    """
 
     def __init__(self, refusing: Exception | None = None) -> None:
         self.refusing = refusing
         self.sent: list[dict[str, str]] = []
+        self.asked_for: list[UUID] = []
+
+    def __call__(self, workspace_id: UUID) -> "_Sender":
+        self.asked_for.append(workspace_id)
+        return self
 
     async def send_text(
         self, *, app_id: str, app_secret: str, open_id: str, text: str
@@ -188,7 +199,7 @@ async def _dispatch(engine: AsyncEngine, sender: _Sender, **kwargs: Any) -> int:
         dispatched = await ChannelReplyDispatcher(
             store=SqlChannelStore(db),
             resolve_secret=resolver.resolve,
-            sender=sender,
+            senders=sender,
             **kwargs,
         ).dispatch_once()
         await db.commit()
@@ -436,3 +447,31 @@ async def test_an_ordinary_console_run_is_never_in_the_queue(
     sender = _Sender()
     assert await _dispatch(engine, sender) == 0
     assert sender.sent == []
+
+
+async def test_the_reply_leaves_under_its_own_workspace_scope(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§16.5's chain is platform ∩ workspace ∩ …, and a request naming no
+    workspace is measured against the platform alone.
+
+    Concretely: an installation that approved `open.feishu.cn` at the
+    platform layer would deliver replies for a workspace that never
+    approved it. The workspace layer would still be in the database, still
+    be shown in the console, and mean nothing — which is the shape of
+    control this project keeps shipping by accident.
+    """
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    run_id = _deliver(client, binding_id)
+    await _finish(engine, run_id, said="做完了")
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+
+    assert sender.asked_for == [UUID(workspace_id)]

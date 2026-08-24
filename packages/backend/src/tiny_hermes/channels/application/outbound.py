@@ -64,6 +64,7 @@ class ReplyOutcome:
 class _Recipient:
     """A delivery target that has everything a send needs."""
 
+    workspace_id: UUID
     app_id: str
     app_secret_ref: str
     open_id: str
@@ -81,6 +82,25 @@ class ChannelSender(Protocol):
     async def send_text(
         self, *, app_id: str, app_secret: str, open_id: str, text: str
     ) -> None: ...
+
+
+class ChannelSenders(Protocol):
+    """A sender for one workspace's traffic.
+
+    Per workspace rather than one shared sender, because §16.5's chain is
+    platform ∩ workspace ∩ … and a request naming no workspace is measured
+    against the platform alone. An installation that approved
+    `open.feishu.cn` at the platform layer would then deliver replies for a
+    workspace that never approved it — the workspace scope still in the
+    database, still shown in the console, and meaning nothing.
+
+    The Agent and Run layers are deliberately not named. A reply is the
+    platform delivering its own notification; the Agent did not ask to call
+    Feishu, and measuring it against an Agent's `network.allow` would
+    require every Agent published to a channel to list the vendor.
+    """
+
+    def __call__(self, workspace_id: UUID, /) -> ChannelSender: ...
 
 
 class ReplyQueue(Protocol):
@@ -105,13 +125,13 @@ class ChannelReplyDispatcher:
         *,
         store: ReplyQueue,
         resolve_secret: Callable[[str], Awaitable[str]],
-        sender: ChannelSender,
+        senders: ChannelSenders,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         batch_size: int = 50,
     ) -> None:
         self._store = store
         self._resolve_secret = resolve_secret
-        self._sender = sender
+        self._senders = senders
         self._max_attempts = max_attempts
         self._batch_size = batch_size
 
@@ -156,7 +176,7 @@ class ChannelReplyDispatcher:
         await self._store.record_reply_attempt(pending.event_row_id)
         try:
             secret = await self._resolve_secret(recipient.app_secret_ref)
-            await self._sender.send_text(
+            await self._senders(recipient.workspace_id).send_text(
                 app_id=recipient.app_id,
                 app_secret=secret,
                 open_id=recipient.open_id,
@@ -197,6 +217,7 @@ class ChannelReplyDispatcher:
         if not target.app_secret_ref or not target.app_id:
             return ReplyOutcome.NO_CREDENTIAL
         return _Recipient(
+            workspace_id=target.workspace_id,
             app_id=target.app_id,
             app_secret_ref=target.app_secret_ref,
             open_id=target.external_user_id,
@@ -237,6 +258,7 @@ __all__ = [
     "DEFAULT_MAX_ATTEMPTS",
     "ChannelReplyDispatcher",
     "ChannelSender",
+    "ChannelSenders",
     "ReplyOutcome",
     "ReplyQueue",
 ]

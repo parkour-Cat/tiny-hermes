@@ -5,6 +5,7 @@ import signal
 import socket
 import uuid
 from collections.abc import Callable
+from uuid import UUID
 
 import uvicorn
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -261,13 +262,13 @@ async def _scheduler() -> None:
     notifier = _notifier(settings)
     workspace = _workspace(settings)
     await _ensure_bucket(workspace)
-    outbound = SafeOutboundClient(egress=_egress(settings))
+    senders = _FeishuSenders(settings)
     runtime = SchedulerRuntime(
         session_factory=build_session_factory(settings),
         notifier=notifier,
         sandbox=_controller(settings),
         objects=None if workspace is None else workspace.objects,
-        replies=_channel_replies(settings, outbound),
+        replies=_channel_replies(settings, senders),
         settings=SchedulerSettings(
             max_recovery_attempts=settings.max_recovery_attempts,
             event_retention_hours=settings.event_retention_hours,
@@ -279,12 +280,66 @@ async def _scheduler() -> None:
         await runtime.run_forever(stop, settings.scheduler_interval_seconds)
     finally:
         await notifier.close()
-        await outbound.aclose()
+        await senders.aclose()
     logger.info("scheduler stopped")
 
 
+class _FeishuSenders:
+    """One Feishu sender per workspace, kept for the process's lifetime.
+
+    Per workspace because §16.5's chain is platform ∩ workspace ∩ … and the
+    layers a request is measured against are fixed when the proxy connection
+    is configured, not per call. A single shared client would name no
+    workspace, so every reply would be measured against the platform layer
+    alone and a workspace's own outbound scope would mean nothing.
+
+    Kept rather than rebuilt because the tenant-access-token cache lives on
+    the sender, and Feishu rate-limits the token endpoint. The number of
+    workspaces with a channel binding is small and bounded by the
+    installation, so this does not grow without limit.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+        self._clients: dict[UUID, SafeOutboundClient] = {}
+        self._senders: dict[UUID, FeishuSender] = {}
+
+    def __call__(self, workspace_id: UUID, /) -> FeishuSender:
+        held = self._senders.get(workspace_id)
+        if held is None:
+            client = SafeOutboundClient(
+                egress=_workspace_egress(self._settings, workspace_id)
+            )
+            self._clients[workspace_id] = client
+            held = FeishuSender(client)
+            self._senders[workspace_id] = held
+        return held
+
+    async def aclose(self) -> None:
+        for client in self._clients.values():
+            await client.aclose()
+
+
+def _workspace_egress(settings: Settings, workspace_id: UUID) -> EgressRoute | None:
+    """The route out, named for one workspace and no Agent.
+
+    Not `_egress(settings, EgressClaim(...))`: that claim requires an
+    `agent_version_id`, and a channel reply has none to give honestly. The
+    Agent did not ask to call Feishu — the platform is delivering its own
+    notification — and naming an Agent version would measure the send
+    against an `network.allow` no Agent author wrote for this.
+    """
+    if not settings.egress_proxy_url or not settings.egress_proxy_token:
+        return None
+    return EgressRoute(
+        url=settings.egress_proxy_url,
+        token=settings.egress_proxy_token,
+        workspace_id=workspace_id,
+    )
+
+
 def _channel_replies(
-    settings: Settings, outbound: SafeOutboundClient
+    settings: Settings, senders: _FeishuSenders
 ) -> Callable[[AsyncSession], ChannelReplyDispatcher] | None:
     """The reply dispatcher, when this deployment can send anything at all.
 
@@ -293,21 +348,17 @@ def _channel_replies(
     would produce a queue whose every row failed five times and settled
     `refused`. Absent is the honest state — the answers wait in the queue,
     and `reply_note` stays empty rather than blaming Feishu.
-
-    The token cache lives on the sender, so the sender is built once here
-    and shared across passes; everything session-scoped is built per call.
     """
     if _egress(settings) is None:
         logger.warning("no egress route: channel replies will not be sent")
         return None
-    sender = FeishuSender(outbound)
     kek = optional_kek(settings.tiny_hermes_kek)
 
     def build(session: AsyncSession) -> ChannelReplyDispatcher:
         return ChannelReplyDispatcher(
             store=SqlChannelStore(session),
             resolve_secret=CredentialResolver(SqlSecretStore(session), kek).resolve,
-            sender=sender,
+            senders=senders,
         )
 
     return build
