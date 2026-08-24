@@ -15,7 +15,7 @@ stricter than most of this console and is the easy one to get wrong.
 """
 
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -73,7 +73,9 @@ def secret_ref(client: TestClient, scope: dict[str, str]) -> str:
         json={"name": "feishu-encrypt-key", "scope": "workspace", "plaintext": "s" * 32},
     )
     assert created.status_code == 201, created.text
-    return str(created.json()["name"])
+    # The **id**: that is what `CredentialResolver` resolves, and therefore
+    # what a binding must store. The name is only what a person picks by.
+    return str(created.json()["id"])
 
 
 def _create(
@@ -291,3 +293,25 @@ async def test_a_binding_in_another_workspace_is_invisible(
     listed = client.get("/api/v1/channel-bindings", headers=elsewhere)
 
     assert listed.status_code == 403, listed.text
+
+
+def test_a_key_reference_must_be_one_the_resolver_can_actually_resolve(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """The reference stored must be the shape `CredentialResolver` reads.
+
+    It reads a Secret **id**, or else an environment-variable name. A
+    secret's *name* is neither. `secret_exists` looked the name up and said
+    yes, so a binding created cleanly and then failed at the first real
+    delivery with `CredentialMissing` and a 500 — validation and use were
+    checking different things, which is why the console could report success
+    for a binding that could never work.
+    """
+    created = _create(client, scope, published_agent, secret_ref)
+    assert created.status_code == 201, created.text
+
+    listed = client.get("/api/v1/channel-bindings", headers=scope).json()
+    stored = listed[0]["encrypt_key_ref"]
+
+    # A uuid, not the name it was chosen by.
+    UUID(stored)

@@ -60,10 +60,15 @@ test("a bound channel says which Agent it publishes and where", async () => {
   expect(screen.getByText("cli_a1b2c3")).toBeVisible();
 });
 
-test("the form sends the secret's name, never a key", async () => {
-  // §4.6: `管理元数据，不查看明文`. A field that took the key itself would
-  // put plaintext in a request body and in this page's memory, which is the
-  // one thing this row is designed to avoid — see migration 0037.
+test("the form sends the secret's id, never a key and never its name", async () => {
+  // §4.6: `管理元数据，不查看明文` — a field taking the key itself would put
+  // plaintext in a request body, which migration 0037 exists to prevent.
+  //
+  // The **id**, not the name: `CredentialResolver` resolves a Secret by id
+  // (or an environment-variable name), so a binding storing the display name
+  // validated cleanly and then failed at the first real delivery with
+  // `CredentialMissing`. Measured against a live tenant — the webhook
+  // answered 500 while the console had reported the binding as fine.
   let sent: Record<string, unknown> | null = null;
   server.use(
     http.get("/api/v1/channel-bindings", () => HttpResponse.json([])),
@@ -103,8 +108,8 @@ test("the form sends the secret's name, never a key", async () => {
     channel: "feishu",
     agent_id: AGENT,
     app_id: "cli_zzz",
-    encrypt_key_ref: "feishu-encrypt-key",
-    app_secret_ref: "feishu-app-secret",
+    encrypt_key_ref: "s1",
+    app_secret_ref: "s2",
   });
 });
 
