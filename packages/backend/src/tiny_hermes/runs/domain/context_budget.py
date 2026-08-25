@@ -582,9 +582,13 @@ def plan_context(
 ) -> ContextPlan:
     """Decide what this round sends.
 
-    ``memories`` is allocated and always empty until M2D fills it. It is a
-    parameter rather than a future edit because the trimming order already
-    names it: when M2D arrives, the order does not move.
+    ``memories`` carries §14.1's remembered facts — the Worker reads the
+    subject's own and the Agent's shared ones and passes them here. This
+    said "allocated and always empty until M2D fills it" long after M2D
+    filled it, and the stale sentence was believed: it was read as evidence
+    that this platform had no long-term memory at all. A comment describing
+    a state the code has left is the failure this repository keeps naming,
+    pointed at itself.
 
     ``segments`` is this Agent's resolved table rather than the platform
     default, for the same reason the publish check resolves before it measures
