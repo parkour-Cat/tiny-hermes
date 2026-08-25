@@ -34,7 +34,17 @@ LITERAL_UPSTREAM = re.compile(r"proxy_pass\s+https?://(?!\$)[^;]*;")
 
 
 def _config() -> str:
-    return CONFIG.read_text(encoding="utf-8")
+    """The directives, with comments stripped.
+
+    Not cosmetic: the comments in that file explain the very trap these
+    tests check for, and they quote `proxy_pass http://api:8000;` to do it.
+    Reading the raw text made the first version of this test match its own
+    documentation and fail against a correct config.
+    """
+    return "\n".join(
+        line for line in CONFIG.read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
+    )
 
 
 def test_the_config_is_where_this_test_thinks_it_is() -> None:
