@@ -17,7 +17,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.memory.domain.scope import MemoryKind, MemoryScope, MemoryStatus
-from tiny_hermes.memory.infrastructure.tables import SEARCH_CONFIG, MemoryRow
+from tiny_hermes.memory.infrastructure.search_query import matching
+from tiny_hermes.memory.infrastructure.tables import MemoryRow
 from tiny_hermes.memory.ports.library import RememberedFact
 from tiny_hermes.runs.domain.models import CallerIdentity, CallerType
 
@@ -44,9 +45,12 @@ class SqlMemoryLibrary:
     ) -> Sequence[RememberedFact]:
         """The same scoped read, ordered by keyword relevance to `query`.
 
-        `plainto_tsquery('simple', ...)` turns the Run's input into a query the
-        same way the stored `search` column was built — `simple`, so a stemmer
-        for one language does not mangle the other. Rank first, recency to break
+        `matching()` turns the Run's input into a query built the same way the
+        stored `search` column was — words for English, character bigrams for
+        Chinese (migration 0045). Before that, Chinese produced no computable
+        relevance at all, so this ordering was arbitrary — and it decides
+        which memories survive when the segment is over budget. Rank first,
+        recency to break
         ties, and a blank or match-less query still returns the scope's rows by
         recency rather than nothing: a memory that does not match this turn is
         still this subject's, and the segment budget decides what fits.
@@ -55,7 +59,7 @@ class SqlMemoryLibrary:
         if not cleaned:
             return await self.active_in(scope, limit=limit)
         rank = func.ts_rank(
-            MemoryRow.search, func.plainto_tsquery(SEARCH_CONFIG, cleaned)
+            MemoryRow.search, matching(cleaned)
         )
         rows = (
             await self._session.scalars(
