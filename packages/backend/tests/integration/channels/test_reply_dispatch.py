@@ -983,3 +983,59 @@ async def test_a_slow_run_still_delivers_its_answer_afterwards(
     assert "还在" in sender.sent[0]["text"]
     assert sender.sent[1]["text"] == "终于好了"
     assert len({entry["delivery_key"] for entry in sender.sent}) == 2
+
+
+async def test_a_run_of_a_dozen_seconds_is_slow_enough_to_mention(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The threshold, pinned by what a person called "a long time".
+
+    Measured against the live tenant: a message asking the Agent to create
+    ten files and count words took **17.7 seconds**, and the person who sent
+    it said it felt like a long wait with nothing happening. The first
+    threshold was 20 seconds, chosen from a sample of ordinary Runs that
+    took about five — so the one case that actually needed the notice was
+    the one case that missed it, by 2.3 seconds.
+
+    Asserted at 12 seconds rather than by reading the constant: a test that
+    imports the number cannot fail when the number is wrong, and the number
+    being wrong is exactly what happened.
+    """
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    _deliver(client, binding_id)
+    await _age_delivery(engine, 12)
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+
+    assert len(sender.sent) == 1
+    assert "还在" in sender.sent[0]["text"]
+
+
+async def test_an_ordinary_five_second_run_is_still_left_alone(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other side of the same judgement, and the reason the threshold
+    cannot simply go to zero. An ordinary Feishu reply measures about five
+    seconds end to end; a notice on every one of those is noise, and noise
+    is what stops people reading the messages that matter."""
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    _deliver(client, binding_id)
+    await _age_delivery(engine, 5)
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+
+    assert sender.sent == []

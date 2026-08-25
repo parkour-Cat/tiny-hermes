@@ -55,10 +55,20 @@ _NOTICE_KEY_SUFFIX = ":q"
 _PROGRESS_KEY_SUFFIX = ":p"
 
 #: How long a Run may go before its sender is told it is still working.
-#: Long enough that an ordinary Run — the live ones measure about five
-#: seconds — never triggers it, because a notice on every message is noise,
-#: and noise is what makes people stop reading the messages that matter.
-DEFAULT_PROGRESS_AFTER_SECONDS = 20
+#:
+#: Was 20, chosen from a sample of ordinary Runs that measure about five
+#: seconds. The live tenant then produced the case that mattered — ten files
+#: created and words counted, **17.7 seconds** — and it missed the notice by
+#: 2.3 seconds. The person who sent it described exactly the symptom this
+#: notice exists to prevent: a long wait with nothing happening.
+#:
+#: 8 keeps the original reason intact — an ordinary five-second Run still
+#: says nothing, because a notice on every message is noise and noise is
+#: what stops people reading the messages that matter — while landing
+#: inside the few seconds in which somebody starts wondering whether it
+#: broke. Pinned by `test_a_run_of_a_dozen_seconds_is_slow_enough_to_mention`
+#: rather than by this constant, so that raising it fails a test.
+DEFAULT_PROGRESS_AFTER_SECONDS = 8
 
 
 class ReplyOutcome:
