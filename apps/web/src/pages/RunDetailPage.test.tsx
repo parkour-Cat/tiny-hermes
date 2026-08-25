@@ -373,6 +373,43 @@ test("the session transcript and the run's files are listed", async () => {
   expect(screen.getAllByRole("button", { name: t("downloadArtifact") }).length).toBeGreaterThan(0);
 });
 
+test("shows a tool turn in the transcript rather than an empty row", async () => {
+  // Reported as "why is tool empty?" — and a blank row reads exactly like a
+  // bug in the page. The tools section below always carried this content;
+  // the transcript is where the step between the assistant's stated intent
+  // and its conclusion had gone missing.
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run())),
+    http.get(`/api/v1/sessions/${SESSION}/messages`, () =>
+      HttpResponse.json([
+        { role: "assistant", parts: [{ type: "text", text: "先看看目录。" }] },
+        {
+          role: "assistant",
+          parts: [
+            { type: "tool_call", call_id: "c9", name: "file.list", arguments: { path: "." } },
+          ],
+        },
+        {
+          role: "tool",
+          parts: [
+            { type: "tool_result", call_id: "c9", output: "3 entries", failed: false },
+          ],
+        },
+      ]),
+    ),
+    http.get(`/api/v1/runs/${RUN}/artifacts`, () => HttpResponse.json([])),
+  );
+  stream();
+
+  renderRun();
+
+  expect(await screen.findByText("先看看目录。")).toBeInTheDocument();
+  // The arrows only appear in a transcript line, never in the tools section,
+  // so matching them pins the assertion to the row that used to be blank.
+  expect(screen.getByText(/→ file\.list/)).toBeInTheDocument();
+  expect(screen.getByText(/← 3 entries/)).toBeInTheDocument();
+});
+
 test("a trimmed context is said in words, not left as a payload to decode", async () => {
   // The one class of event that reports a decision nobody asked for: the round
   // was sent something other than what the transcript holds. `context_trimmed`
