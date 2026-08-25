@@ -267,3 +267,11 @@ html[data-theme="dark"] .workspace-row {
     min-width: 0;
   }
 }
+
+/* A transcript line can now carry several parts — words, then a tool call,
+   then its result — joined by newlines. Without this they collapse onto one
+   line and the steps run together, which is the readability problem this
+   rendering exists to fix. */
+.transcript-line {
+  white-space: pre-wrap;
+}
