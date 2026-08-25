@@ -15,7 +15,14 @@ Runs (`SchedulerRuntime._recover_interrupted`), so a summary that came back
 different on replay would change what the model saw between attempts.
 """
 
-from tiny_hermes.runs.domain.context_budget import compaction_hints
+# `_summarize` is private and asserted on directly, which pyright flags. The
+# alternative is reaching it through `plan_context` with a hand-built window,
+# and that tests the planner's arithmetic rather than the sentence a model
+# ends up reading — which is the thing these tests are about.
+from tiny_hermes.runs.domain.context_budget import (
+    _summarize,  # pyright: ignore[reportPrivateUsage]
+    compaction_hints,
+)
 from tiny_hermes.runs.domain.models import (
     CanonicalMessage,
     StoredMessage,
@@ -112,7 +119,12 @@ def test_tool_names_are_not_repeated_as_hints() -> None:
             sequence=2,
             message=CanonicalMessage(  # pyright: ignore[reportArgumentType]
                 role="tool",
-                blocks=(ToolResultBlock(call_id="c1", output="file.read file.read"),),
+                blocks=(ToolResultBlock(
+                        call_id="c1",
+                        output="file.read file.read",
+                        exit_code=0,
+                        failed=False,
+                    ),),
             ),
         ),
     ]
@@ -124,3 +136,71 @@ def test_nothing_worth_hinting_yields_nothing() -> None:
     """Empty rather than a filler line. A summary that always ends with a
     hint section teaches the reader to skip it."""
     assert compaction_hints([_said(1, "ok")]) == ()
+
+
+def test_the_summary_carries_the_hints_it_computed() -> None:
+    """The step that decides whether any of this is reachable.
+
+    A hint list computed and left in a variable is this repository's
+    signature failure — written, correct, and read by nobody. It has to
+    appear in the text the model actually receives.
+    """
+
+    summary = _summarize(
+        [
+            _said(1, "鹈鹕项目的发布定在下周二"),
+            _said(2, "鹈鹕项目还需要新的看板"),
+        ]
+    )
+
+    assert "鹈鹕" in summary
+
+
+def test_a_summary_with_no_hints_says_nothing_about_them() -> None:
+
+    summary = _summarize([_said(1, "ok")])
+
+    assert "Topics" not in summary
+
+
+def test_the_summary_tells_the_model_it_can_search_for_them() -> None:
+    """A bare word list is a puzzle. The sentence around it is what turns
+    the hints into something the model knows to act on — `session.search`
+    is the tool, and the summary is the only place it learns these terms
+    exist at all."""
+
+    summary = _summarize(
+        [
+            _said(1, "鹈鹕项目的发布定在下周二"),
+            _said(2, "鹈鹕项目还需要新的看板"),
+        ]
+    )
+
+    assert "search" in summary.lower()
+
+
+def test_hints_are_dropped_before_compaction_is_allowed_to_fail() -> None:
+    """The priority when both cannot fit.
+
+    Hints cost tokens, and a summary carrying them can be the difference
+    between compaction fitting and not — at which point §7.4.2 pauses the
+    Run with `context_overflow` and the person gets nothing at all. Being
+    able to search for a topic is worth less than the conversation
+    continuing, so it is the half that gets dropped.
+
+    Found by an existing test rather than by design: adding hints made
+    `test_the_summary_says_what_it_replaced_and_where_to_find_it` stop
+    compacting altogether.
+    """
+
+    covered = [
+        _said(1, "鹈鹕项目的发布定在下周二"),
+        _said(2, "鹈鹕项目还需要新的看板"),
+    ]
+
+    with_hints = _summarize(covered)
+    without = _summarize(covered, with_hints=False)
+
+    assert "鹈鹕" in with_hints
+    assert "鹈鹕" not in without
+    assert len(without) < len(with_hints)
