@@ -17,6 +17,7 @@ originals are never removed from the transcript by anything in this file — it
 has no I/O at all.
 """
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -513,7 +514,82 @@ def _trim_memories(
     )
 
 
-def _summarize(covered: Sequence[StoredMessage]) -> str:
+#: How many terms a compacted range may leave behind. It rides inside the
+#: summary, which exists to save context — a list that grew with the
+#: conversation would hand back exactly what compaction spent tokens removing.
+MAX_HINTS = 12
+
+#: A term has to appear at least this often to be worth keeping. Once is an
+#: aside; twice is a subject. A hint list that included everything would be an
+#: index of the conversation, which is the thing being summarized away.
+MIN_HINT_OCCURRENCES = 2
+
+#: Latin terms shorter than this are almost always function words, and this
+#: platform ships no stop-word list it could consult instead.
+MIN_LATIN_HINT = 4
+
+
+def compaction_hints(covered: Sequence[StoredMessage]) -> tuple[str, ...]:
+    """Terms worth searching for, taken from the text being compacted away.
+
+    Extracted, never generated. `_summarize` is deterministic for a reason
+    that is not stylistic: this platform recovers interrupted Runs
+    (`SchedulerRuntime._recover_interrupted`), and a summary produced by a
+    model call would come back different on replay — the same Run would see
+    a different context on its second attempt.
+
+    Han text is counted as character bigrams, matching how migration 0045
+    indexes it, so a hint is a term `session.search` can actually find.
+    Latin text is counted as words. Tool names are excluded: the summary
+    already lists them, and repeating them crowds out the words that are
+    findable nowhere else.
+    """
+    counts: dict[str, int] = {}
+    for stored in covered:
+        for block in stored.message.blocks:
+            said = (
+                block.text
+                if isinstance(block, TextBlock)
+                else block.output
+                if isinstance(block, ToolResultBlock)
+                else ""
+            )
+            for term in _terms(said):
+                counts[term] = counts.get(term, 0) + 1
+    named = {
+        block.name
+        for stored in covered
+        for block in stored.message.blocks
+        if isinstance(block, ToolCallBlock)
+    }
+    worth = [
+        term
+        for term, count in counts.items()
+        if count >= MIN_HINT_OCCURRENCES and term not in named
+    ]
+    # Sorted by count and then by the term itself: `dict` preserves insertion
+    # order, which would make the result depend on the order blocks happened
+    # to be walked in. That is stable today and is not a property worth
+    # relying on when replay determinism is the whole point.
+    worth.sort(key=lambda term: (-counts[term], term))
+    return tuple(worth[:MAX_HINTS])
+
+
+def _terms(said: str) -> list[str]:
+    """Han bigrams and Latin words, from one piece of text."""
+    found: list[str] = []
+    for match in re.finditer(r"[\u4e00-\u9fff]{2,}", said):
+        run = match.group()
+        found.extend(run[i : i + 2] for i in range(len(run) - 1))
+    found.extend(
+        word.lower()
+        for word in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", said)
+        if len(word) >= MIN_LATIN_HINT
+    )
+    return found
+
+
+def _summarize(covered: Sequence[StoredMessage], *, with_hints: bool = True) -> str:
     """A structured summary, generated rather than written.
 
     No model call: §7.4.2 asks for 结构化压缩, and a deterministic summary is
@@ -546,15 +622,31 @@ def _summarize(covered: Sequence[StoredMessage]) -> str:
         parts.append(f"Tools called: {called}.")
     if output_characters:
         parts.append(f"Tool output omitted: {output_characters} characters.")
+    hints = compaction_hints(covered) if with_hints else ()
+    if hints:
+        # The sentence matters as much as the list. A bare row of terms is a
+        # puzzle; naming the tool is what turns them into something the model
+        # can act on — and this summary is the only place it learns these
+        # terms existed at all, because the text they came from has just been
+        # removed from its context.
+        parts.append(
+            "Topics discussed there, searchable with session.search: "
+            + ", ".join(hints)
+            + "."
+        )
     parts.append("Ask for anything from that range if you need it again.")
     return " ".join(parts)
 
 
 def _compact(
-    history: Sequence[StoredMessage], through: int, tokenizer: str | None
+    history: Sequence[StoredMessage],
+    through: int,
+    tokenizer: str | None,
+    *,
+    with_hints: bool = True,
 ) -> tuple[CanonicalMessage, CompactionRecord]:
     covered = history[:through]
-    summary = _summarize(covered)
+    summary = _summarize(covered, with_hints=with_hints)
     before = sum(_message_estimate(item.message, tokenizer) for item in covered)
     message = CanonicalMessage(
         role="user", blocks=(TextBlock(text=summary),), author="platform"
@@ -762,21 +854,31 @@ def plan_context(
         len(history),
     )
     compactable = min(len(working) - PROTECTED_RECENT_MESSAGES, protected)
-    for through in range(2, max(compactable, 0) + 1):
-        summary, compaction = _compact(history, through, tokenizer)
-        candidate = [summary, *working[through:]]
-        spent = fixed + sum(_message_estimate(message, tokenizer) for message in candidate)
-        if spent <= allowance:
-            return ContextPlan(
-                messages=tuple(candidate),
-                fits=True,
-                input_estimate=spent,
-                allowance=allowance,
-                trimmed=tuple(trimmed),
-                compacted=compaction,
-                skill_summaries=surviving,
-                memories=tuple(kept_memories),
+    # Hints first, then without them. They cost tokens, and a summary carrying
+    # them can be the difference between compaction fitting and not — at which
+    # point the Run pauses with `context_overflow` and the person gets nothing
+    # at all. Being able to search for a topic is worth less than the
+    # conversation continuing, so it is the half that gets dropped.
+    for with_hints in (True, False):
+        for through in range(2, max(compactable, 0) + 1):
+            summary, compaction = _compact(
+                history, through, tokenizer, with_hints=with_hints
             )
+            candidate = [summary, *working[through:]]
+            spent = fixed + sum(
+                _message_estimate(message, tokenizer) for message in candidate
+            )
+            if spent <= allowance:
+                return ContextPlan(
+                    messages=tuple(candidate),
+                    fits=True,
+                    input_estimate=spent,
+                    allowance=allowance,
+                    trimmed=tuple(trimmed),
+                    compacted=compaction,
+                    skill_summaries=surviving,
+                    memories=tuple(kept_memories),
+                )
 
     # Compaction did not make it fit. §7.4.2: 压缩失败后保留原文；若保留原文又
     # 无法装入窗口，Run 进入 paused(context_overflow). The originals go back
