@@ -11,6 +11,7 @@ at all until somebody sees another person's words in their own transcript.
 """
 
 from collections.abc import Callable
+from hashlib import sha256
 from uuid import UUID
 
 import pytest
@@ -43,9 +44,15 @@ def _worker(engine: AsyncEngine, workspace_id: str) -> WorkerRuntime:
 
 
 def _run(client: TestClient, scope: dict[str, str], session_id: str, body: str) -> str:
+    # The key is a digest of the input rather than a slice of it. An HTTP
+    # header is latin-1 at best, so pasting the message in raised
+    # `UnicodeEncodeError` the moment a test said anything in Chinese — in a
+    # helper used by the suite that tests search for a platform whose users
+    # write Chinese.
+    digest = sha256(body.encode("utf-8")).hexdigest()[:16]
     created = client.post(
         "/api/v1/runs",
-        headers={**scope, "Idempotency-Key": f"search-{body[:14]}-{session_id[:8]}"},
+        headers={**scope, "Idempotency-Key": f"search-{digest}-{session_id[:8]}"},
         json={"session_id": session_id, "input": body},
     )
     assert created.status_code == 201, created.text
@@ -174,3 +181,79 @@ async def test_an_empty_console_query_is_refused(
     )
 
     assert refused.status_code == 422
+
+
+async def test_a_run_finds_what_was_said_in_chinese(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    searcher: str,
+) -> None:
+    """§14.3's search, for the language this platform is actually used in.
+
+    `to_tsvector('simple', …)` does not segment Chinese — a whole sentence
+    becomes **one token** — so a query matched only when it was character-
+    for-character identical to the stored text. Every realistic Chinese
+    search returned nothing.
+
+    The English test above passed throughout, which is why this went
+    unnoticed: `simple` splits English on spaces perfectly well, and the
+    comment on that column explains the choice as serving "Chinese and
+    English side by side".
+    """
+    workspace_id = scope["X-Workspace-Id"]
+    earlier = session_for(searcher)
+    _run(client, scope, earlier, "鹈鹕项目的发布定在下周二")
+    await _worker(engine, workspace_id).run_once()
+
+    later = session_for(searcher)
+    found = _run(client, scope, later, "鹈鹕项目")
+    await _worker(engine, workspace_id).run_once()
+
+    assert "鹈鹕项目" in await _transcript(engine, found)
+
+
+async def test_a_chinese_search_does_not_match_unrelated_text(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    searcher: str,
+) -> None:
+    """The other half. Indexing Chinese by character pairs is what makes a
+    search work at all here, and it is also how a careless version starts
+    matching everything — a search that returns every session is as useless
+    as one that returns none, and harder to notice."""
+    workspace_id = scope["X-Workspace-Id"]
+    earlier = session_for(searcher)
+    _run(client, scope, earlier, "鹈鹕项目的发布定在下周二")
+    await _worker(engine, workspace_id).run_once()
+
+    later = session_for(searcher)
+    found = _run(client, scope, later, "服务器磁盘告警")
+    await _worker(engine, workspace_id).run_once()
+
+    assert "鹈鹕" not in await _transcript(engine, found)
+
+
+async def test_english_search_still_works_alongside_chinese(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    searcher: str,
+) -> None:
+    """Whatever fixes Chinese must not cost English. A stemmer for one
+    mangles the other — that reasoning was right, and it is the reason the
+    fix adds an index rather than replacing the configuration."""
+    workspace_id = scope["X-Workspace-Id"]
+    earlier = session_for(searcher)
+    _run(client, scope, earlier, "the pelican rollout is on Tuesday 下周二发布")
+    await _worker(engine, workspace_id).run_once()
+
+    later = session_for(searcher)
+    found = _run(client, scope, later, "pelican")
+    await _worker(engine, workspace_id).run_once()
+
+    assert "pelican rollout" in await _transcript(engine, found)
