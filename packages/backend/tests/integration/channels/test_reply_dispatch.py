@@ -14,7 +14,7 @@ anything comes out the other side.
 import base64
 import hashlib
 import json
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -89,6 +89,80 @@ class _Sender:
         self.sent: list[dict[str, str]] = []
         self.asked_for: list[UUID] = []
 
+    @staticmethod
+    def _readable(card: dict[str, Any]) -> str:
+        """What a person reads off a card, flattened.
+
+        Recorded instead of the raw JSON so these tests assert on what was
+        said rather than on the vendor's element structure — the same
+        distinction `CanonicalMessage.text` draws. A test matching on card
+        JSON breaks the first time a card gains a divider.
+
+        Walked explicitly rather than recursively: a generic walk also
+        collects `config` values and reorders what it finds, and both showed
+        up as failures the moment it was tried.
+        """
+        said: list[str] = []
+        header: Any = card.get("header")
+        if isinstance(header, dict):
+            title: Any = cast(dict[str, Any], header).get("title")
+            if isinstance(title, dict):
+                said.append(str(cast(dict[str, Any], title).get("content", "")))
+        raw: Any = card.get("elements")
+        for entry in cast(list[Any], raw) if isinstance(raw, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            element = cast(dict[str, Any], entry)
+            body: Any = element.get("text")
+            if isinstance(body, dict):
+                said.append(str(cast(dict[str, Any], body).get("content", "")))
+            buttons: Any = element.get("actions")
+            for item in cast(list[Any], buttons) if isinstance(buttons, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                action = cast(dict[str, Any], item)
+                said.append(str(action.get("url", "")))
+                label: Any = action.get("text")
+                if isinstance(label, dict):
+                    said.append(str(cast(dict[str, Any], label).get("content", "")))
+        return "\n".join(said)
+
+    @property
+    def opening(self) -> dict[str, str]:
+        """The card this delivery opened with.
+
+        Recipient and credentials are asserted here rather than on a later
+        entry: a patch names no recipient — the message id already fixes who
+        sees it — so the opening card is where "sent to the right person, as
+        the right app" is actually decided.
+        """
+        opened = [
+            entry
+            for entry in self.sent
+            if entry.get("delivery_key", "").endswith(":c")
+        ]
+        assert opened, "no opening card was sent"
+        return opened[0]
+
+    def after_opening(self) -> list[dict[str, str]]:
+        """Everything except the card each delivery now opens with.
+
+        Every delivery that has a Run gets an opening card within a second —
+        that is the whole point of the card design. So a test asking "was an
+        answer sent" means everything *after* that, and one asking "was
+        anything sent" would now always be true and stop testing anything.
+
+        Identified by the delivery key's `:c` suffix rather than by the
+        card's wording: the suffix is the contract the dispatcher actually
+        commits to, and matching on Chinese text would break the first time
+        somebody reworded a card.
+        """
+        return [
+            entry
+            for entry in self.sent
+            if not entry.get("delivery_key", "").endswith(":c")
+        ]
+
     def __call__(self, workspace_id: UUID) -> "_Sender":
         self.asked_for.append(workspace_id)
         return self
@@ -130,7 +204,7 @@ class _Sender:
                 "app_secret": app_secret,
                 "open_id": "",
                 "message_id": message_id,
-                "text": json.dumps(card, ensure_ascii=False),
+                "text": self._readable(card),
                 "delivery_key": "",
             }
         )
@@ -152,9 +226,7 @@ class _Sender:
                 "app_id": app_id,
                 "app_secret": app_secret,
                 "open_id": open_id,
-                # Flattened, because these tests ask what a person can read
-                # rather than which element it landed in.
-                "text": json.dumps(card, ensure_ascii=False),
+                "text": self._readable(card),
                 "delivery_key": delivery_key or "",
             }
         )
@@ -295,13 +367,14 @@ async def test_a_finished_run_answers_the_person_who_sent_the_message(
     await _finish(engine, run_id, said="上周有 12 单。")
 
     sender = _Sender()
-    assert await _dispatch(engine, sender) == 1
+    await _dispatch(engine, sender)
+    assert len(sender.after_opening()) == 1
 
-    assert len(sender.sent) == 1
-    assert sender.sent[0]["open_id"] == "ou_zhang"
-    assert sender.sent[0]["app_id"] == "cli_x"
-    assert sender.sent[0]["app_secret"] == "s3cret"  # noqa: S105
-    assert sender.sent[0]["text"] == "上周有 12 单。"
+    assert len(sender.after_opening()) == 1
+    assert sender.opening["open_id"] == "ou_zhang"
+    assert sender.opening["app_id"] == "cli_x"
+    assert sender.opening["app_secret"] == "s3cret"  # noqa: S105
+    assert "上周有 12 单。" in sender.after_opening()[0]["text"]
 
     replied_at, attempts, note = await _reply_row(engine)
     assert replied_at is not None
@@ -353,10 +426,10 @@ async def test_a_reply_is_sent_once_however_often_the_dispatcher_runs(
     await _finish(engine, run_id, said="做完了")
 
     sender = _Sender()
-    assert await _dispatch(engine, sender) == 1
-    assert await _dispatch(engine, sender) == 0
+    await _dispatch(engine, sender)
+    await _dispatch(engine, sender)
 
-    assert len(sender.sent) == 1
+    assert len(sender.after_opening()) == 1
 
 
 async def test_a_run_that_has_not_finished_is_left_alone(
@@ -366,17 +439,22 @@ async def test_a_run_that_has_not_finished_is_left_alone(
     published_agent: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A half-finished Run replied to is worse than a late reply: the
-    delivery would be stamped and the real answer never sent."""
+    """A half-finished Run answered is worse than a late answer: the
+    delivery would be stamped and the real answer never sent.
+
+    The opening card is excluded — it says 「正在处理」, which is exactly
+    what an unfinished Run should be showing.
+    """
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
     _deliver(client, binding_id)
 
     sender = _Sender()
-    assert await _dispatch(engine, sender) == 0
+    await _dispatch(engine, sender)
+    assert sender.after_opening() == []
 
-    assert sender.sent == []
+    assert sender.after_opening() == []
     replied_at, attempts, _ = await _reply_row(engine)
     assert replied_at is None
     assert attempts == 0
@@ -399,7 +477,7 @@ async def test_a_receive_only_binding_sends_nothing_and_stops_asking(
     sender = _Sender()
     await _dispatch(engine, sender)
 
-    assert sender.sent == []
+    assert sender.after_opening() == []
     replied_at, _, note = await _reply_row(engine)
     assert replied_at is not None
     assert note == ReplyOutcome.NO_CREDENTIAL
@@ -432,7 +510,7 @@ async def test_a_disabled_binding_is_not_replied_through(
     sender = _Sender()
     await _dispatch(engine, sender)
 
-    assert sender.sent == []
+    assert sender.after_opening() == []
     replied_at, _, note = await _reply_row(engine)
     assert replied_at is not None
     assert note == ReplyOutcome.BINDING_DISABLED
@@ -462,7 +540,7 @@ async def test_a_refused_send_is_retried_and_then_given_up_on(
     for _ in range(4):
         await _dispatch(engine, sender, max_attempts=3)
 
-    assert len(sender.sent) == 3
+    assert len(sender.after_opening()) == 3
     replied_at, attempts, note = await _reply_row(engine)
     assert attempts == 3
     assert replied_at is not None
@@ -491,8 +569,8 @@ async def test_a_failed_run_reports_why_instead_of_going_quiet(
     sender = _Sender()
     await _dispatch(engine, sender)
 
-    assert len(sender.sent) == 1
-    assert "model_endpoint_unreachable" in sender.sent[0]["text"]
+    assert len(sender.after_opening()) == 1
+    assert "model_endpoint_unreachable" in sender.after_opening()[0]["text"]
 
 
 async def test_an_ordinary_console_run_is_never_in_the_queue(
@@ -505,8 +583,9 @@ async def test_an_ordinary_console_run_is_never_in_the_queue(
     """Nothing pushes a console Run anywhere. The queue is `channel_events`,
     and a Run that arrived through the API put no row in it."""
     sender = _Sender()
-    assert await _dispatch(engine, sender) == 0
-    assert sender.sent == []
+    await _dispatch(engine, sender)
+    assert sender.after_opening() == []
+    assert sender.after_opening() == []
 
 
 async def test_the_reply_leaves_under_its_own_workspace_scope(
@@ -534,7 +613,7 @@ async def test_the_reply_leaves_under_its_own_workspace_scope(
     sender = _Sender()
     await _dispatch(engine, sender)
 
-    assert sender.asked_for == [UUID(workspace_id)]
+    assert set(sender.asked_for) == {UUID(workspace_id)}
 
 
 async def test_every_retry_of_one_reply_carries_the_same_deduplication_key(
@@ -565,8 +644,8 @@ async def test_every_retry_of_one_reply_carries_the_same_deduplication_key(
     for _ in range(3):
         await _dispatch(engine, sender, max_attempts=3)
 
-    keys = {attempt["delivery_key"] for attempt in sender.sent}
-    assert len(sender.sent) == 3
+    keys = {attempt["delivery_key"] for attempt in sender.after_opening()}
+    assert len(sender.after_opening()) == 3
     assert len(keys) == 1
     assert "" not in keys
 
@@ -609,10 +688,9 @@ async def test_a_queued_message_is_told_it_is_queued(
     sender = _Sender()
     await _dispatch(engine, sender)
 
-    cards = [entry for entry in sender.sent if entry["kind"] == "card"]
-    assert len(cards) == 1
-    assert cards[0]["open_id"] == "ou_zhang"
-    assert "排队" in cards[0]["text"]
+    queued = [e for e in sender.sent if "排队" in e["text"]]
+    assert len(queued) == 1
+    assert queued[0]["open_id"] == "ou_zhang"
 
 
 async def test_the_queue_notice_is_sent_once(
@@ -635,7 +713,11 @@ async def test_the_queue_notice_is_sent_once(
     for _ in range(3):
         await _dispatch(engine, sender)
 
-    assert len([e for e in sender.sent if e["kind"] == "card"]) == 1
+    # The queue card *is* the opening card now — a blocked message opens
+    # with it rather than with 「正在处理」, which would be false. So this
+    # asserts the delivery opened once, however many times the scan ran.
+    opened = [e for e in sender.sent if e["delivery_key"].endswith(":c")]
+    assert len([e for e in opened if "排队" in e["text"]]) == 1
 
 
 async def test_a_message_that_was_never_queued_gets_no_notice(
@@ -657,7 +739,7 @@ async def test_a_message_that_was_never_queued_gets_no_notice(
     sender = _Sender()
     await _dispatch(engine, sender)
 
-    assert [e for e in sender.sent if e["kind"] == "card"] == []
+    assert [e for e in sender.after_opening() if e["kind"] == "card"] == []
 
 
 async def test_a_queued_message_still_gets_its_answer_afterwards(
@@ -686,9 +768,12 @@ async def test_a_queued_message_still_gets_its_answer_afterwards(
     await _finish(engine, queued, said="终于轮到我了")
     await _dispatch(engine, sender)
 
-    kinds = [entry["kind"] for entry in sender.sent]
-    assert kinds == ["card", "text"]
-    assert sender.sent[1]["text"] == "终于轮到我了"
+    # Opened as a queue card, then rewritten in place with the answer — one
+    # message in the conversation, not two. The notice must not settle the
+    # delivery, which is what this test has always been about.
+    said = [e["text"] for e in sender.sent]
+    assert any("排队" in text for text in said)
+    assert any("终于轮到我了" in text for text in said)
 
 
 async def test_the_notice_and_the_reply_do_not_share_a_deduplication_key(
@@ -713,9 +798,12 @@ async def test_the_notice_and_the_reply_do_not_share_a_deduplication_key(
     await _finish(engine, queued, said="终于轮到我了")
     await _dispatch(engine, sender)
 
-    keys = [entry["delivery_key"] for entry in sender.sent]
-    assert len(set(keys)) == 2
-    assert all(key != "" for key in keys)
+    # Only creating a message needs a key; a patch is idempotent by
+    # construction and carries none. What must still not collide is the
+    # opening card against a fallback message — covered by
+    # `test_a_card_that_cannot_be_updated_falls_back_to_a_new_message`.
+    keys = [e["delivery_key"] for e in sender.sent if e["delivery_key"]]
+    assert len(set(keys)) == len(keys)
 
 
 def _photo(event_id: str = "om_photo") -> dict[str, Any]:
@@ -765,9 +853,9 @@ async def test_a_photo_gets_an_answer_instead_of_silence(
     sender = _Sender()
     await _dispatch(engine, sender)
 
-    assert len(sender.sent) == 1
-    assert sender.sent[0]["open_id"] == "ou_zhang"
-    assert "文字" in sender.sent[0]["text"]
+    assert len(sender.after_opening()) == 1
+    assert sender.after_opening()[0]["open_id"] == "ou_zhang"
+    assert "文字" in sender.after_opening()[0]["text"]
 
 
 async def test_a_photo_starts_no_run(
@@ -815,7 +903,7 @@ async def test_the_same_photo_delivered_twice_is_answered_once(
     await _dispatch(engine, sender)
     await _dispatch(engine, sender)
 
-    assert len(sender.sent) == 1
+    assert len(sender.after_opening()) == 1
 
 
 async def test_a_broken_envelope_is_answered_to_nobody(
@@ -845,7 +933,7 @@ async def test_a_broken_envelope_is_answered_to_nobody(
     sender = _Sender()
     await _dispatch(engine, sender)
 
-    assert sender.sent == []
+    assert sender.after_opening() == []
 
 
 async def _age_delivery(engine: AsyncEngine, seconds: int) -> None:
@@ -884,21 +972,27 @@ async def test_a_slow_run_says_it_is_still_working(
     sender = _Sender()
     await _dispatch(engine, sender)
 
-    assert len(sender.sent) == 1
-    assert sender.sent[0]["open_id"] == "ou_zhang"
-    assert "还在" in sender.sent[0]["text"]
+    assert len(sender.after_opening()) == 1
+    # The recipient is fixed by the opening card; a patch names none — the
+    # message id already decides who sees it.
+    assert sender.opening["open_id"] == "ou_zhang"
+    assert "还在" in sender.after_opening()[0]["text"]
 
 
-async def test_a_run_that_has_only_just_started_says_nothing(
+async def test_a_run_that_has_only_just_started_gets_no_progress_note(
     client: TestClient,
     engine: AsyncEngine,
     workspace_id: str,
     published_agent: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A notice on every message would be noise on the ordinary five-second
-    Run — and noise in a chat is what makes people stop reading the
-    messages that matter."""
+    """No *progress* note. The delivery's opening card is already there —
+    that is unconditional now — and this asserts nothing follows it.
+
+    Renamed from "says nothing", which stopped being true: the card design
+    means something is said within a second of every message. What must not
+    happen is a second thing arriving for an ordinary Run.
+    """
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
@@ -907,7 +1001,7 @@ async def test_a_run_that_has_only_just_started_says_nothing(
     sender = _Sender()
     await _dispatch(engine, sender)
 
-    assert sender.sent == []
+    assert sender.after_opening() == []
 
 
 async def test_a_run_that_already_finished_gets_its_answer_not_a_progress_note(
@@ -930,8 +1024,8 @@ async def test_a_run_that_already_finished_gets_its_answer_not_a_progress_note(
     sender = _Sender()
     await _dispatch(engine, sender)
 
-    assert len(sender.sent) == 1
-    assert sender.sent[0]["text"] == "慢是慢,做完了"
+    assert len(sender.after_opening()) == 1
+    assert "慢是慢,做完了" in sender.after_opening()[0]["text"]
 
 
 async def test_the_progress_note_is_sent_once_however_long_it_runs(
@@ -958,7 +1052,7 @@ async def test_the_progress_note_is_sent_once_however_long_it_runs(
     for _ in range(4):
         await _dispatch(engine, sender)
 
-    assert len(sender.sent) == 1
+    assert len(sender.after_opening()) == 1
 
 
 async def test_a_queued_message_gets_the_card_and_not_a_progress_note(
@@ -981,9 +1075,13 @@ async def test_a_queued_message_gets_the_card_and_not_a_progress_note(
     sender = _Sender()
     await _dispatch(engine, sender)
 
-    kinds = [entry["kind"] for entry in sender.sent]
-    assert kinds.count("card") == 1
-    assert "text" not in kinds
+    # Two deliveries here — the head and the one behind it — so this looks
+    # across every opening card rather than at the first. The queued one
+    # opened as a queue card, and nothing follows either: 「还在处理」 would
+    # be false for a message nothing is processing.
+    opened = [e["text"] for e in sender.sent if e["delivery_key"].endswith(":c")]
+    assert any("排队" in text for text in opened)
+    assert sender.after_opening() == []
 
 
 async def test_a_slow_run_still_delivers_its_answer_afterwards(
@@ -1007,10 +1105,12 @@ async def test_a_slow_run_still_delivers_its_answer_afterwards(
     await _finish(engine, run_id, said="终于好了")
     await _dispatch(engine, sender)
 
-    assert len(sender.sent) == 2
-    assert "还在" in sender.sent[0]["text"]
-    assert sender.sent[1]["text"] == "终于好了"
-    assert len({entry["delivery_key"] for entry in sender.sent}) == 2
+    assert len(sender.after_opening()) == 2
+    assert "还在" in sender.after_opening()[0]["text"]
+    assert "终于好了" in sender.after_opening()[1]["text"]
+    # Two writes to one message rather than two messages, so neither
+    # carries a key — the progress note cannot consume the answer.
+    assert [e["kind"] for e in sender.after_opening()] == ["patch", "patch"]
 
 
 async def test_a_run_of_a_dozen_seconds_is_slow_enough_to_mention(
@@ -1042,8 +1142,8 @@ async def test_a_run_of_a_dozen_seconds_is_slow_enough_to_mention(
     sender = _Sender()
     await _dispatch(engine, sender)
 
-    assert len(sender.sent) == 1
-    assert "还在" in sender.sent[0]["text"]
+    assert len(sender.after_opening()) == 1
+    assert "还在" in sender.after_opening()[0]["text"]
 
 
 async def test_an_ordinary_five_second_run_is_still_left_alone(
@@ -1066,7 +1166,7 @@ async def test_an_ordinary_five_second_run_is_still_left_alone(
     sender = _Sender()
     await _dispatch(engine, sender)
 
-    assert sender.sent == []
+    assert sender.after_opening() == []
 
 
 # --- one card per delivery, rewritten in place ---
@@ -1174,7 +1274,7 @@ async def test_a_card_that_cannot_be_updated_falls_back_to_a_new_message(
     await _dispatch(engine, sender)
 
     assert [entry["kind"] for entry in sender.sent] == ["card", "text"]
-    assert sender.sent[1]["text"] == "上周有 12 单。"
+    assert "上周有 12 单。" in sender.sent[1]["text"]
 
 
 async def test_a_slow_run_rewrites_the_card_rather_than_adding_a_message(

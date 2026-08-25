@@ -83,6 +83,15 @@ class ChannelEventRow(IdMixin, Base):
                 "blocked_notice IS NOT NULL AND blocked_notified_at IS NULL"
             ),
         ),
+        # The opening card's — migration 0044.
+        Index(
+            "ix_channel_events_awaiting_card",
+            "received_at",
+            postgresql_where=text(
+                "run_id IS NOT NULL AND card_message_id IS NULL"
+                " AND replied_at IS NULL AND card_attempted_at IS NULL"
+            ),
+        ),
         # The progress scan's — migration 0043.
         Index(
             "ix_channel_events_awaiting_progress",
@@ -153,6 +162,16 @@ class ChannelEventRow(IdMixin, Base):
     #: the same reason as `blocked_notified_at`, and a stamp rather than a
     #: counter because it is said exactly once — migration 0043.
     progress_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    #: Feishu's id for the card this delivery opened with, so later stages
+    #: rewrite it rather than adding messages. NULL means there is nothing to
+    #: patch and the answer goes as a new message — migration 0044.
+    card_message_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    #: When the opening card was attempted, whether or not an id came back.
+    #: Separate from `card_message_id` so a send that produced no id still
+    #: leaves the scan — otherwise it would re-send a card every second.
+    card_attempted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 

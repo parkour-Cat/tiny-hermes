@@ -29,14 +29,22 @@ from tiny_hermes.channels.domain.reply import (
     refusal_for,
     reply_for,
 )
-from tiny_hermes.channels.infrastructure.feishu_card import blocked_card
+from tiny_hermes.channels.infrastructure.feishu_card import (
+    answer_card,
+    blocked_card,
+    failure_card,
+    progress_card,
+    working_card,
+)
 from tiny_hermes.channels.infrastructure.sql_channel_store import (
     DeliveryTarget,
+    PendingCard,
     PendingNotice,
     PendingProgress,
     PendingRefusal,
     PendingReply,
 )
+from tiny_hermes.runs.domain.models import RunState
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +61,10 @@ _NOTICE_KEY_SUFFIX = ":q"
 #: And for the progress note, so one delivery's three possible sends are
 #: three distinct keys to Feishu's deduplication.
 _PROGRESS_KEY_SUFFIX = ":p"
+
+#: And for the opening card, so all of one delivery's sends stay distinct to
+#: Feishu's deduplication.
+_CARD_KEY_SUFFIX = ":c"
 
 #: How long a Run may go before its sender is told it is still working.
 #:
@@ -131,6 +143,15 @@ class ChannelSender(Protocol):
         open_id: str,
         card: dict[str, Any],
         delivery_key: str | None = None,
+    ) -> str | None: ...
+
+    async def update_card(
+        self,
+        *,
+        app_id: str,
+        app_secret: str,
+        message_id: str,
+        card: dict[str, Any],
     ) -> None: ...
 
 
@@ -163,6 +184,14 @@ class ReplyQueue(Protocol):
     ) -> list[PendingNotice]: ...
 
     async def pending_refusals(self, limit: int = 50) -> list[PendingRefusal]: ...
+
+    async def pending_card_opens(self, limit: int = 50) -> list[PendingCard]: ...
+
+    async def record_card(
+        self, event_row_id: UUID, message_id: str | None, now: datetime
+    ) -> None: ...
+
+    async def card_for(self, event_row_id: UUID) -> str | None: ...
 
     async def pending_progress_notices(
         self, older_than: datetime, limit: int = 50
@@ -225,6 +254,12 @@ class ChannelReplyDispatcher:
         not sending it at all.
         """
         sent = 0
+        # First, because it is the only stage that must not wait: everything
+        # else has something to say and can take a second doing it, while
+        # this one exists precisely so the person is not looking at nothing.
+        for opening in await self._store.pending_card_opens(self._batch_size):
+            if await self._open_card(opening):
+                sent += 1
         for unreadable in await self._store.pending_refusals(self._batch_size):
             if await self._refuse(unreadable):
                 sent += 1
@@ -241,6 +276,72 @@ class ChannelReplyDispatcher:
             if await self._dispatch(pending):
                 sent += 1
         return sent
+
+    async def _open_card(self, opening: PendingCard) -> bool:
+        """Put something on screen, about a second after the message landed.
+
+        A queued delivery opens with the queue card rather than 「正在处理」
+        — nothing is processing it, and the queue card already carries the
+        reason and the position. Its notice is settled here too, so the
+        blocked-notice scan does not send a second copy.
+        """
+        target = await self._store.delivery_target_for(opening.session_id)
+        recipient = self._sendable(target)
+        if isinstance(recipient, str):
+            logger.info(
+                "channel card not opened: run=%s reason=%s", opening.run_id, recipient
+            )
+            await self._store.record_card(opening.event_row_id, None, _now())
+            return False
+        card = (
+            blocked_card(opening.notice, console_url=self._console_url)
+            if opening.notice is not None
+            else working_card()
+        )
+        try:
+            secret = await self._resolve_secret(recipient.app_secret_ref)
+            message_id = await self._senders(recipient.workspace_id).send_card(
+                app_id=recipient.app_id,
+                app_secret=secret,
+                open_id=recipient.open_id,
+                card=card,
+                delivery_key=f"{opening.event_row_id}{_CARD_KEY_SUFFIX}",
+            )
+        except Exception:
+            logger.warning(
+                "channel card failed to open: run=%s", opening.run_id, exc_info=True
+            )
+            # Stamped anyway. A failure here must not park the delivery in
+            # this scan re-sending an opening card every second; the answer
+            # goes as a new message later, which is the fallback this whole
+            # design keeps.
+            await self._store.record_card(opening.event_row_id, None, _now())
+            return False
+        await self._store.record_card(opening.event_row_id, message_id, _now())
+        if opening.notice is not None:
+            await self._store.settle_blocked_notice(opening.event_row_id, _now())
+        return True
+
+    async def _rewrite(
+        self, event_row_id: UUID, recipient: "_Recipient", card: dict[str, Any]
+    ) -> bool:
+        """Update this delivery's card, or report that there is none.
+
+        `False` means the caller must fall back to sending a message. That
+        path is not an afterthought: a design that could only speak through
+        a card would go silent exactly when the card was unreachable.
+        """
+        message_id = await self._store.card_for(event_row_id)
+        if message_id is None:
+            return False
+        secret = await self._resolve_secret(recipient.app_secret_ref)
+        await self._senders(recipient.workspace_id).update_card(
+            app_id=recipient.app_id,
+            app_secret=secret,
+            message_id=message_id,
+            card=card,
+        )
+        return True
 
     async def _report_progress(self, working: PendingProgress) -> bool:
         """Tell somebody their Run is taking a while — once.
@@ -261,6 +362,13 @@ class ChannelReplyDispatcher:
             await self._store.settle_progress_notice(working.event_row_id, _now())
             return False
         try:
+            if await self._rewrite(
+                working.event_row_id, recipient, progress_card()
+            ):
+                await self._store.settle_progress_notice(
+                    working.event_row_id, _now()
+                )
+                return True
             secret = await self._resolve_secret(recipient.app_secret_ref)
             await self._senders(recipient.workspace_id).send_text(
                 app_id=recipient.app_id,
@@ -403,6 +511,20 @@ class ChannelReplyDispatcher:
         # spent, and a bound that only counts polite failures is not a bound.
         await self._store.record_reply_attempt(pending.event_row_id)
         try:
+            # The card first: this delivery opened with one, and the answer
+            # belongs *in* it rather than under it. Falling through to a new
+            # message is the deliberate fallback for a delivery whose card
+            # could not be opened — see `_rewrite`.
+            finished = (
+                failure_card(pending.failure_reason)
+                if pending.state is not RunState.COMPLETED
+                else answer_card(text)
+            )
+            if await self._rewrite(pending.event_row_id, recipient, finished):
+                await self._store.settle_reply(
+                    pending.event_row_id, ReplyOutcome.SENT, _now()
+                )
+                return True
             secret = await self._resolve_secret(recipient.app_secret_ref)
             await self._senders(recipient.workspace_id).send_text(
                 app_id=recipient.app_id,

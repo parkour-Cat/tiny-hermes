@@ -90,6 +90,20 @@ def working_card() -> dict[str, Any]:
     )
 
 
+def progress_card() -> dict[str, Any]:
+    """The opening card, rewritten once when a Run turns out to be slow.
+
+    Deliberately vague about *what* it is doing: that is tool names and
+    internal state, which §19.1 keeps off an end-user surface. The person
+    needs to know it is alive, not the step list.
+    """
+    return _card(
+        "还在处理",
+        "blue",
+        [_paragraph("**还在处理,这条要花点时间。**\n\n完成后我会更新这条消息。")],
+    )
+
+
 def answer_card(text: str) -> dict[str, Any]:
     """The finished answer, replacing `working_card` in the same message."""
     return _card("回复", "green", [_paragraph(text)])
@@ -187,4 +201,10 @@ def _what_you_can_do(notice: BlockedNotice) -> str:
     return f"前一个任务可以{named}——这些操作要在控制台里做。"
 
 
-__all__ = ["answer_card", "blocked_card", "failure_card", "working_card"]
+__all__ = [
+    "answer_card",
+    "blocked_card",
+    "failure_card",
+    "progress_card",
+    "working_card",
+]
