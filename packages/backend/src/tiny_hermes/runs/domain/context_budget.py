@@ -231,6 +231,17 @@ ASCII_CHARS_PER_TOKEN = 3
 #: framing.
 MESSAGE_OVERHEAD_TOKENS = 4
 
+#: What one image is charged as. A flat number rather than something derived
+#: from the file: providers bill images by their own tiling rules, and this
+#: platform's estimate is only ever an upper bound used to decide what to
+#: send. DeepSeek documents up to 384 tokens per image on its multimodal
+#: endpoint; this is that ceiling, not a measurement of any particular file.
+#:
+#: It is deliberately not per-endpoint. Making it so would mean every
+#: endpoint declaring a number nobody has measured — see `context_window`,
+#: which is declared because it is knowable, and contrast.
+IMAGE_TOKENS = 384
+
 #: Never compacted. §7.4.2 puts 最近历史 last in the trimming order and gives
 #: compaction to 旧会话 — a summary that swallowed the turn the model is
 #: answering would be summarizing the present. Trimming is not bound by this:
@@ -271,8 +282,22 @@ def _message_estimate(message: CanonicalMessage, tokenizer: str | None) -> int:
             total += estimate_tokens(block.text, tokenizer)
         elif isinstance(block, ToolCallBlock):
             total += estimate_tokens(f"{block.name}{block.arguments}", tokenizer)
-        else:
+        elif isinstance(block, ToolResultBlock):
             total += estimate_tokens(block.output, tokenizer)
+        else:
+            # Only `ImageBlock` reaches here — pyright proves it, which is
+            # why an `isinstance` check would be flagged as redundant.
+            #
+            # This branch was a bare `else` reading `block.output` until
+            # recently, and every new block type walked straight into it:
+            # `ReasoningBlock` did, `ImageBlock` did again. Both were caught
+            # by pyright, which is luck rather than a control — the type
+            # checker only complained because those types lacked `output`,
+            # and a future block that happens to have one would slip through
+            # silently. `test_every_block_type_is_estimated` is the actual
+            # guard: it walks the `Block` union and fails when a member has
+            # no deliberate cost.
+            total += IMAGE_TOKENS
     return total
 
 

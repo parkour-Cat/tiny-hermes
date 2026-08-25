@@ -319,6 +319,33 @@ SAFETY_PREAMBLE = (
 
 
 @dataclass(frozen=True)
+class ImageBlock:
+    """An image somebody sent, by reference.
+
+    The bytes are **not** here. A transcript row holds a pointer and the
+    image lives where artifacts live, because `session_messages.content` is
+    read whole by the context estimator, by `content::text` in search, and
+    by every transcript render — a base64 megabyte in that column would be
+    paid for by all three on every turn.
+
+    `media_type` comes from the channel that received the file rather than
+    being sniffed from the bytes. Guessing here would place a second,
+    possibly disagreeing answer next to the one the sender's own platform
+    already gave.
+    """
+
+    artifact_id: str
+    media_type: str
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "type": "image",
+            "artifact_id": self.artifact_id,
+            "media_type": self.media_type,
+        }
+
+
+@dataclass(frozen=True)
 class ReasoningBlock:
     """A thinking model's own scratch work, kept so it can be handed back.
 
@@ -407,7 +434,7 @@ class ToolResultBlock:
         }
 
 
-Block = TextBlock | ReasoningBlock | ToolCallBlock | ToolResultBlock
+Block = TextBlock | ReasoningBlock | ImageBlock | ToolCallBlock | ToolResultBlock
 
 
 @dataclass(frozen=True)
@@ -513,6 +540,13 @@ def message_from_document(document: dict[str, Any]) -> CanonicalMessage:
             blocks.append(TextBlock(text=str(part.get("text", ""))))
         elif kind == "reasoning":
             blocks.append(ReasoningBlock(text=str(part.get("text", ""))))
+        elif kind == "image":
+            blocks.append(
+                ImageBlock(
+                    artifact_id=str(part.get("artifact_id", "")),
+                    media_type=str(part.get("media_type", "")),
+                )
+            )
         elif kind == "tool_call":
             arguments: Any = part.get("arguments")
             blocks.append(
