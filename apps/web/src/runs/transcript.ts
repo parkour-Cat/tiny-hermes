@@ -23,6 +23,51 @@ export function textOf(message: CanonicalMessage): string {
     .join("");
 }
 
+/** How much of a tool's output a transcript line carries. The tools section
+ * below the transcript holds the whole thing; this line exists to keep the
+ * causal chain readable, and a 40 KB shell dump in the middle of it does the
+ * opposite. */
+const OUTPUT_PREVIEW = 160;
+
+/**
+ * One turn, as a line a person can read.
+ *
+ * Separate from `textOf` rather than an extension of it. `textOf` means "the
+ * words somebody said", and `chat-web` uses `textOf(message) !== ""` to
+ * decide whether a turn is worth showing at all — widening it to include tool
+ * calls would put internal state on an end-user surface that §19.1 keeps it
+ * off.
+ *
+ * A turn with nothing readable still returns a marker rather than an empty
+ * string. A blank row reads as a bug in the page, which is how the original
+ * problem was reported.
+ */
+export function transcriptLineOf(message: CanonicalMessage): string {
+  const said = message.parts.flatMap((part) => {
+    if (part.type === "text") {
+      return part.text === undefined || part.text === "" ? [] : [part.text];
+    }
+    if (part.type === "tool_call") {
+      return [`→ ${part.name ?? "?"}`];
+    }
+    if (part.type === "tool_result") {
+      // The arrow direction carries "sent" versus "came back" without a word
+      // to translate, and the marker distinguishes a failure from a result —
+      // rendering both the same made a failing Run read as though every step
+      // had worked.
+      const mark = part.failed === true ? "✗" : "←";
+      return [`${mark} ${preview(part.output ?? "")}`];
+    }
+    return [];
+  });
+  return said.length === 0 ? "—" : said.join("\n");
+}
+
+function preview(output: string): string {
+  const flat = output.trim();
+  return flat.length <= OUTPUT_PREVIEW ? flat : `${flat.slice(0, OUTPUT_PREVIEW)}…`;
+}
+
 export function toolsOf(messages: CanonicalMessage[]): ToolRound[] {
   const rounds: ToolRound[] = [];
   const byCall = new Map<string, ToolRound>();

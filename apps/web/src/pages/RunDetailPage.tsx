@@ -19,7 +19,7 @@ import { useT } from "../i18n/locale";
 import type { MessageKey } from "../i18n/zh-CN";
 import { RUN_ACTIONS } from "../runs/actions";
 import { eventNote, fill, outcomeLabel, statusNote } from "../runs/explain";
-import { artifactIdsIn, mergeArtifacts, textOf, toolsOf } from "../runs/transcript";
+import { artifactIdsIn, mergeArtifacts, toolsOf, transcriptLineOf } from "../runs/transcript";
 import { runQueryOptions, useRunEvents } from "../runs/useRunEvents";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
@@ -487,10 +487,16 @@ export function RunDetailPage() {
         {turns.length === 0 ? (
           <Empty description={t("emptyMessages")} />
         ) : (
+          /* `index` as the key is safe here and only here: this list is
+             read-only, append-only and never reordered, and a message
+             carries no id of its own. It stops being safe the moment a turn
+             can be edited or inserted. */
           turns.map((message, index) => (
             <article className="workspace-row" key={`${message.role}-${index}`}>
               <Tag>{message.role}</Tag>
-              <Typography.Paragraph className="fact-note">{textOf(message)}</Typography.Paragraph>
+              <Typography.Paragraph className="fact-note transcript-line">
+                {transcriptLineOf(message)}
+              </Typography.Paragraph>
             </article>
           ))
         )}
