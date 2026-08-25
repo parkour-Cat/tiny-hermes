@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, DateTime, Integer, String, UniqueConstraint
+from sqlalchemy import CheckConstraint, DateTime, Integer, String, UniqueConstraint, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from tiny_hermes.shared.database import Base, CreatedAtMixin, IdMixin
@@ -66,6 +66,9 @@ class ModelEndpointRow(IdMixin, CreatedAtMixin, Base):
     #: Null means "no tokenizer declared", which is every row today. The
     #: planner's conservative bound is what answers then.
     tokenizer: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: Whether this endpoint accepts image input. Declared, never inferred
+    #: from `model` — see migration 0046.
+    accepts_images: Mapped[bool] = mapped_column(default=False, server_default=false())
     status: Mapped[str] = mapped_column(String(20), default="active")
     created_by: Mapped[UUID] = mapped_column()
     updated_at: Mapped[datetime] = mapped_column(

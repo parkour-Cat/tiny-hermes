@@ -165,4 +165,10 @@ def test_the_spec_holds_no_credential_field_at_all() -> None:
         "credential_ref",
         "context_accounting",
         "tokenizer",
+        # A capability declaration, not a credential: a boolean saying whether
+        # this endpoint takes image input. Listed here because this assertion
+        # is a whitelist — every field added has to be looked at and named,
+        # which is the only reason it is written as an equality rather than a
+        # pair of `not in` checks.
+        "accepts_images",
     }

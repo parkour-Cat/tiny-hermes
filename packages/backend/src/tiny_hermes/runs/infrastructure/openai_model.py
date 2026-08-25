@@ -29,6 +29,7 @@ from tiny_hermes.runs.domain.models import (
     SAFETY_PREAMBLE,
     CacheStateHint,
     CanonicalMessage,
+    ImageBlock,
     ReasoningBlock,
     TextBlock,
     ToolCallBlock,
@@ -242,10 +243,30 @@ def _tool_round(body: dict[str, Any], message: Any) -> ModelResponse:
     )
 
 
+class ImagesNotAccepted(Exception):
+    """This endpoint was not declared as accepting image input.
+
+    Refused here rather than at the provider. Sending anyway earns a vendor
+    400 in the vendor's own words, which reaches a person in Feishu as
+    `endpoint_status:400` — true, unactionable, and about the wrong layer.
+    This names the thing an administrator can change.
+    """
+
+
+class ImageUnavailable(Exception):
+    """An `ImageBlock` whose bytes the caller did not resolve.
+
+    Raised rather than dropping the block. A question about a picture, sent
+    without the picture, gets answered about nothing — confidently, and with
+    no sign to the reader that anything was missing.
+    """
+
+
 def build_payload(
     spec: ModelEndpointSpec,
     request: ModelRequest,
     tools: list[dict[str, Any]] | None = None,
+    images: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """The request body, with the platform's rules ahead of the Agent's persona.
 
@@ -256,6 +277,7 @@ def build_payload(
     minimum here means a later change to that check cannot turn into a request
     the endpoint was never approved for.
     """
+    resolved = images or {}
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SAFETY_PREAMBLE},
         {"role": "system", "content": request.personality},
@@ -277,7 +299,7 @@ def build_payload(
         # turn cannot talk over it. §11.3 calls it a protected runtime hint.
         messages.append({"role": "system", "content": CACHE_RESET_HINT})
     for entry in request.messages:
-        messages.extend(_as_messages(entry))
+        messages.extend(_as_messages(entry, spec=spec, images=resolved))
     payload: dict[str, Any] = {
         "model": spec.model,
         "messages": messages,
@@ -339,7 +361,44 @@ def _memory_block(request: ModelRequest) -> str:
     )
 
 
-def _as_messages(message: CanonicalMessage) -> list[dict[str, Any]]:
+def _parts(
+    text: str,
+    pictures: list[ImageBlock],
+    *,
+    spec: ModelEndpointSpec | None,
+    images: dict[str, str],
+) -> list[dict[str, Any]]:
+    """A turn as content parts, which is how an image travels.
+
+    Both refusals happen here rather than further down: an endpoint that
+    was not declared to accept images, and a reference the caller did not
+    resolve. Neither can be recovered from by sending something slightly
+    different — one gets a vendor 400, the other gets a confident answer
+    about a picture that was never attached.
+    """
+    if spec is not None and not spec.accepts_images:
+        raise ImagesNotAccepted(
+            f"endpoint {spec.name!r} is not declared as accepting image input"
+        )
+    parts: list[dict[str, Any]] = []
+    if text:
+        parts.append({"type": "text", "text": text})
+    for picture in pictures:
+        found = images.get(picture.artifact_id)
+        if found is None:
+            raise ImageUnavailable(
+                f"image {picture.artifact_id!r} was not resolved for this request"
+            )
+        parts.append({"type": "image_url", "image_url": {"url": found}})
+    return parts
+
+
+def _as_messages(
+    message: CanonicalMessage,
+    *,
+    spec: ModelEndpointSpec | None = None,
+    images: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     """One canonical turn, as the one-or-more messages the API expects.
 
     It walks `blocks` rather than `message.text`. The text accessor still
@@ -368,6 +427,18 @@ def _as_messages(message: CanonicalMessage) -> list[dict[str, Any]]:
     reasoning = {"reasoning_content": thought} if thought else {}
     calls = [b for b in message.blocks if isinstance(b, ToolCallBlock)]
     if not calls:
+        pictures = [b for b in message.blocks if isinstance(b, ImageBlock)]
+        if pictures:
+            return [
+                {
+                    "role": message.role,
+                    "content": _parts(text, pictures, spec=spec, images=images or {}),
+                    **reasoning,
+                }
+            ]
+        # A plain string, which is what every request this platform has ever
+        # sent looks like. Wrapping every message in a parts array for the
+        # sake of the rare one with a photo would change all of them.
         return [{"role": message.role, "content": text, **reasoning}]
     return [
         {
