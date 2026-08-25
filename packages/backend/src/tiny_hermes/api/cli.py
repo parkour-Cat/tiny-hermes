@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.channels.application.outbound import ChannelReplyDispatcher
 from tiny_hermes.channels.infrastructure.feishu_sender import FeishuSender
+from tiny_hermes.channels.infrastructure.run_images import ChannelImageSource
 from tiny_hermes.channels.infrastructure.sql_channel_store import SqlChannelStore
 from tiny_hermes.memory.infrastructure.run_searches import SqlRunSessionSearches
 from tiny_hermes.memory.infrastructure.sql_candidates import SqlMemoryCandidates
@@ -118,6 +119,28 @@ async def _worker() -> None:
         # The Agent's half of §15.3. It writes proposals and can approve
         # none of them, which is the whole governance story in one field.
         proposals=SqlSkillProposals(sessions),
+        # How a picture a person sent becomes something the model can see.
+        # One client per workspace, unlike the model call above: a model
+        # endpoint is approved platform-wide, but an image is fetched from
+        # the channel that received it, and §16.5 measures that against the
+        # workspace which owns the binding.
+        images=ChannelImageSource(
+            sessions,
+            lambda workspace_id: SafeOutboundClient(
+                # `_workspace_egress`, not `_egress(EgressClaim(...))`: that
+                # claim needs an `agent_version_id`, and fetching a picture
+                # somebody sent has none to give honestly. The Agent did not
+                # ask to call Feishu — the platform is collecting the input it
+                # was handed — and naming an Agent version would measure the
+                # fetch against a `network.allow` no Agent author wrote for it.
+                egress=_workspace_egress(settings, workspace_id),
+                connect_timeout=settings.outbound_connect_timeout_seconds,
+                read_timeout=settings.outbound_read_timeout_seconds,
+                max_redirects=settings.outbound_max_redirects,
+                max_response_bytes=settings.outbound_max_response_bytes,
+            ),
+            CredentialResolver(None, optional_kek(settings.tiny_hermes_kek)).resolve,
+        ),
         # An Agent's calls to somebody else's API leave from here rather than
         # from the sandbox, so the credential stays on this side and the
         # request passes the same egress boundary as every other outbound

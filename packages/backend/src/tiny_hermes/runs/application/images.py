@@ -9,6 +9,7 @@ only sends what it was given, and refuses a block naming something absent.
 
 from collections.abc import Sequence
 from typing import Protocol
+from uuid import UUID
 
 from tiny_hermes.runs.domain.models import CanonicalMessage, ImageBlock
 
@@ -28,13 +29,20 @@ class ImageSource(Protocol):
 
     Narrow on purpose: the Worker must not learn which surface a reference
     came from, and this is the whole of what it needs.
+
+    `session_id` is a parameter rather than something the implementation is
+    constructed with, because a Worker is one per process and a Session is
+    one per Run. Binding it at construction would fetch a second workspace's
+    image with the first workspace's token.
     """
 
-    async def data_url_for(self, reference: str) -> str: ...
+    async def data_url_for(self, reference: str, session_id: UUID) -> str: ...
 
 
 async def resolve_images(
-    messages: Sequence[CanonicalMessage], source: ImageSource | None
+    messages: Sequence[CanonicalMessage],
+    source: ImageSource | None,
+    session_id: UUID,
 ) -> dict[str, str]:
     """Every distinct image reference in this round, fetched.
 
@@ -64,7 +72,7 @@ async def resolve_images(
         if reference in found:
             continue
         try:
-            found[reference] = await source.data_url_for(reference)
+            found[reference] = await source.data_url_for(reference, session_id)
         except Exception as error:
             raise ImagesUnresolvable(
                 f"could not fetch image {reference!r}: {error}"

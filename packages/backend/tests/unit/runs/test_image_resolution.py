@@ -11,6 +11,7 @@ one — that is most Runs.
 """
 
 from typing import Any
+from uuid import UUID, uuid4
 
 import pytest
 from tiny_hermes.runs.application.images import resolve_images
@@ -23,11 +24,15 @@ class _Resolver:
         self.fails = fails
         self.asked: list[str] = []
 
-    async def data_url_for(self, reference: str) -> str:
+    async def data_url_for(self, reference: str, session_id: UUID) -> str:
+        del session_id
         self.asked.append(reference)
         if self.fails:
             raise RuntimeError("feishu said no")
         return self.answers[reference]
+
+
+SESSION = uuid4()
 
 
 def _turn(*blocks: Any) -> CanonicalMessage:
@@ -39,7 +44,7 @@ async def test_a_round_with_no_images_asks_nothing() -> None:
     depend on a channel being reachable."""
     resolver = _Resolver()
 
-    found = await resolve_images((_turn(TextBlock(text="hi")),), resolver)
+    found = await resolve_images((_turn(TextBlock(text="hi")),), resolver, SESSION)
 
     assert found == {}
     assert resolver.asked == []
@@ -54,6 +59,7 @@ async def test_each_reference_is_resolved_once() -> None:
             _turn(ImageBlock(reference="feishu:om_1:k", media_type="image/png")),
         ),
         resolver,
+        SESSION,
     )
 
     assert found == {"feishu:om_1:k": "data:image/png;base64,AAA"}
@@ -65,7 +71,7 @@ async def test_each_reference_is_resolved_once() -> None:
 
 async def test_no_resolver_and_no_images_is_fine() -> None:
     """A deployment with no image-capable channel injects nothing."""
-    assert await resolve_images((_turn(TextBlock(text="hi")),), None) == {}
+    assert await resolve_images((_turn(TextBlock(text="hi")),), None, SESSION) == {}
 
 
 async def test_an_image_with_no_resolver_is_refused() -> None:
@@ -78,6 +84,7 @@ async def test_an_image_with_no_resolver_is_refused() -> None:
         await resolve_images(
             (_turn(ImageBlock(reference="feishu:om_1:k", media_type="image/png")),),
             None,
+            SESSION,
         )
 
 
@@ -88,4 +95,5 @@ async def test_a_failing_fetch_is_refused_rather_than_skipped() -> None:
         await resolve_images(
             (_turn(ImageBlock(reference="feishu:om_1:k", media_type="image/png")),),
             _Resolver(fails=True),
+            SESSION,
         )

@@ -24,6 +24,11 @@ from tiny_hermes.model_catalog.domain.pricing import (
     within_ceiling,
 )
 from tiny_hermes.model_catalog.domain.pricing import unknown as unknown_cost
+from tiny_hermes.runs.application.images import (
+    ImageSource,
+    ImagesUnresolvable,
+    resolve_images,
+)
 from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
 from tiny_hermes.runs.application.tool_answers import (
     answer_agent_delegate,
@@ -302,6 +307,10 @@ class WorkerRuntime:
         mcp: McpGateway | None = None,
         memories: MemoryCandidates | None = None,
         searches: SessionSearches | None = None,
+        #: Turns an `ImageBlock.reference` into bytes. `None` on a deployment
+        #: with no channel that sends images, which is why a round carrying
+        #: none never touches it — see `resolve_images`.
+        images: ImageSource | None = None,
         children: ChildRuns | None = None,
         artifacts: ArtifactReads | None = None,
     ) -> None:
@@ -330,6 +339,7 @@ class WorkerRuntime:
         # nothing: "no past message matched" and "nobody wired the search"
         # are different facts and a model cannot tell them apart.
         self._searches = searches
+        self._images = images
         # Absent, `agent.delegate` is refused rather than answered with an
         # empty list of children: a parent told it started nothing and a
         # parent told nobody wired delegation are different situations, and
@@ -425,9 +435,33 @@ class WorkerRuntime:
                     await self._cost_exceeded(claimed, handle, box, context, spend)
                     return
                 round_started = monotonic()
-                response = await self._model.complete(
-                    _request(context, box, plan, mcp)
-                )
+                try:
+                    # Before the call, not inside the provider: fetching a
+                    # channel's image needs that channel's credentials, and a
+                    # model adapter holding them would be a credential in the
+                    # wrong module.
+                    pictures = await resolve_images(
+                        plan.messages, self._images, claimed.run.session_id
+                    )
+                except ImagesUnresolvable as unresolved:
+                    # A failed round with a named reason rather than an
+                    # exception: a Run that cannot fetch its own attachment is
+                    # an ordinary operational event, and the Run's own failure
+                    # is where an operator should read about it — the same
+                    # reasoning `model_router` gives for a vanished endpoint.
+                    logger.warning(
+                        "images unresolved: run=%s %s", claimed.run.id, unresolved
+                    )
+                    response = ModelResponse(
+                        stop_reason=StopReason.FAILED,
+                        text="",
+                        usage_quality=UsageQuality.UNAVAILABLE,
+                        failure="image_unavailable",
+                    )
+                else:
+                    response = await self._model.complete(
+                        _request(context, box, plan, mcp, pictures)
+                    )
                 if box is not None:
                     # Only the first round of a slice is told, because only the
                     # first one is news.
@@ -2028,6 +2062,7 @@ def _request(
     box: "_Sandbox | None",
     plan: ContextPlan,
     mcp: tuple[BoundMcpTool, ...] = (),
+    pictures: dict[str, str] | None = None,
 ) -> ModelRequest:
     """Build one round's request.
 
@@ -2036,6 +2071,7 @@ def _request(
     past it would send a request the window was never measured against.
     """
     return ModelRequest(
+        images=pictures or {},
         policy=context.spec.model_policy,
         personality=context.spec.personality,
         messages=plan.messages,
