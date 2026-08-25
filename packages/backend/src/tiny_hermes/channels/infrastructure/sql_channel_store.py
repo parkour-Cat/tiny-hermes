@@ -40,6 +40,18 @@ _WORKING = (RunState.QUEUED.value, RunState.RUNNING.value)
 
 
 @dataclass(frozen=True)
+class PendingCard:
+    """A delivery that has work under way and nothing on screen yet."""
+
+    event_row_id: UUID
+    run_id: UUID
+    session_id: UUID
+    #: Present when this message landed in a queue. It opens with the queue
+    #: card directly — 「正在处理」 would be false, nothing is processing it.
+    notice: BlockedNotice | None
+
+
+@dataclass(frozen=True)
 class PendingProgress:
     """A Run still going, whose sender has been told nothing yet."""
 
@@ -282,6 +294,66 @@ class SqlChannelStore:
             .values(blocked_notice=notice.document())
         )
         await self._session.flush()
+
+    async def pending_card_opens(self, limit: int = 50) -> list["PendingCard"]:
+        """Deliveries that have a Run and no card yet.
+
+        No age condition: this is the one stage that must not wait. It runs
+        on the very next scan after the delivery lands, which is what makes
+        the person see something about a second after they hit send.
+        """
+        rows = (
+            await self._session.execute(
+                select(
+                    ChannelEventRow.id,
+                    ChannelEventRow.run_id,
+                    ChannelEventRow.blocked_notice,
+                    RunRow.session_id,
+                )
+                .join(RunRow, RunRow.id == ChannelEventRow.run_id)
+                .where(
+                    ChannelEventRow.run_id.is_not(None),
+                    ChannelEventRow.card_message_id.is_(None),
+                    ChannelEventRow.replied_at.is_(None),
+                    ChannelEventRow.card_attempted_at.is_(None),
+                )
+                .order_by(ChannelEventRow.received_at, ChannelEventRow.id)
+                .limit(limit)
+            )
+        ).all()
+        return [
+            PendingCard(
+                event_row_id=row.id,
+                run_id=row.run_id,
+                session_id=row.session_id,
+                notice=notice_from_stored(row.blocked_notice),
+            )
+            for row in rows
+        ]
+
+    async def record_card(
+        self, event_row_id: UUID, message_id: str | None, now: datetime
+    ) -> None:
+        """Remember the card, or remember that there is none.
+
+        `card_attempted_at` is stamped either way, and that is the whole
+        reason it exists separately from `card_message_id`. A send that
+        answered without an id would otherwise stay in the opening scan
+        forever, sending a new 「正在处理」 card every second.
+        """
+        await self._session.execute(
+            update(ChannelEventRow)
+            .where(ChannelEventRow.id == event_row_id)
+            .values(card_message_id=message_id, card_attempted_at=now)
+        )
+        await self._session.flush()
+
+    async def card_for(self, event_row_id: UUID) -> str | None:
+        return await self._session.scalar(
+            select(ChannelEventRow.card_message_id).where(
+                ChannelEventRow.id == event_row_id
+            )
+        )
 
     async def record_unsupported(
         self, event_row_id: UUID, kind: str, external_user_id: str

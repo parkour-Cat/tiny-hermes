@@ -13,8 +13,10 @@ This is the rendering that gets it in front of the person who typed.
 """
 
 import json
+from typing import Any, cast
 from uuid import UUID
 
+import pytest
 from tiny_hermes.channels.domain.blocked import BlockedNotice
 from tiny_hermes.channels.infrastructure.feishu_card import blocked_card
 
@@ -34,7 +36,7 @@ def _notice(**overrides: object) -> BlockedNotice:
     return BlockedNotice(**fields)  # pyright: ignore[reportArgumentType]
 
 
-def _text_of(card: dict[str, object]) -> str:
+def _text_of(card: dict[str, Any]) -> str:
     """Every piece of text in the card, flattened — the test asks what a
     person can read, not which element it landed in."""
     return json.dumps(card, ensure_ascii=False)
@@ -157,3 +159,71 @@ def test_the_card_is_the_shape_feishu_takes() -> None:
     # value that could not survive that would fail at the vendor rather than
     # here.
     json.dumps(card)
+
+
+# --- the cards a delivery moves through, and the flag that lets it move ---
+
+
+def _every_card() -> dict[str, dict[str, Any]]:
+    """Every card this platform can put in a conversation.
+
+    Enumerated here so the `update_multi` test below covers all of them: a
+    card added later without the flag would patch fine in a unit test and
+    fail against the tenant, which is the failure mode this whole file is
+    written against.
+    """
+    from tiny_hermes.channels.infrastructure.feishu_card import (
+        answer_card,
+        failure_card,
+        working_card,
+    )
+
+    return {
+        "working": working_card(),
+        "answer": answer_card("上周有 12 单。"),
+        "failure": failure_card("model_endpoint_unreachable"),
+        "blocked": blocked_card(_notice()),
+    }
+
+
+@pytest.mark.parametrize("name", ["working", "answer", "failure", "blocked"])
+def test_every_card_declares_that_it_may_be_updated(name: str) -> None:
+    """Feishu requires `config.update_multi: true` **both when the card is
+    sent and when it is updated**. Without it on the original send, every
+    later patch is refused — and the person is left looking at `正在处理`
+    for as long as the conversation lasts.
+
+    Parameterized over all of them rather than asserted once, because the
+    cost of forgetting it on a new card is paid only against a real tenant.
+    """
+    card = _every_card()[name]
+
+    config = card["config"]
+    assert isinstance(config, dict)
+    assert cast(dict[str, Any], config).get("update_multi") is True
+
+
+def test_the_working_card_says_the_message_arrived() -> None:
+    """The first thing a person sees, about a second after they hit send.
+
+    It exists because a text reply cannot be taken back: the platform had to
+    stay silent until it knew what to say, and silence is what makes people
+    send the message again.
+    """
+    rendered = _text_of(_every_card()["working"])
+
+    assert "收到" in rendered or "处理" in rendered
+
+
+def test_the_answer_card_carries_what_the_agent_said() -> None:
+    rendered = _text_of(_every_card()["answer"])
+
+    assert "上周有 12 单。" in rendered
+
+
+def test_the_failure_card_names_the_reason() -> None:
+    """`failure_reason` is on this project's list of things written and never
+    rendered. It stays rendered here."""
+    rendered = _text_of(_every_card()["failure"])
+
+    assert "model_endpoint_unreachable" in rendered
