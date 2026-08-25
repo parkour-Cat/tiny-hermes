@@ -26,6 +26,7 @@ from uuid import UUID
 
 from tiny_hermes.runs.domain.models import (
     CanonicalMessage,
+    ReasoningBlock,
     StoredMessage,
     TextBlock,
     ToolCallBlock,
@@ -256,7 +257,16 @@ def estimate_tokens(text: str, tokenizer: str | None = None) -> int:
 def _message_estimate(message: CanonicalMessage, tokenizer: str | None) -> int:
     total = MESSAGE_OVERHEAD_TOKENS
     for block in message.blocks:
-        if isinstance(block, TextBlock):
+        if isinstance(block, TextBlock | ReasoningBlock):
+            # Reasoning is counted, not skipped: a thinking endpoint requires
+            # it back on the next request, so it occupies the window exactly
+            # as text does. Leaving it out would under-count every turn a
+            # thinking model produced and plan a request that does not fit.
+            #
+            # Named here rather than left to the `else`, which reads
+            # `block.output` — a `ReasoningBlock` has none, so falling
+            # through would have been an AttributeError on the first Run
+            # against a thinking endpoint. pyright caught it; no test did.
             total += estimate_tokens(block.text, tokenizer)
         elif isinstance(block, ToolCallBlock):
             total += estimate_tokens(f"{block.name}{block.arguments}", tokenizer)
@@ -572,9 +582,13 @@ def plan_context(
 ) -> ContextPlan:
     """Decide what this round sends.
 
-    ``memories`` is allocated and always empty until M2D fills it. It is a
-    parameter rather than a future edit because the trimming order already
-    names it: when M2D arrives, the order does not move.
+    ``memories`` carries §14.1's remembered facts — the Worker reads the
+    subject's own and the Agent's shared ones and passes them here. This
+    said "allocated and always empty until M2D fills it" long after M2D
+    filled it, and the stale sentence was believed: it was read as evidence
+    that this platform had no long-term memory at all. A comment describing
+    a state the code has left is the failure this repository keeps naming,
+    pointed at itself.
 
     ``segments`` is this Agent's resolved table rather than the platform
     default, for the same reason the publish check resolves before it measures

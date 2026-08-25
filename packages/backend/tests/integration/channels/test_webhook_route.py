@@ -227,3 +227,111 @@ async def test_an_unknown_binding_looks_exactly_like_a_bad_signature(
     )
 
     assert posted.status_code == 401, posted.text
+
+
+async def test_an_unsigned_plaintext_handshake_is_answered(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: Any,
+) -> None:
+    """Feishu sends the *registration* handshake unsigned and in plaintext,
+    even when an Encrypt Key is configured — measured against a real tenant,
+    where the console reported `Challenge code没有返回` and this platform
+    logged `carried no signature headers` for the delivery it refused.
+
+    Requiring a signature here made the endpoint impossible to register:
+    the key only takes effect for deliveries that follow, so demanding one
+    during the handshake is a deadlock rather than a defence. The narrow
+    exception is this and only this — see the test below for the line it
+    must not cross.
+    """
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    body = json.dumps({"type": "url_verification", "challenge": "c-plain"}).encode()
+
+    posted = client.post(
+        f"/api/v1/channels/feishu/{binding_id}/webhook",
+        content=body,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert posted.status_code == 200, posted.text
+    assert posted.json()["challenge"] == "c-plain"
+
+
+async def test_an_unsigned_but_encrypted_handshake_is_answered(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: Any,
+) -> None:
+    """What a real tenant actually sends, measured: **no signature headers
+    and an encrypted body**.
+
+        ts=None nonce=None sig=None body={"encrypt":"..."}
+
+    The first version of the unsigned path assumed unsigned meant plaintext,
+    read `{"encrypt": ...}` as the envelope itself, found no `type`, and
+    refused it as "only a handshake may arrive unsigned" — which is how a
+    correct request from Feishu got turned away by the exception written to
+    let it in. Unsigned says nothing about encryption; the two are separate
+    choices and this platform has to handle the pair.
+    """
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    body = _encrypt({"type": "url_verification", "challenge": "c-sealed"})
+
+    posted = client.post(
+        f"/api/v1/channels/feishu/{binding_id}/webhook",
+        content=body,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert posted.status_code == 200, posted.text
+    assert posted.json()["challenge"] == "c-sealed"
+
+
+async def test_an_unsigned_event_is_still_refused_and_starts_nothing(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: Any,
+) -> None:
+    """The line the handshake exception must not cross.
+
+    A real event carries a message that becomes a Run as somebody. Accepting
+    one without a signature would let anyone who learned the URL speak as
+    any user of this tenant — which is the whole reason the signature exists.
+    Only `url_verification` may arrive unsigned; everything else is refused
+    exactly as before.
+    """
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    body = json.dumps(
+        {
+            "schema": "2.0",
+            "header": {"event_id": "forged-1", "event_type": "im.message.receive_v1"},
+            "event": {
+                "sender": {"sender_id": {"open_id": "ou_intruder"}},
+                "message": {"message_type": "text", "content": '{"text":"hello"}'},
+            },
+        }
+    ).encode()
+
+    posted = client.post(
+        f"/api/v1/channels/feishu/{binding_id}/webhook",
+        content=body,
+        headers={"Content-Type": "application/json"},
+    )
+
+    assert posted.status_code == 401, posted.text
+    async with engine.connect() as connection:
+        started = await connection.execute(
+            text("SELECT count(*) FROM runs WHERE workspace_id = :w"),
+            {"w": UUID(workspace_id)},
+        )
+    assert started.scalar() == 0

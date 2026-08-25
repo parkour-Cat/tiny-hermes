@@ -15,7 +15,7 @@ stricter than most of this console and is the easy one to get wrong.
 """
 
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -73,7 +73,9 @@ def secret_ref(client: TestClient, scope: dict[str, str]) -> str:
         json={"name": "feishu-encrypt-key", "scope": "workspace", "plaintext": "s" * 32},
     )
     assert created.status_code == 201, created.text
-    return str(created.json()["name"])
+    # The **id**: that is what `CredentialResolver` resolves, and therefore
+    # what a binding must store. The name is only what a person picks by.
+    return str(created.json()["id"])
 
 
 def _create(
@@ -91,6 +93,47 @@ def _create(
         **overrides,
     }
     return client.post("/api/v1/channel-bindings", headers=headers, json=body)
+
+
+def test_a_binding_carries_the_app_secret_reference_it_replies_with(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """Replying to a Feishu message needs the app secret (exchanged for a
+    tenant token). It is a **reference**, like the encrypt key — the value
+    never touches this table — and it is returned so a console can show
+    which secret a binding was wired to."""
+    created = _create(
+        client, scope, published_agent, secret_ref, app_secret_ref=secret_ref
+    )
+
+    assert created.status_code == 201, created.text
+    assert created.json()["app_secret_ref"] == secret_ref
+    assert "s" * 32 not in created.text  # the value, never
+
+
+def test_a_binding_without_an_app_secret_is_allowed(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """§929's drill needs a receive-only binding — it counts inbound events
+    and never replies. A binding with no app secret is that, not an error."""
+    created = _create(client, scope, published_agent, secret_ref)
+
+    assert created.status_code == 201, created.text
+    assert created.json()["app_secret_ref"] is None
+
+
+def test_an_app_secret_naming_no_workspace_secret_is_refused(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """Same reasoning as the encrypt key: a reference to a secret that does
+    not exist fails when it is used — inside an outbound call nobody is
+    watching — instead of here, where the person who typed it is."""
+    refused = _create(
+        client, scope, published_agent, secret_ref, app_secret_ref="no-such-secret"
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["code"] == "channel_key_unknown"
 
 
 def test_a_binding_can_be_created_and_then_listed(
@@ -250,3 +293,154 @@ async def test_a_binding_in_another_workspace_is_invisible(
     listed = client.get("/api/v1/channel-bindings", headers=elsewhere)
 
     assert listed.status_code == 403, listed.text
+
+
+def test_a_key_reference_must_be_one_the_resolver_can_actually_resolve(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """The reference stored must be the shape `CredentialResolver` reads.
+
+    It reads a Secret **id**, or else an environment-variable name. A
+    secret's *name* is neither. `secret_exists` looked the name up and said
+    yes, so a binding created cleanly and then failed at the first real
+    delivery with `CredentialMissing` and a 500 — validation and use were
+    checking different things, which is why the console could report success
+    for a binding that could never work.
+    """
+    created = _create(client, scope, published_agent, secret_ref)
+    assert created.status_code == 201, created.text
+
+    listed = client.get("/api/v1/channel-bindings", headers=scope).json()
+    stored = listed[0]["encrypt_key_ref"]
+
+    # A uuid, not the name it was chosen by.
+    UUID(stored)
+
+
+def test_a_binding_can_learn_the_app_secret_it_was_created_without(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """The gap that made the reply path unusable on a real tenant.
+
+    A binding created before outbound existed has no `app_secret_ref`, and
+    `uq_channel_bindings_target` allows one binding per (workspace, channel,
+    agent) — a constraint that `disable` does **not** release. So there was
+    no way to attach the secret and no way to replace the binding either:
+    the channel was permanently receive-only, and the dispatcher settled
+    every one of its replies `no_credential`.
+    """
+    created = _create(client, scope, published_agent, secret_ref)
+    assert created.status_code == 201, created.text
+    binding_id = created.json()["id"]
+
+    updated = client.patch(
+        f"/api/v1/channel-bindings/{binding_id}",
+        headers=scope,
+        json={"app_secret_ref": secret_ref},
+    )
+
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["app_secret_ref"] == secret_ref
+    # Untouched, because they were not named. A PATCH that reset every
+    # absent field would silently strip the encrypt key and break inbound
+    # while fixing outbound.
+    assert updated.json()["encrypt_key_ref"] == secret_ref
+    assert updated.json()["app_id"] == "cli_a1b2c3"
+
+
+def test_an_update_naming_a_secret_that_does_not_exist_is_refused(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    created = _create(client, scope, published_agent, secret_ref)
+    binding_id = created.json()["id"]
+
+    refused = client.patch(
+        f"/api/v1/channel-bindings/{binding_id}",
+        headers=scope,
+        json={"app_secret_ref": str(uuid4())},
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["code"] == "channel_key_unknown"
+
+
+def test_a_feishu_binding_cannot_have_its_encrypt_key_cleared(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """The CHECK in migration 0037 would refuse this at the database, which
+    is a 500. Refused here, because a binding with no key is one that would
+    accept forged deliveries — and the caller deserves to be told which
+    field they broke."""
+    created = _create(client, scope, published_agent, secret_ref)
+    binding_id = created.json()["id"]
+
+    refused = client.patch(
+        f"/api/v1/channel-bindings/{binding_id}",
+        headers=scope,
+        json={"encrypt_key_ref": None},
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["code"] == "channel_key_required"
+
+
+def test_an_app_secret_can_be_removed_to_make_a_binding_receive_only(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """The reverse of the first test, and the reason `null` has to mean
+    "clear" rather than "unchanged": §929's drill needs a binding that
+    replies to nobody, and turning an existing one back into that is how an
+    operator runs the drill without deleting the conversation history."""
+    created = _create(
+        client, scope, published_agent, secret_ref, app_secret_ref=secret_ref
+    )
+    binding_id = created.json()["id"]
+
+    updated = client.patch(
+        f"/api/v1/channel-bindings/{binding_id}",
+        headers=scope,
+        json={"app_secret_ref": None},
+    )
+
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["app_secret_ref"] is None
+
+
+async def test_a_developer_may_not_rewire_a_binding(
+    client: TestClient,
+    engine: AsyncEngine,
+    scope: dict[str, str],
+    workspace_id: str,
+    published_agent: str,
+    secret_ref: str,
+) -> None:
+    """§4.6 again: a developer may *use* an authorized binding. Pointing one
+    at a different credential is managing it, which is the administrator's
+    line — and the check has to be on the update route too, not only on
+    create."""
+    created = _create(client, scope, published_agent, secret_ref)
+    binding_id = created.json()["id"]
+    await _seed_user(engine, "Dev Rewire", "dev-rewire@example.com")
+    developer = _member(
+        client, scope, workspace_id, "dev-rewire@example.com", "developer"
+    )
+
+    refused = client.patch(
+        f"/api/v1/channel-bindings/{binding_id}",
+        headers=developer,
+        json={"app_secret_ref": secret_ref},
+    )
+
+    assert refused.status_code == 403, refused.text
+
+
+def test_an_unknown_binding_cannot_be_updated(
+    client: TestClient, scope: dict[str, str]
+) -> None:
+    missing = client.patch(
+        f"/api/v1/channel-bindings/{uuid4()}",
+        headers=scope,
+        json={"app_secret_ref": None},
+    )
+
+    assert missing.status_code == 404, missing.text

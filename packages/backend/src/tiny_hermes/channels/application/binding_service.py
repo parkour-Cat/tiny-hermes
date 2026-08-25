@@ -72,6 +72,9 @@ class ChannelBindingView:
     status: str
     app_id: str | None
     encrypt_key_ref: str | None
+    #: The app secret this binding replies with, by reference. Absent for a
+    #: receive-only binding.
+    app_secret_ref: str | None
     created_by: UUID
     created_at: datetime
 
@@ -79,7 +82,9 @@ class ChannelBindingView:
 class ChannelBindingStore(Protocol):
     async def user_role(self, workspace_id: UUID, user_id: UUID) -> Role | None: ...
 
-    async def secret_exists(self, workspace_id: UUID, name: str) -> bool: ...
+    async def secret_exists(self, workspace_id: UUID, reference: str) -> bool:
+        """By the **id** a `CredentialResolver` would resolve, not by name."""
+        ...
 
     async def agent_exists(self, workspace_id: UUID, agent_id: UUID) -> bool: ...
 
@@ -92,11 +97,23 @@ class ChannelBindingStore(Protocol):
         created_by: UUID,
         app_id: str | None,
         encrypt_key_ref: str | None,
+        app_secret_ref: str | None,
     ) -> ChannelBindingView | None: ...
 
     async def list_bindings(
         self, workspace_id: UUID
     ) -> tuple[ChannelBindingView, ...]: ...
+
+    async def binding(
+        self, workspace_id: UUID, binding_id: UUID
+    ) -> ChannelBindingView | None: ...
+
+    async def update_binding(
+        self,
+        workspace_id: UUID,
+        binding_id: UUID,
+        changes: dict[str, str | None],
+    ) -> ChannelBindingView | None: ...
 
     async def disable_binding(
         self, workspace_id: UUID, binding_id: UUID
@@ -126,6 +143,7 @@ class ChannelBindingService:
         agent_id: UUID,
         app_id: str | None,
         encrypt_key_ref: str | None,
+        app_secret_ref: str | None,
         request_id: str,
     ) -> ChannelBindingView:
         await self._require_role(
@@ -136,6 +154,13 @@ class ChannelBindingService:
             raise ChannelKeyRequired
         if encrypt_key_ref and not await self.store.secret_exists(
             workspace_id, encrypt_key_ref
+        ):
+            raise ChannelKeyUnknown
+        # Same check for the app secret, and the same reason: a reference to
+        # a secret that does not exist fails inside an outbound call nobody
+        # is watching, not here where the person who typed it is.
+        if app_secret_ref and not await self.store.secret_exists(
+            workspace_id, app_secret_ref
         ):
             raise ChannelKeyUnknown
         if not await self.store.agent_exists(workspace_id, agent_id):
@@ -151,6 +176,7 @@ class ChannelBindingService:
             created_by=actor.id,
             app_id=app_id,
             encrypt_key_ref=encrypt_key_ref,
+            app_secret_ref=app_secret_ref,
         )
         if created is None:
             raise ChannelAlreadyBound
@@ -171,6 +197,60 @@ class ChannelBindingService:
             audit_as_platform="channel.bindings_read_by_platform_admin",
         )
         return await self.store.list_bindings(workspace_id)
+
+    async def update(
+        self,
+        actor: Actor,
+        workspace_id: UUID,
+        binding_id: UUID,
+        *,
+        changes: dict[str, str | None],
+        request_id: str,
+    ) -> ChannelBindingView:
+        """Rewire an existing binding's credentials.
+
+        Exists because `uq_channel_bindings_target` allows one binding per
+        (workspace, channel, agent) and `disable` does not release it. A
+        binding created before the reply path existed therefore had no way
+        to acquire an app secret and no way to be replaced — permanently
+        receive-only, with every reply settling `no_credential`.
+
+        Deliberately narrow: credentials and `app_id` only. Moving a binding
+        to a different Agent would silently redirect every existing
+        conversation in `channel_conversations`, which is a different
+        operation from fixing a credential and should look like one.
+        """
+        await self._require_role(
+            actor, workspace_id, request_id, allowed=MANAGERS,
+            audit_as_platform="channel.binding_updated_by_platform_admin",
+        )
+        existing = await self.store.binding(workspace_id, binding_id)
+        if existing is None:
+            raise UnknownChannel
+        # Validated against the *result* of the change, not against what was
+        # sent: an update that clears the encrypt key and one that never
+        # mentioned it are the same binding afterwards, and only the first
+        # is refused.
+        after_key = changes.get("encrypt_key_ref", existing.encrypt_key_ref)
+        if existing.channel in ENCRYPTED_CHANNELS and not after_key:
+            raise ChannelKeyRequired
+        for field in ("encrypt_key_ref", "app_secret_ref"):
+            reference = changes.get(field)
+            if reference and not await self.store.secret_exists(
+                workspace_id, reference
+            ):
+                raise ChannelKeyUnknown
+        updated = await self.store.update_binding(workspace_id, binding_id, changes)
+        if updated is None:
+            raise UnknownChannel
+        await self.store.append_audit(
+            workspace_id=workspace_id,
+            actor_id=actor.id,
+            action="channel.binding_updated",
+            resource_id=binding_id,
+            request_id=request_id,
+        )
+        return updated
 
     async def disable(
         self, actor: Actor, workspace_id: UUID, binding_id: UUID, request_id: str

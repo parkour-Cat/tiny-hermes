@@ -11,6 +11,7 @@ end-user cookie, which has nothing to do with this caller. Feishu arrives
 with no cookies at all.
 """
 
+import logging
 from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
@@ -47,6 +48,8 @@ from tiny_hermes.identity.presentation.dependencies import (
 )
 from tiny_hermes.shared.errors import AppError
 from tiny_hermes.tenancy.domain.models import Actor
+
+logger = logging.getLogger(__name__)
 
 WorkspaceHeader = Annotated[str | None, Header(alias="X-Workspace-Id")]
 CsrfHeader = Annotated[str | None, Header(alias="X-CSRF-Token")]
@@ -111,12 +114,13 @@ def feishu_webhook_router(resources: ApplicationResources) -> APIRouter:
         # it. FastAPI would happily have given a typed body here and the
         # signature would then fail for well-formed requests.
         body = await request.body()
-        if (
-            x_lark_request_timestamp is None
-            or x_lark_request_nonce is None
-            or x_lark_signature is None
-        ):
-            raise _refused()
+        # Not refused here any more. Feishu sends the registration handshake
+        # unsigned, so this route cannot tell "unsigned" from "unacceptable"
+        # on its own; `webhook_service` decides, and it lets exactly one kind
+        # of unsigned body through — a `url_verification`. Everything else
+        # still needs a signature that verifies.
+        if x_lark_signature is None:
+            logger.info("feishu delivery arrived unsigned: binding=%s", binding_id)
 
         try:
             outcome = await service.deliver(
@@ -128,6 +132,21 @@ def feishu_webhook_router(resources: ApplicationResources) -> APIRouter:
                 request_id=request.state.request_id,
             )
         except (WebhookRefused, UnknownChannelBinding) as error:
+            # The caller's answer stays uniform (see `_refused`), but an
+            # operator watching their own deployment needs the reason:
+            # "signature does not match" points at an Encrypt Key differing
+            # from the one this binding names, which is a different fix from
+            # an unknown binding or a malformed body.
+            logger.warning(
+                "feishu delivery refused: binding=%s reason=%r ts=%s nonce=%s "
+                "sig=%s body=%s",
+                binding_id,
+                error,
+                x_lark_request_timestamp,
+                x_lark_request_nonce,
+                x_lark_signature,
+                body[:200],
+            )
             raise _refused() from error
         except ErasedSubjectRefused as error:
             # §344 holds across transports. Refused like any unverified
@@ -135,12 +154,28 @@ def feishu_webhook_router(resources: ApplicationResources) -> APIRouter:
             # once existed and was erased is itself disclosure.
             raise _refused() from error
         except MalformedChannelEvent as error:
-            # Verified, so this really is Feishu — just a message this
-            # platform does not handle. Answered 200 rather than 4xx:
-            # retries are finite and would not make an unsupported message
-            # type supported, so refusing only produces four more copies of
-            # something already understood.
-            del error
+            # An envelope with no sender or no event id — genuinely broken,
+            # and the only case left here. A message type this build cannot
+            # read no longer reaches this branch: `webhook_service` claims
+            # it and marks it for a refusal the scan sends, because that one
+            # has somebody to answer.
+            #
+            # This one does not. **Silent to any person, and it has to be**:
+            # there is no sender named in the envelope, so a reply would go
+            # to whoever the platform guessed. An earlier version of this
+            # comment claimed `never silently` on the strength of the log
+            # line below — which is read by operators and not by anybody
+            # waiting for an answer.
+            #
+            # Answered 200 rather than 4xx: retries are finite and would not
+            # make a broken envelope readable, so refusing only produces
+            # four more copies of something already understood.
+            logger.warning(
+                "feishu delivery could not be read and names nobody to tell: "
+                "binding=%s reason=%r",
+                binding_id,
+                error,
+            )
             return DeliveryAccepted()
 
         if isinstance(outcome, Challenge):
@@ -171,6 +206,26 @@ class CreateChannelBindingRequest(BaseModel):
     #: administrator manage this metadata without ever seeing plaintext, and
     #: a field that took the key itself would make that impossible to keep.
     encrypt_key_ref: str | None = Field(default=None, max_length=200)
+    #: The name of the workspace secret holding the app secret, used to
+    #: reply. Optional: a binding with none is receive-only.
+    app_secret_ref: str | None = Field(default=None, max_length=200)
+
+
+class UpdateChannelBindingRequest(BaseModel):
+    """Credentials and `app_id`, and deliberately nothing else.
+
+    A field left out is unchanged; a field sent as `null` is cleared. The
+    route reads `model_fields_set` to tell them apart, which is the whole
+    reason this model exists rather than reusing the create request.
+
+    `agent_id` and `channel` are absent on purpose: moving a binding to
+    another Agent would silently redirect every conversation already mapped
+    in `channel_conversations`, and that is not a credential fix.
+    """
+
+    app_id: str | None = Field(default=None, max_length=120)
+    encrypt_key_ref: str | None = Field(default=None, max_length=200)
+    app_secret_ref: str | None = Field(default=None, max_length=200)
 
 
 class ChannelBindingResponse(BaseModel):
@@ -180,6 +235,7 @@ class ChannelBindingResponse(BaseModel):
     status: str
     app_id: str | None
     encrypt_key_ref: str | None
+    app_secret_ref: str | None
     created_by: UUID
     created_at: datetime
 
@@ -192,6 +248,7 @@ class ChannelBindingResponse(BaseModel):
             status=view.status,
             app_id=view.app_id,
             encrypt_key_ref=view.encrypt_key_ref,
+            app_secret_ref=view.app_secret_ref,
             created_by=view.created_by,
             created_at=view.created_at,
         )
@@ -269,6 +326,7 @@ def channel_binding_router(resources: ApplicationResources) -> APIRouter:
                 agent_id=payload.agent_id,
                 app_id=payload.app_id,
                 encrypt_key_ref=payload.encrypt_key_ref,
+                app_secret_ref=payload.app_secret_ref,
                 request_id=request.state.request_id,
             )
         except (
@@ -300,6 +358,46 @@ def channel_binding_router(resources: ApplicationResources) -> APIRouter:
         except ForbiddenChannelAction as error:
             raise _binding_error(error) from error
         return [ChannelBindingResponse.of(item) for item in listed]
+
+    @router.patch("/{binding_id}", response_model=ChannelBindingResponse)
+    async def update_binding(  # pyright: ignore[reportUnusedFunction]
+        binding_id: UUID,
+        payload: UpdateChannelBindingRequest,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        service: Annotated[
+            ChannelBindingService, Depends(service_dependency, scope="function")
+        ],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> ChannelBindingResponse:
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            updated = await service.update(
+                _actor(user),
+                workspace_id,
+                binding_id,
+                # `model_fields_set` rather than the values: a field absent
+                # from the body and one sent as `null` are different
+                # requests, and Pydantic's default would render both as
+                # `None`. Without this an update that fixed the app secret
+                # would strip the encrypt key and break inbound.
+                changes={
+                    name: getattr(payload, name)
+                    for name in payload.model_fields_set
+                },
+                request_id=request.state.request_id,
+            )
+        except (
+            ForbiddenChannelAction,
+            ChannelKeyRequired,
+            ChannelKeyUnknown,
+            UnknownChannel,
+        ) as error:
+            raise _binding_error(error) from error
+        return ChannelBindingResponse.of(updated)
 
     @router.post("/{binding_id}/disable", response_model=ChannelBindingResponse)
     async def disable_binding(  # pyright: ignore[reportUnusedFunction]

@@ -94,6 +94,12 @@ class Settings(BaseSettings):
     #: and networks. §4 of the M2C-1 plan moves this into the database; a
     #: single-tenant installation is served by the setting alone.
     egress_allowed_hosts: str = ""
+    #: Where this deployment's console can be reached, for links inside
+    #: messages the platform sends out. Empty on purpose by default: the
+    #: address of a private installation's console is known only to whoever
+    #: deployed it, and a guessed URL is a dead link in front of a user.
+    #: §19.2 allows `必要的审批卡片或跳转管理页面`, and this is the second.
+    console_base_url: str = ""
     #: The Docker network a sandbox is attached to. Empty means a sandbox has
     #: no network at all — §16.4's default — rather than one nobody guards.
     #: The network itself must reach the proxy and nothing else; Compose

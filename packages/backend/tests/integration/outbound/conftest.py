@@ -11,6 +11,7 @@ makes these assertions about the path production actually takes.
 
 import asyncio
 import contextlib
+import gzip
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -70,6 +71,12 @@ class StandIn:
         if status in (301, 302, 303, 307, 308):
             extra.append((b"location", body.decode("latin-1").encode("latin-1")))
             body = b""
+        if path == "/gzipped":
+            # An ordinary compressed answer, which is what most of the public
+            # internet sends to a client that advertises `Accept-Encoding` —
+            # and httpx advertises it by default.
+            body = gzip.compress(body)
+            extra.append((b"content-encoding", b"gzip"))
         await send(
             {
                 "type": "http.response.start",
@@ -97,6 +104,8 @@ class StandIn:
         if path == "/slow":
             await asyncio.sleep(self.slow_seconds)
             return 200, b'{"ok":true}'
+        if path == "/gzipped":
+            return 200, b'{"ok":true,"said":"compressed"}'
         if path == "/unauthorized":
             return 401, b'{"error":"no"}'
         if path == "/flaky":

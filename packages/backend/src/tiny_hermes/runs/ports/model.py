@@ -105,6 +105,11 @@ class ModelResponse:
     external_effect_unknown: bool = False
     #: A normalized reason when ``stop_reason`` is ``failed``.
     failure: str | None = None
+    #: A thinking model's own reasoning, when the endpoint sent some.
+    #: `None` rather than empty, because the two decide different things:
+    #: DeepSeek requires this back on the next request, and a field invented
+    #: for an endpoint that never sent one is a request it may refuse.
+    reasoning: str | None = None
 
     @property
     def billable_tokens(self) -> int:

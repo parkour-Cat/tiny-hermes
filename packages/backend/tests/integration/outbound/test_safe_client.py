@@ -305,3 +305,72 @@ async def test_a_refusal_from_the_boundary_is_not_the_target_saying_no(
 
     assert refusal.value.reason is RefusalReason.TARGET_NOT_IN_SCOPE
     assert app.requests == []
+
+
+async def test_a_json_body_arrives_declared_as_json(
+    stand_in: tuple[StandIn, str], proxy: ProxyHandle
+) -> None:
+    """A body sent as `json=` must carry `Content-Type: application/json`.
+
+    It did not. The client encodes the body with
+    `httpx.Request(...).content`, which returns the bytes and drops the
+    header httpx would have sent with them, and only the `data=` branch set
+    a content type of its own. Every JSON request this platform made went
+    out with no content type at all.
+
+    Servers are entitled to refuse that, and DeepSeek does: a real model
+    endpoint answered `415 Unsupported Media Type` to every call, which the
+    Run surfaced as `endpoint_status:415` — a message that points at the
+    endpoint rather than at the client that malformed the request.
+    """
+    app, url = stand_in
+    async with build(proxy) as client:
+        response = await client.post(f"{url}/ok", json={"say": "hello"})
+
+    assert response.status_code == 200
+    assert app.last().headers.get("content-type") == "application/json"
+
+
+async def test_a_caller_may_still_choose_its_own_content_type(
+    stand_in: tuple[StandIn, str], proxy: ProxyHandle
+) -> None:
+    """The default must not overwrite a caller that meant something else —
+    a JSON-shaped body with a vendor media type is somebody's real API."""
+    app, url = stand_in
+    async with build(proxy) as client:
+        await client.post(
+            f"{url}/ok",
+            json={"say": "hello"},
+            headers={"Content-Type": "application/vnd.example+json"},
+        )
+
+    assert app.last().headers.get("content-type") == "application/vnd.example+json"
+
+
+async def test_a_compressed_answer_can_actually_be_read(
+    stand_in: tuple[StandIn, str], proxy: ProxyHandle
+) -> None:
+    """`.json()` on a gzipped response, which every caller of this client does.
+
+    `stream=True` plus `aiter_bytes()` hands back **decoded** bytes, and the
+    rebuilt response carried the original `Content-Encoding: gzip` alongside
+    them — so httpx decompressed a second time and raised `DecodingError:
+    incorrect header check`. Every caller saw a transport failure for a
+    request that had completed perfectly.
+
+    Measured against a live tenant, and it cost more than an error: the Feishu
+    reply dispatcher read that as "the send failed", retried five times, and
+    sent the person five copies of the same message. The request had succeeded
+    every time.
+    """
+    app, url = stand_in
+    async with build(proxy) as client:
+        response = await client.request("GET", f"{url}/gzipped")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "said": "compressed"}
+    # The header is gone rather than kept, because the bytes it describes are
+    # not compressed any more. Leaving it would be a claim about the body that
+    # is false, and the next reader would meet the same failure.
+    assert "content-encoding" not in response.headers
+    assert app.last().path == "/gzipped"

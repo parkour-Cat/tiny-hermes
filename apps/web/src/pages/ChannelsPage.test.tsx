@@ -60,10 +60,62 @@ test("a bound channel says which Agent it publishes and where", async () => {
   expect(screen.getByText("cli_a1b2c3")).toBeVisible();
 });
 
-test("the form sends the secret's name, never a key", async () => {
-  // §4.6: `管理元数据，不查看明文`. A field that took the key itself would
-  // put plaintext in a request body and in this page's memory, which is the
-  // one thing this row is designed to avoid — see migration 0037.
+test("the form sends the secret's id, never a key and never its name", async () => {
+  // §4.6: `管理元数据，不查看明文` — a field taking the key itself would put
+  // plaintext in a request body, which migration 0037 exists to prevent.
+  //
+  // The **id**, not the name: `CredentialResolver` resolves a Secret by id
+  // (or an environment-variable name), so a binding storing the display name
+  // validated cleanly and then failed at the first real delivery with
+  // `CredentialMissing`. Measured against a live tenant — the webhook
+  // answered 500 while the console had reported the binding as fine.
+  let sent: Record<string, unknown> | null = null;
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json([])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/secrets", () =>
+      HttpResponse.json([
+        { id: "s1", name: "feishu-encrypt-key", scope: "workspace", status: "active" },
+        { id: "s2", name: "feishu-app-secret", scope: "workspace", status: "active" },
+      ]),
+    ),
+    http.post("/api/v1/channel-bindings", async ({ request }) => {
+      sent = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json(binding(), { status: 201 });
+    }),
+  );
+
+  renderChannels();
+  await userEvent.click(await screen.findByRole("button", { name: /绑定渠道|Bind a channel/i }));
+  await userEvent.click(await screen.findByLabelText(/Agent/));
+  await userEvent.click(await screen.findByTitle("Support"));
+  await userEvent.click(screen.getByLabelText(/加密密钥|Encrypt key/i));
+  await userEvent.click(await screen.findByTitle("feishu-encrypt-key"));
+  await userEvent.click(screen.getByLabelText(/应用密钥|App secret/i));
+  // Both selects list every stored secret, so the option title appears more
+  // than once. Click the one in the dropdown that is actually open.
+  const options = await screen.findAllByTitle("feishu-app-secret");
+  const open = options.find(
+    (node) => node.closest(".ant-select-dropdown:not(.ant-select-dropdown-hidden)") !== null,
+  );
+  expect(open).toBeDefined();
+  await userEvent.click(open!);
+  await userEvent.type(screen.getByLabelText(/应用 ID|App ID/i), "cli_zzz");
+  await userEvent.click(screen.getByRole("button", { name: /^绑定$|^Bind$/ }));
+
+  await waitFor(() => expect(sent).not.toBeNull());
+  expect(sent).toEqual({
+    channel: "feishu",
+    agent_id: AGENT,
+    app_id: "cli_zzz",
+    encrypt_key_ref: "s1",
+    app_secret_ref: "s2",
+  });
+});
+
+test("the app secret is optional — a receive-only binding is allowed", async () => {
+  // §929's drill needs one: it counts inbound events and never replies.
+  // Leaving the app secret unset must not block binding.
   let sent: Record<string, unknown> | null = null;
   server.use(
     http.get("/api/v1/channel-bindings", () => HttpResponse.json([])),
@@ -83,16 +135,10 @@ test("the form sends the secret's name, never a key", async () => {
   await userEvent.click(await screen.findByTitle("Support"));
   await userEvent.click(screen.getByLabelText(/加密密钥|Encrypt key/i));
   await userEvent.click(await screen.findByTitle("feishu-encrypt-key"));
-  await userEvent.type(screen.getByLabelText(/应用 ID|App ID/i), "cli_zzz");
   await userEvent.click(screen.getByRole("button", { name: /^绑定$|^Bind$/ }));
 
   await waitFor(() => expect(sent).not.toBeNull());
-  expect(sent).toEqual({
-    channel: "feishu",
-    agent_id: AGENT,
-    app_id: "cli_zzz",
-    encrypt_key_ref: "feishu-encrypt-key",
-  });
+  expect(sent).not.toHaveProperty("app_secret_ref");
 });
 
 test("with no secret stored, the empty page says what to make first", async () => {
@@ -209,4 +255,55 @@ test("registering an issuer sends the key reference shape the API takes", async 
     // list and a comma inside an origin would otherwise split it in two.
     allowed_origins: ["https://portal.example.com"],
   });
+});
+
+test("a binding shows whether it can reply at all", async () => {
+  // Without this column an operator cannot tell a receive-only binding from
+  // one wired to reply, and "the Agent answered but Feishu showed nothing"
+  // has no visible cause on the page that is supposed to explain it.
+  server.use(
+    http.get("/api/v1/channel-bindings", () =>
+      HttpResponse.json([binding({ app_secret_ref: null })]),
+    ),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+  );
+
+  renderChannels();
+
+  expect(await screen.findByText(t("channelReceiveOnly"))).toBeVisible();
+});
+
+test("an existing binding can be given the app secret it was made without", async () => {
+  // The gap that made the whole reply path unusable: one binding per
+  // (workspace, channel, agent), a constraint `disable` does not release,
+  // so a binding created before outbound existed could never acquire a
+  // secret and could never be replaced.
+  let patched: Record<string, unknown> | null = null;
+  server.use(
+    http.get("/api/v1/channel-bindings", () =>
+      HttpResponse.json([binding({ app_secret_ref: null })]),
+    ),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/secrets", () =>
+      HttpResponse.json([
+        { id: "s2", name: "feishu-app-secret", scope: "workspace", status: "active" },
+      ]),
+    ),
+    http.patch("/api/v1/channel-bindings/b1", async ({ request }) => {
+      patched = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json(binding({ app_secret_ref: "s2" }));
+    }),
+  );
+
+  renderChannels();
+  await userEvent.click(await screen.findByRole("button", { name: t("channelEdit") }));
+  await userEvent.click(await screen.findByLabelText(t("channelAppSecretRef")));
+  await userEvent.click(await screen.findByTitle("feishu-app-secret"));
+  await userEvent.click(screen.getByRole("button", { name: t("channelEditConfirm") }));
+
+  await waitFor(() => expect(patched).not.toBeNull());
+  // The id, and only the field that was changed. Sending the whole form
+  // would resubmit `encrypt_key_ref` on every edit, and a stale value there
+  // breaks inbound while fixing outbound.
+  expect(patched).toEqual({ app_secret_ref: "s2" });
 });

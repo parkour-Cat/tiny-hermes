@@ -347,6 +347,8 @@ export type ChannelBindingResponse = {
   status: string;
   app_id: string | null;
   encrypt_key_ref: string | null;
+  /** The app secret this binding replies with, by reference. Null = receive-only. */
+  app_secret_ref: string | null;
   created_by: string;
   created_at: string;
 };

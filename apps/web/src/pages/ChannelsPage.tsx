@@ -35,6 +35,13 @@ export function ChannelsPage() {
   const scope = { workspace: workspaceId ?? "" };
   const [open, setOpen] = useState(false);
   const [form] = Form.useForm<{ agentId: string; encryptKeyRef: string; appId: string }>();
+  // Which binding the edit dialog is open on, or null. The row rather than
+  // its id, because the dialog seeds its fields from the current values —
+  // an edit form that started empty would look like it was about to clear
+  // everything it did not mention.
+  const [editing, setEditing] = useState<ChannelBindingResponse | null>(null);
+  const [editForm] = Form.useForm<{ appId: string; encryptKeyRef: string; appSecretRef?: string }>();
+
 
   const bindingsQuery = ["channel-bindings", workspaceId] as const;
   const bindings = useQuery({
@@ -55,7 +62,7 @@ export function ChannelsPage() {
   const secrets = useQuery({
     queryKey: ["secrets", workspaceId] as const,
     queryFn: () => api<SecretResponse[]>("/api/v1/secrets", scope),
-    enabled: workspaceId !== null && (open || nothingBound),
+    enabled: workspaceId !== null && (open || editing !== null || nothingBound),
   });
 
   // A binding says which Agent is published; an issuer says whose word this
@@ -106,7 +113,12 @@ export function ChannelsPage() {
   });
 
   const bind = useMutation({
-    mutationFn: (values: { agentId: string; encryptKeyRef: string; appId: string }) =>
+    mutationFn: (values: {
+      agentId: string;
+      encryptKeyRef: string;
+      appId: string;
+      appSecretRef?: string;
+    }) =>
       api<ChannelBindingResponse>("/api/v1/channel-bindings", {
         ...scope,
         method: "POST",
@@ -115,6 +127,10 @@ export function ChannelsPage() {
           agent_id: values.agentId,
           app_id: values.appId,
           encrypt_key_ref: values.encryptKeyRef,
+          // Omitted, not sent as null, when unset: a binding with no app
+          // secret is receive-only (§929's drill), and the key's absence is
+          // what says so.
+          ...(values.appSecretRef ? { app_secret_ref: values.appSecretRef } : {}),
         }),
       }),
     onSuccess: () => {
@@ -135,6 +151,37 @@ export function ChannelsPage() {
         method: "POST",
       }),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: bindingsQuery }),
+  });
+
+  const rewire = useMutation({
+    mutationFn: (values: { appId: string; encryptKeyRef: string; appSecretRef?: string }) => {
+      const current = editing;
+      if (current === null) throw new Error("no binding is open");
+      // Only what actually changed. Resubmitting the whole form would send
+      // `encrypt_key_ref` on every edit, and the API reads an explicit
+      // `null` as "clear" — so a form field the user never touched could
+      // strip the key that makes inbound work.
+      const changes: Record<string, string | null> = {};
+      if (values.appId !== (current.app_id ?? "")) changes.app_id = values.appId || null;
+      if (values.encryptKeyRef !== current.encrypt_key_ref) {
+        changes.encrypt_key_ref = values.encryptKeyRef;
+      }
+      if ((values.appSecretRef ?? null) !== current.app_secret_ref) {
+        changes.app_secret_ref = values.appSecretRef ?? null;
+      }
+      return api<ChannelBindingResponse>(`/api/v1/channel-bindings/${current.id}`, {
+        ...scope,
+        method: "PATCH",
+        body: JSON.stringify(changes),
+      });
+    },
+    onSuccess: () => {
+      setEditing(null);
+      editForm.resetFields();
+      void queryClient.invalidateQueries({ queryKey: bindingsQuery });
+    },
+    onError: (caught) =>
+      editForm.setFields([{ name: "appSecretRef", errors: [problemMessage(caught, t)] }]),
   });
 
   if (bindings.isError) {
@@ -203,6 +250,23 @@ export function ChannelsPage() {
                 // field on the response that could carry one.
                 render: (v: string | null) => (v === null ? "—" : <Typography.Text code>{v}</Typography.Text>),
               },
+              {
+                // Whether this binding can answer at all. Without it a
+                // receive-only binding and one wired to reply look
+                // identical, and "the Agent answered but Feishu showed
+                // nothing" has no visible cause on the page meant to
+                // explain it. The reference itself is not shown — the
+                // column is about capability, and the name is in the edit
+                // dialog for whoever is changing it.
+                title: t("channelReplies"),
+                dataIndex: "app_secret_ref",
+                render: (value: string | null) =>
+                  value === null ? (
+                    <Tag>{t("channelReceiveOnly")}</Tag>
+                  ) : (
+                    <Tag color="green">{t("channelCanReply")}</Tag>
+                  ),
+              },
               { title: t("channelStatus"), dataIndex: "status", render: (v: string) => <Tag>{v}</Tag> },
               { title: t("channelBoundAt"), dataIndex: "created_at", render: (v: string) => moment(v) },
               {
@@ -210,14 +274,36 @@ export function ChannelsPage() {
                 key: "actions",
                 render: (_value, row) =>
                   row.status === "active" ? (
-                    <Button
-                      danger
-                      size="small"
-                      loading={disable.isPending}
-                      onClick={() => disable.mutate(row.id)}
-                    >
-                      {t("channelDisable")}
-                    </Button>
+                    <Space size="small">
+                      <Button
+                        size="small"
+                        onClick={() => {
+                          setEditing(row);
+                          // Spread rather than an explicit `undefined`:
+                          // under `exactOptionalPropertyTypes` an optional
+                          // field set to `undefined` is not the same as an
+                          // absent one, and a receive-only binding has to
+                          // leave the select genuinely unset.
+                          editForm.setFieldsValue({
+                            appId: row.app_id ?? "",
+                            encryptKeyRef: row.encrypt_key_ref ?? "",
+                            ...(row.app_secret_ref === null
+                              ? {}
+                              : { appSecretRef: row.app_secret_ref }),
+                          });
+                        }}
+                      >
+                        {t("channelEdit")}
+                      </Button>
+                      <Button
+                        danger
+                        size="small"
+                        loading={disable.isPending}
+                        onClick={() => disable.mutate(row.id)}
+                      >
+                        {t("channelDisable")}
+                      </Button>
+                    </Space>
                   ) : null,
               },
             ]}
@@ -255,7 +341,24 @@ export function ChannelsPage() {
                   // working, and this is the only list of them.
                   render: (value: string[]) => (value.length === 0 ? "—" : value.join(" ")),
                 },
-                { title: t("channelStatus"), dataIndex: "status", render: (v: string) => <Tag>{v}</Tag> },
+                {
+                // Whether this binding can answer at all. Without it a
+                // receive-only binding and one wired to reply look
+                // identical, and "the Agent answered but Feishu showed
+                // nothing" has no visible cause on the page meant to
+                // explain it. The reference itself is not shown — the
+                // column is about capability, and the name is in the edit
+                // dialog for whoever is changing it.
+                title: t("channelReplies"),
+                dataIndex: "app_secret_ref",
+                render: (value: string | null) =>
+                  value === null ? (
+                    <Tag>{t("channelReceiveOnly")}</Tag>
+                  ) : (
+                    <Tag color="green">{t("channelCanReply")}</Tag>
+                  ),
+              },
+              { title: t("channelStatus"), dataIndex: "status", render: (v: string) => <Tag>{v}</Tag> },
                 {
                   title: "",
                   key: "actions",
@@ -337,10 +440,64 @@ export function ChannelsPage() {
                 reference is how you end up with a binding pointing at a
                 secret that does not exist, which fails in a webhook hours
                 later where nobody is watching. */}
-            <Select options={usable.map((secret) => ({ value: secret.name, label: secret.name }))} />
+            {/* Value is the id, label is the name. `CredentialResolver`
+                resolves a Secret by id; a name is neither an id nor an
+                environment variable, so a binding storing one validated
+                cleanly and then failed at the first delivery. */}
+            <Select options={usable.map((secret) => ({ value: secret.id, label: secret.name }))} />
           </Form.Item>
           <Form.Item name="appId" label={t("channelAppId")}>
             <Input />
+          </Form.Item>
+          <Form.Item
+            name="appSecretRef"
+            label={t("channelAppSecretRef")}
+            extra={t("channelAppSecretRefHint")}
+          >
+            {/* Optional — a receive-only binding needs none. The same Select
+                of stored secrets, so an unknown reference cannot be typed.
+                No placeholder: on an antd Select a placeholder becomes the
+                combobox's accessible name and hides the field's label. */}
+            <Select
+              allowClear
+              options={usable.map((secret) => ({ value: secret.id, label: secret.name }))}
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        open={editing !== null}
+        title={t("channelEditTitle")}
+        okText={t("channelEditConfirm")}
+        confirmLoading={rewire.isPending}
+        onCancel={() => {
+          setEditing(null);
+          editForm.resetFields();
+        }}
+        onOk={() => void editForm.submit()}
+        destroyOnHidden
+      >
+        <Form form={editForm} layout="vertical" onFinish={(values) => rewire.mutate(values)}>
+          {/* No Agent field. Moving a binding to another Agent would
+              silently redirect every conversation already mapped to it,
+              and the API refuses it for that reason — offering the control
+              here would be a promise this platform does not keep. */}
+          <Form.Item name="encryptKeyRef" label={t("channelKeyRef")} rules={[{ required: true }]}>
+            <Select options={usable.map((secret) => ({ value: secret.id, label: secret.name }))} />
+          </Form.Item>
+          <Form.Item name="appId" label={t("channelAppId")}>
+            <Input />
+          </Form.Item>
+          <Form.Item
+            name="appSecretRef"
+            label={t("channelAppSecretRef")}
+            extra={t("channelAppSecretRefHint")}
+          >
+            <Select
+              allowClear
+              options={usable.map((secret) => ({ value: secret.id, label: secret.name }))}
+            />
           </Form.Item>
         </Form>
       </Modal>

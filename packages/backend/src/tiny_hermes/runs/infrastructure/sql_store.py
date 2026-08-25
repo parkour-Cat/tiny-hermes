@@ -404,11 +404,33 @@ class SqlRunStore:
         statement = select(RunRow).where(RunRow.workspace_id == workspace_id)
         if session_id is not None:
             statement = statement.where(RunRow.session_id == session_id)
-        rows = (
-            await self._session.scalars(
-                statement.order_by(RunRow.created_at, RunRow.session_sequence, RunRow.id)
+        # Two different questions, and they want opposite orders.
+        #
+        # Filtered to one Session, this list **is** the queue: `queue.position`
+        # counts 1, 2, 3 down it, and reversing that would put position 1 at
+        # the bottom. That is a transcript, where the order carries the
+        # meaning.
+        #
+        # Unfiltered, it is a worklist — "what has been happening" — and it is
+        # read from the top. Oldest-first pushed the newest Run further down
+        # with every submission, so somebody who opened the console to look at
+        # the thing that just happened found it last. That was asked about
+        # twice: once for workspaces, and again here.
+        #
+        # `id` last either way. `created_at` is not a total order — Runs
+        # submitted together share it to the microsecond — and without the
+        # tiebreaker the database may order them differently on each request,
+        # which reads as a list that shuffles itself while you look at it.
+        order = (
+            (RunRow.created_at, RunRow.session_sequence, RunRow.id)
+            if session_id is not None
+            else (
+                RunRow.created_at.desc(),
+                RunRow.session_sequence.desc(),
+                RunRow.id.desc(),
             )
-        ).all()
+        )
+        rows = (await self._session.scalars(statement.order_by(*order))).all()
         return [await self._snapshot(row, capabilities) for row in rows]
 
     async def usage_summary(self, workspace_id: UUID) -> WorkspaceUsageSummary:

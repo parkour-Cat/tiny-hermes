@@ -115,6 +115,35 @@ def _reason(value: str) -> RefusalReason:
         return RefusalReason.EGRESS_UNAVAILABLE
 
 
+#: Headers that describe the bytes as they travelled, not as they end up here.
+#: `aiter_bytes()` yields **decoded** bytes, so carrying these onto the
+#: rebuilt response makes it lie about its own body.
+_TRANSFER_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
+
+
+def _describing_decoded(headers: httpx.Headers) -> httpx.Headers:
+    """The response's headers, minus the ones the decoding already spent.
+
+    Kept as its own function because the failure it prevents is silent and
+    delayed. `aiter_bytes()` decompresses; the first version handed the
+    decompressed bytes to a new `Response` while still telling it
+    `Content-Encoding: gzip`, so httpx decompressed a second time and every
+    `.json()` raised `DecodingError: incorrect header check`. The request had
+    succeeded — only reading it failed — so callers that treat an exception as
+    "it did not happen" retried something that had already happened. The Feishu
+    reply dispatcher did exactly that and sent one person five copies of the
+    same message.
+
+    `Content-Length` goes for the same reason: it counts the compressed bytes,
+    and it is wrong for the ones now attached.
+    """
+    kept = httpx.Headers()
+    for name, value in headers.multi_items():
+        if name.lower() not in _TRANSFER_HEADERS:
+            kept[name] = value
+    return kept
+
+
 def _origin(url: str) -> tuple[str, str, int]:
     parts = urlsplit(url)
     port = parts.port or (443 if parts.scheme == "https" else 80)
@@ -208,8 +237,21 @@ class SafeOutboundClient:
             # client the OIDC flow builds for itself.
             content = urlencode(data).encode("ascii")
             sending.setdefault("Content-Type", "application/x-www-form-urlencoded")
+        elif json is not None:
+            # `httpx.Request(...).content` gives the encoded bytes and leaves
+            # the header httpx would have sent with them behind. Declaring it
+            # here is not cosmetic: a server is entitled to refuse a body it
+            # was not told the type of, and one did — every model call went
+            # out untyped and came back `415 Unsupported Media Type`, which
+            # the Run reported as `endpoint_status:415`, pointing at the
+            # endpoint rather than at this client.
+            #
+            # `setdefault`, so a caller that meant a vendor media type keeps
+            # it.
+            content = httpx.Request("POST", url, json=json).content
+            sending.setdefault("Content-Type", "application/json")
         else:
-            content = None if json is None else httpx.Request("POST", url, json=json).content
+            content = None
         for _ in range(self._max_redirects + 1):
             response = await self._send(method, url, content, sending)
             if response.status_code not in REDIRECT_STATUSES:
@@ -309,7 +351,7 @@ class SafeOutboundClient:
         # that were actually read is what makes `.json()` and `.text` usable.
         return httpx.Response(
             status_code=response.status_code,
-            headers=response.headers,
+            headers=_describing_decoded(response.headers),
             content=bytes(body),
             request=request,
         )

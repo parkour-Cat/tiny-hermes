@@ -33,17 +33,27 @@ class SqlChannelBindingStore:
         )
         return Role(value) if value else None
 
-    async def secret_exists(self, workspace_id: UUID, name: str) -> bool:
-        """Scoped to this workspace on purpose.
+    async def secret_exists(self, workspace_id: UUID, reference: str) -> bool:
+        """By **id**, because that is what resolves it later.
 
-        A platform-scoped secret would resolve at delivery time, but naming
-        one here would let a workspace administrator bind a channel to a
-        secret they cannot see and did not create.
+        `CredentialResolver` reads a Secret id, or else an
+        environment-variable name; a secret's *name* is neither. This used to
+        check the name, so a binding validated cleanly and then failed at the
+        first real delivery with `CredentialMissing` — validation and use
+        were asking different questions, and only the second one counted.
+
+        Scoped to this workspace on purpose: a platform-scoped secret would
+        resolve at delivery time, but naming one here would let a workspace
+        administrator bind a channel to a secret they cannot see.
         """
+        try:
+            secret_id = UUID(reference)
+        except ValueError:
+            return False
         found = await self._session.scalar(
             select(SecretRow.id).where(
                 SecretRow.workspace_id == workspace_id,
-                SecretRow.name == name,
+                SecretRow.id == secret_id,
                 SecretRow.status == "active",
             )
         )
@@ -66,6 +76,7 @@ class SqlChannelBindingStore:
         created_by: UUID,
         app_id: str | None,
         encrypt_key_ref: str | None,
+        app_secret_ref: str | None,
     ) -> ChannelBindingView | None:
         row = ChannelBindingRow(
             workspace_id=workspace_id,
@@ -75,6 +86,7 @@ class SqlChannelBindingStore:
             created_by=created_by,
             app_id=app_id,
             encrypt_key_ref=encrypt_key_ref,
+            app_secret_ref=app_secret_ref,
         )
         self._session.add(row)
         try:
@@ -97,6 +109,46 @@ class SqlChannelBindingStore:
             )
         ).all()
         return tuple(_view(row) for row in rows)
+
+    async def binding(
+        self, workspace_id: UUID, binding_id: UUID
+    ) -> ChannelBindingView | None:
+        row = await self._session.scalar(
+            select(ChannelBindingRow).where(
+                ChannelBindingRow.id == binding_id,
+                ChannelBindingRow.workspace_id == workspace_id,
+            )
+        )
+        return None if row is None else _view(row)
+
+    async def update_binding(
+        self,
+        workspace_id: UUID,
+        binding_id: UUID,
+        changes: dict[str, str | None],
+    ) -> ChannelBindingView | None:
+        """Only the columns named in `changes`, and nothing else.
+
+        The caller decides what "named" means — a PATCH that could not tell
+        an absent field from an explicit null would either strip the encrypt
+        key on every update or make a receive-only binding unreachable. That
+        decision belongs at the route, where the request body is, so this
+        takes a settled mapping rather than a pile of optionals.
+        """
+        if not changes:
+            return await self.binding(workspace_id, binding_id)
+        updated = (
+            await self._session.execute(
+                update(ChannelBindingRow)
+                .where(
+                    ChannelBindingRow.id == binding_id,
+                    ChannelBindingRow.workspace_id == workspace_id,
+                )
+                .values(**changes)
+                .returning(ChannelBindingRow)
+            )
+        ).scalar_one_or_none()
+        return None if updated is None else _view(updated)
 
     async def disable_binding(
         self, workspace_id: UUID, binding_id: UUID
@@ -152,6 +204,7 @@ def _view(row: ChannelBindingRow) -> ChannelBindingView:
         status=row.status,
         app_id=row.app_id,
         encrypt_key_ref=row.encrypt_key_ref,
+        app_secret_ref=row.app_secret_ref,
         created_by=row.created_by,
         created_at=row.created_at,
     )
