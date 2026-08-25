@@ -48,6 +48,66 @@ _ACTIONS = {
 }
 
 
+def _card(
+    title: str, template: str, elements: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """The shell every card in this module shares.
+
+    `update_multi` is the load-bearing part. Feishu requires it in `config`
+    **both when the card is sent and when it is updated**; without it on the
+    original send, every later patch is refused and the person is left
+    looking at 「正在处理」 for the rest of the conversation. It lives here
+    rather than in each renderer so a card added later cannot be written
+    without it — the cost of forgetting is paid only against a real tenant.
+    """
+    return {
+        "config": {"wide_screen_mode": True, "update_multi": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": title},
+            "template": template,
+        },
+        "elements": elements,
+    }
+
+
+def _paragraph(content: str) -> dict[str, Any]:
+    return {"tag": "div", "text": {"tag": "lark_md", "content": content}}
+
+
+def working_card() -> dict[str, Any]:
+    """What a person sees about a second after they hit send.
+
+    This card exists because a text message cannot be taken back. The
+    platform used to stay silent until it knew what to say — 8 seconds for
+    a progress note, longer for an answer — and silence is indistinguishable
+    from a message that was dropped. A card can be sent immediately and
+    rewritten in place once there is something to say.
+    """
+    return _card(
+        "正在处理",
+        "blue",
+        [_paragraph("**收到了,正在处理。**\n\n有结果我会直接更新这条消息。")],
+    )
+
+
+def answer_card(text: str) -> dict[str, Any]:
+    """The finished answer, replacing `working_card` in the same message."""
+    return _card("回复", "green", [_paragraph(text)])
+
+
+def failure_card(reason: str | None) -> dict[str, Any]:
+    """A Run that failed, and why.
+
+    `failure_reason` is on this project's own list of things written and
+    never rendered. Carried here rather than flattened into "出错了",
+    because the reason is the only part somebody can act on.
+    """
+    said = "这次运行失败了。"
+    if reason:
+        said = f"{said}\n\n原因:`{reason}`"
+    return _card("运行失败", "red", [_paragraph(said)])
+
+
 def blocked_card(
     notice: BlockedNotice, *, console_url: str | None = None
 ) -> dict[str, Any]:
@@ -64,9 +124,7 @@ def blocked_card(
         f"原因:{_why(notice)}",
         _what_you_can_do(notice),
     ]
-    elements: list[dict[str, Any]] = [
-        {"tag": "div", "text": {"tag": "lark_md", "content": "\n\n".join(lines)}}
-    ]
+    elements: list[dict[str, Any]] = [_paragraph("\n\n".join(lines))]
     if console_url is not None:
         elements.append(
             {
@@ -81,14 +139,7 @@ def blocked_card(
                 ],
             }
         )
-    return {
-        "config": {"wide_screen_mode": True},
-        "header": {
-            "title": {"tag": "plain_text", "content": "消息已排队"},
-            "template": "orange",
-        },
-        "elements": elements,
-    }
+    return _card("消息已排队", "orange", elements)
 
 
 def _why(notice: BlockedNotice) -> str:
@@ -136,4 +187,4 @@ def _what_you_can_do(notice: BlockedNotice) -> str:
     return f"前一个任务可以{named}——这些操作要在控制台里做。"
 
 
-__all__ = ["blocked_card"]
+__all__ = ["answer_card", "blocked_card", "failure_card", "working_card"]

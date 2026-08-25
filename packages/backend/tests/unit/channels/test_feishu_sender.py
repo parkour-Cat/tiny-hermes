@@ -24,6 +24,7 @@ class _Feishu:
     def __init__(self, *answers: dict[str, Any]) -> None:
         self._answers = list(answers)
         self.sent: list[tuple[str, Any, dict[str, str]]] = []
+        self.methods: list[str] = []
 
     async def post(
         self,
@@ -32,7 +33,18 @@ class _Feishu:
         json: Any = None,
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
+        return await self.request("POST", url, json=json, headers=headers)
+
+    async def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        json: Any = None,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
         self.sent.append((url, json, dict(headers or {})))
+        self.methods.append(method)
         answer = self._answers.pop(0) if self._answers else {"code": 0}
         status = int(answer.pop("_status", 200))
         return httpx.Response(status, json=answer)
@@ -213,3 +225,92 @@ async def test_a_send_without_a_deduplication_key_still_works() -> None:
 
     _, message_body, _ = feishu.sent[1]
     assert "uuid" not in message_body
+
+
+async def test_a_card_can_be_updated_in_place() -> None:
+    """`PATCH /im/v1/messages/{message_id}`, per Feishu's own contract.
+
+    One card that changes — "正在处理" becoming the answer — instead of two
+    or three separate messages. It is also the only way to say anything the
+    moment a message arrives: a text reply cannot be taken back, so the
+    platform had to wait until it knew what to say.
+    """
+    feishu = _Feishu(_ok_token(), {"code": 0})
+
+    await FeishuSender(feishu).update_card(
+        app_id="cli_x",
+        app_secret="s3cret",  # noqa: S106
+        message_id="om_abc123",
+        card={"config": {"update_multi": True}, "elements": []},
+    )
+
+    url, body, headers = feishu.sent[1]
+    assert url.endswith("/im/v1/messages/om_abc123")
+    assert headers["Authorization"] == "Bearer t-abc"
+    # A JSON *string* again, the same quirk as `send_text`'s content.
+    assert json.loads(body["content"]) == {
+        "config": {"update_multi": True},
+        "elements": [],
+    }
+
+
+async def test_updating_a_card_uses_the_patch_method() -> None:
+    """Not POST. Feishu routes the update by method on the same path, so a
+    POST here would be read as something else entirely."""
+    feishu = _Feishu(_ok_token(), {"code": 0})
+
+    await FeishuSender(feishu).update_card(
+        app_id="cli_x",
+        app_secret="s3cret",  # noqa: S106
+        message_id="om_abc123",
+        card={"config": {"update_multi": True}, "elements": []},
+    )
+
+    assert feishu.methods[1] == "PATCH"
+
+
+async def test_an_update_refused_by_feishu_is_a_failure() -> None:
+    """The same 200-with-a-code trap as sending. An update that silently
+    failed would leave the person looking at `正在处理` forever."""
+    feishu = _Feishu(_ok_token(), {"code": 232001, "msg": "message not found"})
+
+    with pytest.raises(FeishuApiRefused) as refused:
+        await FeishuSender(feishu).update_card(
+            app_id="cli_x",
+            app_secret="s3cret",  # noqa: S106
+            message_id="om_gone",
+            card={"config": {"update_multi": True}, "elements": []},
+        )
+
+    assert refused.value.code == 232001
+
+
+async def test_sending_a_card_reports_the_id_needed_to_update_it() -> None:
+    """`send_card` has to hand back Feishu's `message_id`, or nothing can
+    ever be updated — the id is the only handle the API offers."""
+    feishu = _Feishu(_ok_token(), {"code": 0, "data": {"message_id": "om_new"}})
+
+    sent = await FeishuSender(feishu).send_card(
+        app_id="cli_x",
+        app_secret="s3cret",  # noqa: S106
+        open_id="ou_zhang",
+        card={"config": {"update_multi": True}, "elements": []},
+    )
+
+    assert sent == "om_new"
+
+
+async def test_a_card_sent_without_an_id_in_the_answer_reports_none() -> None:
+    """`None` rather than a guess. The caller then knows this card can never
+    be updated and must fall back to sending a new message — which is worse
+    than updating, and much better than silence."""
+    feishu = _Feishu(_ok_token(), {"code": 0})
+
+    sent = await FeishuSender(feishu).send_card(
+        app_id="cli_x",
+        app_secret="s3cret",  # noqa: S106
+        open_id="ou_zhang",
+        card={"config": {"update_multi": True}, "elements": []},
+    )
+
+    assert sent is None

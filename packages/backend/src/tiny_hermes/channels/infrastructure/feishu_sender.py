@@ -50,6 +50,21 @@ class FeishuApiRefused(Exception):
 
 
 class OutboundPost(Protocol):
+    """`request` as well as `post`, because updating a card is a PATCH.
+
+    Feishu routes the update by method on the same path as a read, so the
+    method is not incidental — a POST there means something else.
+    """
+
+    async def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        json: Any = None,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response: ...
+
     """Only the verb this module uses. Narrow so a sender cannot reach past
     it into the rest of `SafeOutboundClient`."""
 
@@ -128,8 +143,13 @@ class FeishuSender:
         open_id: str,
         card: dict[str, Any],
         delivery_key: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """An `interactive` message — §19.2's status card.
+
+        Returns Feishu's `message_id`, which is the only handle `update_card`
+        accepts. `None` when the answer carried none: the caller then knows
+        this card can never be updated and has to send a new message instead,
+        which is worse than updating and much better than silence.
 
         Same envelope as a text message with a different `msg_type`, which
         is why both go through `_send`: the token exchange, the `uuid`
@@ -137,7 +157,7 @@ class FeishuSender:
         specific to what is being sent, and a second copy of them would be a
         second place to get that wrong.
         """
-        await self._send(
+        envelope = await self._send(
             app_id=app_id,
             app_secret=app_secret,
             open_id=open_id,
@@ -145,6 +165,40 @@ class FeishuSender:
             content=json.dumps(card, ensure_ascii=False),
             delivery_key=delivery_key,
         )
+        data: Any = envelope.get("data")
+        if not isinstance(data, dict):
+            return None
+        found: Any = cast(dict[str, Any], data).get("message_id")
+        return found if isinstance(found, str) and found else None
+
+    async def update_card(
+        self,
+        *,
+        app_id: str,
+        app_secret: str,
+        message_id: str,
+        card: dict[str, Any],
+    ) -> None:
+        """Rewrite a card that is already in the conversation.
+
+        `PATCH /im/v1/messages/{message_id}`. Feishu's own constraints, none
+        of which this platform gets to relax: the card must carry
+        `config.update_multi: true` **both when sent and when updated**, only
+        interactive cards can be updated, the window is 14 days, the result
+        must stay under 30 KB, and the token has to be the one that sent it.
+
+        No `uuid` here. Deduplication is for creating a message twice; an
+        update is idempotent by construction — the same card patched twice
+        leaves the same card.
+        """
+        token = await self._token(app_id, app_secret)
+        answer = await self._client.request(
+            "PATCH",
+            f"{self._base_url}/im/v1/messages/{message_id}",
+            json={"content": json.dumps(card, ensure_ascii=False)},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        self._envelope(answer)
 
     async def _send(
         self,
@@ -155,7 +209,7 @@ class FeishuSender:
         msg_type: str,
         content: str,
         delivery_key: str | None,
-    ) -> None:
+    ) -> dict[str, Any]:
         token = await self._token(app_id, app_secret)
         message: dict[str, Any] = {
             "receive_id": open_id,
@@ -169,7 +223,7 @@ class FeishuSender:
             json=message,
             headers={"Authorization": f"Bearer {token}"},
         )
-        self._envelope(answer)
+        return self._envelope(answer)
 
     async def _token(self, app_id: str, app_secret: str) -> str:
         held = self._tokens.get(app_id)
