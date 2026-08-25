@@ -384,10 +384,10 @@ def _parts(
     if text:
         parts.append({"type": "text", "text": text})
     for picture in pictures:
-        found = images.get(picture.artifact_id)
+        found = images.get(picture.reference)
         if found is None:
             raise ImageUnavailable(
-                f"image {picture.artifact_id!r} was not resolved for this request"
+                f"image {picture.reference!r} was not resolved for this request"
             )
         parts.append({"type": "image_url", "image_url": {"url": found}})
     return parts

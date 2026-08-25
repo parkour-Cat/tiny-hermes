@@ -26,7 +26,7 @@ def test_an_image_block_round_trips_through_storage() -> None:
         role="user",
         blocks=(
             TextBlock(text="这张图里是什么?"),
-            ImageBlock(artifact_id="a1", media_type="image/png"),
+            ImageBlock(reference="a1", media_type="image/png"),
         ),
     )
 
@@ -44,7 +44,7 @@ def test_an_image_is_not_part_of_what_was_said() -> None:
         role="user",
         blocks=(
             TextBlock(text="这张图里是什么?"),
-            ImageBlock(artifact_id="a1", media_type="image/png"),
+            ImageBlock(reference="a1", media_type="image/png"),
         ),
     )
 
@@ -56,12 +56,12 @@ def test_a_turn_may_be_an_image_alone() -> None:
     least one block, and an image is one — requiring text beside it would
     refuse the most ordinary case there is."""
     turn = CanonicalMessage(
-        role="user", blocks=(ImageBlock(artifact_id="a1", media_type="image/jpeg"),)
+        role="user", blocks=(ImageBlock(reference="a1", media_type="image/jpeg"),)
     )
 
     only = turn.blocks[0]
     assert isinstance(only, ImageBlock)
-    assert only.artifact_id == "a1"
+    assert only.reference == "a1"
 
 
 def test_an_unknown_media_type_is_kept_rather_than_guessed() -> None:
@@ -70,7 +70,7 @@ def test_an_unknown_media_type_is_kept_rather_than_guessed() -> None:
     the sender's platform already gave."""
     turn = CanonicalMessage(
         role="user",
-        blocks=(ImageBlock(artifact_id="a1", media_type="image/heic"),),
+        blocks=(ImageBlock(reference="a1", media_type="image/heic"),),
     )
 
     restored = message_from_document(json.loads(json.dumps(turn.document())))
@@ -108,7 +108,7 @@ def test_every_block_type_is_estimated() -> None:
     samples: dict[type, object] = {
         TextBlock: TextBlock(text="hello"),
         ReasoningBlock: ReasoningBlock(text="thinking"),
-        ImageBlock: ImageBlock(artifact_id="a1", media_type="image/png"),
+        ImageBlock: ImageBlock(reference="a1", media_type="image/png"),
         ToolCallBlock: ToolCallBlock(call_id="c1", name="file.read", arguments={}),
         ToolResultBlock: ToolResultBlock(
             call_id="c1", output="out", exit_code=0, failed=False

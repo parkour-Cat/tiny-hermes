@@ -46,7 +46,7 @@ def _turn() -> CanonicalMessage:
         role="user",
         blocks=(
             TextBlock(text="这张图里是什么?"),
-            ImageBlock(artifact_id="a1", media_type="image/png"),
+            ImageBlock(reference="a1", media_type="image/png"),
         ),
     )
 

@@ -322,25 +322,31 @@ SAFETY_PREAMBLE = (
 class ImageBlock:
     """An image somebody sent, by reference.
 
-    The bytes are **not** here. A transcript row holds a pointer and the
-    image lives where artifacts live, because `session_messages.content` is
-    read whole by the context estimator, by `content::text` in search, and
-    by every transcript render — a base64 megabyte in that column would be
-    paid for by all three on every turn.
+    The bytes are **not** here. `session_messages.content` is read whole by
+    the context estimator, by `content::text` in search, and by every
+    transcript render — a base64 megabyte in that column is paid for by all
+    three on every turn.
 
-    `media_type` comes from the channel that received the file rather than
-    being sniffed from the bytes. Guessing here would place a second,
-    possibly disagreeing answer next to the one the sender's own platform
-    already gave.
+    `reference` is opaque to this module and is resolved by whoever knows
+    the surface it came from. It is deliberately **not** an artifact id:
+    `artifacts.run_id` is required, and an image arrives before the Run it
+    belongs to exists — that table is for a Run's *outputs*, and this is an
+    input. Fetching happens in the Worker, which has an outbound client, is
+    not bound by the channel's response deadline, and can fail a Run with a
+    reason instead of timing out somebody's webhook.
+
+    `media_type` comes from the surface that received the file rather than
+    being sniffed from the bytes: guessing would put a second, possibly
+    disagreeing answer beside the one the sender's own platform gave.
     """
 
-    artifact_id: str
+    reference: str
     media_type: str
 
     def document(self) -> dict[str, Any]:
         return {
             "type": "image",
-            "artifact_id": self.artifact_id,
+            "reference": self.reference,
             "media_type": self.media_type,
         }
 
@@ -543,7 +549,7 @@ def message_from_document(document: dict[str, Any]) -> CanonicalMessage:
         elif kind == "image":
             blocks.append(
                 ImageBlock(
-                    artifact_id=str(part.get("artifact_id", "")),
+                    reference=str(part.get("reference", "")),
                     media_type=str(part.get("media_type", "")),
                 )
             )
