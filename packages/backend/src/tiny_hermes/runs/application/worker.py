@@ -56,6 +56,7 @@ from tiny_hermes.runs.domain.models import (
     CanonicalMessage,
     CheckpointEffectStatus,
     PauseReason,
+    ReasoningBlock,
     RunCapabilities,
     RunEventType,
     RunSignal,
@@ -937,12 +938,26 @@ class WorkerRuntime:
         if response.stop_reason is StopReason.FAILED:
             # A failed round said nothing the transcript should keep.
             return _RoundWork((), False)
+        # Kept first in the turn, and kept at all because a thinking endpoint
+        # requires its own reasoning handed back on the next request. It is a
+        # `ReasoningBlock` rather than text so it never reaches a transcript,
+        # a Feishu reply or a completions document — `CanonicalMessage.text`
+        # collects only `TextBlock`, and §19.1 keeps internal state off an
+        # end-user surface.
+        thought: list[Block] = (
+            [ReasoningBlock(text=response.reasoning)] if response.reasoning else []
+        )
         if response.stop_reason is not StopReason.TOOL_CALL:
             return _RoundWork(
-                (CanonicalMessage("assistant", (TextBlock(text=response.text),)),), False
+                (
+                    CanonicalMessage(
+                        "assistant", (*thought, TextBlock(text=response.text))
+                    ),
+                ),
+                False,
             )
 
-        blocks: list[Block] = []
+        blocks: list[Block] = [*thought]
         if response.text:
             blocks.append(TextBlock(text=response.text))
         blocks.extend(response.tool_calls)

@@ -319,6 +319,29 @@ SAFETY_PREAMBLE = (
 
 
 @dataclass(frozen=True)
+class ReasoningBlock:
+    """A thinking model's own scratch work, kept so it can be handed back.
+
+    Not a `TextBlock`, and the difference is load-bearing in both
+    directions. `CanonicalMessage.text` collects only `TextBlock`, so this
+    never reaches a transcript, a Feishu reply or a completions document —
+    §19.1 keeps internal state off an end-user surface, and a model's
+    private reasoning is exactly that.
+
+    It is kept at all because DeepSeek's thinking mode **requires it back**
+    on the next request. Dropping it made every multi-turn conversation
+    fail with `400 The reasoning_content in the thinking mode must be
+    passed back to the API` from the first round in which the model
+    reasoned. Nothing in the transcript looked wrong.
+    """
+
+    text: str
+
+    def document(self) -> dict[str, Any]:
+        return {"type": "reasoning", "text": self.text}
+
+
+@dataclass(frozen=True)
 class TextBlock:
     text: str
 
@@ -384,7 +407,7 @@ class ToolResultBlock:
         }
 
 
-Block = TextBlock | ToolCallBlock | ToolResultBlock
+Block = TextBlock | ReasoningBlock | ToolCallBlock | ToolResultBlock
 
 
 @dataclass(frozen=True)
@@ -488,6 +511,8 @@ def message_from_document(document: dict[str, Any]) -> CanonicalMessage:
         kind = part.get("type")
         if kind == "text":
             blocks.append(TextBlock(text=str(part.get("text", ""))))
+        elif kind == "reasoning":
+            blocks.append(ReasoningBlock(text=str(part.get("text", ""))))
         elif kind == "tool_call":
             arguments: Any = part.get("arguments")
             blocks.append(

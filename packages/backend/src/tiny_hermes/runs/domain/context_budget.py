@@ -26,6 +26,7 @@ from uuid import UUID
 
 from tiny_hermes.runs.domain.models import (
     CanonicalMessage,
+    ReasoningBlock,
     StoredMessage,
     TextBlock,
     ToolCallBlock,
@@ -256,7 +257,16 @@ def estimate_tokens(text: str, tokenizer: str | None = None) -> int:
 def _message_estimate(message: CanonicalMessage, tokenizer: str | None) -> int:
     total = MESSAGE_OVERHEAD_TOKENS
     for block in message.blocks:
-        if isinstance(block, TextBlock):
+        if isinstance(block, TextBlock | ReasoningBlock):
+            # Reasoning is counted, not skipped: a thinking endpoint requires
+            # it back on the next request, so it occupies the window exactly
+            # as text does. Leaving it out would under-count every turn a
+            # thinking model produced and plan a request that does not fit.
+            #
+            # Named here rather than left to the `else`, which reads
+            # `block.output` — a `ReasoningBlock` has none, so falling
+            # through would have been an AttributeError on the first Run
+            # against a thinking endpoint. pyright caught it; no test did.
             total += estimate_tokens(block.text, tokenizer)
         elif isinstance(block, ToolCallBlock):
             total += estimate_tokens(f"{block.name}{block.arguments}", tokenizer)

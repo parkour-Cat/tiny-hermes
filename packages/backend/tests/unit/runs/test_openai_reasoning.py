@@ -21,7 +21,7 @@ import json
 from typing import Any
 
 from tiny_hermes.agents.domain.models import DeterministicModelPolicy
-from tiny_hermes.model_catalog.domain.models import ModelEndpointSpec
+from tiny_hermes.model_catalog.domain.models import ModelEndpointSpec, UsageQuality
 from tiny_hermes.runs.domain.models import (
     CanonicalMessage,
     ReasoningBlock,
@@ -34,15 +34,25 @@ from tiny_hermes.runs.ports.model import ModelRequest, StopReason
 
 def _answer(**message: Any) -> dict[str, Any]:
     return {
-        "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", **message}}],
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {"role": "assistant", **message},
+            }
+        ],
         "usage": {"prompt_tokens": 10, "completion_tokens": 5},
     }
 
 
 def _spec() -> ModelEndpointSpec:
     return ModelEndpointSpec(
+        name="thinking-endpoint",
         base_url="https://example.invalid/v1",
         model="thinker",
+        context_window=128_000,
+        max_output_tokens=4_096,
+        usage_quality=UsageQuality.PROVIDER,
         credential_ref="KEY",
     )
 
@@ -51,9 +61,10 @@ def _payload(*messages: CanonicalMessage) -> dict[str, Any]:
     return build_payload(
         _spec(),
         ModelRequest(
+            policy=DeterministicModelPolicy(),
+            personality="You are careful.",
             messages=tuple(messages),
-            policy=DeterministicModelPolicy(temperature=0.0, top_p=1.0, seed=1),
-            tools=(),
+            round_index=1,
         ),
     )
 

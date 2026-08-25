@@ -29,6 +29,7 @@ from tiny_hermes.runs.domain.models import (
     SAFETY_PREAMBLE,
     CacheStateHint,
     CanonicalMessage,
+    ReasoningBlock,
     TextBlock,
     ToolCallBlock,
     ToolResultBlock,
@@ -172,7 +173,20 @@ def normalize(body: dict[str, Any]) -> ModelResponse:
         input_tokens=prompt_tokens,
         output_tokens=completion_tokens,
         usage_quality=quality,
+        reasoning=_reasoning(cast(dict[str, Any], message)),
     )
+
+
+def _reasoning(message: dict[str, Any]) -> str | None:
+    """A thinking endpoint's own scratch work, or `None` if it sent none.
+
+    `None` and empty are kept apart because they decide different things
+    downstream: DeepSeek requires this value back on the next request, and
+    inventing the field for an endpoint that never sent one is a request
+    that endpoint is entitled to refuse.
+    """
+    value: Any = message.get("reasoning_content")
+    return value if isinstance(value, str) and value else None
 
 
 def _tool_round(body: dict[str, Any], message: Any) -> ModelResponse:
@@ -218,6 +232,7 @@ def _tool_round(body: dict[str, Any], message: Any) -> ModelResponse:
     content: Any = fields.get("content")
     prompt_tokens, completion_tokens, quality = _usage(body)
     return ModelResponse(
+        reasoning=_reasoning(fields),
         stop_reason=StopReason.TOOL_CALL,
         text=content if isinstance(content, str) else "",
         tool_calls=tuple(calls),
@@ -343,15 +358,24 @@ def _as_messages(message: CanonicalMessage) -> list[dict[str, Any]]:
         ]
 
     text = "".join(b.text for b in message.blocks if isinstance(b, TextBlock))
+    # Handed straight back, because a thinking endpoint requires it: without
+    # this every conversation failed from the first round the model reasoned
+    # in, with `400 The reasoning_content in the thinking mode must be
+    # passed back to the API`. Omitted entirely when there is none — a field
+    # invented for a non-thinking endpoint is one it may refuse, which would
+    # trade this bug for a wider one.
+    thought = "".join(b.text for b in message.blocks if isinstance(b, ReasoningBlock))
+    reasoning = {"reasoning_content": thought} if thought else {}
     calls = [b for b in message.blocks if isinstance(b, ToolCallBlock)]
     if not calls:
-        return [{"role": message.role, "content": text}]
+        return [{"role": message.role, "content": text, **reasoning}]
     return [
         {
             "role": "assistant",
             # Null rather than empty when the model acted without speaking,
             # which is what the API expects and what actually happened.
             "content": text or None,
+            **reasoning,
             "tool_calls": [
                 {
                     "id": block.call_id,
