@@ -121,6 +121,40 @@ class ModelEndpointService:
         await self._approve_host(updated, actor)
         return updated
 
+    async def amend(
+        self,
+        actor: Actor,
+        endpoint_id: UUID,
+        *,
+        status: EndpointStatus | None = None,
+        accepts_images: bool | None = None,
+    ) -> ModelEndpoint:
+        """Change what may be changed after registration.
+
+        `None` means unchanged for each, so a caller naming one field cannot
+        reset the other underneath itself.
+
+        `accepts_images` is a statement about the endpoint rather than a
+        choice of endpoint, which is why it is amendable at all while
+        `model` and `base_url` are not — changing either of those swaps the
+        endpoint for a different one beneath every AgentVersion that named
+        it.
+        """
+        if not actor.is_platform_admin:
+            raise _forbidden()
+        if accepts_images is not None:
+            amended = await self._store.set_accepts_images(
+                endpoint_id, accepts_images
+            )
+            if amended is None:
+                raise self._unknown()
+        if status is None:
+            found = await self._store.read(endpoint_id)
+            if found is None:
+                raise self._unknown()
+            return found
+        return await self.set_status(actor, endpoint_id, status)
+
     async def set_status(
         self, actor: Actor, endpoint_id: UUID, status: EndpointStatus
     ) -> ModelEndpoint:

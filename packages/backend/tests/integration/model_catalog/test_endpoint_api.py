@@ -167,6 +167,12 @@ def test_the_list_carries_no_credential_and_no_address(
         "model",
         "context_window",
         "max_output_tokens",
+        # A capability declaration — whether this endpoint takes image
+        # input. Named here because this assertion is a whitelist: it is
+        # written as an equality so a new field cannot appear in the list
+        # response without somebody saying what it is. This one is neither a
+        # credential nor an address.
+        "accepts_images",
         "context_accounting",
         "tokenizer",
         "usage_quality",

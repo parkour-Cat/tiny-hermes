@@ -7,11 +7,14 @@ edit. It is the gap the channel bindings had, with the same cost: a correct
 value reachable only by starting over.
 """
 
+import pytest
 from fastapi.testclient import TestClient
 
+
 def test_an_endpoint_can_be_told_it_accepts_images(
-    client: TestClient, admin_csrf: str
+    client: TestClient, admin_csrf: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("MODEL_KEY", "k")
     """An endpoint could be registered and disabled and nothing else.
 
     A person registered a vision endpoint, left the switch off, and had no
@@ -51,8 +54,9 @@ def test_an_endpoint_can_be_told_it_accepts_images(
 
 
 def test_the_status_patch_still_works_on_its_own(
-    client: TestClient, admin_csrf: str
+    client: TestClient, admin_csrf: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("MODEL_KEY", "k")
     """The field that was already there. A request naming only `status` must
     not have its image declaration reset to the default underneath it."""
     created = client.post(

@@ -106,6 +106,16 @@ class SqlModelEndpointStore:
             raise EndpointNameTaken(spec.name) from clash
         return _to_domain(row)
 
+    async def set_accepts_images(
+        self, endpoint_id: UUID, accepts: bool
+    ) -> "ModelEndpoint | None":
+        row = await self._session.get(ModelEndpointRow, endpoint_id)
+        if row is None:
+            return None
+        row.accepts_images = accepts
+        await self._session.flush()
+        return _to_domain(row)
+
     async def set_status(
         self, endpoint_id: UUID, status: EndpointStatus
     ) -> ModelEndpoint | None:

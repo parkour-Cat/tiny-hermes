@@ -361,3 +361,39 @@ test("an endpoint is text-only unless somebody says otherwise", async () => {
   await waitFor(() => expect(sent).not.toBeNull());
   expect(sent!.accepts_images).toBe(false);
 });
+
+test("an endpoint's image declaration can be corrected after the fact", async () => {
+  // Registered with the switch off, and no way to say otherwise: the page
+  // offered 测试连接 / 设定价格 / 停用 and nothing else. Somebody built two
+  // vision endpoints and could not tell the platform either of them took
+  // images.
+  let sent: Record<string, unknown> | null = null;
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(user(true))),
+    http.get("/api/v1/model-endpoints", () =>
+      HttpResponse.json([
+        {
+          ...SUMMARY,
+          id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          name: "vision",
+          model: "deepseek-v4-flash-vision-exp",
+          accepts_images: false,
+        },
+      ]),
+    ),
+    http.patch("/api/v1/model-endpoints/:id", async ({ request }) => {
+      sent = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json({ ...SUMMARY, accepts_images: true });
+    }),
+  );
+
+  renderEndpoints();
+
+  await userEvent.click(await screen.findByRole("button", { name: t("endpointAcceptsImages") }));
+
+  await waitFor(() => expect(sent).not.toBeNull());
+  expect(sent!.accepts_images).toBe(true);
+  // Only that field. A PATCH also naming `status` would disable the
+  // endpoint as a side effect of correcting a capability.
+  expect(sent).not.toHaveProperty("status");
+});

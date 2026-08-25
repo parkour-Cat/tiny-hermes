@@ -39,6 +39,7 @@ export type ModelEndpointSummary = {
   usage_quality: string;
   context_accounting: string;
   tokenizer: string | null;
+  accepts_images: boolean;
   status: string;
 };
 

@@ -33,3 +33,7 @@ class ModelEndpointStore(Protocol):
     async def set_status(
         self, endpoint_id: UUID, status: EndpointStatus
     ) -> ModelEndpoint | None: ...
+
+    async def set_accepts_images(
+        self, endpoint_id: UUID, accepts: bool
+    ) -> ModelEndpoint | None: ...

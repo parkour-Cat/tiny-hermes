@@ -136,6 +136,19 @@ export function ModelEndpointsPage() {
       priceForm.setFields([{ name: "inputPerMillion", errors: [problemMessage(caught, t)] }]),
   });
 
+  // Only this field, and never alongside `status`: a PATCH naming both would
+  // disable an endpoint as a side effect of correcting a capability.
+  const setAcceptsImages = useMutation({
+    mutationFn: ({ id, accepts }: { id: string; accepts: boolean }) =>
+      api<ModelEndpointSummary>(`/api/v1/model-endpoints/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ accepts_images: accepts }),
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["model-endpoints"] });
+    },
+  });
+
   const register = useMutation({
     mutationFn: (values: RegisterValues) =>
       api<ModelEndpointDetail>("/api/v1/model-endpoints", {
@@ -360,6 +373,24 @@ export function ModelEndpointsPage() {
                     <>
                       <Button onClick={() => check.mutate(entry.id)} loading={check.isPending}>
                         {t("checkEndpoint")}
+                      </Button>
+                      {/* A toggle rather than an edit dialog: this is the one
+                          field that may change after registration, because it
+                          states something about the endpoint rather than
+                          choosing one. Model and address stay fixed — changing
+                          either swaps the endpoint underneath every
+                          AgentVersion that named it. */}
+                      <Button
+                        type={entry.accepts_images ? "primary" : "default"}
+                        loading={setAcceptsImages.isPending}
+                        onClick={() =>
+                          setAcceptsImages.mutate({
+                            id: entry.id,
+                            accepts: !entry.accepts_images,
+                          })
+                        }
+                      >
+                        {t("endpointAcceptsImages")}
                       </Button>
                       <Button
                         onClick={() => {
