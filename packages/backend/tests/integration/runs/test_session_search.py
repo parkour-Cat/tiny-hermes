@@ -10,6 +10,7 @@ adapter reads the subject off the Run, and a wrong join there looks like nothing
 at all until somebody sees another person's words in their own transcript.
 """
 
+import json
 from collections.abc import Callable
 from hashlib import sha256
 from uuid import UUID
@@ -70,7 +71,14 @@ async def _transcript(engine: AsyncEngine, run_id: str) -> str:
             ),
             {"r": UUID(run_id)},
         )
-        return " ".join(str(r[0]) for r in rows.all())
+        # Decoded, because `content::text` renders non-ASCII as `\uXXXX`.
+        # A Chinese assertion against the raw text can never match while an
+        # English one always does — the second time this file assumed ASCII,
+        # after the `Idempotency-Key` above. Both were invisible for as long
+        # as the suite only spoke English.
+        return " ".join(
+            json.dumps(json.loads(str(r[0])), ensure_ascii=False) for r in rows.all()
+        )
 
 
 async def _reassign_session(
@@ -211,7 +219,9 @@ async def test_a_run_finds_what_was_said_in_chinese(
     found = _run(client, scope, later, "鹈鹕项目")
     await _worker(engine, workspace_id).run_once()
 
-    assert "鹈鹕项目" in await _transcript(engine, found)
+    # 「下周二」 appears only in the earlier session, never in this query —
+    # so finding it proves the search reached back rather than echoing.
+    assert "下周二" in await _transcript(engine, found)
 
 
 async def test_a_chinese_search_does_not_match_unrelated_text(

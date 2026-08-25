@@ -21,6 +21,7 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.memory.domain.search import SearchHit, SearchRequest, snippet_of
+from tiny_hermes.memory.infrastructure.search_query import matching
 from tiny_hermes.runs.domain.models import CallerIdentity
 from tiny_hermes.runs.infrastructure.tables import SessionMessageRow, SessionRow
 
@@ -75,7 +76,7 @@ class SqlSessionSearch:
     ) -> Sequence[SearchHit]:
         rank = func.ts_rank(
             SessionMessageRow.search,
-            func.plainto_tsquery(SEARCH_CONFIG, request.query),
+            matching(request.query),
         )
         rows = (
             await self._session.scalars(
@@ -98,7 +99,7 @@ def _base(
             SessionMessageRow.workspace_id == workspace_id,
             SessionMessageRow.redacted.is_(False),
             SessionMessageRow.search.op("@@")(
-                func.plainto_tsquery(SEARCH_CONFIG, request.query)
+                matching(request.query)
             ),
         )
     )
