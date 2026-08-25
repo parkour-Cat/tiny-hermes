@@ -91,6 +91,37 @@ def test_the_actions_a_subject_does_have_are_named_in_words() -> None:
     assert "resume" not in rendered
 
 
+def test_naming_an_action_also_says_where_to_do_it() -> None:
+    """The card must not offer something the card cannot do.
+
+    A live tenant showed `available_actions` as `resume`/`cancel` — the
+    blocked head was the sender's *own* Run, so they really could control
+    it — and the card said `你现在可以:继续、取消。` with no button, no
+    link, and no way to do either from Feishu. That is the card claiming a
+    capability it does not provide, which is the comment rule in CLAUDE.md
+    pointed at a user-facing string.
+
+    This build renders no interactive buttons: a real card-action callback
+    needs its own webhook route, its own signature check and its own
+    authorization. Until that exists, naming an action obliges the card to
+    say where it can be taken.
+    """
+    rendered = _text_of(
+        blocked_card(_notice(available_actions=("resume", "cancel")))
+    )
+
+    assert "控制台" in rendered
+
+
+def test_saying_nothing_can_be_done_needs_no_console(
+) -> None:
+    """The other branch does not point anywhere, and should not. Nothing
+    for this person to do means nothing for them to open."""
+    rendered = _text_of(blocked_card(_notice(available_actions=())))
+
+    assert "控制台" not in rendered
+
+
 def test_an_unknown_action_is_shown_rather_than_dropped() -> None:
     """A slug this build has no wording for is still an action the caller
     may take. Dropping it would quietly shorten the list §497 requires;

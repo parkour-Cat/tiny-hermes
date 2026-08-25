@@ -109,18 +109,31 @@ def _why(notice: BlockedNotice) -> str:
 
 
 def _what_you_can_do(notice: BlockedNotice) -> str:
-    """Empty is the usual case and the one that must not render as nothing.
+    """What this person may do, and — when there is something — where.
 
-    A Feishu user is an `EndUser`, never a workspace member (§122), so
-    `can_control` is false and this list is normally empty. Empty means
-    somebody else has to act — which is worth a sentence. A card that
-    dropped the section would leave the reader with a queue notice and no
-    idea whether they were expected to do anything.
+    Empty must not render as nothing: it means somebody else has to act,
+    and a card that dropped the section would leave the reader with a queue
+    notice and no idea whether they were expected to do something.
+
+    Empty is **not** the usual case, though an earlier version of this
+    docstring said so. It reasoned that a Feishu user is an `EndUser` and
+    never a workspace member (§122), so `can_control` would be false — and
+    a live tenant returned `resume`/`cancel`, because the blocked head was
+    that same person's own Run and they could of course control it. The
+    claim was reasoned rather than observed, and the observation contradicted
+    it.
+
+    Naming an action obliges this card to say where it can be taken. This
+    build renders no interactive buttons — a real card-action callback needs
+    its own webhook route, signature check and authorization — so a card
+    that said `你现在可以:继续、取消。` offered two things it had no way
+    to do. That is the comment rule in CLAUDE.md aimed at a string a person
+    reads.
     """
     if not notice.available_actions:
         return "这个需要有权限的人去处理,你先等着就行,前面结束后会自动开始。"
     named = "、".join(_ACTIONS.get(action, action) for action in notice.available_actions)
-    return f"你现在可以:{named}。"
+    return f"前一个任务可以{named}——这些操作要在控制台里做。"
 
 
 __all__ = ["blocked_card"]
