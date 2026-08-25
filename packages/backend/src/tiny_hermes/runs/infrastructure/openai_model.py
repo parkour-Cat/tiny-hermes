@@ -489,7 +489,7 @@ class OpenAICompatibleProvider:
             return _failed("credential_missing")
 
         url = f"{self._spec.base_url}/chat/completions"
-        payload = build_payload(self._spec, request)
+        payload = build_payload(self._spec, request, images=request.images)
         last: ModelResponse = _failed("unreachable")
         for attempt in range(1, self._policy.max_attempts + 1):
             try:

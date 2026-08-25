@@ -5,7 +5,7 @@ The request carries a conversation rather than a string. Phase 2B carried
 in advance what round two will say and cannot be enough for anything else.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
 
@@ -53,6 +53,13 @@ class ModelRequest:
     #: The tools this AgentVersion bound, as provider schemas. §10.2's first
     #: step: an Agent that bound none advertises none.
     tools: tuple[dict[str, Any], ...] = ()
+    #: Every `ImageBlock.reference` in `messages`, already resolved to a data
+    #: URL. Resolved by the Worker rather than the provider: fetching a
+    #: Feishu image needs that binding's app secret, and a model adapter has
+    #: no business holding a channel's credentials. The provider only sends
+    #: what it was handed, and refuses when a block names something absent —
+    #: which is why this is a map rather than the bytes inline.
+    images: dict[str, str] = field(default_factory=dict[str, str])
     #: One line per bound skill: what it is called and what it is for, the
     #: whole of what the model is told before it asks for any of the text.
     #:
