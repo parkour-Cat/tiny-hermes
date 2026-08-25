@@ -366,6 +366,9 @@ export const enUS: Record<MessageKey, string> = {
   endpointContextAccounting: "Window accounting",
   endpointAccountingShared: "Input and output share the window",
   endpointAccountingSeparate: "Input and output are bounded separately",
+  endpointAcceptsImages: "Accepts image input",
+  endpointAcceptsImagesNote:
+    "Only a declared endpoint is sent images. Never inferred from the model name — DeepSeek's vision support lives under a different model id.",
   endpointTokenizer: "Tokenizer",
   endpointTokenizerNote:
     "The name is recorded, not honoured yet: this release counts with a conservative character bound and says so.",

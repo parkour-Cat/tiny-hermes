@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Form, Input, InputNumber, Select, Space, Tag, Typography , Modal } from "antd";
+import {Alert, Button, Card, Empty, Form, Input, InputNumber, Modal, Select, Space, Switch, Tag, Typography } from "antd";
 import { useState } from "react";
 
 import { ApiError, api } from "../api/client";
@@ -24,6 +24,7 @@ type RegisterValues = {
   max_output_tokens: number;
   usage_quality: "provider" | "unavailable";
   context_accounting: "shared" | "separate";
+  accepts_images: boolean;
   tokenizer?: string;
   credential_ref: string;
 };
@@ -209,6 +210,7 @@ export function ModelEndpointsPage() {
               kind: "openai_compatible",
               usage_quality: "unavailable",
               context_accounting: "shared",
+              accepts_images: false,
               context_window: 128000,
               max_output_tokens: 4096,
             }}
@@ -267,6 +269,14 @@ export function ModelEndpointsPage() {
                   { value: "separate", label: t("endpointAccountingSeparate") },
                 ]}
               />
+            </Form.Item>
+            <Form.Item
+              name="accepts_images"
+              label={t("endpointAcceptsImages")}
+              extra={t("endpointAcceptsImagesNote")}
+              valuePropName="checked"
+            >
+              <Switch />
             </Form.Item>
             <Form.Item
               name="tokenizer"

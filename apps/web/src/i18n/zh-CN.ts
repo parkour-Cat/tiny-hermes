@@ -354,6 +354,9 @@ export const zhCN = {
   endpointContextAccounting: "窗口计算方式",
   endpointAccountingShared: "输入与输出共用一个窗口",
   endpointAccountingSeparate: "输入与输出分别计算",
+  endpointAcceptsImages: "接受图片输入",
+  endpointAcceptsImagesNote:
+    "只有声明过的端点才会收到图片。绝不从模型名推断——DeepSeek 的视觉能力在另一个模型 id 下。",
   endpointTokenizer: "分词器",
   endpointTokenizerNote: "只记录名称，本版本仍按字符保守估算，并会如实说明。",
   endpointWindowSummary: "{window} token，最多输出 {output}。{accounting}。",
