@@ -376,20 +376,31 @@ def _parts(
     different — one gets a vendor 400, the other gets a confident answer
     about a picture that was never attached.
     """
-    if spec is not None and not spec.accepts_images:
-        raise ImagesNotAccepted(
-            f"endpoint {spec.name!r} is not declared as accepting image input"
-        )
     parts: list[dict[str, Any]] = []
     if text:
         parts.append({"type": "text", "text": text})
+    accepted = spec is None or spec.accepts_images
+    missing = 0
     for picture in pictures:
-        found = images.get(picture.reference)
+        found = images.get(picture.reference) if accepted else None
         if found is None:
-            raise ImageUnavailable(
-                f"image {picture.reference!r} was not resolved for this request"
-            )
+            missing += 1
+            continue
         parts.append({"type": "image_url", "image_url": {"url": found}})
+    if missing:
+        # Said, not swallowed. The model answers that it cannot see the
+        # picture, which is the honest reply — and the alternative, failing
+        # the round, permanently broke every Session that ever held an
+        # image the platform could no longer fetch.
+        parts.append(
+            {
+                "type": "text",
+                "text": (
+                    f"[{missing} image(s) in this conversation could not be "
+                    "retrieved and are not shown]"
+                ),
+            }
+        )
     return parts
 
 

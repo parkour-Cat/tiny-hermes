@@ -4,6 +4,7 @@ Shared by both transports on purpose — see `events.ChannelEvent`.
 """
 
 import json
+import logging
 from typing import Any, cast
 
 from tiny_hermes.channels.domain._json import object_at, string_at
@@ -12,6 +13,8 @@ from tiny_hermes.channels.domain.events import (
     ChannelImage,
     MalformedChannelEvent,
 )
+
+logger = logging.getLogger(__name__)
 
 CHANNEL = "feishu"
 
@@ -100,6 +103,17 @@ def event_from_envelope(payload: dict[str, Any]) -> ChannelEvent:
         )
 
     if kind == "post":
+        # Logged because a picture's `image_key` and the message it can be
+        # downloaded from are not always the same message. A quoted reply
+        # carries the original's image inline while being its own message,
+        # and Feishu answers `234003 File not in msg` for the pairing — a
+        # true error whose cause is invisible without knowing the parentage.
+        logger.info(
+            "feishu post: message=%s parent=%s root=%s",
+            string_at(message, "message_id"),
+            string_at(message, "parent_id"),
+            string_at(message, "root_id"),
+        )
         said, pictures = _post_of(message)
         if not said and not pictures:
             # Nothing to act on. A Run built from this hands the Agent an

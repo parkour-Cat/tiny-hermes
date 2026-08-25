@@ -101,31 +101,33 @@ def test_a_text_only_turn_still_sends_a_plain_string() -> None:
     assert user["content"] == "hi"
 
 
-def test_an_endpoint_that_does_not_accept_images_refuses_before_sending() -> None:
-    """Refused here, not by the endpoint.
+def test_an_endpoint_that_does_not_accept_images_says_so_in_the_request() -> None:
+    """Not sent, and not silently dropped either.
 
-    Sending anyway earns a provider 400 whose text is the vendor's, in the
-    vendor's terms, surfaced to a person in Feishu as `endpoint_status:400`.
-    A named refusal is something the platform can explain and an
-    administrator can act on: this endpoint needs a model that accepts
-    images.
+    The picture is left out — this endpoint would refuse it with a vendor
+    400 — and a marker takes its place so the model answers that it cannot
+    see the image. Raising here was the first design and it was wrong for
+    the same reason the resolver's was: a Session replays its history, so
+    one image on a text-only endpoint failed every future Run in that
+    conversation.
     """
-    import pytest
-    from tiny_hermes.runs.infrastructure.openai_model import ImagesNotAccepted
+    sent = _payload(accepts_images=False)["messages"]
 
-    with pytest.raises(ImagesNotAccepted):
-        _payload(accepts_images=False)
+    user = [m for m in sent if m["role"] == "user"][-1]
+    kinds = [part["type"] for part in user["content"]]
+    assert "image_url" not in kinds
+    assert any("could not be retrieved" in part.get("text", "") for part in user["content"])
 
 
-def test_an_unresolved_reference_refuses_rather_than_sending_a_gap() -> None:
-    """A caller that forgot to resolve one. Dropping the block would send a
-    question about a picture with no picture, and the model would answer
-    about nothing — confidently."""
-    import pytest
-    from tiny_hermes.runs.infrastructure.openai_model import ImageUnavailable
+def test_an_unresolved_reference_is_named_rather_than_left_as_a_gap() -> None:
+    """The picture could not be fetched. The model is told that, rather than
+    being handed a question about a picture with no picture — which it would
+    answer confidently — or the round being failed, which permanently broke
+    a live conversation."""
+    sent = _payload(images={})["messages"]
 
-    with pytest.raises(ImageUnavailable):
-        _payload(images={})
+    user = [m for m in sent if m["role"] == "user"][-1]
+    assert any("could not be retrieved" in part.get("text", "") for part in user["content"])
 
 
 def test_the_default_is_to_accept_nothing() -> None:

@@ -7,21 +7,29 @@ asks an injected port and hands the provider a finished map; the provider
 only sends what it was given, and refuses a block naming something absent.
 """
 
+import logging
 from collections.abc import Sequence
 from typing import Protocol
 from uuid import UUID
 
 from tiny_hermes.runs.domain.models import CanonicalMessage, ImageBlock
 
+#: Why a failure here degrades rather than raising, reversed from the first
+#: version by what it did to a real conversation.
+#:
+#: Raising was reasoned from the current turn: a question about a picture,
+#: answered without the picture, is a confident lie. True — and a Session
+#: replays its whole history on every round, so one permanently unfetchable
+#: image failed *every future Run* in that conversation. Four of them made a
+#: live Session unusable forever, and `image_unavailable` was the only thing
+#: anybody could get out of it.
+#:
+#: The reply is a marker instead. The model is told plainly that an image
+#: could not be retrieved, which is neither silence nor a confident answer
+#: about something it cannot see.
 
-class ImagesUnresolvable(Exception):
-    """A round carries an image this deployment cannot fetch.
 
-    Raised rather than dropping the block. A question about a picture, sent
-    without the picture, is answered confidently and with nothing to tell
-    the reader anything was missing — the quietest possible outcome for a
-    configuration mistake.
-    """
+logger = logging.getLogger(__name__)
 
 
 class ImageSource(Protocol):
@@ -61,23 +69,21 @@ async def resolve_images(
         for block in message.blocks
         if isinstance(block, ImageBlock)
     ]
-    if not wanted:
+    if not wanted or source is None:
         return {}
-    if source is None:
-        raise ImagesUnresolvable(
-            "this round carries images and no image source is configured"
-        )
     found: dict[str, str] = {}
     for reference in wanted:
         if reference in found:
             continue
         try:
             found[reference] = await source.data_url_for(reference, session_id)
-        except Exception as error:
-            raise ImagesUnresolvable(
-                f"could not fetch image {reference!r}: {error}"
-            ) from error
+        except Exception:
+            # One bad reference must not take a good one with it, and none of
+            # them may take the conversation.
+            logger.warning(
+                "image could not be fetched: %s", reference, exc_info=True
+            )
     return found
 
 
-__all__ = ["ImageSource", "ImagesUnresolvable", "resolve_images"]
+__all__ = ["ImageSource", "resolve_images"]

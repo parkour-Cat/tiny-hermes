@@ -13,7 +13,6 @@ one — that is most Runs.
 from typing import Any
 from uuid import UUID, uuid4
 
-import pytest
 from tiny_hermes.runs.application.images import resolve_images
 from tiny_hermes.runs.domain.models import CanonicalMessage, ImageBlock, TextBlock
 
@@ -74,26 +73,60 @@ async def test_no_resolver_and_no_images_is_fine() -> None:
     assert await resolve_images((_turn(TextBlock(text="hi")),), None, SESSION) == {}
 
 
-async def test_an_image_with_no_resolver_is_refused() -> None:
-    """Rather than dropped. Sending the question without the picture gets a
-    confident answer about nothing, and there is no configuration mistake
-    more silent than that."""
-    from tiny_hermes.runs.application.images import ImagesUnresolvable
+async def test_an_image_with_no_resolver_resolves_to_nothing() -> None:
+    """A deployment with no image-capable channel. The block becomes a
+    marker downstream rather than failing the round — see
+    `test_an_unfetchable_image_does_not_stop_the_round` for why raising here
+    turned out to be wrong."""
+    found = await resolve_images(
+        (_turn(ImageBlock(reference="feishu:om_1:k", media_type="image/png")),),
+        None,
+        SESSION,
+    )
 
-    with pytest.raises(ImagesUnresolvable):
-        await resolve_images(
-            (_turn(ImageBlock(reference="feishu:om_1:k", media_type="image/png")),),
-            None,
-            SESSION,
-        )
+    assert found == {}
 
 
-async def test_a_failing_fetch_is_refused_rather_than_skipped() -> None:
-    from tiny_hermes.runs.application.images import ImagesUnresolvable
 
-    with pytest.raises(ImagesUnresolvable):
-        await resolve_images(
-            (_turn(ImageBlock(reference="feishu:om_1:k", media_type="image/png")),),
-            _Resolver(fails=True),
-            SESSION,
-        )
+
+
+async def test_an_unfetchable_image_does_not_stop_the_round() -> None:
+    """A design decision reversed by what it did to a real conversation.
+
+    The first version raised, on the reasoning that a question about a
+    picture answered without the picture is a confident lie. That is true of
+    the *current* turn — and a Session replays its whole history on every
+    round, so one permanently unfetchable picture failed every future Run in
+    that conversation. Four such messages made a live Session unusable
+    forever, with `image_unavailable` as the only thing anybody could send
+    to it.
+
+    So a failure degrades to a marker instead. The model is told plainly
+    that an image could not be retrieved, which is neither silence nor a
+    confident answer about something it cannot see.
+    """
+    found = await resolve_images(
+        (_turn(ImageBlock(reference="feishu:om_1:k", media_type="image/png")),),
+        _Resolver(fails=True),
+        SESSION,
+    )
+
+    assert found == {}
+
+
+async def test_the_pictures_that_do_resolve_still_arrive() -> None:
+    """One bad reference must not take a good one with it."""
+    resolver = _Resolver({"feishu:om_1:good": "data:image/png;base64,AAA"})
+
+    found = await resolve_images(
+        (
+            _turn(
+                ImageBlock(reference="feishu:om_1:good", media_type="image/png"),
+                ImageBlock(reference="feishu:om_1:gone", media_type="image/png"),
+            ),
+        ),
+        resolver,
+        SESSION,
+    )
+
+    assert found == {"feishu:om_1:good": "data:image/png;base64,AAA"}

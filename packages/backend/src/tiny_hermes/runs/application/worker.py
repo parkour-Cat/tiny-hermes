@@ -24,11 +24,7 @@ from tiny_hermes.model_catalog.domain.pricing import (
     within_ceiling,
 )
 from tiny_hermes.model_catalog.domain.pricing import unknown as unknown_cost
-from tiny_hermes.runs.application.images import (
-    ImageSource,
-    ImagesUnresolvable,
-    resolve_images,
-)
+from tiny_hermes.runs.application.images import ImageSource, resolve_images
 from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
 from tiny_hermes.runs.application.tool_answers import (
     answer_agent_delegate,
@@ -435,33 +431,21 @@ class WorkerRuntime:
                     await self._cost_exceeded(claimed, handle, box, context, spend)
                     return
                 round_started = monotonic()
-                try:
-                    # Before the call, not inside the provider: fetching a
-                    # channel's image needs that channel's credentials, and a
-                    # model adapter holding them would be a credential in the
-                    # wrong module.
-                    pictures = await resolve_images(
-                        plan.messages, self._images, claimed.run.session_id
-                    )
-                except ImagesUnresolvable as unresolved:
-                    # A failed round with a named reason rather than an
-                    # exception: a Run that cannot fetch its own attachment is
-                    # an ordinary operational event, and the Run's own failure
-                    # is where an operator should read about it — the same
-                    # reasoning `model_router` gives for a vanished endpoint.
-                    logger.warning(
-                        "images unresolved: run=%s %s", claimed.run.id, unresolved
-                    )
-                    response = ModelResponse(
-                        stop_reason=StopReason.FAILED,
-                        text="",
-                        usage_quality=UsageQuality.UNAVAILABLE,
-                        failure="image_unavailable",
-                    )
-                else:
-                    response = await self._model.complete(
-                        _request(context, box, plan, mcp, pictures)
-                    )
+                # Before the call, not inside the provider: fetching a
+                # channel's image needs that channel's credentials, and a
+                # model adapter holding them would be a credential in the
+                # wrong module.
+                #
+                # Failures degrade rather than stopping the round. A Session
+                # replays its history, so an image that can never be fetched
+                # again would otherwise fail every future Run in that
+                # conversation — which it did, to a live one.
+                pictures = await resolve_images(
+                    plan.messages, self._images, claimed.run.session_id
+                )
+                response = await self._model.complete(
+                    _request(context, box, plan, mcp, pictures)
+                )
                 if box is not None:
                     # Only the first round of a slice is told, because only the
                     # first one is news.
