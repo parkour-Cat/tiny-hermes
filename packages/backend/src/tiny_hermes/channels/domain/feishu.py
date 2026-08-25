@@ -18,7 +18,7 @@ CHANNEL = "feishu"
 #: The message types §19.2's first version reads. A type outside this set is
 #: refused *answerably* — see `UnsupportedMessageType`. Absent is read as
 #: text: Feishu's v1 schema omitted the field on text messages.
-_READABLE = frozenset({"text", "", "image"})
+_READABLE = frozenset({"text", "", "image", "post"})
 
 
 class UnsupportedMessageType(MalformedChannelEvent):
@@ -99,6 +99,20 @@ def event_from_envelope(payload: dict[str, Any]) -> ChannelEvent:
             kind, channel_event_id=event_id, external_user_id=open_id
         )
 
+    if kind == "post":
+        said, pictures = _post_of(message)
+        if not said and not pictures:
+            # Nothing to act on. A Run built from this hands the Agent an
+            # empty turn and charges somebody for the round.
+            raise MalformedChannelEvent("rich text message carried nothing readable")
+        return ChannelEvent(
+            channel=CHANNEL,
+            channel_event_id=event_id,
+            external_user_id=open_id,
+            text=said,
+            images=pictures,
+        )
+
     if kind == "image":
         return ChannelEvent(
             channel=CHANNEL,
@@ -119,6 +133,77 @@ def event_from_envelope(payload: dict[str, Any]) -> ChannelEvent:
     )
 
 
+def _post_of(message: dict[str, Any]) -> tuple[str, tuple[ChannelImage, ...]]:
+    """Everything a rich-text message says, and every picture in it.
+
+    The content is language-keyed — `{"zh_cn": {...}}` — and the event
+    carries whichever locale the sender's client used. Reading the first
+    key rather than looking for `zh_cn` is why an English speaker's message
+    does not vanish.
+
+    Paragraphs are joined with a newline and runs inside one are not:
+    Feishu splits a styled line into several runs, and they are one line to
+    the person who typed them.
+    """
+    raw = string_at(message, "content")
+    if raw is None:
+        raise MalformedChannelEvent("rich text content is not a string")
+    try:
+        parsed: object = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise MalformedChannelEvent("rich text content is not JSON") from error
+    if not isinstance(parsed, dict):
+        raise MalformedChannelEvent("rich text content is not an object")
+    localized = cast(dict[str, Any], parsed)
+    body: Any = next(iter(localized.values()), None)
+    if not isinstance(body, dict):
+        raise MalformedChannelEvent("rich text content carries no localized body")
+    document = cast(dict[str, Any], body)
+
+    lines: list[str] = []
+    title = string_at(document, "title")
+    if title:
+        # A person who filled it in meant it to be read.
+        lines.append(title)
+    pictures: list[ChannelImage] = []
+    paragraphs: Any = document.get("content")
+    for entry in cast(list[Any], paragraphs) if isinstance(paragraphs, list) else []:
+        if not isinstance(entry, list):
+            continue
+        runs: list[str] = []
+        for item in cast(list[Any], entry):
+            if not isinstance(item, dict):
+                continue
+            element = cast(dict[str, Any], item)
+            tag = string_at(element, "tag")
+            if tag in ("text", "a"):
+                # A link's visible words are part of the sentence; dropping
+                # them removes a piece of what was said.
+                runs.append(string_at(element, "text") or "")
+            elif tag == "img":
+                key = string_at(element, "image_key")
+                if key:
+                    pictures.append(
+                        ChannelImage(
+                            message_id=_message_id_of(message), file_key=key
+                        )
+                    )
+            # Anything else — a divider, an emoji, a code block — is skipped.
+            # It is not content this build renders, and it is also not a
+            # reason to refuse a message whose words came through fine.
+        joined = "".join(runs)
+        if joined:
+            lines.append(joined)
+    return "\n".join(lines), tuple(pictures)
+
+
+def _message_id_of(message: dict[str, Any]) -> str:
+    message_id = string_at(message, "message_id")
+    if message_id is None:
+        raise MalformedChannelEvent("message carries no message id")
+    return message_id
+
+
 def _image_of(message: dict[str, Any]) -> ChannelImage:
     """Both ids a download needs, or a refusal.
 
@@ -126,9 +211,7 @@ def _image_of(message: dict[str, Any]) -> ChannelImage:
     could never succeed from being attempted, and keeps the sender's
     refusal accurate rather than a timeout.
     """
-    message_id = string_at(message, "message_id")
-    if message_id is None:
-        raise MalformedChannelEvent("image message carries no message id")
+    message_id = _message_id_of(message)
     raw = string_at(message, "content")
     if raw is None:
         raise MalformedChannelEvent("image message content is not a string")

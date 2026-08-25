@@ -68,7 +68,9 @@ def test_an_unreadable_type_is_refused_in_a_way_that_can_be_answered() -> None:
     assert refused.value.external_user_id == "ou_zhang"
 
 
-@pytest.mark.parametrize("kind", ["audio", "file", "post", "sticker", "media"])
+# `post` left this list when rich text became readable — a photo with a
+# caption is a post, which is how people actually send pictures.
+@pytest.mark.parametrize("kind", ["audio", "file", "sticker", "media"])
 def test_every_other_message_type_is_refused_the_same_way(kind: str) -> None:
     with pytest.raises(UnsupportedMessageType):
         event_from_envelope(_envelope({"message_type": kind, "content": "{}"}))
