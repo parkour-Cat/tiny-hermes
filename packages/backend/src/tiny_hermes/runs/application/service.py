@@ -4,10 +4,12 @@ from uuid import UUID
 
 from tiny_hermes.runs.domain.event_cursor import cursor_is_stale
 from tiny_hermes.runs.domain.models import (
+    Block,
     CallerIdentity,
     CallerType,
     CanonicalMessage,
     DeliveryMode,
+    ImageBlock,
     RunCapabilities,
     RunSignal,
     RunSnapshot,
@@ -262,6 +264,7 @@ class RunCoordination:
         text: str,
         idempotency_key: str | None,
         request_id: str,
+        images: Sequence[ImageBlock] = (),
     ) -> AcceptedRun:
         """§5's Run half.
 
@@ -283,7 +286,16 @@ class RunCoordination:
         """
         session = await self.get_end_user_session(workspace_id, end_user_id, session_id)
         key = _require_idempotency_key(idempotency_key)
-        message = CanonicalMessage("user", (TextBlock(text=text),))
+        # Text first when there is any, then the pictures. A photo sent with
+        # no caption is an ordinary message on a chat surface, so an empty
+        # text block is left out rather than sent as a blank turn.
+        blocks: tuple[Block, ...] = (
+            *((TextBlock(text=text),) if text else ()),
+            *images,
+        )
+        if not blocks:
+            raise ValueError("a Run needs something to act on")
+        message = CanonicalMessage("user", blocks)
         return await self._store.accept_run(
             AcceptRunCommand(
                 workspace_id=workspace_id,
