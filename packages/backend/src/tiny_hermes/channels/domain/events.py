@@ -16,6 +16,21 @@ from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
+class ChannelImage:
+    """An image the sender attached, as the two ids needed to fetch it.
+
+    Not the bytes. Parsing happens inside the webhook transaction, and a
+    download there would make an inbound delivery wait on the vendor —
+    the same reason the reply is sent by a scan rather than in the request.
+    Both ids are required because the fetch takes both:
+    `GET /im/v1/messages/{message_id}/resources/{file_key}`.
+    """
+
+    message_id: str
+    file_key: str
+
+
+@dataclass(frozen=True)
 class ChannelEvent:
     """A normalized inbound event.
 
@@ -33,6 +48,9 @@ class ChannelEvent:
     #: a platform member — §122: a Feishu user does not become one.
     external_user_id: str
     text: str
+    #: Images attached to this message, by reference. Empty for the ordinary
+    #: text message, which is almost all of them.
+    images: tuple[ChannelImage, ...] = ()
 
 
 class MalformedChannelEvent(Exception):

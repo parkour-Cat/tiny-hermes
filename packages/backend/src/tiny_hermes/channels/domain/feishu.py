@@ -7,14 +7,18 @@ import json
 from typing import Any, cast
 
 from tiny_hermes.channels.domain._json import object_at, string_at
-from tiny_hermes.channels.domain.events import ChannelEvent, MalformedChannelEvent
+from tiny_hermes.channels.domain.events import (
+    ChannelEvent,
+    ChannelImage,
+    MalformedChannelEvent,
+)
 
 CHANNEL = "feishu"
 
 #: The message types §19.2's first version reads. A type outside this set is
 #: refused *answerably* — see `UnsupportedMessageType`. Absent is read as
 #: text: Feishu's v1 schema omitted the field on text messages.
-_READABLE = frozenset({"text", ""})
+_READABLE = frozenset({"text", "", "image"})
 
 
 class UnsupportedMessageType(MalformedChannelEvent):
@@ -85,14 +89,26 @@ def event_from_envelope(payload: dict[str, Any]) -> ChannelEvent:
     if message is None:
         raise MalformedChannelEvent("no message")
 
-    # Checked before the content is read, so a photo is refused for being a
-    # photo rather than for "carrying no text" — the second is true of a
-    # photo but says nothing a person could act on, and it is also what a
-    # genuinely broken text message looks like.
+    # Checked before the content is read, so an unreadable type is refused
+    # for being that type rather than for "carrying no text" — the second is
+    # true of a voice note but says nothing a person could act on, and it is
+    # also what a genuinely broken text message looks like.
     kind = string_at(message, "message_type") or ""
     if kind not in _READABLE:
         raise UnsupportedMessageType(
             kind, channel_event_id=event_id, external_user_id=open_id
+        )
+
+    if kind == "image":
+        return ChannelEvent(
+            channel=CHANNEL,
+            channel_event_id=event_id,
+            external_user_id=open_id,
+            # Feishu sends a photo as its own message with no caption field.
+            # Empty rather than invented: whatever the Run is asked to do
+            # with the picture is the caller's wording, not the parser's.
+            text="",
+            images=(_image_of(message),),
         )
 
     return ChannelEvent(
@@ -101,3 +117,28 @@ def event_from_envelope(payload: dict[str, Any]) -> ChannelEvent:
         external_user_id=open_id,
         text=_text_of(message),
     )
+
+
+def _image_of(message: dict[str, Any]) -> ChannelImage:
+    """Both ids a download needs, or a refusal.
+
+    Half an address is not an address: refusing here keeps a fetch that
+    could never succeed from being attempted, and keeps the sender's
+    refusal accurate rather than a timeout.
+    """
+    message_id = string_at(message, "message_id")
+    if message_id is None:
+        raise MalformedChannelEvent("image message carries no message id")
+    raw = string_at(message, "content")
+    if raw is None:
+        raise MalformedChannelEvent("image message content is not a string")
+    try:
+        parsed: object = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise MalformedChannelEvent("image content is not JSON") from error
+    if not isinstance(parsed, dict):
+        raise MalformedChannelEvent("image content is not an object")
+    file_key = string_at(cast(dict[str, Any], parsed), "image_key")
+    if file_key is None:
+        raise MalformedChannelEvent("image message carries no image key")
+    return ChannelImage(message_id=message_id, file_key=file_key)
