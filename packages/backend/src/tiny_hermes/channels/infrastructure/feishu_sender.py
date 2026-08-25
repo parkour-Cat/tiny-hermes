@@ -225,6 +225,16 @@ class FeishuSender:
         )
         return self._envelope(answer)
 
+    async def token_for(self, app_id: str, app_secret: str) -> str:
+        """The cached tenant token, for another caller in this package.
+
+        `FeishuImageFetcher` needs one for the same app. Sharing this cache
+        rather than building a second is not an optimisation: Feishu
+        rate-limits the token endpoint, and two caches for one app would
+        double the calls to it.
+        """
+        return await self._token(app_id, app_secret)
+
     async def _token(self, app_id: str, app_secret: str) -> str:
         held = self._tokens.get(app_id)
         if held is not None and held.expires_at > self._now():
