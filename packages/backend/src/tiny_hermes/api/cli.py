@@ -139,7 +139,7 @@ async def _worker() -> None:
                 max_redirects=settings.outbound_max_redirects,
                 max_response_bytes=settings.outbound_max_response_bytes,
             ),
-            CredentialResolver(None, optional_kek(settings.tiny_hermes_kek)).resolve,
+            optional_kek(settings.tiny_hermes_kek),
         ),
         # An Agent's calls to somebody else's API leave from here rather than
         # from the sandbox, so the credential stays on this side and the
