@@ -16,7 +16,6 @@ import json
 from uuid import UUID
 
 import pytest
-
 from tiny_hermes.channels.domain.blocked import BlockedNotice
 from tiny_hermes.channels.infrastructure.feishu_card import blocked_card
 

@@ -79,8 +79,13 @@ class _Sender:
     identical from every other assertion here.
     """
 
-    def __init__(self, refusing: Exception | None = None) -> None:
+    def __init__(
+        self, refusing: Exception | None = None, card_id: str | None = "om_card"
+    ) -> None:
         self.refusing = refusing
+        #: What Feishu answers `send_card` with. `None` reproduces an answer
+        #: carrying no id — the card exists but can never be updated.
+        self.card_id = card_id
         self.sent: list[dict[str, str]] = []
         self.asked_for: list[UUID] = []
 
@@ -110,6 +115,28 @@ class _Sender:
         if self.refusing is not None:
             raise self.refusing
 
+    async def update_card(
+        self,
+        *,
+        app_id: str,
+        app_secret: str,
+        message_id: str,
+        card: dict[str, Any],
+    ) -> None:
+        self.sent.append(
+            {
+                "kind": "patch",
+                "app_id": app_id,
+                "app_secret": app_secret,
+                "open_id": "",
+                "message_id": message_id,
+                "text": json.dumps(card, ensure_ascii=False),
+                "delivery_key": "",
+            }
+        )
+        if self.refusing is not None:
+            raise self.refusing
+
     async def send_card(
         self,
         *,
@@ -118,7 +145,7 @@ class _Sender:
         open_id: str,
         card: dict[str, Any],
         delivery_key: str | None = None,
-    ) -> None:
+    ) -> str | None:
         self.sent.append(
             {
                 "kind": "card",
@@ -133,6 +160,7 @@ class _Sender:
         )
         if self.refusing is not None:
             raise self.refusing
+        return self.card_id
 
 
 async def _binding(
@@ -1039,3 +1067,182 @@ async def test_an_ordinary_five_second_run_is_still_left_alone(
     await _dispatch(engine, sender)
 
     assert sender.sent == []
+
+
+# --- one card per delivery, rewritten in place ---
+
+
+async def test_a_message_gets_a_card_before_anything_is_known(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The point of the whole design: something appears immediately.
+
+    Not after 8 seconds, and not after the Run finishes. A text message
+    cannot be taken back, so the platform used to have to know what to say
+    before saying anything — and the wait is indistinguishable from a
+    dropped message.
+
+    Sent by the scan rather than on the inbound path, deliberately: sending
+    inside the webhook transaction would make an inbound delivery depend on
+    `open.feishu.cn` being reachable, and a timeout would leave Feishu
+    retrying a delivery whose claim was already taken. The scan runs every
+    second, which is what "immediately" means here.
+    """
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    _deliver(client, binding_id)
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+
+    assert len(sender.sent) == 1
+    assert sender.sent[0]["kind"] == "card"
+    assert "收到" in sender.sent[0]["text"] or "处理" in sender.sent[0]["text"]
+
+
+async def test_the_card_id_is_remembered_so_it_can_be_rewritten(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Feishu's `message_id` is the only handle an update accepts. Losing it
+    turns every later stage back into a separate message."""
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    _deliver(client, binding_id)
+
+    await _dispatch(engine, _Sender())
+
+    async with engine.connect() as connection:
+        stored = await connection.execute(
+            text("SELECT card_message_id FROM channel_events")
+        )
+    assert stored.scalar_one() == "om_card"
+
+
+async def test_the_answer_rewrites_the_card_instead_of_sending_a_new_message(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One card that changes, not a conversation full of status updates."""
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    run_id = _deliver(client, binding_id)
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+    await _finish(engine, run_id, said="上周有 12 单。")
+    await _dispatch(engine, sender)
+
+    assert [entry["kind"] for entry in sender.sent] == ["card", "patch"]
+    assert sender.sent[1]["message_id"] == "om_card"
+    assert "上周有 12 单。" in sender.sent[1]["text"]
+
+
+async def test_a_card_that_cannot_be_updated_falls_back_to_a_new_message(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Feishu answered the send without a `message_id`, so there is nothing
+    to patch. The answer still has to arrive — a design that could only
+    speak through a card would go silent whenever the card was unreachable,
+    which is worse than the two-message version it replaces.
+    """
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    run_id = _deliver(client, binding_id)
+
+    sender = _Sender(card_id=None)
+    await _dispatch(engine, sender)
+    await _finish(engine, run_id, said="上周有 12 单。")
+    await _dispatch(engine, sender)
+
+    assert [entry["kind"] for entry in sender.sent] == ["card", "text"]
+    assert sender.sent[1]["text"] == "上周有 12 单。"
+
+
+async def test_a_slow_run_rewrites_the_card_rather_than_adding_a_message(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    _deliver(client, binding_id)
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+    await _age_delivery(engine, 12)
+    await _dispatch(engine, sender)
+
+    assert [entry["kind"] for entry in sender.sent] == ["card", "patch"]
+    assert "还在" in sender.sent[1]["text"]
+
+
+async def test_a_queued_message_opens_with_the_queue_card_directly(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No "正在处理" first. Nothing is processing it — it is queued, and
+    saying otherwise would be a sentence the platform knows to be false."""
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    first = _deliver(client, binding_id, event_id="om_head")
+    await _block_head(engine, first)
+    _deliver(client, binding_id, event_id="om_queued")
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+
+    queued = [e for e in sender.sent if "排队" in e["text"]]
+    assert len(queued) == 1
+    assert queued[0]["kind"] == "card"
+
+
+async def test_a_failed_run_rewrites_the_card_with_the_reason(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    run_id = _deliver(client, binding_id)
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+    await _finish(engine, run_id, said="", status="failed")
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE runs SET checkpoint = :c WHERE id = :r"),
+            {"r": run_id, "c": json.dumps({"failure": "model_endpoint_unreachable"})},
+        )
+    await _dispatch(engine, sender)
+
+    assert sender.sent[1]["kind"] == "patch"
+    assert "model_endpoint_unreachable" in sender.sent[1]["text"]
