@@ -154,11 +154,26 @@ def _post_of(message: dict[str, Any]) -> tuple[str, tuple[ChannelImage, ...]]:
         raise MalformedChannelEvent("rich text content is not JSON") from error
     if not isinstance(parsed, dict):
         raise MalformedChannelEvent("rich text content is not an object")
-    localized = cast(dict[str, Any], parsed)
-    body: Any = next(iter(localized.values()), None)
-    if not isinstance(body, dict):
-        raise MalformedChannelEvent("rich text content carries no localized body")
-    document = cast(dict[str, Any], body)
+    envelope = cast(dict[str, Any], parsed)
+    # Two shapes, and the documented one is not the one that arrives.
+    #
+    # Feishu documents the **send** format, keyed by locale:
+    # `{"zh_cn": {"title": ..., "content": [...]}}`. What comes back in an
+    # `im.message.receive_v1` event is already resolved to one language and
+    # carries `content` at the top level. Ten unit tests written from the
+    # documentation passed while every real message failed — the tests and
+    # this parser agreed with each other and both disagreed with the
+    # service, which is a shape this repository has produced before.
+    #
+    # Both are accepted. An SDK may hand over the documented one verbatim,
+    # and nothing is gained by refusing a structure this can read.
+    if isinstance(envelope.get("content"), list):
+        document = envelope
+    else:
+        body: Any = next(iter(envelope.values()), None)
+        if not isinstance(body, dict):
+            raise MalformedChannelEvent("rich text content carries no readable body")
+        document = cast(dict[str, Any], body)
 
     lines: list[str] = []
     title = string_at(document, "title")

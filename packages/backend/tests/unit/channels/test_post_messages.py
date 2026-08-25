@@ -144,3 +144,43 @@ def test_a_post_whose_language_key_differs_still_reads() -> None:
     )
 
     assert event.text == "hello"
+
+
+def test_a_post_received_without_a_language_key_reads() -> None:
+    """The shape a real tenant actually sends.
+
+    Feishu's documentation describes the **send** format, which is keyed by
+    locale: `{"zh_cn": {"title": ..., "content": [...]}}`. What arrives in
+    an `im.message.receive_v1` event is already resolved to one language and
+    has no such key. Ten unit tests written from the documentation passed
+    while every real message failed with `rich text content carries no
+    localized body` — the tests and the implementation agreed with each
+    other and both disagreed with the service.
+    """
+    event = event_from_envelope(
+        _post(
+            {
+                "title": "",
+                "content": [
+                    [{"tag": "img", "image_key": "img_v2_abc"}],
+                    [{"tag": "text", "text": "图片里的是什么"}],
+                ],
+            }
+        )
+    )
+
+    assert event.text == "图片里的是什么"
+    assert event.images[0].file_key == "img_v2_abc"
+
+
+def test_both_shapes_are_accepted() -> None:
+    """Kept rather than replaced. The documented shape is what the send API
+    takes, an SDK may hand it over verbatim, and nothing is gained by
+    refusing a structure this parser can read."""
+    keyed = event_from_envelope(_post(_zh([{"tag": "text", "text": "有键"}])))
+    bare = event_from_envelope(
+        _post({"title": "", "content": [[{"tag": "text", "text": "无键"}]]})
+    )
+
+    assert keyed.text == "有键"
+    assert bare.text == "无键"
