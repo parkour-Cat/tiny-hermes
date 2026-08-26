@@ -1,7 +1,7 @@
 """一条命令走的是另一条路：不建 Run，不进队列，但欠人一句话。"""
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -165,11 +165,15 @@ def runs() -> FakeRuns:
 
 
 @pytest.fixture
-def busy_coordination(runs: FakeRuns) -> FakeRuns:
-    """Configures the very `runs` fake `ingestion` was built with — not a
-    second object — so requesting this fixture changes what withdrawal does
-    inside an `ingestion` that already exists in the same test.
+def busy_coordination(runs: FakeRuns, conversations: FakeConversations) -> FakeRuns:
+    """Configures the very `runs` and `conversations` fakes `ingestion` was
+    built with — not second objects — so requesting this fixture changes
+    what an already-built `ingestion` does in the same test. A session must
+    exist for `withdraw_from_session` to be reached at all (see
+    `_command`'s "no conversation" short-circuit), so this also gives
+    `conversations` one; the default fixture deliberately has none.
     """
+    conversations.known = uuid4()
     runs.busy_reason = "running"
     return runs
 
@@ -185,7 +189,9 @@ def ingestion(
     )
 
 
-async def test_a_command_does_not_become_a_run(ingestion, undo_event, binding) -> None:
+async def test_a_command_does_not_become_a_run(
+    ingestion: ChannelIngestion, undo_event: ChannelEvent, binding: ChannelBindingRecord
+) -> None:
     delivered = await ingestion.run_for(
         binding=binding, event=undo_event, request_id="r1"
     )
@@ -195,7 +201,9 @@ async def test_a_command_does_not_become_a_run(ingestion, undo_event, binding) -
     assert delivered.receipt.command == "undo"
 
 
-async def test_an_ordinary_message_is_untouched(ingestion, text_event, binding) -> None:
+async def test_an_ordinary_message_is_untouched(
+    ingestion: ChannelIngestion, text_event: ChannelEvent, binding: ChannelBindingRecord
+) -> None:
     delivered = await ingestion.run_for(
         binding=binding, event=text_event, request_id="r2"
     )
@@ -205,29 +213,38 @@ async def test_an_ordinary_message_is_untouched(ingestion, text_event, binding) 
 
 
 async def test_a_command_from_someone_with_no_conversation_creates_no_session(
-    ingestion, undo_event, binding, conversations
+    ingestion: ChannelIngestion,
+    undo_event: ChannelEvent,
+    binding: ChannelBindingRecord,
+    conversations: FakeConversations,
 ) -> None:
     delivered = await ingestion.run_for(
         binding=binding, event=undo_event, request_id="r3"
     )
 
+    assert delivered.receipt is not None
     assert delivered.receipt.outcome == "nothing"
     assert conversations.created == []
 
 
 async def test_a_busy_session_gets_a_receipt_that_says_which_kind(
-    ingestion, undo_event, binding, busy_coordination
+    ingestion: ChannelIngestion,
+    undo_event: ChannelEvent,
+    binding: ChannelBindingRecord,
+    busy_coordination: FakeRuns,
 ) -> None:
+    del busy_coordination
     delivered = await ingestion.run_for(
         binding=binding, event=undo_event, request_id="r4"
     )
 
+    assert delivered.receipt is not None
     assert delivered.receipt.outcome == "busy"
     assert delivered.receipt.busy_reason == "running"
 
 
 async def test_a_finished_undo_echoes_the_withdrawn_text(
-    subjects, binding, undo_event
+    subjects: FakeSubjects, binding: ChannelBindingRecord, undo_event: ChannelEvent
 ) -> None:
     """The receipt's numbers must be what actually happened, not what was
     asked for — mirrors `Withdrawal`'s own contract (`turns` is the real
@@ -249,6 +266,7 @@ async def test_a_finished_undo_echoes_the_withdrawn_text(
         binding=binding, event=undo_event, request_id="r5"
     )
 
+    assert delivered.receipt is not None
     assert delivered.receipt.outcome == "done"
     assert delivered.receipt.messages == 2
     assert delivered.receipt.turns == 1
@@ -257,7 +275,7 @@ async def test_a_finished_undo_echoes_the_withdrawn_text(
 
 
 async def test_new_withdraws_the_whole_session_not_just_the_last_exchange(
-    subjects, binding
+    subjects: FakeSubjects, binding: ChannelBindingRecord
 ) -> None:
     """`/new` is "draw a line across this session", not `/undo` with a
     bigger number — §8's decision that it stays one Session entity. Scope
@@ -282,12 +300,13 @@ async def test_new_withdraws_the_whole_session_not_just_the_last_exchange(
         binding=binding, event=new_event, request_id="r6"
     )
 
+    assert delivered.receipt is not None
     assert delivered.receipt.command == "new"
     assert runs.withdraw_calls == [(existing_session, WithdrawScope.ALL, 1)]
 
 
 async def test_a_message_the_parser_rejects_reaches_the_model_byte_identical(
-    subjects, binding
+    subjects: FakeSubjects, binding: ChannelBindingRecord
 ) -> None:
     """The claim this task exists to make true: `commands.py`'s docstring
     says a non-command message beginning with `/` is passed through to the
