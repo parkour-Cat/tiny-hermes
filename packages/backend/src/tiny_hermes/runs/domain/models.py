@@ -505,6 +505,11 @@ class StoredMessage:
     id: UUID
     sequence: int
     message: CanonicalMessage
+    #: When somebody took this turn back. `execution_context` never builds a
+    #: `StoredMessage` for a withdrawn row at all, so this stays `None` there;
+    #: `list_session_messages` is the one caller that leaves withdrawn rows in
+    #: and needs a way to say so, which is why the field exists here at all.
+    withdrawn_at: datetime | None = None
 
 
 @dataclass(frozen=True)

@@ -1271,7 +1271,7 @@ class SqlRunStore:
             .with_for_update()
         )
 
-    async def _child_result(self, run: RunRow) -> dict[str, Any]:
+    async def child_result_for(self, run: RunRow) -> dict[str, Any]:
         """What a child reports, and deliberately not what it did.
 
         §13's seventh clause: an outcome, a sentence, and the Artifacts it was
@@ -1283,6 +1283,9 @@ class SqlRunStore:
         The summary is the child's last words rather than a generated
         precis: it is what the child itself chose to say it had done, and a
         second model call to compress it would be a claim nobody made.
+
+        Public rather than the private name this method carried before, purely
+        as a test seam — production still reaches this only from `_terminalize`.
         """
         said = await self._session.scalar(
             select(SessionMessageRow)
@@ -1290,6 +1293,11 @@ class SqlRunStore:
                 SessionMessageRow.session_id == run.session_id,
                 SessionMessageRow.role == "assistant",
                 SessionMessageRow.redacted.is_(False),
+                # A withdrawn message means it must not be quoted back as a
+                # result — the parent would be reading words the child took
+                # back, through a channel §13 never meant as a second
+                # transcript.
+                SessionMessageRow.withdrawn_at.is_(None),
             )
             .order_by(SessionMessageRow.sequence.desc())
             .limit(1)
@@ -1324,7 +1332,7 @@ class SqlRunStore:
             # can take an answer — another Worker holds it, or it is still
             # waiting on a sibling — and a row survives that where a call would
             # not. The sweep hands it over when the parent can take it.
-            run.delegation_result = await self._child_result(run)
+            run.delegation_result = await self.child_result_for(run)
         await self._session.execute(
             update(IdempotencyRecordRow)
             .where(IdempotencyRecordRow.run_id == run.id)
@@ -2233,7 +2241,7 @@ class SqlRunStore:
         self._session.add(run)
         await self._session.flush()
 
-        await self._copy_checkpoint_messages(session, source, run_id, now)
+        await self.copy_checkpoint_messages(session, source, run_id, now)
         session.next_run_sequence += 1
         if session.head_run_id is None:
             session.head_run_id = run_id
@@ -2605,7 +2613,13 @@ class SqlRunStore:
 
     async def list_session_messages(
         self, workspace_id: UUID, session_id: UUID
-    ) -> Sequence[CanonicalMessage]:
+    ) -> Sequence[StoredMessage]:
+        # Deliberately not filtered on `withdrawn_at`: this is the transcript a
+        # person reads, and a person who took a message back still needs to see
+        # that they said it and that it is marked withdrawn — the console has
+        # no other route to that fact. `withdrawn_at` rides along on the DTO
+        # instead, so a caller can render "withdrawn" rather than pretending
+        # the row was never there.
         rows = (
             await self._session.scalars(
                 select(SessionMessageRow)
@@ -2617,7 +2631,15 @@ class SqlRunStore:
                 .order_by(SessionMessageRow.sequence)
             )
         ).all()
-        return [_to_message(row) for row in rows]
+        return [
+            StoredMessage(
+                id=row.id,
+                sequence=row.sequence,
+                message=_to_message(row),
+                withdrawn_at=row.withdrawn_at,
+            )
+            for row in rows
+        ]
 
     async def record_end_user_session_read(
         self,
@@ -2671,13 +2693,18 @@ class SqlRunStore:
             document,
         )
 
-    async def _copy_checkpoint_messages(
+    async def copy_checkpoint_messages(
         self, session: SessionRow, source: RunRow, run_id: UUID, now: datetime
-    ) -> None:
+    ) -> Sequence[SessionMessageRow]:
         """Re-point the source Run's authorized messages at the Derived Retry.
 
         Only references are copied; no message content is rewritten and no
         redacted message is exposed.
+
+        Public rather than the private name this method carried before, purely
+        as a test seam — production still reaches this only from `derive_retry`.
+        Returns what it copied so a caller (a test, here) can check what did
+        not make it across.
         """
         rows = (
             await self._session.scalars(
@@ -2686,25 +2713,33 @@ class SqlRunStore:
                     SessionMessageRow.session_id == session.id,
                     SessionMessageRow.source_run_id == source.id,
                     SessionMessageRow.redacted.is_(False),
+                    # A checkpoint is for continuing. Copying a message the
+                    # user withdrew into the new Run's history would hand it
+                    # straight back to the model on the very next round —
+                    # continuing with the history they took back is the same
+                    # as never having taken it back.
+                    SessionMessageRow.withdrawn_at.is_(None),
                 )
                 .order_by(SessionMessageRow.sequence)
             )
         ).all()
+        copied: list[SessionMessageRow] = []
         for row in rows:
-            self._session.add(
-                SessionMessageRow(
-                    id=uuid4(),
-                    session_id=session.id,
-                    workspace_id=session.workspace_id,
-                    sequence=session.next_message_sequence,
-                    role=row.role,
-                    content=row.content,
-                    source_run_id=run_id,
-                    redacted=False,
-                    created_at=now,
-                )
+            new_row = SessionMessageRow(
+                id=uuid4(),
+                session_id=session.id,
+                workspace_id=session.workspace_id,
+                sequence=session.next_message_sequence,
+                role=row.role,
+                content=row.content,
+                source_run_id=run_id,
+                redacted=False,
+                created_at=now,
             )
+            self._session.add(new_row)
+            copied.append(new_row)
             session.next_message_sequence += 1
+        return copied
 
     async def _claim_idempotency(
         self,

@@ -16,6 +16,7 @@ from tiny_hermes.runs.domain.models import (
     RunTree,
     SessionMode,
     SessionSnapshot,
+    StoredMessage,
     TextBlock,
     WorkspaceUsageSummary,
     fingerprint_request,
@@ -351,7 +352,7 @@ class RunCoordination:
 
     async def read_end_user_session_messages(
         self, workspace_id: UUID, end_user_id: UUID, session_id: UUID
-    ) -> Sequence[CanonicalMessage]:
+    ) -> Sequence[StoredMessage]:
         """An end user's own read of their own conversation.
 
         No audit row, unlike `read_session_messages`: §6's audit is the
@@ -592,13 +593,13 @@ class RunCoordination:
 
     async def list_session_messages(
         self, workspace_id: UUID, actor: Actor, session_id: UUID
-    ) -> Sequence[CanonicalMessage]:
+    ) -> Sequence[StoredMessage]:
         await self._load_readable_session(workspace_id, actor, session_id)
         return await self._store.list_session_messages(workspace_id, session_id)
 
     async def read_session_messages(
         self, workspace_id: UUID, actor: Actor, session_id: UUID, request_id: str
-    ) -> Sequence[CanonicalMessage]:
+    ) -> Sequence[StoredMessage]:
         """§6: the console's read of message content.
 
         §4.6 opened "查看" for a developer at the price of this audit row —

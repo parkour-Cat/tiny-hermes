@@ -73,10 +73,10 @@ from tiny_hermes.identity.presentation.end_user_dependencies import (
 )
 from tiny_hermes.runs.application.service import RunCoordination, RunCoordinationError
 from tiny_hermes.runs.domain.models import (
-    CanonicalMessage,
     RunSnapshot,
     SessionMode,
     SessionSnapshot,
+    StoredMessage,
 )
 from tiny_hermes.runs.presentation.errors import as_app_error
 from tiny_hermes.runs.presentation.routes import REPLAYED_HEADER
@@ -192,8 +192,8 @@ class EndUserSessionMessageResponse(BaseModel):
     author: str | None = None
 
     @classmethod
-    def from_domain(cls, message: CanonicalMessage) -> "EndUserSessionMessageResponse":
-        return cls.model_validate(message.document())
+    def from_domain(cls, stored: StoredMessage) -> "EndUserSessionMessageResponse":
+        return cls.model_validate(stored.message.document())
 
 
 def end_user_run_router(resources: ApplicationResources) -> APIRouter:

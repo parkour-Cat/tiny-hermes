@@ -254,7 +254,7 @@ async def test_a_withdrawn_assistant_message_is_not_a_child_run_result(
 ) -> None:
     """A child Run's delegation result takes its most recent assistant turn.
     The one it took back must not be the one that surfaces."""
-    run_id, earlier_id, later_id = run_with_two_assistant_turns
+    run_id, _, later_id = run_with_two_assistant_turns
     await store.mark_withdrawn([later_id], at=datetime.now(UTC))
 
     run = await db_session.get(RunRow, run_id)

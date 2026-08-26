@@ -20,11 +20,11 @@ from tiny_hermes.runs.application.service import (
     RunCoordinationError,
 )
 from tiny_hermes.runs.domain.models import (
-    CanonicalMessage,
     RunSignal,
     RunSnapshot,
     SessionMode,
     SessionSnapshot,
+    StoredMessage,
     WorkspaceUsageSummary,
 )
 from tiny_hermes.runs.presentation.errors import as_app_error
@@ -92,8 +92,8 @@ class SessionMessageResponse(BaseModel):
     author: str | None = None
 
     @classmethod
-    def from_domain(cls, message: CanonicalMessage) -> "SessionMessageResponse":
-        return cls.model_validate(message.document())
+    def from_domain(cls, stored: StoredMessage) -> "SessionMessageResponse":
+        return cls.model_validate(stored.message.document())
 
 
 class QueueResponse(BaseModel):
