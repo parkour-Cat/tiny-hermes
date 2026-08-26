@@ -425,12 +425,15 @@ async def test_a_withdrawn_assistant_message_is_not_a_child_run_result(
     store, parent_and_child_run
 ) -> None:
     """子 Run 的结果取的是它最近一条 assistant 消息。撤掉的那条不该顶上来。"""
-    parent, child, answer_id = parent_and_child_run
+    parent, child, earlier_answer_id, answer_id = parent_and_child_run
     await store.mark_withdrawn([answer_id], at=datetime.now(UTC))
 
     result = await store.child_result_for(parent.id)
 
-    assert result is None or result.get("message_id") != answer_id
+    # 断言它取到了**前一条**未撤回的 assistant 消息，而不是「没取到」——
+    # 一个把结果整个丢掉的实现同样能让「不等于 answer_id」通过。
+    assert result is not None
+    assert result["message_id"] == earlier_answer_id
 
 
 async def test_a_withdrawn_message_is_not_copied_into_a_checkpoint(
@@ -929,15 +932,16 @@ def receipt_from_document(document: dict[str, Any] | None) -> CommandReceipt | N
     return CommandReceipt(
         command=command,
         outcome=outcome,
-        messages=int_at(document, "messages"),
-        turns=int_at(document, "turns"),
+        messages=int_at(document, "messages", 0),
+        turns=int_at(document, "turns", 0),
         echoed_text=string_at(document, "echoed_text") or "",
         busy_reason=string_at(document, "busy_reason") or None,
     )
 ```
 
-> `string_at` / `int_at` 的确切签名以 `channels/domain/_json.py` 为准；
-> 若它们返回 `str | None` / `int`，上面的写法直接可用。
+> 签名已核对：`string_at(container, key) -> str | None`，
+> `int_at(container, key, default) -> int`（**`default` 是必填位置参数**）。
+> 上面的写法与之相符，照抄即可。
 
 - [ ] **Step 4: 加两列与扫描器**
 
