@@ -29,6 +29,7 @@ from tiny_hermes.runs.domain.models import (
     SAFETY_PREAMBLE,
     CacheStateHint,
     CanonicalMessage,
+    ImageBlock,
     ReasoningBlock,
     TextBlock,
     ToolCallBlock,
@@ -242,10 +243,30 @@ def _tool_round(body: dict[str, Any], message: Any) -> ModelResponse:
     )
 
 
+class ImagesNotAccepted(Exception):
+    """This endpoint was not declared as accepting image input.
+
+    Refused here rather than at the provider. Sending anyway earns a vendor
+    400 in the vendor's own words, which reaches a person in Feishu as
+    `endpoint_status:400` — true, unactionable, and about the wrong layer.
+    This names the thing an administrator can change.
+    """
+
+
+class ImageUnavailable(Exception):
+    """An `ImageBlock` whose bytes the caller did not resolve.
+
+    Raised rather than dropping the block. A question about a picture, sent
+    without the picture, gets answered about nothing — confidently, and with
+    no sign to the reader that anything was missing.
+    """
+
+
 def build_payload(
     spec: ModelEndpointSpec,
     request: ModelRequest,
     tools: list[dict[str, Any]] | None = None,
+    images: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """The request body, with the platform's rules ahead of the Agent's persona.
 
@@ -256,6 +277,7 @@ def build_payload(
     minimum here means a later change to that check cannot turn into a request
     the endpoint was never approved for.
     """
+    resolved = images or {}
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SAFETY_PREAMBLE},
         {"role": "system", "content": request.personality},
@@ -277,7 +299,8 @@ def build_payload(
         # turn cannot talk over it. §11.3 calls it a protected runtime hint.
         messages.append({"role": "system", "content": CACHE_RESET_HINT})
     for entry in request.messages:
-        messages.extend(_as_messages(entry))
+        messages.extend(_as_messages(entry, spec=spec, images=resolved))
+    _log_images(spec, request, messages)
     payload: dict[str, Any] = {
         "model": spec.model,
         "messages": messages,
@@ -339,7 +362,106 @@ def _memory_block(request: ModelRequest) -> str:
     )
 
 
-def _as_messages(message: CanonicalMessage) -> list[dict[str, Any]]:
+def _log_images(
+    spec: ModelEndpointSpec,
+    request: ModelRequest,
+    messages: list[dict[str, Any]],
+) -> None:
+    """Say what this request actually carries, when it carries a picture.
+
+    Only when there is one: almost every round has none, and a line per round
+    saying so would bury the one that matters.
+
+    This exists because every layer of image support was separately provable
+    — the endpoint's declaration, the download, the data URL, this builder,
+    the vendor — while the conversation still answered "I cannot see the
+    picture". A green suite says the parts work; nothing said which request
+    went out. `attached` and `missing` are counted apart because they are
+    different failures: an endpoint never declared to accept images, versus a
+    reference the resolver could not fetch.
+    """
+    wanted = sum(
+        1
+        for entry in request.messages
+        for block in entry.blocks
+        if isinstance(block, ImageBlock)
+    )
+    if not wanted:
+        return
+    attached = sum(
+        1
+        for message in messages
+        if isinstance(message.get("content"), list)
+        for part in cast(list[dict[str, Any]], message["content"])
+        if part.get("type") == "image_url"
+    )
+    logger.info(
+        "model request images attached=%d missing=%d accepts_images=%s",
+        attached,
+        wanted - attached,
+        spec.accepts_images,
+    )
+
+
+def _parts(
+    text: str,
+    pictures: list[ImageBlock],
+    *,
+    spec: ModelEndpointSpec | None,
+    images: dict[str, str],
+) -> list[dict[str, Any]]:
+    """A turn as content parts, which is how an image travels.
+
+    Both refusals happen here rather than further down: an endpoint that
+    was not declared to accept images, and a reference the caller did not
+    resolve. Neither can be recovered from by sending something slightly
+    different — one gets a vendor 400, the other gets a confident answer
+    about a picture that was never attached.
+    """
+    parts: list[dict[str, Any]] = []
+    if text:
+        parts.append({"type": "text", "text": text})
+    accepted = spec is None or spec.accepts_images
+    missing = 0
+    for picture in pictures:
+        found = images.get(picture.reference) if accepted else None
+        if found is None:
+            missing += 1
+            continue
+        parts.append({"type": "image_url", "image_url": {"url": found}})
+    if missing:
+        # Said, not swallowed. The model answers that it cannot see the
+        # picture, which is the honest reply — and the alternative, failing
+        # the round, permanently broke every Session that ever held an
+        # image the platform could no longer fetch.
+        #
+        # Scoped to *this message*, because that is all this function knows.
+        # It said "in this conversation" once, and a live session showed the
+        # price: two images belonged to messages their sender had recalled,
+        # so the sentence appeared on every round, and the model took it as a
+        # standing fact about all images — refusing to look at the seven
+        # attached beside it. Replaying that history without the sentence,
+        # the same model described the picture correctly.
+        subject = "1 image" if missing == 1 else f"{missing} images"
+        verb = "is" if missing == 1 else "are"
+        parts.append(
+            {
+                "type": "text",
+                "text": (
+                    f"[{subject} in this message could not be "
+                    f"retrieved and {verb} not shown]"
+                ),
+            }
+        )
+    return parts
+
+
+def _as_messages(
+    message: CanonicalMessage,
+    *,
+    spec: ModelEndpointSpec | None = None,
+    images: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     """One canonical turn, as the one-or-more messages the API expects.
 
     It walks `blocks` rather than `message.text`. The text accessor still
@@ -368,6 +490,18 @@ def _as_messages(message: CanonicalMessage) -> list[dict[str, Any]]:
     reasoning = {"reasoning_content": thought} if thought else {}
     calls = [b for b in message.blocks if isinstance(b, ToolCallBlock)]
     if not calls:
+        pictures = [b for b in message.blocks if isinstance(b, ImageBlock)]
+        if pictures:
+            return [
+                {
+                    "role": message.role,
+                    "content": _parts(text, pictures, spec=spec, images=images or {}),
+                    **reasoning,
+                }
+            ]
+        # A plain string, which is what every request this platform has ever
+        # sent looks like. Wrapping every message in a parts array for the
+        # sake of the rare one with a photo would change all of them.
         return [{"role": message.role, "content": text, **reasoning}]
     return [
         {
@@ -418,7 +552,7 @@ class OpenAICompatibleProvider:
             return _failed("credential_missing")
 
         url = f"{self._spec.base_url}/chat/completions"
-        payload = build_payload(self._spec, request)
+        payload = build_payload(self._spec, request, images=request.images)
         last: ModelResponse = _failed("unreachable")
         for attempt in range(1, self._policy.max_attempts + 1):
             try:

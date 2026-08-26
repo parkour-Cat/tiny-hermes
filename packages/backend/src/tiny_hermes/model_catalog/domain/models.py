@@ -90,6 +90,18 @@ class ModelEndpointSpec(BaseModel):
     #: §9.4 admits a real estimate only from a tokenizer verified against the
     #: model. A name here is a declaration, never a promise the count is exact.
     tokenizer: str | None = Field(default=None, max_length=64)
+    #: Whether this endpoint accepts image input.
+    #:
+    #: Declared, never inferred from `model`. §7.4.2 applies the same rule to
+    #: `context_accounting` and the reason holds here: DeepSeek's vision
+    #: support is a *different model id* from its text one
+    #: (`deepseek-v4-flash-vision-exp` beside `deepseek-v4-flash`), so a
+    #: name-sniffing check would be a guess that goes silently wrong the next
+    #: time a vendor renames something.
+    #:
+    #: `False` by default, which is what every endpoint registered before
+    #: this field existed actually is.
+    accepts_images: bool = False
 
     @field_validator("base_url")
     @classmethod

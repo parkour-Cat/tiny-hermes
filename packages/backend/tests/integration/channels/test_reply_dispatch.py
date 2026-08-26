@@ -807,13 +807,19 @@ async def test_the_notice_and_the_reply_do_not_share_a_deduplication_key(
 
 
 def _photo(event_id: str = "om_photo") -> dict[str, Any]:
+    """A voice note, despite the name this helper kept.
+
+    It was an image until images became readable. What these tests are
+    about is the *refusal* path — a message with a sender that this build
+    cannot read — and that property now belongs to audio.
+    """
     return {
         "header": {"event_id": event_id},
         "event": {
             "sender": {"sender_id": {"open_id": "ou_zhang"}},
             "message": {
-                "message_type": "image",
-                "content": json.dumps({"image_key": "img_v2_1"}),
+                "message_type": "audio",
+                "content": json.dumps({"file_key": "f_v2_1"}),
             },
         },
     }
@@ -830,7 +836,7 @@ def _deliver_raw(
     )
 
 
-async def test_a_photo_gets_an_answer_instead_of_silence(
+async def test_an_unreadable_message_gets_an_answer_instead_of_silence(
     client: TestClient,
     engine: AsyncEngine,
     workspace_id: str,
@@ -858,7 +864,7 @@ async def test_a_photo_gets_an_answer_instead_of_silence(
     assert "文字" in sender.after_opening()[0]["text"]
 
 
-async def test_a_photo_starts_no_run(
+async def test_an_unreadable_message_starts_no_run(
     client: TestClient,
     engine: AsyncEngine,
     workspace_id: str,
@@ -878,7 +884,7 @@ async def test_a_photo_starts_no_run(
     assert runs.scalar_one() == 0
 
 
-async def test_the_same_photo_delivered_twice_is_answered_once(
+async def test_the_same_unreadable_message_twice_is_answered_once(
     client: TestClient,
     engine: AsyncEngine,
     workspace_id: str,

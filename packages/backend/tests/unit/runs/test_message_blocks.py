@@ -133,7 +133,7 @@ def test_an_unknown_part_type_is_dropped_rather_than_guessed_at() -> None:
             "role": "assistant",
             "parts": [
                 {"type": "text", "text": "kept"},
-                {"type": "image", "url": "https://example.com/x.png"},
+                {"type": "hologram", "url": "https://example.com/x.png"},
             ],
         }
     )
@@ -146,7 +146,7 @@ def test_a_document_with_no_readable_part_becomes_an_empty_text_block() -> None:
     A transcript row the platform cannot read is a bad row, not a reason to
     fail a Run that has nothing to do with it.
     """
-    message = message_from_document({"role": "user", "parts": [{"type": "image"}]})
+    message = message_from_document({"role": "user", "parts": [{"type": "hologram"}]})
     assert message.blocks == (TextBlock(text=""),)
 
 

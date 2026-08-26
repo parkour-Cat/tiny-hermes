@@ -7,14 +7,16 @@ for the Session, and the subject's own private memory. Feishu is a new
 *transport* onto that path, not a second identity system.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
 from tiny_hermes.channels.domain.blocked import BlockedNotice, notice_from_document
 from tiny_hermes.channels.domain.events import ChannelEvent
+from tiny_hermes.channels.domain.image_reference import feishu_reference
 from tiny_hermes.identity.ports.end_user_store import UpsertedIdentity
-from tiny_hermes.runs.domain.models import SessionMode, SessionSnapshot
+from tiny_hermes.runs.domain.models import ImageBlock, SessionMode, SessionSnapshot
 from tiny_hermes.runs.ports.store import AcceptedRun
 
 
@@ -83,6 +85,7 @@ class RunEntry(Protocol):
         text: str,
         idempotency_key: str | None,
         request_id: str,
+        images: Sequence[ImageBlock] = (),
     ) -> AcceptedRun: ...
 
 
@@ -156,6 +159,23 @@ class ChannelIngestion:
             event.text,
             event.channel_event_id,
             request_id,
+            # References, not bytes. The download happens in the Worker: it
+            # needs this binding's app secret, and doing it here would make an
+            # inbound delivery wait on the vendor inside the webhook's own
+            # response deadline.
+            images=tuple(
+                ImageBlock(
+                    reference=feishu_reference(
+                        message_id=picture.message_id, file_key=picture.file_key
+                    ),
+                    # Declared by the download, not guessed here. Until the
+                    # bytes arrive nobody knows, and `image/*` is the honest
+                    # placeholder — the Worker replaces it with what Feishu
+                    # actually served.
+                    media_type="image/*",
+                )
+                for picture in event.images
+            ),
         )
         # §497: saving the pending Run is allowed, staying quiet about it is
         # not. Read here rather than left to each transport, so a transport

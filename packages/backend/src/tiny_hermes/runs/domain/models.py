@@ -319,6 +319,39 @@ SAFETY_PREAMBLE = (
 
 
 @dataclass(frozen=True)
+class ImageBlock:
+    """An image somebody sent, by reference.
+
+    The bytes are **not** here. `session_messages.content` is read whole by
+    the context estimator, by `content::text` in search, and by every
+    transcript render — a base64 megabyte in that column is paid for by all
+    three on every turn.
+
+    `reference` is opaque to this module and is resolved by whoever knows
+    the surface it came from. It is deliberately **not** an artifact id:
+    `artifacts.run_id` is required, and an image arrives before the Run it
+    belongs to exists — that table is for a Run's *outputs*, and this is an
+    input. Fetching happens in the Worker, which has an outbound client, is
+    not bound by the channel's response deadline, and can fail a Run with a
+    reason instead of timing out somebody's webhook.
+
+    `media_type` comes from the surface that received the file rather than
+    being sniffed from the bytes: guessing would put a second, possibly
+    disagreeing answer beside the one the sender's own platform gave.
+    """
+
+    reference: str
+    media_type: str
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "type": "image",
+            "reference": self.reference,
+            "media_type": self.media_type,
+        }
+
+
+@dataclass(frozen=True)
 class ReasoningBlock:
     """A thinking model's own scratch work, kept so it can be handed back.
 
@@ -407,7 +440,7 @@ class ToolResultBlock:
         }
 
 
-Block = TextBlock | ReasoningBlock | ToolCallBlock | ToolResultBlock
+Block = TextBlock | ReasoningBlock | ImageBlock | ToolCallBlock | ToolResultBlock
 
 
 @dataclass(frozen=True)
@@ -513,6 +546,13 @@ def message_from_document(document: dict[str, Any]) -> CanonicalMessage:
             blocks.append(TextBlock(text=str(part.get("text", ""))))
         elif kind == "reasoning":
             blocks.append(ReasoningBlock(text=str(part.get("text", ""))))
+        elif kind == "image":
+            blocks.append(
+                ImageBlock(
+                    reference=str(part.get("reference", "")),
+                    media_type=str(part.get("media_type", "")),
+                )
+            )
         elif kind == "tool_call":
             arguments: Any = part.get("arguments")
             blocks.append(

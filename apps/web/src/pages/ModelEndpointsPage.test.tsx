@@ -266,3 +266,134 @@ test("the credential is chosen from stored secrets, not typed as a uuid", async 
   // ...and what crosses the wire is the id the resolver actually accepts.
   expect(sent!.credential_ref).toBe("11111111-2222-4333-8444-555555555555");
 });
+
+test("an endpoint can be declared as accepting images", async () => {
+  // Declared, never guessed from the model name. DeepSeek's vision support
+  // is a different model id from its text one, so a name-sniffing check
+  // would go silently wrong the next time a vendor renames anything — and
+  // there has to be somewhere for an administrator to say it.
+  let sent: Record<string, unknown> | null = null;
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(user(true))),
+    http.get("/api/v1/model-endpoints", () => HttpResponse.json([])),
+    http.get("/api/v1/secrets", () =>
+      HttpResponse.json([
+        {
+          id: "11111111-2222-4333-8444-555555555555",
+          name: "openai-api-key",
+          scope: "workspace",
+          status: "active",
+        },
+      ]),
+    ),
+    http.post("/api/v1/model-endpoints", async ({ request }) => {
+      sent = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json(
+        {
+          ...SUMMARY,
+          kind: "openai_compatible",
+          base_url: "https://x/v1",
+          credential_available: true,
+        },
+        { status: 201 },
+      );
+    }),
+  );
+
+  renderEndpoints();
+
+  await userEvent.type(await screen.findByLabelText(t("endpointName")), "vision");
+  await userEvent.type(screen.getByLabelText(t("endpointBaseUrl")), "https://api.deepseek.com/v1");
+  await userEvent.type(
+    screen.getByLabelText(t("endpointModel")),
+    "deepseek-v4-flash-vision-exp",
+  );
+  await userEvent.click(screen.getByLabelText(t("endpointCredentialRef")));
+  await userEvent.click(await screen.findByTitle("openai-api-key · workspace"));
+  await userEvent.click(screen.getByLabelText(t("endpointAcceptsImages")));
+  await userEvent.click(screen.getByRole("button", { name: t("registerEndpoint") }));
+
+  await waitFor(() => expect(sent).not.toBeNull());
+  expect(sent!.accepts_images).toBe(true);
+});
+
+test("an endpoint is text-only unless somebody says otherwise", async () => {
+  // The default that matters: every endpoint registered before this field
+  // existed is text-only, and a form that silently sent `true` would send
+  // images to endpoints that cannot read them.
+  let sent: Record<string, unknown> | null = null;
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(user(true))),
+    http.get("/api/v1/model-endpoints", () => HttpResponse.json([])),
+    http.get("/api/v1/secrets", () =>
+      HttpResponse.json([
+        {
+          id: "11111111-2222-4333-8444-555555555555",
+          name: "openai-api-key",
+          scope: "workspace",
+          status: "active",
+        },
+      ]),
+    ),
+    http.post("/api/v1/model-endpoints", async ({ request }) => {
+      sent = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json(
+        {
+          ...SUMMARY,
+          kind: "openai_compatible",
+          base_url: "https://x/v1",
+          credential_available: true,
+        },
+        { status: 201 },
+      );
+    }),
+  );
+
+  renderEndpoints();
+
+  await userEvent.type(await screen.findByLabelText(t("endpointName")), "plain");
+  await userEvent.type(screen.getByLabelText(t("endpointBaseUrl")), "https://api.deepseek.com/v1");
+  await userEvent.type(screen.getByLabelText(t("endpointModel")), "deepseek-v4-flash");
+  await userEvent.click(screen.getByLabelText(t("endpointCredentialRef")));
+  await userEvent.click(await screen.findByTitle("openai-api-key · workspace"));
+  await userEvent.click(screen.getByRole("button", { name: t("registerEndpoint") }));
+
+  await waitFor(() => expect(sent).not.toBeNull());
+  expect(sent!.accepts_images).toBe(false);
+});
+
+test("an endpoint's image declaration can be corrected after the fact", async () => {
+  // Registered with the switch off, and no way to say otherwise: the page
+  // offered 测试连接 / 设定价格 / 停用 and nothing else. Somebody built two
+  // vision endpoints and could not tell the platform either of them took
+  // images.
+  let sent: Record<string, unknown> | null = null;
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(user(true))),
+    http.get("/api/v1/model-endpoints", () =>
+      HttpResponse.json([
+        {
+          ...SUMMARY,
+          id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          name: "vision",
+          model: "deepseek-v4-flash-vision-exp",
+          accepts_images: false,
+        },
+      ]),
+    ),
+    http.patch("/api/v1/model-endpoints/:id", async ({ request }) => {
+      sent = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json({ ...SUMMARY, accepts_images: true });
+    }),
+  );
+
+  renderEndpoints();
+
+  await userEvent.click(await screen.findByRole("button", { name: t("endpointAcceptsImages") }));
+
+  await waitFor(() => expect(sent).not.toBeNull());
+  expect(sent!.accepts_images).toBe(true);
+  // Only that field. A PATCH also naming `status` would disable the
+  // endpoint as a side effect of correcting a capability.
+  expect(sent).not.toHaveProperty("status");
+});

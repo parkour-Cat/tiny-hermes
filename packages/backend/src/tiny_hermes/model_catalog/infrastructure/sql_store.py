@@ -30,6 +30,7 @@ def _to_domain(row: ModelEndpointRow) -> ModelEndpoint:
             credential_ref=row.credential_ref,
             context_accounting=ContextAccounting(row.context_accounting),
             tokenizer=row.tokenizer,
+            accepts_images=row.accepts_images,
         ),
         status=EndpointStatus(row.status),
         created_by=row.created_by,
@@ -56,6 +57,7 @@ class SqlModelEndpointStore:
             credential_ref=spec.credential_ref,
             context_accounting=spec.context_accounting.value,
             tokenizer=spec.tokenizer,
+            accepts_images=spec.accepts_images,
             status=EndpointStatus.ACTIVE.value,
             created_by=created_by,
             created_at=now,
@@ -102,6 +104,16 @@ class SqlModelEndpointStore:
         except IntegrityError as clash:
             await self._session.rollback()
             raise EndpointNameTaken(spec.name) from clash
+        return _to_domain(row)
+
+    async def set_accepts_images(
+        self, endpoint_id: UUID, accepts: bool
+    ) -> "ModelEndpoint | None":
+        row = await self._session.get(ModelEndpointRow, endpoint_id)
+        if row is None:
+            return None
+        row.accepts_images = accepts
+        await self._session.flush()
         return _to_domain(row)
 
     async def set_status(

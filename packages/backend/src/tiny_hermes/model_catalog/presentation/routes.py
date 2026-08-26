@@ -24,8 +24,21 @@ CsrfHeader = Annotated[str | None, Header(alias="X-CSRF-Token")]
 SessionCookie = Annotated[str | None, Cookie(alias=SESSION_COOKIE)]
 
 
-class UpdateStatusRequest(BaseModel):
-    status: EndpointStatus
+class UpdateEndpointRequest(BaseModel):
+    """What may be changed after registration, which is deliberately little.
+
+    `status` was the whole of it. `accepts_images` joins it because it is a
+    *statement about* the endpoint — already true or already false — rather
+    than a choice of endpoint. `model` and `base_url` stay out: changing
+    either swaps the endpoint for a different one underneath every
+    AgentVersion that named it, and that is a new registration.
+
+    Both are optional and absent means unchanged, so a request naming one
+    cannot silently reset the other.
+    """
+
+    status: EndpointStatus | None = None
+    accepts_images: bool | None = None
 
 
 class EndpointSummary(BaseModel):
@@ -46,6 +59,10 @@ class EndpointSummary(BaseModel):
     #: choosing how much conversation it can hold.
     context_accounting: str
     tokenizer: str | None
+    #: Whether this endpoint takes image input. Carried out to callers
+    #: because the console has to show it and let it be changed — a
+    #: declaration nobody can read is one nobody can correct.
+    accepts_images: bool
     status: str
 
     @classmethod
@@ -59,6 +76,7 @@ class EndpointSummary(BaseModel):
             usage_quality=endpoint.spec.usage_quality.value,
             context_accounting=endpoint.spec.context_accounting.value,
             tokenizer=endpoint.spec.tokenizer,
+            accepts_images=endpoint.spec.accepts_images,
             status=endpoint.status.value,
         )
 
@@ -148,16 +166,21 @@ def model_endpoint_router(resources: ApplicationResources) -> APIRouter:
         )
 
     @router.patch("/{endpoint_id}", response_model=EndpointDetail)
-    async def update_status(  # pyright: ignore[reportUnusedFunction]
+    async def update_endpoint(  # pyright: ignore[reportUnusedFunction]
         endpoint_id: UUID,
-        payload: UpdateStatusRequest,
+        payload: UpdateEndpointRequest,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
         endpoints: Annotated[ModelEndpointService, Depends(endpoints_dependency, scope="function")],
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
     ) -> EndpointDetail:
         user = await verify_browser_write(auth, session_token, csrf_token)
-        updated = await endpoints.set_status(_actor(user), endpoint_id, payload.status)
+        updated = await endpoints.amend(
+            _actor(user),
+            endpoint_id,
+            status=payload.status,
+            accepts_images=payload.accepts_images,
+        )
         return EndpointDetail.detail_from(
             updated, await endpoints.credential_available(updated)
         )

@@ -2,6 +2,7 @@
 become one when that person has been erased.
 """
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -88,8 +89,10 @@ class FakeRuns:
         text: str,
         idempotency_key: str | None,
         request_id: str,
+        images: Sequence[Any] = (),
     ) -> Any:
         del workspace_id, text, request_id
+        self.images = list(images)
         self.submitted.append((end_user_id, session_id, idempotency_key))
         return AcceptedRun(run_id=uuid4(), document=self.document, replayed=False)
 
@@ -212,3 +215,57 @@ async def test_an_unblocked_delivery_carries_no_notice() -> None:
     )
 
     assert delivered.blocked is None
+
+
+async def test_an_image_message_reaches_the_run_as_a_reference() -> None:
+    """The join between parsing and the Run, which nothing else asserts.
+
+    Everything upstream can be right — the envelope parsed, the reference
+    formatted, the fetcher able to download it — and the picture still never
+    reaches the model if this one call drops it. That is the shape this
+    repository keeps producing, so it gets its own test at the seam rather
+    than a hope that the layers on either side imply it.
+    """
+    from tiny_hermes.channels.domain.events import ChannelImage
+    from tiny_hermes.runs.domain.models import ImageBlock
+
+    runs = FakeRuns()
+    ingestion = ChannelIngestion(
+        subjects=FakeSubjects(), conversations=FakeConversations(), runs=runs
+    )
+
+    await ingestion.run_for(
+        binding=BINDING,
+        event=ChannelEvent(
+            channel="feishu",
+            channel_event_id="om_1",
+            external_user_id="ou_zhang",
+            text="",
+            images=(ChannelImage(message_id="om_msg", file_key="img_k"),),
+        ),
+        request_id="req-1",
+    )
+
+    assert runs.images == [
+        ImageBlock(reference="feishu:om_msg:img_k", media_type="image/*")
+    ]
+
+
+async def test_a_text_message_carries_no_image_reference() -> None:
+    runs = FakeRuns()
+    ingestion = ChannelIngestion(
+        subjects=FakeSubjects(), conversations=FakeConversations(), runs=runs
+    )
+
+    await ingestion.run_for(
+        binding=BINDING,
+        event=ChannelEvent(
+            channel="feishu",
+            channel_event_id="om_2",
+            external_user_id="ou_zhang",
+            text="在吗",
+        ),
+        request_id="req-2",
+    )
+
+    assert runs.images == []

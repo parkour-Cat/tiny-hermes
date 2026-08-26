@@ -1,4 +1,4 @@
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from alembic.config import Config
@@ -130,3 +130,91 @@ async def test_the_migration_created_the_table_not_the_metadata(engine: AsyncEng
     async with engine.connect() as connection:
         version = await connection.execute(text("SELECT version_num FROM alembic_version"))
         assert version.scalar_one() == head
+
+
+async def test_a_declared_vision_endpoint_stores_and_reads_back_as_one(
+    engine: AsyncEngine,
+) -> None:
+    """The declaration has to survive the store, and it did not.
+
+    `ModelEndpointRow` is built field by field, so a spec field with no line
+    here is silently dropped: the console sent `accepts_images: true`, the
+    API accepted it, the row was written `false`, and every image was
+    replaced by "could not be retrieved" with nothing anywhere saying why.
+
+    A frontend test asserted the flag left the browser and a domain test
+    asserted the default — neither could see the gap between them.
+    """
+    from tiny_hermes.model_catalog.infrastructure.sql_store import SqlModelEndpointStore
+
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as session:
+        store = SqlModelEndpointStore(session)
+        created = await store.register(
+            ModelEndpointSpec(
+                name="vision",
+                base_url="https://api.example.com/v1",
+                model="deepseek-v4-flash-vision-exp",
+                context_window=128_000,
+                max_output_tokens=4_096,
+                usage_quality=UsageQuality.PROVIDER,
+                credential_ref="MODEL_KEY",
+                accepts_images=True,
+            ),
+            created_by=await _some_user(engine),
+        )
+        await session.commit()
+
+    async with sessions() as session:
+        read = await SqlModelEndpointStore(session).read(created.id)
+
+    assert read is not None
+    assert read.spec.accepts_images is True
+
+
+async def test_an_endpoint_that_said_nothing_reads_back_text_only(
+    engine: AsyncEngine,
+) -> None:
+    from tiny_hermes.model_catalog.infrastructure.sql_store import SqlModelEndpointStore
+
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as session:
+        store = SqlModelEndpointStore(session)
+        created = await store.register(
+            ModelEndpointSpec(
+                name="plain",
+                base_url="https://api.example.com/v1",
+                model="deepseek-v4-flash",
+                context_window=128_000,
+                max_output_tokens=4_096,
+                usage_quality=UsageQuality.PROVIDER,
+                credential_ref="MODEL_KEY",
+            ),
+            created_by=await _some_user(engine),
+        )
+        await session.commit()
+
+    async with sessions() as session:
+        read = await SqlModelEndpointStore(session).read(created.id)
+
+    assert read is not None
+    assert read.spec.accepts_images is False
+
+
+async def _some_user(engine: AsyncEngine) -> UUID:
+    """Any user, created if the fixtures left none — `created_by` is a
+    foreign key and this test is about the spec, not about authorship."""
+    async with engine.begin() as connection:
+        found = await connection.execute(text("SELECT id FROM users LIMIT 1"))
+        existing = found.scalar_one_or_none()
+        if existing is not None:
+            return existing
+        made = uuid4()
+        await connection.execute(
+            text(
+                "INSERT INTO users (id, display_name, status, is_platform_admin,"
+                " created_at) VALUES (:i, 'fixture', 'active', false, now())"
+            ),
+            {"i": made},
+        )
+        return made

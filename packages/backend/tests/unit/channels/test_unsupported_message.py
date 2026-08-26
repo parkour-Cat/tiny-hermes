@@ -44,27 +44,33 @@ def test_a_text_message_is_read_as_before() -> None:
     assert event.text == "在吗"
 
 
-def test_a_photo_is_refused_in_a_way_that_can_be_answered() -> None:
-    """The case a real person hits on their first day: they send a picture.
+def test_an_unreadable_type_is_refused_in_a_way_that_can_be_answered() -> None:
+    """A voice note, which this build still cannot read.
 
     `UnsupportedMessageType` carries the sender and the event id precisely
     so the transport can claim the delivery and reply. A plain
     `MalformedChannelEvent` could not be answered — there would be nobody
     named to answer.
+
+    This used to be an image, which was the first thing a real person sent.
+    Images are read now; the property this test protects belongs to whatever
+    is still unreadable.
     """
     with pytest.raises(UnsupportedMessageType) as refused:
         event_from_envelope(
             _envelope(
-                {"message_type": "image", "content": json.dumps({"image_key": "img_1"})}
+                {"message_type": "audio", "content": json.dumps({"file_key": "f_1"})}
             )
         )
 
-    assert refused.value.kind == "image"
+    assert refused.value.kind == "audio"
     assert refused.value.channel_event_id == "om_1"
     assert refused.value.external_user_id == "ou_zhang"
 
 
-@pytest.mark.parametrize("kind", ["audio", "file", "post", "sticker", "media"])
+# `post` left this list when rich text became readable — a photo with a
+# caption is a post, which is how people actually send pictures.
+@pytest.mark.parametrize("kind", ["audio", "file", "sticker", "media"])
 def test_every_other_message_type_is_refused_the_same_way(kind: str) -> None:
     with pytest.raises(UnsupportedMessageType):
         event_from_envelope(_envelope({"message_type": kind, "content": "{}"}))
