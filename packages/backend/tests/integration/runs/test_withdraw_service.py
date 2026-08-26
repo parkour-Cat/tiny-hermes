@@ -14,7 +14,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from tiny_hermes.runs.application.service import RunCoordination, SessionBusy
-from tiny_hermes.runs.domain.models import WithdrawScope
+from tiny_hermes.runs.domain.models import (
+    EndUserEscape,
+    RunCapabilities,
+    RunState,
+    SessionMode,
+    WithdrawScope,
+)
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 
 
@@ -159,6 +165,91 @@ async def session_with_a_running_run(
     return UUID(session_id), ids
 
 
+@pytest.fixture
+async def session_with_a_queued_run_behind_a_finished_head(
+    client: TestClient, scope: dict[str, str], session_id: str, engine: AsyncEngine
+) -> tuple[UUID, list[UUID]]:
+    """未了结的工作**不是**队首。
+
+    §6 明说不得凭 `head_run_id` 一个字段下结论，而在此之前这个文件只造过
+    「队首在跑」一种忙。这里队首已经终态、`sessions.head_run_id` 还指着它，
+    真正未了结的是排在它后面那一个——`head_run_id` 对它一无所知。
+    """
+    first = _submit(client, scope, session_id, "queued-head")
+    second = _submit(client, scope, session_id, "queued-behind")
+    await _finish_with_a_reply(engine, session_id, first, "reply one")
+
+    async with engine.connect() as connection:
+        behind = (
+            await connection.execute(
+                text("SELECT status FROM runs WHERE id = :id"),
+                {"id": UUID(str(second["id"]))},
+            )
+        ).one()
+        head = (
+            await connection.execute(
+                text("SELECT head_run_id FROM sessions WHERE id = :s"),
+                {"s": UUID(session_id)},
+            )
+        ).one()
+    assert behind.status == "queued", behind.status
+    assert head.head_run_id == UUID(str(first["id"])), head.head_run_id
+
+    return UUID(session_id), await _message_ids(engine, session_id)
+
+
+@pytest.fixture
+async def parked_end_user_session(
+    engine: AsyncEngine, workspace_id: str, published_agent: str
+) -> tuple[UUID, UUID, UUID, list[UUID]]:
+    """一个停在 `waiting_approval` 上的队首 Run，属于一个终端用户。
+
+    必须是终端用户的 Session 而不是本文件其它 fixture 用的控制台 Session：
+    `/new` 取消停住的队首走的是 `cancel_end_user_run`，而它的归属检查读的是
+    Session 自己的 `caller`。
+
+    种在一个**单独提交**的事务里——`store` fixture 那个事务全程不提交，而下面
+    改状态的 `UPDATE` 走的是另一条连接，看不见没提交的行。
+    """
+    end_user_id = uuid4()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory.begin() as db:
+        seeding = RunCoordination(SqlRunStore(db))
+        created = await seeding.create_end_user_session(
+            UUID(workspace_id),
+            end_user_id,
+            UUID(published_agent),
+            SessionMode.PERSISTENT,
+            "seed",
+        )
+        accepted = await seeding.submit_end_user_run(
+            UUID(workspace_id),
+            end_user_id,
+            created.id,
+            "帮我查一下上周的订单",
+            "parked-seed",
+            "seed",
+        )
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE runs SET status = 'waiting_approval' WHERE id = :id"),
+            {"id": accepted.run_id},
+        )
+
+    ids = await _message_ids(engine, str(created.id))
+    assert len(ids) == 1, ids
+    return created.id, end_user_id, accepted.run_id, ids
+
+
+async def _state_of(store: SqlRunStore, workspace_id: str, run_id: UUID) -> RunState:
+    snapshot = await store.get_run(
+        UUID(workspace_id), run_id, RunCapabilities(can_control=True, can_retry=True)
+    )
+    assert snapshot is not None
+    return snapshot.state
+
+
 async def test_undo_takes_back_the_last_user_turn_and_what_followed(
     coordination: RunCoordination,
     finished_session_of_four_messages: tuple[UUID, list[UUID]],
@@ -215,6 +306,70 @@ async def test_a_session_with_work_in_flight_refuses_and_changes_nothing(
     assert raised.value.reason == "running"
     for message_id in ids:
         assert await store.withdrawn_at_of(message_id) is None
+
+
+async def test_a_run_still_queued_behind_a_finished_head_refuses_as_queued(
+    coordination: RunCoordination,
+    store: SqlRunStore,
+    session_with_a_queued_run_behind_a_finished_head: tuple[UUID, list[UUID]],
+) -> None:
+    session_id, ids = session_with_a_queued_run_behind_a_finished_head
+
+    with pytest.raises(SessionBusy) as raised:
+        await coordination.withdraw_from_session(session_id, WithdrawScope.ALL)
+
+    assert raised.value.reason == "queued"
+    for message_id in ids:
+        assert await store.withdrawn_at_of(message_id) is None
+
+
+async def test_new_ends_a_parked_head_run_instead_of_refusing(
+    coordination: RunCoordination,
+    store: SqlRunStore,
+    workspace_id: str,
+    parked_end_user_session: tuple[UUID, UUID, UUID, list[UUID]],
+) -> None:
+    """阻塞卡片写着「被卡住时，可以发 /new 开始一段新对话」。停在等审批上正是
+    卡片被渲染出来的那种状态——这里断言那句话是真的。
+    """
+    session_id, end_user_id, run_id, ids = parked_end_user_session
+
+    done = await coordination.withdraw_from_session(
+        session_id,
+        WithdrawScope.ALL,
+        escape_hatch=EndUserEscape(
+            workspace_id=UUID(workspace_id),
+            end_user_id=end_user_id,
+            request_id="req-new",
+        ),
+    )
+
+    assert done is not None
+    assert done.messages == len(ids)
+    # 撤了历史却留着一个还能醒进来的 Run，等于把旧对话接进新对话里。
+    assert await _state_of(store, workspace_id, run_id) is RunState.CANCELLED
+
+
+async def test_undo_refuses_a_parked_head_run_and_leaves_it_running(
+    coordination: RunCoordination,
+    store: SqlRunStore,
+    workspace_id: str,
+    parked_end_user_session: tuple[UUID, UUID, UUID, list[UUID]],
+) -> None:
+    """不对称是故意的：`/new` 是逃生口，有权结束一个停住的 Run；`/undo` 是对
+    已经落定的历史动刀，没有理由替用户放弃一个他没说要放弃的 Run。
+    """
+    session_id, _end_user_id, run_id, ids = parked_end_user_session
+
+    with pytest.raises(SessionBusy) as raised:
+        await coordination.withdraw_from_session(
+            session_id, WithdrawScope.LAST_EXCHANGE, turns=1
+        )
+
+    assert raised.value.reason == "parked"
+    for message_id in ids:
+        assert await store.withdrawn_at_of(message_id) is None
+    assert await _state_of(store, workspace_id, run_id) is RunState.WAITING_APPROVAL
 
 
 async def test_withdrawing_twice_does_not_move_the_timestamp(

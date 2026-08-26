@@ -13,7 +13,12 @@ from tiny_hermes.channels.application.ingestion import (
 from tiny_hermes.channels.domain.events import ChannelEvent
 from tiny_hermes.identity.ports.end_user_store import UpsertedIdentity
 from tiny_hermes.runs.application.service import SessionBusy
-from tiny_hermes.runs.domain.models import SessionMode, Withdrawal, WithdrawScope
+from tiny_hermes.runs.domain.models import (
+    EndUserEscape,
+    SessionMode,
+    Withdrawal,
+    WithdrawScope,
+)
 from tiny_hermes.runs.ports.store import AcceptedRun
 
 
@@ -71,6 +76,8 @@ class FakeRuns:
         #: makes true or false.
         self.submitted: list[tuple[UUID, UUID, str, str | None]] = []
         self.withdraw_calls: list[tuple[UUID, WithdrawScope, int]] = []
+        #: 每次撤回带的逃生口（`/new` 有，`/undo` 必须没有）。
+        self.escapes: list[EndUserEscape | None] = []
         self.session_id = uuid4()
         self.withdrawal = withdrawal
         self.busy_reason = busy_reason
@@ -108,9 +115,15 @@ class FakeRuns:
         return AcceptedRun(run_id=uuid4(), document=self.document, replayed=False)
 
     async def withdraw_from_session(
-        self, session_id: UUID, scope: WithdrawScope, *, turns: int = 1
+        self,
+        session_id: UUID,
+        scope: WithdrawScope,
+        *,
+        turns: int = 1,
+        escape_hatch: EndUserEscape | None = None,
     ) -> Withdrawal | None:
         self.withdraw_calls.append((session_id, scope, turns))
+        self.escapes.append(escape_hatch)
         if self.busy_reason is not None:
             raise SessionBusy(self.busy_reason)
         return self.withdrawal
@@ -343,3 +356,48 @@ async def test_a_message_the_parser_rejects_reaches_the_model_byte_identical(
     assert runs.submitted == [
         (subjects.end_user_id, existing_session, original_text, "om_path")
     ]
+
+
+async def test_only_new_carries_the_permission_to_end_a_parked_run(
+    subjects: FakeSubjects, binding: ChannelBindingRecord
+) -> None:
+    """阻塞卡片对同一个人说「被卡住时，可以发 /new 开始一段新对话」。让那句话
+    成立的就是这个逃生口——它必须跟着 `/new` 走到服务层。
+
+    `/undo` 必须**不**带它：`/undo` 是对已经落定的历史动刀，没有理由替用户
+    放弃一个他没说要放弃的 Run。两个断言写在一起，因为这个不对称本身才是被
+    钉住的东西——只断言 `/new` 带了，一个两条命令都带的实现照样能过。
+    """
+    existing_session = uuid4()
+    runs = FakeRuns(withdrawal=Withdrawal(messages=2, turns=1, echoed_text="在的"))
+    ingestion = ChannelIngestion(
+        subjects=subjects,  # pyright: ignore[reportArgumentType]
+        conversations=FakeConversations(known=existing_session),  # pyright: ignore[reportArgumentType]
+        runs=runs,  # pyright: ignore[reportArgumentType]
+    )
+    new_event = ChannelEvent(
+        channel="feishu",
+        channel_event_id="om_new",
+        external_user_id="ou_zhang",
+        text="/new",
+    )
+
+    await ingestion.run_for(binding=binding, event=new_event, request_id="r-new")
+    await ingestion.run_for(
+        binding=binding,
+        event=ChannelEvent(
+            channel="feishu",
+            channel_event_id="om_undo",
+            external_user_id="ou_zhang",
+            text="/undo",
+        ),
+        request_id="r-undo",
+    )
+
+    for_new, for_undo = runs.escapes
+    assert for_new == EndUserEscape(
+        workspace_id=binding.workspace_id,
+        end_user_id=subjects.end_user_id,
+        request_id="r-new",
+    )
+    assert for_undo is None
