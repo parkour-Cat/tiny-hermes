@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    JSON,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -109,6 +110,15 @@ class ChannelEventRow(IdMixin, Base):
                 "unsupported_kind IS NOT NULL AND replied_at IS NULL"
             ),
         ),
+        # The command-receipt scan's, matching its predicate exactly —
+        # migration 0048.
+        Index(
+            "ix_channel_events_awaiting_command_receipt",
+            "received_at",
+            postgresql_where=text(
+                "command_receipt IS NOT NULL AND replied_at IS NULL"
+            ),
+        ),
     )
 
     channel_binding_id: Mapped[UUID] = mapped_column(
@@ -174,6 +184,17 @@ class ChannelEventRow(IdMixin, Base):
     card_attempted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    #: A `/undo` or `/new` produces no Run, so it never reaches
+    #: `pending_replies`'s join to `runs`. Its own document, for its own
+    #: scan — see migration 0048 for why this is not `blocked_notice` or
+    #: `unsupported_kind` reused.
+    command_receipt: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True
+    )
+    #: Who to answer, kept here for the same reason as `unsupported_open_id`:
+    #: a command does not create a `channel_conversations` row on its own,
+    #: so the scan has nowhere else to find the sender.
+    command_open_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
 
 
 class ChannelConversationRow(IdMixin, CreatedAtMixin, Base):
