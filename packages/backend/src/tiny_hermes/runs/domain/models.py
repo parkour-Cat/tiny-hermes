@@ -530,16 +530,21 @@ class Withdrawal:
     messages: int
     turns: int
     echoed_text: str
+    #: 这次撤回顺手结束掉的 Run 数。`/new` 会把这个 Session 的未了结工作全部
+    #: 结束，而被结束的 Run 永远不会再答复——不报出来，用户只会发现自己有条
+    #: 消息石沉大海，而他刚被告知这是一段全新的对话，正好没有理由去找。
+    runs_ended: int = 0
 
 
 @dataclass(frozen=True)
-class ParkedHead:
-    """一个停住的队首 Run：等人批、等外部事件，或者被暂停。
+class StoppedRun:
+    """一个停着的 Run：等人批、等外部事件、被暂停，或者还排在队列里没轮到。
 
-    「停住」和「在跑」必须分开，因为只有停住的才可以取消：上游 Hermes 因为拆
-    在飞的工作留下的三个 issue，拆的都是**真的在跑**的工作。一个停住的 Run 没
-    有工具在执行——它等的是一个人或一个外部事件——所以取消它不会把某个副作用
-    截在半路。
+    「停着」和「在跑」必须分开，因为只有停着的才可以取消：上游 Hermes 因为拆
+    在飞的工作留下的三个 issue，拆的都是**真的在跑**的工作。一个停着的 Run 没
+    有工具在执行——它等的是一个人、一个外部事件，或者前面那个 Run——所以取消它
+    不会把某个副作用截在半路。排队的 Run 连第一轮都还没开始，这条理由对它只有
+    更强。
 
     `state_version` 一起带出来，是因为取消要拿它做乐观并发检查；分两次读会读
     到两个不同的版本。
@@ -556,13 +561,17 @@ class UnfinishedWork:
     `reason` 是说给人听的那个词，也是 `SessionBusy` 带出去的那个：`running`、
     `queued`、`parked`。
 
-    `parked` 有值时，挡着的是一个可以取消的队首 Run。判据放在这个字段上而不
-    是放在 `reason` 的字符串比较上，是因为「能不能取消」这件事必须由**有没有
-    那个 Run 的 id 和版本**来决定——只有它是可执行的。
+    `cancellable` 非空时，`/new` 可以把这个 Session 的未了结工作**全部**结束。
+    全部，不是队首那一个：只结束队首，后面排队的会被提上来，拿着已经被撤掉的
+    历史跑完一整轮再答复——出站渠道和模型上下文于是讲两个不同的故事。
+
+    判据放在这个字段上而不是放在 `reason` 的字符串比较上，是因为「能不能取消」
+    必须由**有没有那些 Run 的 id 和版本**来决定——只有它是可执行的。元组的
+    顺序就是必须取消的顺序（见 `unfinished_work`）。
     """
 
     reason: str
-    parked: ParkedHead | None = None
+    cancellable: tuple[StoppedRun, ...] = ()
 
 
 @dataclass(frozen=True)

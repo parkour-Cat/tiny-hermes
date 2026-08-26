@@ -152,7 +152,14 @@ def command_receipt_text(receipt: CommandReceipt) -> str:
     if receipt.command == "new":
         if receipt.outcome == "nothing":
             return "已经是一段新对话了，直接说就行。"
-        return f"已经开始一段新对话。之前的 {receipt.messages} 条消息不再进入上下文。"
+        said = "已经开始一段新对话。"
+        if receipt.messages:
+            said += f"之前的 {receipt.messages} 条消息不再进入上下文。"
+        if receipt.runs_ended:
+            # 被结束的 Run 永远不会再答复。不说出来，用户只会发现自己有条消息
+            # 石沉大海，而他刚被告知这是一段全新的对话，正好没有理由去找。
+            said += f"另外结束了 {receipt.runs_ended} 个还没跑完的任务，它们不会再有答复。"
+        return said
     if receipt.outcome == "nothing":
         return "没有可撤的内容。"
     echoed = receipt.echoed_text

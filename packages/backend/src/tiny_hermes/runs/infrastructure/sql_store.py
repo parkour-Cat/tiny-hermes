@@ -68,7 +68,6 @@ from tiny_hermes.runs.domain.models import (
     CheckpointEffectStatus,
     ChildRunRef,
     DeliveryMode,
-    ParkedHead,
     PauseReason,
     QueueStatus,
     RunCapabilities,
@@ -82,6 +81,7 @@ from tiny_hermes.runs.domain.models import (
     SessionMode,
     SessionSnapshot,
     StateDecision,
+    StoppedRun,
     StoredMessage,
     TextBlock,
     TreeNode,
@@ -96,6 +96,7 @@ from tiny_hermes.runs.domain.models import (
 )
 from tiny_hermes.runs.domain.slice_policy import WAIT_CHILD_RUNS
 from tiny_hermes.runs.domain.state_machine import (
+    TRANSITIONS,
     InvalidStateMetadata,
     InvalidStateTransition,
     RunLimitReached,
@@ -170,6 +171,16 @@ WAITING_HEAD_STATES = frozenset(
 #: 同一组状态，写成 `runs.status` 里存的那些字符串。`unfinished_work` 比对的是
 #: 列的原值而不是 `RunState`，两边各自 `.value` 一次容易漏，所以只算这一次。
 _PARKED_STATUSES = frozenset(state.value for state in WAITING_HEAD_STATES)
+
+#: 能合法收下 `CANCEL_REQUESTED` 的状态，从状态机那张表里推出来而不是另抄一份
+#: ——`running` 只收 `SAFE_CANCEL_STARTED`，`cancelling` 一条取消边都没有，抄
+#: 一份就等着两边哪天不一样。`unfinished_work` 用它做事前判断：`/new` 要么能
+#: 把整个 Session 清干净，要么一个 Run 都不动。
+_CANCELLABLE_STATUSES = frozenset(
+    state.value
+    for (state, signal) in TRANSITIONS
+    if signal is RunSignal.CANCEL_REQUESTED
+)
 
 
 #: How many memories one scope may contribute to a round before the planner
@@ -882,10 +893,20 @@ class SqlRunStore:
 
         非终态里再分一刀，分的是**队首自己**的状态：停在 `WAITING_HEAD_STATES`
         上时报 `parked` 并把它的 id 和版本带出去，因为只有这一种可以被取消
-        （理由见 `ParkedHead`）。这一刀故意不看队首后面还排着什么——阻塞卡片
+        （理由见 `StoppedRun`）。这一刀故意不看队首后面还排着什么——阻塞卡片
         正是在「队首停着、你的消息排在后面」时渲染的，而卡片承诺的出口就是
         `/new`；把排队的算进来会让那句承诺在它唯一要兑现的场景里失效。
-        代价写明：`parked` 只描述队首，取消它不动后面排队的那些。
+
+        `cancellable` 带出的是这个 Session **全部**未了结的 Run，不只是队首：
+        只取消队首，后面排队的会被提上来，拿着已经被撤掉的历史跑完一整轮再答复。
+        顺序是载荷的一部分——排队的在前，停住的队首在最后。队首终态时
+        `_terminalize` 会把下一个提上来，先取消队首等于在中途改变自己正要读的
+        那张表；今天它并不动 `state_version`，所以先后其实都能过，但依赖这一点
+        等于依赖 `_terminalize` 的一个本函数没有理由知道的细节。
+
+        **全有或全无**：只要有一个非终态的 Run 收不下 `CANCEL_REQUESTED`
+        （`running`、`cancelling`），就一个都不给，报 `running`。这是事前检查，
+        不是回滚——这一层没有 savepoint，而撤一半比拒绝更糟，所以挡在动手之前。
 
         先锁 Session 行：`accept_run`（`submit_run`/`submit_end_user_run` 都
         经它）通过 `_lock_session` 锁的是同一行（`SessionRow.id == session_id`），
@@ -899,7 +920,12 @@ class SqlRunStore:
         )
         rows = (
             await self._session.execute(
-                select(RunRow.id, RunRow.status, RunRow.state_version).where(
+                select(
+                    RunRow.id,
+                    RunRow.status,
+                    RunRow.state_version,
+                    RunRow.session_sequence,
+                ).where(
                     RunRow.session_id == session_id,
                     RunRow.status.not_in(tuple(s.value for s in TERMINAL_STATES)),
                 )
@@ -916,9 +942,20 @@ class SqlRunStore:
             return UnfinishedWork(reason="queued")
         if at_head.status not in _PARKED_STATUSES:
             return UnfinishedWork(reason="running")
+        if any(row.status not in _CANCELLABLE_STATUSES for row in rows):
+            # 队首停着，但后面站着一个取消不掉的。`running` 是这里最诚实的词：
+            # 它就是那个 Run 的状态。
+            return UnfinishedWork(reason="running")
+        behind = sorted(
+            (row for row in rows if row.id != head),
+            key=lambda row: row.session_sequence,
+        )
         return UnfinishedWork(
             reason="parked",
-            parked=ParkedHead(run_id=at_head.id, state_version=at_head.state_version),
+            cancellable=tuple(
+                StoppedRun(run_id=row.id, state_version=row.state_version)
+                for row in (*behind, at_head)
+            ),
         )
 
     async def withdrawable(

@@ -329,6 +329,7 @@ def _receipt(
         turns=0 if withdrawal is None else withdrawal.turns,
         echoed_text="" if withdrawal is None else withdrawal.echoed_text,
         busy_reason=busy_reason,
+        runs_ended=0 if withdrawal is None else withdrawal.runs_ended,
     )
 
 

@@ -568,10 +568,14 @@ class RunStore(Protocol):
     async def unfinished_work(self, session_id: UUID) -> UnfinishedWork | None:
         """Whether this Session has unfinished work right now, and which kind.
 
-        `"running"` when the head Run is actually executing, `"queued"` when
-        something is still waiting behind the head, and `"parked"` — carrying
-        the head's own id and state version — when the head is stopped on a
-        person or an external event and nothing else is behind it.
+        `"running"` when the head Run is actually executing (or when anything
+        unfinished cannot legally be cancelled), `"queued"` when the head is
+        already terminal and the unfinished work sits behind it, and
+        `"parked"` when the head is stopped on a person or an external event.
+
+        `"parked"` carries `cancellable`: every unfinished Run in the Session,
+        in the order they must be cancelled. All of them, not just the head —
+        see `UnfinishedWork`.
         """
         ...
 
