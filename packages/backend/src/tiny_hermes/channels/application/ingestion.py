@@ -20,6 +20,7 @@ from tiny_hermes.channels.domain.image_reference import feishu_reference
 from tiny_hermes.identity.ports.end_user_store import UpsertedIdentity
 from tiny_hermes.runs.application.service import SessionBusy
 from tiny_hermes.runs.domain.models import (
+    EndUserEscape,
     ImageBlock,
     SessionMode,
     SessionSnapshot,
@@ -116,7 +117,12 @@ class RunEntry(Protocol):
     ) -> AcceptedRun: ...
 
     async def withdraw_from_session(
-        self, session_id: UUID, scope: WithdrawScope, *, turns: int = 1
+        self,
+        session_id: UUID,
+        scope: WithdrawScope,
+        *,
+        turns: int = 1,
+        escape_hatch: EndUserEscape | None = None,
     ) -> Withdrawal | None: ...
 
 
@@ -181,7 +187,9 @@ class ChannelIngestion:
         # unchanged.
         command = parse(event.text, has_images=bool(event.images))
         if command is not None:
-            return await self._command(binding, event, command)
+            return await self._command(
+                binding, event, command, subject.end_user_id, request_id
+            )
 
         session_id = await self.conversations.session_for(
             binding.id, event.external_user_id
@@ -239,6 +247,8 @@ class ChannelIngestion:
         binding: ChannelBindingRecord,
         event: ChannelEvent,
         command: ChatCommand,
+        end_user_id: UUID,
+        request_id: str,
     ) -> Delivered:
         """A command acts on a conversation that already exists; it does not
         start one.
@@ -263,7 +273,10 @@ class ChannelIngestion:
 
         try:
             withdrawal = await self.runs.withdraw_from_session(
-                session_id, _SCOPES[command.name], turns=command.turns
+                session_id,
+                _SCOPES[command.name],
+                turns=command.turns,
+                escape_hatch=_escape_for(command, binding, end_user_id, request_id),
             )
         except SessionBusy as busy:
             return Delivered(
@@ -278,6 +291,28 @@ class ChannelIngestion:
         return Delivered(
             run=None, blocked=None, receipt=_receipt(command, "done", withdrawal)
         )
+
+
+def _escape_for(
+    command: ChatCommand,
+    binding: ChannelBindingRecord,
+    end_user_id: UUID,
+    request_id: str,
+) -> EndUserEscape | None:
+    """只有 `/new` 拿得到结束一个停住的队首 Run 的许可。
+
+    `blocked_card` 对同一个人写着「被卡住时，可以发 /new 开始一段新对话」，而
+    那句话指的正是队首停在等审批/等外部事件/暂停上的时候——这个许可就是让那句
+    话成立的东西。`/undo` 不带它：撤回是对已经落定的历史动刀，没有理由替用户
+    放弃一个他没说要放弃的 Run。
+    """
+    if command.name is not CommandName.NEW:
+        return None
+    return EndUserEscape(
+        workspace_id=binding.workspace_id,
+        end_user_id=end_user_id,
+        request_id=request_id,
+    )
 
 
 def _receipt(

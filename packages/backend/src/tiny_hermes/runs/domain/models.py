@@ -533,6 +533,52 @@ class Withdrawal:
 
 
 @dataclass(frozen=True)
+class ParkedHead:
+    """一个停住的队首 Run：等人批、等外部事件，或者被暂停。
+
+    「停住」和「在跑」必须分开，因为只有停住的才可以取消：上游 Hermes 因为拆
+    在飞的工作留下的三个 issue，拆的都是**真的在跑**的工作。一个停住的 Run 没
+    有工具在执行——它等的是一个人或一个外部事件——所以取消它不会把某个副作用
+    截在半路。
+
+    `state_version` 一起带出来，是因为取消要拿它做乐观并发检查；分两次读会读
+    到两个不同的版本。
+    """
+
+    run_id: UUID
+    state_version: int
+
+
+@dataclass(frozen=True)
+class UnfinishedWork:
+    """这个 Session 现在挡着什么。
+
+    `reason` 是说给人听的那个词，也是 `SessionBusy` 带出去的那个：`running`、
+    `queued`、`parked`。
+
+    `parked` 有值时，挡着的是一个可以取消的队首 Run。判据放在这个字段上而不
+    是放在 `reason` 的字符串比较上，是因为「能不能取消」这件事必须由**有没有
+    那个 Run 的 id 和版本**来决定——只有它是可执行的。
+    """
+
+    reason: str
+    parked: ParkedHead | None = None
+
+
+@dataclass(frozen=True)
+class EndUserEscape:
+    """谁在用 `/new` 逃离一个停住的 Run。
+
+    带着 `cancel_end_user_run` 需要的三样东西。`None` 表示这次撤回不许取消任何
+    Run —— `/undo` 走的就是这一条。
+    """
+
+    workspace_id: UUID
+    end_user_id: UUID
+    request_id: str
+
+
+@dataclass(frozen=True)
 class BoundSkill:
     """One skill this Run's Version bound, as a round needs it.
 

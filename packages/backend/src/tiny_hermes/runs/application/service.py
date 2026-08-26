@@ -10,7 +10,9 @@ from tiny_hermes.runs.domain.models import (
     CallerType,
     CanonicalMessage,
     DeliveryMode,
+    EndUserEscape,
     ImageBlock,
+    ParkedHead,
     RunCapabilities,
     RunSignal,
     RunSnapshot,
@@ -637,12 +639,29 @@ class RunCoordination:
         return await self._store.list_session_messages(workspace_id, session_id)
 
     async def withdraw_from_session(
-        self, session_id: UUID, scope: WithdrawScope, *, turns: int = 1
+        self,
+        session_id: UUID,
+        scope: WithdrawScope,
+        *,
+        turns: int = 1,
+        escape_hatch: EndUserEscape | None = None,
     ) -> Withdrawal | None:
-        """把一段历史挡在后续上下文之外。返回 `None` 表示没有可撤的。"""
-        reason = await self._store.busy_reason(session_id)
-        if reason is not None:
-            raise SessionBusy(reason)
+        """把一段历史挡在后续上下文之外。返回 `None` 表示没有可撤的。
+
+        `escape_hatch` 只有 `/new` 会带，`/undo` 永远不带。这个不对称是故意的：
+        `/new` 是逃生口——阻塞卡片对同一个人写着「被卡住时，可以发 /new 开始
+        一段新对话」，而那句话指的正是队首停在等审批/等外部事件/暂停上的时候
+        ——所以它有权结束那个停住的 Run。`/undo` 是对已经落定的历史动刀，没有
+        理由替用户放弃一个他没说要放弃的 Run。
+
+        `SessionBusy` 的三个 `reason` 都留着：`running`、`queued` 是真的忙，
+        `parked` 是「只有 `/new` 能过」的那一种。
+        """
+        work = await self._store.unfinished_work(session_id)
+        if work is not None:
+            if work.parked is None or escape_hatch is None:
+                raise SessionBusy(work.reason)
+            await self._end_the_parked_run(work.parked, escape_hatch)
         ids, taken, text = await self._store.withdrawable(session_id, scope, turns)
         if not ids:
             return None
@@ -650,6 +669,33 @@ class RunCoordination:
         if changed == 0:
             return None
         return Withdrawal(messages=changed, turns=taken, echoed_text=text)
+
+    async def _end_the_parked_run(
+        self, parked: ParkedHead, escape: EndUserEscape
+    ) -> None:
+        """走 `cancel_end_user_run`，不另开一条路。
+
+        它的 docstring 描述的就是这一种情况：「本人 can cancel a Run they
+        started, once it has stopped anywhere they cannot otherwise reach
+        it」。合法转移表是 `RunStateMachine` 的地盘，这里不重写一份。
+
+        取消没成功就不撤——否则用户拿到的是一段新对话，外加一个还能醒进来的
+        Run。拒绝是看得见的，醒进来不是。
+
+        **只结束队首这一个 Run。**排在它后面的 Run 不动，队首让开之后它们照常
+        被提上来——也就是说 `/new` 之后仍可能收到一条来自旧消息的答复，而那一
+        轮的历史已经被撤掉了。这是本版明知而未做的取舍，不要读成这里挡住了它。
+        """
+        try:
+            await self.cancel_end_user_run(
+                escape.workspace_id,
+                escape.end_user_id,
+                parked.run_id,
+                parked.state_version,
+                escape.request_id,
+            )
+        except RunCoordinationError as refused:
+            raise SessionBusy("cancel_failed") from refused
 
     async def _load_readable_session(
         self, workspace_id: UUID, actor: Actor, session_id: UUID

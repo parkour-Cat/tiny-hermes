@@ -26,6 +26,7 @@ from tiny_hermes.runs.domain.models import (
     SessionMode,
     SessionSnapshot,
     StoredMessage,
+    UnfinishedWork,
     WaitPolicy,
     WithdrawScope,
     WorkspaceCleanupTarget,
@@ -564,11 +565,13 @@ class RunStore(Protocol):
         document: dict[str, Any],
     ) -> None: ...
 
-    async def busy_reason(self, session_id: UUID) -> str | None:
+    async def unfinished_work(self, session_id: UUID) -> UnfinishedWork | None:
         """Whether this Session has unfinished work right now, and which kind.
 
-        `"running"` when the unfinished work is the Session's own head Run,
-        `"queued"` when it is a Run still waiting behind the head.
+        `"running"` when the head Run is actually executing, `"queued"` when
+        something is still waiting behind the head, and `"parked"` — carrying
+        the head's own id and state version — when the head is stopped on a
+        person or an external event and nothing else is behind it.
         """
         ...
 

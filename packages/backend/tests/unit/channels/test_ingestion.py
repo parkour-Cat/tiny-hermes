@@ -97,7 +97,12 @@ class FakeRuns:
         return AcceptedRun(run_id=uuid4(), document=self.document, replayed=False)
 
     async def withdraw_from_session(
-        self, session_id: UUID, scope: Any, *, turns: int = 1
+        self,
+        session_id: UUID,
+        scope: Any,
+        *,
+        turns: int = 1,
+        escape_hatch: Any = None,
     ) -> Any:
         # Never called here: every test in this file sends an ordinary
         # message, and `run_for` only reaches `withdraw_from_session` on a

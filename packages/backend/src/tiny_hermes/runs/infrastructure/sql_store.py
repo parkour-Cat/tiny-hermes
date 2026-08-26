@@ -68,6 +68,7 @@ from tiny_hermes.runs.domain.models import (
     CheckpointEffectStatus,
     ChildRunRef,
     DeliveryMode,
+    ParkedHead,
     PauseReason,
     QueueStatus,
     RunCapabilities,
@@ -84,6 +85,7 @@ from tiny_hermes.runs.domain.models import (
     StoredMessage,
     TextBlock,
     TreeNode,
+    UnfinishedWork,
     WaitPolicy,
     WithdrawScope,
     WorkspaceCleanupTarget,
@@ -164,6 +166,10 @@ RETRY_ERRORS: dict[str, RunCoordinationError] = {
 WAITING_HEAD_STATES = frozenset(
     {RunState.PAUSED, RunState.WAITING_APPROVAL, RunState.WAITING_EXTERNAL}
 )
+
+#: 同一组状态，写成 `runs.status` 里存的那些字符串。`unfinished_work` 比对的是
+#: 列的原值而不是 `RunState`，两边各自 `.value` 一次容易漏，所以只算这一次。
+_PARKED_STATUSES = frozenset(state.value for state in WAITING_HEAD_STATES)
 
 
 #: How many memories one scope may contribute to a round before the planner
@@ -867,12 +873,19 @@ class SqlRunStore:
             caller_type=None if owning is None else CallerType(owning.caller_type),
         )
 
-    async def busy_reason(self, session_id: UUID) -> str | None:
+    async def unfinished_work(self, session_id: UUID) -> UnfinishedWork | None:
         """这个 Session 现在有没有未了结的工作，有的话是哪一种。
 
         判据是「有没有非终态的 Run」，不是 `head_run_id` 是否为空——排在队首
         之后、还没被提上来的 Run 同样是未了结的工作，而 `head_run_id` 对它们
         一无所知。
+
+        非终态里再分一刀，分的是**队首自己**的状态：停在 `WAITING_HEAD_STATES`
+        上时报 `parked` 并把它的 id 和版本带出去，因为只有这一种可以被取消
+        （理由见 `ParkedHead`）。这一刀故意不看队首后面还排着什么——阻塞卡片
+        正是在「队首停着、你的消息排在后面」时渲染的，而卡片承诺的出口就是
+        `/new`；把排队的算进来会让那句承诺在它唯一要兑现的场景里失效。
+        代价写明：`parked` 只描述队首，取消它不动后面排队的那些。
 
         先锁 Session 行：`accept_run`（`submit_run`/`submit_end_user_run` 都
         经它）通过 `_lock_session` 锁的是同一行（`SessionRow.id == session_id`），
@@ -886,7 +899,7 @@ class SqlRunStore:
         )
         rows = (
             await self._session.execute(
-                select(RunRow.id, RunRow.status).where(
+                select(RunRow.id, RunRow.status, RunRow.state_version).where(
                     RunRow.session_id == session_id,
                     RunRow.status.not_in(tuple(s.value for s in TERMINAL_STATES)),
                 )
@@ -896,7 +909,17 @@ class SqlRunStore:
             return None
         owning = await self._session.get(SessionRow, session_id)
         head = None if owning is None else owning.head_run_id
-        return "running" if any(row.id == head for row in rows) else "queued"
+        at_head = next((row for row in rows if row.id == head), None)
+        if at_head is None:
+            # 队首自己已经终态，未了结的全排在它后面——§6 点名的那一半，
+            # `head_run_id` 对它们一无所知。
+            return UnfinishedWork(reason="queued")
+        if at_head.status not in _PARKED_STATUSES:
+            return UnfinishedWork(reason="running")
+        return UnfinishedWork(
+            reason="parked",
+            parked=ParkedHead(run_id=at_head.id, state_version=at_head.state_version),
+        )
 
     async def withdrawable(
         self, session_id: UUID, scope: WithdrawScope, turns: int

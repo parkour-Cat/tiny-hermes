@@ -242,6 +242,39 @@ async def parked_end_user_session(
     return created.id, end_user_id, accepted.run_id, ids
 
 
+@pytest.fixture
+async def parked_with_a_message_queued_behind(
+    engine: AsyncEngine,
+    workspace_id: str,
+    parked_end_user_session: tuple[UUID, UUID, UUID, list[UUID]],
+) -> tuple[UUID, UUID, UUID, list[UUID]]:
+    """阻塞卡片**真正**被渲染出来的那个状态。
+
+    卡片是在「你的消息排在第 N 位」时发出去的，也就是队首停着、用户自己那条
+    排在后面。所以这才是「被卡住时，可以发 /new 开始一段新对话」这句话必须
+    成立的场景——只有停住的队首而后面空无一物的那种，用户根本收不到卡片。
+    """
+    session_id, end_user_id, parked_run_id, _ = parked_end_user_session
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory.begin() as db:
+        behind = await RunCoordination(SqlRunStore(db)).submit_end_user_run(
+            UUID(workspace_id), end_user_id, session_id, "还在吗", "behind-seed", "seed"
+        )
+
+    async with engine.connect() as connection:
+        queued = (
+            await connection.execute(
+                text("SELECT status FROM runs WHERE id = :id"),
+                {"id": behind.run_id},
+            )
+        ).one()
+    assert queued.status == "queued", queued.status
+
+    ids = await _message_ids(engine, str(session_id))
+    assert len(ids) == 2, ids
+    return session_id, end_user_id, parked_run_id, ids
+
+
 async def _state_of(store: SqlRunStore, workspace_id: str, run_id: UUID) -> RunState:
     snapshot = await store.get_run(
         UUID(workspace_id), run_id, RunCapabilities(can_control=True, can_retry=True)
@@ -348,6 +381,35 @@ async def test_new_ends_a_parked_head_run_instead_of_refusing(
     assert done.messages == len(ids)
     # 撤了历史却留着一个还能醒进来的 Run，等于把旧对话接进新对话里。
     assert await _state_of(store, workspace_id, run_id) is RunState.CANCELLED
+
+
+async def test_new_works_in_the_very_state_the_blocked_card_advertises_it_for(
+    coordination: RunCoordination,
+    store: SqlRunStore,
+    workspace_id: str,
+    parked_with_a_message_queued_behind: tuple[UUID, UUID, UUID, list[UUID]],
+) -> None:
+    """队首停着、用户的消息排在后面——收到卡片的人所处的就是这个状态。上一版
+    在这里报 `busy`，于是卡片上唯一的出口在它唯一要兑现的场景里是假的。
+
+    只断言队首被结束了。排在后面那一条不在本版的处理范围内（见
+    `_end_the_parked_run` 写明的取舍），所以这里不假装它被挡住了。
+    """
+    session_id, end_user_id, parked_run_id, ids = parked_with_a_message_queued_behind
+
+    done = await coordination.withdraw_from_session(
+        session_id,
+        WithdrawScope.ALL,
+        escape_hatch=EndUserEscape(
+            workspace_id=UUID(workspace_id),
+            end_user_id=end_user_id,
+            request_id="req-card",
+        ),
+    )
+
+    assert done is not None
+    assert done.messages == len(ids)
+    assert await _state_of(store, workspace_id, parked_run_id) is RunState.CANCELLED
 
 
 async def test_undo_refuses_a_parked_head_run_and_leaves_it_running(
