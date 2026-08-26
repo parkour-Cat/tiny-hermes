@@ -186,8 +186,15 @@ def feishu_webhook_router(resources: ApplicationResources) -> APIRouter:
             return DeliveryAccepted()
 
         blocked = outcome.delivered.blocked
+        run = outcome.delivered.run
+        # `run_id` was already optional for a duplicate and the handshake
+        # (see `DeliveryAccepted.run_id`'s own docstring); a command is a
+        # third reason it comes back `None` here. Its own reply does not
+        # travel through this response at all — it reaches the sender
+        # later, through the outbound scan that reads
+        # `pending_command_receipts`.
         return DeliveryAccepted(
-            run_id=outcome.delivered.run.run_id,
+            run_id=None if run is None else run.run_id,
             blocked_by_run_id=None if blocked is None else blocked.blocked_by_run_id,
             queue_position=None if blocked is None else blocked.position,
             available_actions=[] if blocked is None else list(blocked.available_actions),
