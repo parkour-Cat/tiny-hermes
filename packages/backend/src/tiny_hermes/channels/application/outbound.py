@@ -32,6 +32,7 @@ from tiny_hermes.channels.domain.reply import (
 from tiny_hermes.channels.infrastructure.feishu_card import (
     answer_card,
     blocked_card,
+    command_receipt_text,
     failure_card,
     progress_card,
     working_card,
@@ -39,6 +40,7 @@ from tiny_hermes.channels.infrastructure.feishu_card import (
 from tiny_hermes.channels.infrastructure.sql_channel_store import (
     DeliveryTarget,
     PendingCard,
+    PendingCommandReceipt,
     PendingNotice,
     PendingProgress,
     PendingRefusal,
@@ -185,6 +187,10 @@ class ReplyQueue(Protocol):
 
     async def pending_refusals(self, limit: int = 50) -> list[PendingRefusal]: ...
 
+    async def pending_command_receipts(
+        self, limit: int = 50
+    ) -> list[PendingCommandReceipt]: ...
+
     async def pending_card_opens(self, limit: int = 50) -> list[PendingCard]: ...
 
     async def record_card(
@@ -262,6 +268,9 @@ class ChannelReplyDispatcher:
                 sent += 1
         for unreadable in await self._store.pending_refusals(self._batch_size):
             if await self._refuse(unreadable):
+                sent += 1
+        for command in await self._store.pending_command_receipts(self._batch_size):
+            if await self._answer_command(command):
                 sent += 1
         for waiting in await self._store.pending_blocked_notices(self._batch_size):
             if await self._notify(waiting):
@@ -438,6 +447,54 @@ class ChannelReplyDispatcher:
             return False
         await self._store.settle_reply(
             unreadable.event_row_id, ReplyOutcome.UNSUPPORTED_MESSAGE, _now()
+        )
+        return True
+
+    async def _answer_command(self, command: PendingCommandReceipt) -> bool:
+        """Tell somebody what their `/undo` or `/new` did.
+
+        Credentials come off the binding, like `_refuse`: a command produces
+        no Run and so no `channel_conversations` row of its own for
+        `delivery_target_for` to join through. Settled whether or not it
+        goes out and with no retry, same reasoning as a refusal — a receipt
+        that arrives after the person has already sent another message is
+        noise, and one retried every scan is worse.
+        """
+        target = await self._store.binding_target(command.binding_id)
+        recipient = self._sendable(target)
+        if isinstance(recipient, str):
+            logger.info(
+                "channel command receipt not sent: binding=%s reason=%s",
+                command.binding_id,
+                recipient,
+            )
+            await self._store.settle_reply(command.event_row_id, recipient, _now())
+            return False
+        try:
+            secret = await self._resolve_secret(recipient.app_secret_ref)
+            await self._senders(recipient.workspace_id).send_text(
+                app_id=recipient.app_id,
+                app_secret=secret,
+                # From the delivery, not from `recipient` — `binding_target`
+                # leaves that field empty for the same reason `_refuse` does:
+                # a binding serves everybody and cannot know who this one is
+                # for.
+                open_id=command.external_user_id,
+                text=command_receipt_text(command.receipt),
+                delivery_key=str(command.event_row_id),
+            )
+        except Exception:
+            logger.warning(
+                "channel command receipt failed: binding=%s",
+                command.binding_id,
+                exc_info=True,
+            )
+            await self._store.settle_reply(
+                command.event_row_id, ReplyOutcome.REFUSED, _now()
+            )
+            return False
+        await self._store.settle_reply(
+            command.event_row_id, ReplyOutcome.SENT, _now()
         )
         return True
 
