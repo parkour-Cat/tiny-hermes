@@ -434,12 +434,22 @@ def _parts(
         # picture, which is the honest reply — and the alternative, failing
         # the round, permanently broke every Session that ever held an
         # image the platform could no longer fetch.
+        #
+        # Scoped to *this message*, because that is all this function knows.
+        # It said "in this conversation" once, and a live session showed the
+        # price: two images belonged to messages their sender had recalled,
+        # so the sentence appeared on every round, and the model took it as a
+        # standing fact about all images — refusing to look at the seven
+        # attached beside it. Replaying that history without the sentence,
+        # the same model described the picture correctly.
+        subject = "1 image" if missing == 1 else f"{missing} images"
+        verb = "is" if missing == 1 else "are"
         parts.append(
             {
                 "type": "text",
                 "text": (
-                    f"[{missing} image(s) in this conversation could not be "
-                    "retrieved and are not shown]"
+                    f"[{subject} in this message could not be "
+                    f"retrieved and {verb} not shown]"
                 ),
             }
         )
