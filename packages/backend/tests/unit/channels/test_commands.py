@@ -38,6 +38,12 @@ def test_new_and_its_alias(text: str) -> None:
         "/undo 0",
         "/undo abc",
         "/new 3",
+        # `'²'.isdigit()` is True while `int('²')` raises. A `ValueError` out
+        # of `parse` leaves the webhook returning 500, the claim rolled back,
+        # and Feishu redelivering the same event for six hours — so this one
+        # is not merely "unrecognised", it is the case that must not crash.
+        "/undo ²",
+        "/undo ٣",
     ],
 )
 def test_what_must_not_be_swallowed(text: str) -> None:

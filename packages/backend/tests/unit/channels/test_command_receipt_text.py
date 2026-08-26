@@ -39,6 +39,39 @@ def test_nothing_to_undo_says_so_rather_than_a_count_of_zero() -> None:
     assert "没有" in text
 
 
+def test_new_on_an_empty_session_still_confirms_a_fresh_conversation() -> None:
+    """`/new` 的「没得撤」不是「你的命令没做成」——它是「你已经在一段新对话里
+    了」。回一句 `/undo` 的「没有可撤的内容」会让人以为 `/new` 失败了，于是
+    再发一次。
+    """
+    text = command_receipt_text(CommandReceipt("new", "nothing", 0, 0, "", None))
+
+    assert "新对话" in text
+    assert "没有可撤的内容。" != text
+
+
+def test_a_parked_head_and_a_running_one_are_not_the_same_sentence() -> None:
+    """停住的队首是 `/new` 唯一能救的那种忙。`/undo` 撞上它时收到的那句话必须
+    指得出这条路——阻塞卡片就是这么写给同一个人的。
+    """
+    parked = command_receipt_text(CommandReceipt("undo", "busy", 0, 0, "", "parked"))
+    running = command_receipt_text(CommandReceipt("undo", "busy", 0, 0, "", "running"))
+
+    assert parked != running
+    assert "/new" in parked
+
+
+def test_a_cancel_that_failed_does_not_read_as_a_fresh_conversation() -> None:
+    """`/new` 取消不掉那个停住的 Run 时什么都没撤。用户必须知道这一点，否则
+    他会以为自己在一段新对话里，而那个 Run 还能醒进来。
+    """
+    text = command_receipt_text(
+        CommandReceipt("new", "busy", 0, 0, "", "cancel_failed")
+    )
+
+    assert "新对话" not in text
+
+
 def test_a_long_echo_is_truncated_rather_than_sent_in_full() -> None:
     """照上游 Hermes 的 200 字符：够认出是哪条消息，又不至于把一条长提示整段
     抄回聊天窗口。"""
