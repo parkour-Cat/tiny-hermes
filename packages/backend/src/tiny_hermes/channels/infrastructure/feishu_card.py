@@ -132,17 +132,29 @@ def command_receipt_text(receipt: CommandReceipt) -> str:
     """一条命令的结果，说给发它的人听。
 
     `CommandReceipt` 存的是事实，措辞在这里才决定——和 `blocked_card` 读
-    `BlockedNotice` 是同一层分工。`busy`/`nothing` 先于具体命令判断，因为
-    「还在跑」「没什么可撤」这两句话不因为命令是 `/undo` 还是 `/new` 而不同。
+    `BlockedNotice` 是同一层分工。`busy` 先于具体命令判断，因为「还在跑」
+    「在排队」这两句话不因为命令是 `/undo` 还是 `/new` 而不同。
+
+    `nothing` 不能这样合并：对 `/undo` 它是「没什么可撤」，对 `/new` 它是
+    「你已经在一段新对话里了」。同一句话会让发 `/new` 的人以为命令失败了，
+    于是再发一次。
     """
     if receipt.outcome == "busy":
         if receipt.busy_reason == "running":
             return "还有一轮在跑。等它结束，或者先取消，再试一次。"
+        if receipt.busy_reason == "parked":
+            # 只有 `/undo` 会读到这一句：`/new` 撞上停住的队首会把它取消掉，
+            # 走的是 `done`。这句话给出的出口和阻塞卡片给的是同一个。
+            return "前面有一轮停着在等人处理。可以发 /new 开始一段新对话。"
+        if receipt.busy_reason == "cancel_failed":
+            return "前面那一轮没能取消，所以这次什么都没撤。请到控制台处理后再试。"
         return "前面还有消息在排队。等队列走完再试一次。"
+    if receipt.command == "new":
+        if receipt.outcome == "nothing":
+            return "已经是一段新对话了，直接说就行。"
+        return f"已经开始一段新对话。之前的 {receipt.messages} 条消息不再进入上下文。"
     if receipt.outcome == "nothing":
         return "没有可撤的内容。"
-    if receipt.command == "new":
-        return f"已经开始一段新对话。之前的 {receipt.messages} 条消息不再进入上下文。"
     echoed = receipt.echoed_text
     if len(echoed) > _ECHO_LIMIT:
         echoed = echoed[:_ECHO_LIMIT] + "..."

@@ -50,6 +50,10 @@ def parse(text: str, *, has_images: bool = False) -> ChatCommand | None:
         return ChatCommand(name=name)
     if len(words) > 2:
         return None
-    if not words[1].isdigit() or int(words[1]) < 1:
+    # `isascii()` 和 `isdecimal()` 都要，`isdigit()` 一个都不够：`'²'.isdigit()`
+    # 为真而 `int('²')` 抛 ValueError——从 `run_for` 一路抛出去就是 webhook 500、
+    # claim 回滚、飞书重投六小时。而 `'٣'` 两个谓词都为真且 `int` 收得下，只是
+    # 没有人会用阿拉伯-印度数字给 `/undo` 传轮数，当成命令收下的风险大于收益。
+    if not (words[1].isascii() and words[1].isdecimal()) or int(words[1]) < 1:
         return None
     return ChatCommand(name=name, turns=int(words[1]))
