@@ -592,6 +592,16 @@ class SqlChannelStore:
             .where(
                 SessionMessageRow.source_run_id == RunRow.id,
                 SessionMessageRow.role == "assistant",
+                # Not "prevents a leak" — this reply goes to the same person
+                # who withdrew the message, so nothing leaks. It is that the
+                # channel and the model's own context must tell one story: a
+                # sender who received an answer no longer in the model's
+                # history gets no coherent response when they follow up on
+                # it. The `outerjoin` below already handles no row matching
+                # here (a Run can finish having said nothing), so a withdrawn
+                # newest turn just falls back to the next assistant turn, or
+                # to that same empty-reply path if there isn't one.
+                SessionMessageRow.withdrawn_at.is_(None),
             )
             .order_by(SessionMessageRow.sequence.desc())
             .limit(1)
