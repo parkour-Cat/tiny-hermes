@@ -17,8 +17,10 @@ tested or replayed. So the caller resolves references to data URLs and
 hands them in — the seam is explicit rather than either half bending.
 """
 
+import logging
 from typing import Any
 
+import pytest
 from tiny_hermes.agents.domain.models import DeterministicModelPolicy
 from tiny_hermes.model_catalog.domain.models import ModelEndpointSpec, UsageQuality
 from tiny_hermes.runs.domain.models import CanonicalMessage, ImageBlock, TextBlock
@@ -144,3 +146,68 @@ def test_the_default_is_to_accept_nothing() -> None:
     )
 
     assert spec.accepts_images is False
+
+
+def test_the_request_says_out_loud_how_many_images_it_carries(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """What was actually sent, at INFO, once per request.
+
+    Not scaffolding. Every layer of this feature was individually provable —
+    the endpoint flag, the download, the data URL, the payload builder, the
+    vendor — and every one of them passed while a live conversation still
+    answered "I cannot see the picture". Nothing in a green suite says which
+    request went out, so the only remaining question, *did this round carry
+    the image*, took a database, seven probes and the vendor's own API to
+    answer. This is the line that answers it in one grep.
+    """
+    with caplog.at_level(logging.INFO, logger="tiny_hermes.runs.infrastructure.openai_model"):
+        build_payload(
+            _spec(accepts_images=True),
+            ModelRequest(
+                policy=DeterministicModelPolicy(),
+                personality="You are careful.",
+                messages=(_turn(), _turn()),
+                round_index=1,
+            ),
+            images={"a1": PIXEL},
+        )
+
+    assert "images attached=2 missing=0 accepts_images=True" in caplog.text
+
+
+def test_the_diagnostic_counts_what_was_left_out_separately(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`attached` and `missing` are different failures with different fixes —
+    an endpoint that was never declared to accept images versus a reference
+    the resolver could not fetch. One number for both would name neither."""
+    with caplog.at_level(logging.INFO, logger="tiny_hermes.runs.infrastructure.openai_model"):
+        build_payload(
+            _spec(accepts_images=False),
+            ModelRequest(
+                policy=DeterministicModelPolicy(),
+                personality="You are careful.",
+                messages=(_turn(),),
+                round_index=1,
+            ),
+            images={"a1": PIXEL},
+        )
+
+    assert "images attached=0 missing=1 accepts_images=False" in caplog.text
+
+
+def test_a_request_with_no_images_stays_quiet() -> None:
+    """Almost every request has no picture in it. A line per round saying so
+    would bury the one that matters."""
+    caplog_free = build_payload(
+        _spec(),
+        ModelRequest(
+            policy=DeterministicModelPolicy(),
+            personality="You are careful.",
+            messages=(CanonicalMessage(role="user", blocks=(TextBlock(text="hi"),)),),
+            round_index=1,
+        ),
+    )
+
+    assert caplog_free["messages"][-1]["content"] == "hi"
