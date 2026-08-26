@@ -9,7 +9,6 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
-    JSON,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -189,7 +188,7 @@ class ChannelEventRow(IdMixin, Base):
     #: scan — see migration 0048 for why this is not `blocked_notice` or
     #: `unsupported_kind` reused.
     command_receipt: Mapped[dict[str, Any] | None] = mapped_column(
-        JSON, nullable=True
+        JSONB, nullable=True
     )
     #: Who to answer, kept here for the same reason as `unsupported_open_id`:
     #: a command does not create a `channel_conversations` row on its own,

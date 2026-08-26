@@ -15,6 +15,7 @@
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision: str = "20260826_0048"
 down_revision: str | None = "20260826_0047"
@@ -25,7 +26,11 @@ depends_on: None = None
 def upgrade() -> None:
     op.add_column(
         "channel_events",
-        sa.Column("command_receipt", sa.JSON(), nullable=True),
+        # JSONB, matching `blocked_notice` on this same table — there is no
+        # reason for a new column with the same access pattern (write once
+        # on the inbound row, read back whole) to diverge from the type
+        # already established here.
+        sa.Column("command_receipt", postgresql.JSONB(), nullable=True),
     )
     op.add_column(
         "channel_events",

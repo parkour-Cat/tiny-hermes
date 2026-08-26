@@ -104,3 +104,32 @@ async def test_an_answered_receipt_is_not_owed_again(
     await channel_store.settle_reply(claimed_event.id, note="ok", now=NOW)
 
     assert await channel_store.pending_command_receipts() == []
+
+
+async def test_a_row_without_a_receipt_is_not_returned(
+    channel_store: SqlChannelStore, claimed_event: _ClaimedEvent
+) -> None:
+    """Two claimed rows on the same binding, only one carrying a receipt.
+
+    `test_a_recorded_receipt_is_owed_an_answer` alone cannot catch a scan
+    that dropped the `command_receipt IS NOT NULL` half of its predicate and
+    kept only `replied_at IS NULL` — with a single row in the fixture
+    database, that broken scan returns the same one row either way. A
+    second, ordinary claimed delivery that never ran a command is what makes
+    the missing half of the predicate observable: a scan without it would
+    return both rows here, not just the one with a receipt.
+    """
+    other_event_id = await channel_store.claim_delivery(
+        claimed_event.binding_id, "om_not_a_command", NOW
+    )
+    assert other_event_id is not None
+
+    await channel_store.record_command_receipt(
+        claimed_event.id,
+        CommandReceipt("undo", "done", 2, 1, "图里是什么", None),
+        external_user_id="ou_test",
+    )
+
+    pending = await channel_store.pending_command_receipts()
+
+    assert [p.event_row_id for p in pending] == [claimed_event.id]
