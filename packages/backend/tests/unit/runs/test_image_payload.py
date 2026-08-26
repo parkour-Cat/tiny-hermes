@@ -211,3 +211,60 @@ def test_a_request_with_no_images_stays_quiet() -> None:
     )
 
     assert caplog_free["messages"][-1]["content"] == "hi"
+
+
+def test_the_marker_speaks_only_for_the_message_it_sits_in() -> None:
+    """It is injected per message, so it must not describe the conversation.
+
+    The wording used to say "in this conversation". A live session proved
+    what that costs: two images belonged to messages their sender had
+    *recalled* and could never be fetched again, so the phrase appeared on
+    every round — and the model read it as a standing fact about all images,
+    refusing to look at the seven that were attached beside it. Replaying
+    that history with the same seven images and this sentence removed, the
+    model described the picture correctly.
+
+    So this is the rule CLAUDE.md states for comments, applied to a string
+    the model reads: it must not claim more than the code does.
+    """
+    sent = _payload(images={})["messages"]
+
+    user = [m for m in sent if m["role"] == "user"][-1]
+    marker = next(
+        part["text"] for part in user["content"] if "could not be retrieved" in part.get("text", "")
+    )
+    assert "this message" in marker
+    assert "conversation" not in marker
+
+
+def test_two_unfetchable_images_are_counted_once() -> None:
+    """One turn can carry several pictures, and the count is stated once.
+
+    Written because the first attempt at the message-scoped wording built
+    the sentence from a count *and* a pluralised noun that already carried
+    the count, reading "[2 2 images ...]". The singular case hid it.
+    """
+    turn = CanonicalMessage(
+        role="user",
+        blocks=(
+            TextBlock(text="这两张呢?"),
+            ImageBlock(reference="a1", media_type="image/png"),
+            ImageBlock(reference="a2", media_type="image/png"),
+        ),
+    )
+    payload = build_payload(
+        _spec(),
+        ModelRequest(
+            policy=DeterministicModelPolicy(),
+            personality="You are careful.",
+            messages=(turn,),
+            round_index=1,
+        ),
+        images={},
+    )
+
+    user = [m for m in payload["messages"] if m["role"] == "user"][-1]
+    marker = next(
+        p["text"] for p in user["content"] if "could not be retrieved" in p.get("text", "")
+    )
+    assert marker == "[2 images in this message could not be retrieved and are not shown]"
