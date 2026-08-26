@@ -21,9 +21,9 @@ from tiny_hermes.runs.domain.models import (
     CallerIdentity,
     CallerType,
     EndUserEscape,
-    ParkedHead,
     SessionMode,
     SessionSnapshot,
+    StoppedRun,
     UnfinishedWork,
     WithdrawScope,
 )
@@ -33,6 +33,7 @@ WORKSPACE = uuid4()
 END_USER = uuid4()
 SESSION = uuid4()
 PARKED_RUN = uuid4()
+QUEUED_BEHIND = uuid4()
 
 
 class RefusingStore:
@@ -42,14 +43,23 @@ class RefusingStore:
     拒绝一次转移时抛的就是它。
     """
 
-    def __init__(self, failure: Exception) -> None:
+    def __init__(self, failure: Exception, fail_on: UUID = PARKED_RUN) -> None:
         self.failure = failure
+        #: 哪一个 Run 的取消会失败。默认队首，`fail_on=QUEUED_BEHIND` 用来造
+        #: 「前面几个已经取消掉了，后面这个失败」这种半路失败。
+        self.fail_on = fail_on
+        self.cancelled: list[UUID] = []
         self.withdrawn: list[Sequence[UUID]] = []
 
     async def unfinished_work(self, session_id: UUID) -> UnfinishedWork:
         del session_id
+        # 排队的在前，停住的队首在最后——`unfinished_work` 交出来的顺序。
         return UnfinishedWork(
-            reason="parked", parked=ParkedHead(run_id=PARKED_RUN, state_version=3)
+            reason="parked",
+            cancellable=(
+                StoppedRun(run_id=QUEUED_BEHIND, state_version=1),
+                StoppedRun(run_id=PARKED_RUN, state_version=3),
+            ),
         )
 
     async def get_run(
@@ -76,8 +86,10 @@ class RefusingStore:
         )
 
     async def control_run(self, command: ControlRunCommand) -> Any:
-        del command
-        raise self.failure
+        if command.run_id == self.fail_on:
+            raise self.failure
+        self.cancelled.append(command.run_id)
+        return None
 
     async def withdrawable(
         self, session_id: UUID, scope: WithdrawScope, turns: int
@@ -96,7 +108,9 @@ class RefusingStore:
 async def test_a_cancel_that_failed_refuses_instead_of_withdrawing_anyway() -> None:
     from tiny_hermes.runs.application.service import DeniedRunControl
 
-    store = RefusingStore(DeniedRunControl("invalid_state_transition"))
+    store = RefusingStore(
+        DeniedRunControl("invalid_state_transition"), fail_on=QUEUED_BEHIND
+    )
     coordination = RunCoordination(store)  # pyright: ignore[reportArgumentType]
 
     with pytest.raises(SessionBusy) as raised:
@@ -109,6 +123,36 @@ async def test_a_cancel_that_failed_refuses_instead_of_withdrawing_anyway() -> N
         )
 
     assert raised.value.reason == "cancel_failed"
+    assert store.cancelled == []
+    assert store.withdrawn == []
+
+
+async def test_a_failure_half_way_through_still_withdraws_nothing() -> None:
+    """`/new` 要结束的是这个 Session 的**全部**未了结工作。第一个取消成功、
+    第二个失败时，撤回照做等于既撤了历史又留下一个还会答复的 Run —— 比拒绝糟。
+
+    这里断言的是可观察的那一半：一行都没撤。已经发出去的那次取消不会被回滚，
+    这一层没有 savepoint，`unfinished_work` 的事前合法性检查是挡这件事的地方，
+    不是这里 —— 别把这条测试读成这里有回滚。
+    """
+    from tiny_hermes.runs.application.service import DeniedRunControl
+
+    store = RefusingStore(
+        DeniedRunControl("invalid_state_transition"), fail_on=PARKED_RUN
+    )
+    coordination = RunCoordination(store)  # pyright: ignore[reportArgumentType]
+
+    with pytest.raises(SessionBusy) as raised:
+        await coordination.withdraw_from_session(
+            SESSION,
+            WithdrawScope.ALL,
+            escape_hatch=EndUserEscape(
+                workspace_id=WORKSPACE, end_user_id=END_USER, request_id="req-new"
+            ),
+        )
+
+    assert raised.value.reason == "cancel_failed"
+    assert store.cancelled == [QUEUED_BEHIND]
     assert store.withdrawn == []
 
 
@@ -118,7 +162,7 @@ async def test_a_state_version_conflict_refuses_the_same_way() -> None:
     """
     from tiny_hermes.runs.application.service import StateVersionConflict
 
-    store = RefusingStore(StateVersionConflict())
+    store = RefusingStore(StateVersionConflict(), fail_on=QUEUED_BEHIND)
     coordination = RunCoordination(store)  # pyright: ignore[reportArgumentType]
 
     with pytest.raises(SessionBusy) as raised:

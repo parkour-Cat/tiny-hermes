@@ -247,7 +247,7 @@ async def parked_with_a_message_queued_behind(
     engine: AsyncEngine,
     workspace_id: str,
     parked_end_user_session: tuple[UUID, UUID, UUID, list[UUID]],
-) -> tuple[UUID, UUID, UUID, list[UUID]]:
+) -> tuple[UUID, UUID, UUID, UUID, list[UUID]]:
     """阻塞卡片**真正**被渲染出来的那个状态。
 
     卡片是在「你的消息排在第 N 位」时发出去的，也就是队首停着、用户自己那条
@@ -272,7 +272,7 @@ async def parked_with_a_message_queued_behind(
 
     ids = await _message_ids(engine, str(session_id))
     assert len(ids) == 2, ids
-    return session_id, end_user_id, parked_run_id, ids
+    return session_id, end_user_id, parked_run_id, behind.run_id, ids
 
 
 async def _state_of(store: SqlRunStore, workspace_id: str, run_id: UUID) -> RunState:
@@ -383,19 +383,21 @@ async def test_new_ends_a_parked_head_run_instead_of_refusing(
     assert await _state_of(store, workspace_id, run_id) is RunState.CANCELLED
 
 
-async def test_new_works_in_the_very_state_the_blocked_card_advertises_it_for(
+async def test_new_ends_every_unfinished_run_not_only_the_parked_head(
     coordination: RunCoordination,
     store: SqlRunStore,
     workspace_id: str,
-    parked_with_a_message_queued_behind: tuple[UUID, UUID, UUID, list[UUID]],
+    parked_with_a_message_queued_behind: tuple[UUID, UUID, UUID, UUID, list[UUID]],
 ) -> None:
-    """队首停着、用户的消息排在后面——收到卡片的人所处的就是这个状态。上一版
-    在这里报 `busy`，于是卡片上唯一的出口在它唯一要兑现的场景里是假的。
+    """队首停着、用户的消息排在后面——收到卡片的人所处的就是这个状态。
 
-    只断言队首被结束了。排在后面那一条不在本版的处理范围内（见
-    `_end_the_parked_run` 写明的取舍），所以这里不假装它被挡住了。
+    只结束队首是不够的：队首让开之后，排在后面那条会被提上来，拿着**已经被撤
+    掉的历史**跑完一整轮，然后把答复发进用户以为是全新的对话里。那正是出站渠道
+    和模型上下文讲两个不同故事的分裂，也正是这个功能存在的理由。
     """
-    session_id, end_user_id, parked_run_id, ids = parked_with_a_message_queued_behind
+    session_id, end_user_id, parked_run_id, behind_run_id, ids = (
+        parked_with_a_message_queued_behind
+    )
 
     done = await coordination.withdraw_from_session(
         session_id,
@@ -410,6 +412,50 @@ async def test_new_works_in_the_very_state_the_blocked_card_advertises_it_for(
     assert done is not None
     assert done.messages == len(ids)
     assert await _state_of(store, workspace_id, parked_run_id) is RunState.CANCELLED
+    assert await _state_of(store, workspace_id, behind_run_id) is RunState.CANCELLED
+    # 回执要说得出结束了几个，否则用户只会发现自己有条消息永远没人答。
+    assert done.runs_ended == 2
+
+
+async def test_new_refuses_when_one_of_the_runs_behind_cannot_be_cancelled(
+    coordination: RunCoordination,
+    store: SqlRunStore,
+    engine: AsyncEngine,
+    workspace_id: str,
+    parked_with_a_message_queued_behind: tuple[UUID, UUID, UUID, UUID, list[UUID]],
+) -> None:
+    """全有或全无。
+
+    `running` 收不了 `CANCEL_REQUESTED`（状态机里只有 `SAFE_CANCEL_STARTED`
+    那一条边），所以队首后面站着一个真的在跑的 Run 时，`/new` 没法把这个
+    Session 清干净。这时候撤一半比拒绝更糟：历史撤了，而那个 Run 还会答复。
+    """
+    session_id, end_user_id, parked_run_id, behind_run_id, ids = (
+        parked_with_a_message_queued_behind
+    )
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE runs SET status = 'running' WHERE id = :id"),
+            {"id": behind_run_id},
+        )
+
+    with pytest.raises(SessionBusy) as raised:
+        await coordination.withdraw_from_session(
+            session_id,
+            WithdrawScope.ALL,
+            escape_hatch=EndUserEscape(
+                workspace_id=UUID(workspace_id),
+                end_user_id=end_user_id,
+                request_id="req-card",
+            ),
+        )
+
+    assert raised.value.reason == "running"
+    for message_id in ids:
+        assert await store.withdrawn_at_of(message_id) is None
+    # 一个都没动，队首也没有。
+    assert await _state_of(store, workspace_id, parked_run_id) is RunState.WAITING_APPROVAL
+    assert await _state_of(store, workspace_id, behind_run_id) is RunState.RUNNING
 
 
 async def test_undo_refuses_a_parked_head_run_and_leaves_it_running(

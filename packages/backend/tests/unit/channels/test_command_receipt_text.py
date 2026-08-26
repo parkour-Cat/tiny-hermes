@@ -72,6 +72,27 @@ def test_a_cancel_that_failed_does_not_read_as_a_fresh_conversation() -> None:
     assert "新对话" not in text
 
 
+def test_new_says_how_many_unfinished_runs_it_ended() -> None:
+    """结束掉的 Run 不会再有答复。不说出来，用户只会发现自己有条消息石沉大海
+    ——而他刚刚被告知这是一段全新的对话，正好没有理由去找。
+    """
+    text = command_receipt_text(
+        CommandReceipt("new", "done", 4, 2, "", None, runs_ended=2)
+    )
+
+    assert "2" in text
+    assert "新对话" in text
+
+
+def test_new_that_ended_nothing_does_not_mention_a_count() -> None:
+    """没结束任何 Run 时不该冒出「结束了 0 个任务」这种话。"""
+    text = command_receipt_text(
+        CommandReceipt("new", "done", 4, 2, "", None, runs_ended=0)
+    )
+
+    assert "0 个" not in text
+
+
 def test_a_long_echo_is_truncated_rather_than_sent_in_full() -> None:
     """照上游 Hermes 的 200 字符：够认出是哪条消息，又不至于把一条长提示整段
     抄回聊天窗口。"""
