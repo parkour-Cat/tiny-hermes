@@ -410,6 +410,40 @@ test("shows a tool turn in the transcript rather than an empty row", async () =>
   expect(screen.getByText(/← 3 entries/)).toBeInTheDocument();
 });
 
+test("a withdrawn turn is marked as withdrawn instead of reading as a live one", async () => {
+  // `list_session_messages` deliberately does not filter withdrawn rows: the
+  // transcript is what a person reads, and dropping the row would tell them
+  // they never said it. That only works if the page says which row it is —
+  // otherwise the transcript claims a message is still in play when the model
+  // will never see it again.
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run())),
+    http.get(`/api/v1/sessions/${SESSION}/messages`, () =>
+      HttpResponse.json([
+        { role: "user", parts: [{ type: "text", text: "第一句" }], withdrawn_at: null },
+        {
+          role: "user",
+          parts: [{ type: "text", text: "第二句" }],
+          withdrawn_at: "2026-08-26T02:00:00Z",
+        },
+      ]),
+    ),
+    http.get(`/api/v1/runs/${RUN}/artifacts`, () => HttpResponse.json([])),
+  );
+  stream();
+
+  renderRun();
+
+  // Anchored on the row carrying the text, not on an index into the list.
+  const withdrawn = (await screen.findByText("第二句")).closest("article");
+  const kept = screen.getByText("第一句").closest("article");
+  expect(withdrawn).not.toBeNull();
+  expect(within(withdrawn as HTMLElement).getByText(t("withdrawnTurn"))).toBeInTheDocument();
+  // The other direction too: a page that tagged every row would pass the first
+  // assertion and still be wrong.
+  expect(within(kept as HTMLElement).queryByText(t("withdrawnTurn"))).toBeNull();
+});
+
 test("a trimmed context is said in words, not left as a payload to decode", async () => {
   // The one class of event that reports a decision nobody asked for: the round
   // was sent something other than what the transcript holds. `context_trimmed`

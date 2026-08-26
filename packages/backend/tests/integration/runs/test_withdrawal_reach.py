@@ -247,6 +247,36 @@ async def test_the_transcript_still_shows_it_and_says_it_was_withdrawn(
     assert shown.withdrawn_at is not None
 
 
+async def test_the_console_api_carries_the_withdrawal_out_to_a_caller(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    seeded_session_with_two_messages: tuple[UUID, UUID, UUID],
+) -> None:
+    """本项目最常见 bug 的镜像，而上一版正好踩中了它。
+
+    上面那条只对着 store 断言，于是放过了两个响应模型都从 `message.document()`
+    建、谁都没声明 `withdrawn_at` —— 列写进去了，DTO 带到了，然后在 HTTP 边界
+    上停住。`grep -rn withdrawn apps/` 当时一条都搜不到。判据不是「存住了」，
+    是「这条路走得通」。
+
+    撤回走一个**单独提交**的事务：`client` 用的是另一条连接，看不见没提交的行。
+    """
+    session_id, _first_id, second_id = seeded_session_with_two_messages
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory.begin() as db:
+        await SqlRunStore(db).mark_withdrawn([second_id], at=datetime.now(UTC))
+
+    listed = client.get(f"/api/v1/sessions/{session_id}/messages", headers=scope)
+
+    assert listed.status_code == 200, listed.text
+    # 响应模型不带 id，所以按各自唯一的正文找行——不是按下标。
+    said = {message["parts"][0]["text"]: message for message in listed.json()}
+    assert said["message reach-second"]["withdrawn_at"] is not None
+    # 反面同样要断言：一个把整张表都标成已撤回的实现照样能过上面那一条。
+    assert said["message reach-first"]["withdrawn_at"] is None
+
+
 async def test_a_withdrawn_assistant_message_is_not_a_child_run_result(
     store: SqlRunStore,
     db_session: AsyncSession,
