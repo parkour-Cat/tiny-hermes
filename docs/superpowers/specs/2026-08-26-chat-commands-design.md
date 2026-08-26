@@ -129,8 +129,24 @@ ALTER TABLE session_messages ADD COLUMN withdrawn_at timestamptz NULL;
 | `sql_store.py:2581` `list_session_messages` | 转写记录 / API 列出 | **不过滤**，但必须把 `withdrawn_at` 带出去，让界面能标「已撤回」 |
 | `sql_store.py:2654` `_copy_checkpoint_messages` | 检查点复制 | **过滤**——撤回的不该被复制进新检查点 |
 | `sql_search.py:100` `_base` | 会话搜索 | **过滤**（§3.1 的决定） |
+| `sql_channel_store.py` `pending_replies` | 出站回复取 Run 的最后一条 assistant 消息 | **过滤**——见下 |
 
-实施时若发现第六处读点，必须补进这张表并说明判定理由。
+第六处是实施时（Task 3 Step 5）发现的，原表漏了它，补记于此。
+
+`pending_replies` 用一个 lateral 子查询取 Run 的最后一条 assistant 消息，直接发给飞书。
+撤回的判定条件是「没有非终态的 Run」，而一条 Run 终态之后、回复被扫描器派发之前
+有一个窗口——用户在这个窗口里 `/undo`，不过滤就会**把刚被撤回的那条答复发出去**。
+
+过滤它的理由不是防泄漏（那条回复本来就是发给同一个人的），而是：不过滤会让**出站渠道
+和模型上下文讲两个不同的故事**。用户收到一条答复，而模型的历史里没有它；用户接着追问，
+模型不知道在说什么。这正是本功能要消除的分裂。
+
+安全性已核对：该 lateral 是 `outerjoin`，取不到时 `said` 为空字符串，而
+`PendingReply.said` 的注释写明「Empty is a real answer — a Run can complete having said
+nothing」，`reply_for` 有对应分支。所以过滤不会发出空消息，也不会让扫描器空转。
+
+**同一个查询也没有过滤 `redacted`**，那是本设计之前就存在的缺口，不属于本次改动
+——`redacted` 目前全仓库从未被写成 `True`，所以是潜伏的。已单独记录。
 
 ## 6. 错误处理与边界
 
