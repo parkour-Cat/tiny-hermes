@@ -5,8 +5,8 @@
 `execution_context` 交出来的 history,而不是那一列的值。
 """
 
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import AsyncIterator
 from uuid import UUID
 
 import pytest

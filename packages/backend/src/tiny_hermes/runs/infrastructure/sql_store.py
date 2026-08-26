@@ -824,6 +824,7 @@ class SqlRunStore:
         scoped = select(SessionMessageRow).where(
             SessionMessageRow.session_id == run.session_id,
             SessionMessageRow.redacted.is_(False),
+            SessionMessageRow.withdrawn_at.is_(None),
         )
         if owning is None or owning.session_mode == SessionMode.EPHEMERAL.value:
             scoped = scoped.where(SessionMessageRow.source_run_id == run.id)
@@ -864,6 +865,35 @@ class SqlRunStore:
             # apart).
             caller_type=None if owning is None else CallerType(owning.caller_type),
         )
+
+    async def mark_withdrawn(self, message_ids: Sequence[UUID], *, at: datetime) -> int:
+        """置时间戳，且只置一次。
+
+        `withdrawn_at.is_(None)` 不是防御性的多余条件：撤回是幂等的，重放同一条
+        命令不得把第一次撤回的时刻改写成第二次的。
+        """
+        if not message_ids:
+            return 0
+        # `RETURNING id` rather than `rowcount`, for the same reason
+        # `forget_deliveries_before` gives: a `Result`'s `rowcount` is not
+        # typed as available on every dialect, while the ids the update
+        # actually named are both checkable and dialect-independent.
+        updated = await self._session.scalars(
+            update(SessionMessageRow)
+            .where(
+                SessionMessageRow.id.in_(message_ids),
+                SessionMessageRow.withdrawn_at.is_(None),
+            )
+            .values(withdrawn_at=at)
+            .returning(SessionMessageRow.id)
+        )
+        count = len(list(updated.all()))
+        await self._session.flush()
+        return count
+
+    async def withdrawn_at_of(self, message_id: UUID) -> datetime | None:
+        row = await self._session.get(SessionMessageRow, message_id)
+        return None if row is None else row.withdrawn_at
 
     async def _bound_skills(self, spec: AgentSpec) -> tuple[BoundSkill, ...]:
         """What the Version bound, in the order the author bound it.
