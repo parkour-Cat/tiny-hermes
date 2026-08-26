@@ -190,10 +190,17 @@ class EndUserSessionMessageResponse(BaseModel):
     role: str
     parts: list[dict[str, Any]]
     author: str | None = None
+    #: Widened deliberately, which is what the docstring above asks for. The
+    #: person reading this transcript is the person who sent `/undo` — showing
+    #: them the turn still sitting there with nothing to say it was taken back
+    #: is how a withdrawal comes to look like it did not happen.
+    withdrawn_at: datetime | None = None
 
     @classmethod
     def from_domain(cls, stored: StoredMessage) -> "EndUserSessionMessageResponse":
-        return cls.model_validate(stored.message.document())
+        return cls.model_validate(
+            {**stored.message.document(), "withdrawn_at": stored.withdrawn_at}
+        )
 
 
 def end_user_run_router(resources: ApplicationResources) -> APIRouter:

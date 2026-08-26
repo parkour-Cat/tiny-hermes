@@ -2704,10 +2704,17 @@ class SqlRunStore:
     ) -> Sequence[StoredMessage]:
         # Deliberately not filtered on `withdrawn_at`: this is the transcript a
         # person reads, and a person who took a message back still needs to see
-        # that they said it and that it is marked withdrawn — the console has
-        # no other route to that fact. `withdrawn_at` rides along on the DTO
-        # instead, so a caller can render "withdrawn" rather than pretending
-        # the row was never there.
+        # that they said it and that it is marked withdrawn.
+        #
+        # `withdrawn_at` rides along on the DTO so the fact can be rendered.
+        # Carrying it here is necessary and not sufficient, and the first cut
+        # of this shipped believing otherwise: both response models built from
+        # `message.document()`, which has no such key, so the column reached
+        # exactly this line and stopped. What makes the fact reachable is the
+        # whole chain — this field, `SessionMessageResponse.withdrawn_at`,
+        # `EndUserSessionMessageResponse.withdrawn_at`, and the console's own
+        # transcript row. Anything that drops it on the way out puts the fact
+        # back out of reach, whatever this comment says.
         rows = (
             await self._session.scalars(
                 select(SessionMessageRow)

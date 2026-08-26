@@ -90,10 +90,19 @@ class SessionMessageResponse(BaseModel):
     #: somebody's own misattributes them, and dropping the field here undid the
     #: distinction the store went to the trouble of keeping.
     author: str | None = None
+    #: When somebody took this turn back. The row is still here on purpose —
+    #: `list_session_messages` is the one read that does not filter withdrawn
+    #: rows, because a transcript that silently dropped them would tell a
+    #: reader the message was never said. That only works if the fact travels
+    #: all the way out: a response model that stopped at `document()` would
+    #: hand the console a message it cannot tell apart from a live one.
+    withdrawn_at: datetime | None = None
 
     @classmethod
     def from_domain(cls, stored: StoredMessage) -> "SessionMessageResponse":
-        return cls.model_validate(stored.message.document())
+        return cls.model_validate(
+            {**stored.message.document(), "withdrawn_at": stored.withdrawn_at}
+        )
 
 
 class QueueResponse(BaseModel):

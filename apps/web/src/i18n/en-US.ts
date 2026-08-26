@@ -317,6 +317,7 @@ export const enUS: Record<MessageKey, string> = {
   sessionBlocked: "This session is blocked by the queue",
   emptyPlayground: "No messages yet",
   messagesSection: "Messages",
+  withdrawnTurn: "Withdrawn",
   toolsCallsSection: "Tools",
   filesSection: "Artifacts",
   emptyMessages: "No messages yet",

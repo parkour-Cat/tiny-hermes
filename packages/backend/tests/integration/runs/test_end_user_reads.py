@@ -180,16 +180,20 @@ async def test_an_end_user_sees_which_of_their_turns_was_withdrawn(
     _sign_in(client, workspace_id, "zhang")
     session_id = _start_session(client)
     _submit_run(client, session_id, "withdraw-1", text="第一句")
-    _submit_run(client, session_id, "withdraw-2", text="第二句")
+    second_run = _submit_run(client, session_id, "withdraw-2", text="第二句")
 
     async with engine.begin() as connection:
-        await connection.execute(
+        # 按那条 Run 的 id 定位它自己写下的那条消息，不按下标，也不按正文——
+        # JSON 列里的中文是 `\uXXXX` 转义存的，`LIKE '%第二句%'` 一条都匹配
+        # 不到，而「一条都没改」的 UPDATE 是不会报错的。
+        withdrawn = await connection.execute(
             text(
                 "UPDATE session_messages SET withdrawn_at = now() "
-                "WHERE session_id = :s AND content::text LIKE :needle"
+                "WHERE source_run_id = :r RETURNING id"
             ),
-            {"s": UUID(session_id), "needle": "%第二句%"},
+            {"r": UUID(second_run)},
         )
+        assert len(withdrawn.all()) == 1
 
     read = client.get(f"/api/v1/end-user/sessions/{session_id}/messages")
 
