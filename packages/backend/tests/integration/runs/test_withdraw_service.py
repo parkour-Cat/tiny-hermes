@@ -163,7 +163,8 @@ async def test_undo_takes_back_the_last_user_turn_and_what_followed(
     coordination: RunCoordination,
     finished_session_of_four_messages: tuple[UUID, list[UUID]],
 ) -> None:
-    session_id, ids = finished_session_of_four_messages   # user, assistant, user, assistant
+    # user, assistant, user, assistant
+    session_id, _ids = finished_session_of_four_messages
 
     done = await coordination.withdraw_from_session(
         session_id, WithdrawScope.LAST_EXCHANGE, turns=1

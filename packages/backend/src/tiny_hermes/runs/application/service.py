@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -18,6 +19,8 @@ from tiny_hermes.runs.domain.models import (
     SessionSnapshot,
     StoredMessage,
     TextBlock,
+    Withdrawal,
+    WithdrawScope,
     WorkspaceUsageSummary,
     fingerprint_request,
 )
@@ -153,6 +156,20 @@ class BudgetNotWidened(RunCoordinationError):
     ceiling and typed the number already there should find that out now, not
     when the Run stops at the same place a second time.
     """
+
+
+class SessionBusy(RunCoordinationError):
+    """有未了结的工作时，历史不能在半空中被改写。
+
+    上游 Hermes 选择在这里强行拆掉在飞的工作，代价是三个公开 issue（事件循环
+    被拆卸卡死、僵尸槽位静默丢消息、悬空子 agent 烧 token）。tiny-hermes 的
+    沙箱所有权和 Session FIFO 语义更强，拆得更贵——而且工具副作用已经发生，
+    把那一轮从上下文抹掉不会把副作用抹掉。
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 class RunCoordination:
@@ -618,6 +635,21 @@ class RunCoordination:
                 request_id,
             )
         return await self._store.list_session_messages(workspace_id, session_id)
+
+    async def withdraw_from_session(
+        self, session_id: UUID, scope: WithdrawScope, *, turns: int = 1
+    ) -> Withdrawal | None:
+        """把一段历史挡在后续上下文之外。返回 `None` 表示没有可撤的。"""
+        reason = await self._store.busy_reason(session_id)
+        if reason is not None:
+            raise SessionBusy(reason)
+        ids, taken, text = await self._store.withdrawable(session_id, scope, turns)
+        if not ids:
+            return None
+        changed = await self._store.mark_withdrawn(ids, at=datetime.now(UTC))
+        if changed == 0:
+            return None
+        return Withdrawal(messages=changed, turns=taken, echoed_text=text)
 
     async def _load_readable_session(
         self, workspace_id: UUID, actor: Actor, session_id: UUID

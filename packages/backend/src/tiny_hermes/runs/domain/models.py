@@ -512,6 +512,26 @@ class StoredMessage:
     withdrawn_at: datetime | None = None
 
 
+class WithdrawScope(StrEnum):
+    """撤到哪里为止。"""
+
+    LAST_EXCHANGE = "last_exchange"
+    ALL = "all"
+
+
+@dataclass(frozen=True)
+class Withdrawal:
+    """一次撤回做成了什么。
+
+    `turns` 是**实际**撤掉的轮数而不是请求的轮数：请求 99 轮而只有 2 轮时，
+    回执必须说 2，否则用户以为自己丢了 99 轮。
+    """
+
+    messages: int
+    turns: int
+    echoed_text: str
+
+
 @dataclass(frozen=True)
 class BoundSkill:
     """One skill this Run's Version bound, as a round needs it.

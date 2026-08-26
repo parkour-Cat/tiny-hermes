@@ -85,6 +85,7 @@ from tiny_hermes.runs.domain.models import (
     TextBlock,
     TreeNode,
     WaitPolicy,
+    WithdrawScope,
     WorkspaceCleanupTarget,
     WorkspaceUsageByQuality,
     WorkspaceUsageSummary,
@@ -865,6 +866,70 @@ class SqlRunStore:
             # apart).
             caller_type=None if owning is None else CallerType(owning.caller_type),
         )
+
+    async def busy_reason(self, session_id: UUID) -> str | None:
+        """这个 Session 现在有没有未了结的工作，有的话是哪一种。
+
+        判据是「有没有非终态的 Run」，不是 `head_run_id` 是否为空——排在队首
+        之后、还没被提上来的 Run 同样是未了结的工作，而 `head_run_id` 对它们
+        一无所知。
+
+        先锁 Session 行：`accept_run`（`submit_run`/`submit_end_user_run` 都
+        经它）通过 `_lock_session` 锁的是同一行（`SessionRow.id == session_id`），
+        所以这里的 `with_for_update()` 与一次并发的 Run 提交确实会串行——不是
+        因为它们共享同一份连接，而是因为它们请求了同一把行锁。串行化到此为
+        止：它不保证撤回发生在提交「之前」或「之后」的哪一侧，只保证两者不会
+        在同一时刻各自读到对方尚未写完的一半。
+        """
+        await self._session.execute(
+            select(SessionRow.id).where(SessionRow.id == session_id).with_for_update()
+        )
+        rows = (
+            await self._session.execute(
+                select(RunRow.id, RunRow.status).where(
+                    RunRow.session_id == session_id,
+                    RunRow.status.not_in(tuple(s.value for s in TERMINAL_STATES)),
+                )
+            )
+        ).all()
+        if not rows:
+            return None
+        owning = await self._session.get(SessionRow, session_id)
+        head = None if owning is None else owning.head_run_id
+        return "running" if any(row.id == head for row in rows) else "queued"
+
+    async def withdrawable(
+        self, session_id: UUID, scope: WithdrawScope, turns: int
+    ) -> tuple[list[UUID], int, str]:
+        """要撤的行、实际轮数、被撤那条 user 消息的原文。
+
+        `LAST_EXCHANGE` 的锚点必须是 user 消息（上游同样如此）：从一条 assistant
+        消息往回撤，撤出来的是半轮，重发时对话会错位。
+        """
+        found = (
+            await self._session.scalars(
+                select(SessionMessageRow)
+                .where(
+                    SessionMessageRow.session_id == session_id,
+                    SessionMessageRow.redacted.is_(False),
+                    SessionMessageRow.withdrawn_at.is_(None),
+                )
+                .order_by(SessionMessageRow.sequence)
+            )
+        ).all()
+        if not found:
+            return [], 0, ""
+        if scope is WithdrawScope.ALL:
+            anchors = [row for row in found if row.role == "user"]
+            text = _text_of(anchors[0]) if anchors else ""
+            return [row.id for row in found], len(anchors), text
+        users = [row for row in found if row.role == "user"]
+        if not users:
+            return [], 0, ""
+        index = max(len(users) - turns, 0)
+        anchor = users[index]
+        taken = [row for row in found if row.sequence >= anchor.sequence]
+        return [row.id for row in taken], len(users) - index, _text_of(anchor)
 
     async def mark_withdrawn(self, message_ids: Sequence[UUID], *, at: datetime) -> int:
         """置时间戳，且只置一次。
@@ -3442,6 +3507,17 @@ def _to_message(row: SessionMessageRow) -> CanonicalMessage:
     the version that could not represent them at all.
     """
     return message_from_document({"role": row.role, **row.content})
+
+
+def _text_of(row: SessionMessageRow) -> str:
+    """The words of one stored row, for echoing back to whoever just undid it.
+
+    Goes through `_to_message` rather than re-scanning `row.content["parts"]`
+    by hand: that is the one place this module already knows how to turn a
+    stored document into blocks, and a second reader here could drift from it
+    on a future block type.
+    """
+    return _to_message(row).text
 
 
 def _scan_lock_key(name: str) -> int:

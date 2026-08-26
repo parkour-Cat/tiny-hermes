@@ -27,6 +27,7 @@ from tiny_hermes.runs.domain.models import (
     SessionSnapshot,
     StoredMessage,
     WaitPolicy,
+    WithdrawScope,
     WorkspaceCleanupTarget,
     WorkspaceUsageSummary,
 )
@@ -562,3 +563,29 @@ class RunStore(Protocol):
         run_id: UUID,
         document: dict[str, Any],
     ) -> None: ...
+
+    async def busy_reason(self, session_id: UUID) -> str | None:
+        """Whether this Session has unfinished work right now, and which kind.
+
+        `"running"` when the unfinished work is the Session's own head Run,
+        `"queued"` when it is a Run still waiting behind the head.
+        """
+        ...
+
+    async def withdrawable(
+        self, session_id: UUID, scope: WithdrawScope, turns: int
+    ) -> tuple[list[UUID], int, str]:
+        """The row ids a withdrawal of this scope would take, the turn count
+        it actually reaches, and the text of the user turn it anchors on.
+        """
+        ...
+
+    async def mark_withdrawn(
+        self, message_ids: Sequence[UUID], *, at: datetime
+    ) -> int:
+        """Flip `withdrawn_at` on rows that do not have it yet.
+
+        Returns how many rows this call actually changed, which can be lower
+        than `len(message_ids)` — a row already withdrawn is left alone.
+        """
+        ...
