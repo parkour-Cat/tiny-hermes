@@ -16,7 +16,7 @@ ruff          All checks passed!
 pyright       0 errors, 0 warnings
 web            222 passed
 chat-web        53 passed
-compose-e2e   <FILL>
+compose-e2e     18 passed (2.8m)
 ```
 
 ## 2. 那 2 条失败仍然是环境，不是这条分支
@@ -86,7 +86,10 @@ Session 全部未了结的 Run。停靠可以安全取消，是因为没有任�
 
 ## 7. 这一遍没能证明什么
 
-- **`compose-e2e` <FILL>。**
+- **`compose-e2e` 绿了，但它一条命令都没测。** run `33029676349`（PR 触发那次），
+  `18 passed (2.8m)`，已用 `gh run view --log | grep "^compose-e2e"` 确认是真的跑了
+  测试而不是只返回 success。但 `tests/e2e/` 里没有任何一条涉及 `/undo`、`/new` 或
+  撤回标记。**它证明的是这条分支没有弄坏别的东西，不是命令能用。**
 - **`<FILL：真实飞书里到底验了什么、没验什么>`**
 - **`/new` 结束排队 Run 的行为只在测试里见过。** 真实场景里用户在被卡住时
   连发几条消息再 `/new`，那些消息的 Run 会被取消而用户只看到一句回执，
