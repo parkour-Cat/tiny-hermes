@@ -16,6 +16,7 @@ operators.
 from typing import Any
 
 from tiny_hermes.channels.domain.blocked import BlockedNotice
+from tiny_hermes.channels.domain.command_receipt import CommandReceipt
 
 #: The head states a person can be told about, in their words rather than
 #: the state machine's. A state missing from here falls back to a general
@@ -122,6 +123,52 @@ def failure_card(reason: str | None) -> dict[str, Any]:
     return _card("运行失败", "red", [_paragraph(said)])
 
 
+#: 回显截断到这里。照上游 Hermes 的 200 字符——够认出是哪条消息，
+#: 又不至于把一条长提示整段抄回聊天窗口。
+_ECHO_LIMIT = 200
+
+
+def command_receipt_text(receipt: CommandReceipt) -> str:
+    """一条命令的结果，说给发它的人听。
+
+    `CommandReceipt` 存的是事实，措辞在这里才决定——和 `blocked_card` 读
+    `BlockedNotice` 是同一层分工。`busy` 先于具体命令判断，因为「还在跑」
+    「在排队」这两句话不因为命令是 `/undo` 还是 `/new` 而不同。
+
+    `nothing` 不能这样合并：对 `/undo` 它是「没什么可撤」，对 `/new` 它是
+    「你已经在一段新对话里了」。同一句话会让发 `/new` 的人以为命令失败了，
+    于是再发一次。
+    """
+    if receipt.outcome == "busy":
+        if receipt.busy_reason == "running":
+            return "还有一轮在跑。等它结束，或者先取消，再试一次。"
+        if receipt.busy_reason == "parked":
+            # 只有 `/undo` 会读到这一句：`/new` 撞上停住的队首会把它取消掉，
+            # 走的是 `done`。这句话给出的出口和阻塞卡片给的是同一个。
+            return "前面有一轮停着在等人处理。可以发 /new 开始一段新对话。"
+        if receipt.busy_reason == "cancel_failed":
+            return "前面那一轮没能取消，所以这次什么都没撤。请到控制台处理后再试。"
+        return "前面还有消息在排队。等队列走完再试一次。"
+    if receipt.command == "new":
+        if receipt.outcome == "nothing":
+            return "已经是一段新对话了，直接说就行。"
+        said = "已经开始一段新对话。"
+        if receipt.messages:
+            said += f"之前的 {receipt.messages} 条消息不再进入上下文。"
+        if receipt.runs_ended:
+            # 被结束的 Run 永远不会再答复。不说出来，用户只会发现自己有条消息
+            # 石沉大海，而他刚被告知这是一段全新的对话，正好没有理由去找。
+            said += f"另外结束了 {receipt.runs_ended} 个还没跑完的任务，它们不会再有答复。"
+        return said
+    if receipt.outcome == "nothing":
+        return "没有可撤的内容。"
+    echoed = receipt.echoed_text
+    if len(echoed) > _ECHO_LIMIT:
+        echoed = echoed[:_ECHO_LIMIT] + "..."
+    head = f"已撤回 {receipt.turns} 轮，共 {receipt.messages} 条。"
+    return f"{head}\n\n你刚才说的是：\n{echoed}" if echoed else head
+
+
 def blocked_card(
     notice: BlockedNotice, *, console_url: str | None = None
 ) -> dict[str, Any]:
@@ -196,14 +243,22 @@ def _what_you_can_do(notice: BlockedNotice) -> str:
     reads.
     """
     if not notice.available_actions:
-        return "这个需要有权限的人去处理,你先等着就行,前面结束后会自动开始。"
-    named = "、".join(_ACTIONS.get(action, action) for action in notice.available_actions)
-    return f"前一个任务可以{named}——这些操作要在控制台里做。"
+        said = "这个需要有权限的人去处理,你先等着就行,前面结束后会自动开始。"
+    else:
+        named = "、".join(
+            _ACTIONS.get(action, action) for action in notice.available_actions
+        )
+        said = f"前一个任务可以{named}——这些操作要在控制台里做。"
+    # §935 要求阻塞卡片给出「新建会话」入口。这个 build 不渲染交互按钮
+    # （原因见本函数上方 docstring），所以入口是一条命令而不是一个按钮 ——
+    # 这句话就是那个入口本身，删掉它 §935 就没有实现了。
+    return f"{said}\n\n被卡住时，可以发 /new 开始一段新对话。"
 
 
 __all__ = [
     "answer_card",
     "blocked_card",
+    "command_receipt_text",
     "failure_card",
     "progress_card",
     "working_card",

@@ -431,9 +431,9 @@ async def _completion_document(
         runs = RunCoordination(SqlRunStore(session))
         messages = await runs.list_session_messages(workspace_id, actor, session_id)
     content = ""
-    for message in reversed(messages):
-        if message.role == "assistant" and message.text:
-            content = message.text
+    for stored in reversed(messages):
+        if stored.message.role == "assistant" and stored.message.text:
+            content = stored.message.text
             break
     return {
         "id": f"chatcmpl-{run_id}",

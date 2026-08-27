@@ -382,6 +382,68 @@ async def test_a_finished_run_answers_the_person_who_sent_the_message(
     assert note == ReplyOutcome.SENT
 
 
+async def _withdraw(engine: AsyncEngine, message_id: UUID) -> None:
+    """What `SqlRunStore.mark_withdrawn` does, without building one.
+
+    Every other helper in this module reaches the database directly rather
+    than through the layer under test — `_finish` stands in for the Worker,
+    this stands in for the `/undo` command handler. Going through a second
+    `SqlRunStore`/session here would only add a transaction boundary this
+    test does not need.
+    """
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE session_messages SET withdrawn_at = now() WHERE id = :m"),
+            {"m": message_id},
+        )
+
+
+async def test_a_withdrawn_answer_is_not_sent_as_the_reply(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The channel and the model's own context must tell the same story.
+
+    Task 3's four other read points keep a withdrawn message out of
+    everywhere a model or a reader looks. This is a fifth: if the dispatcher
+    still sent it, the person would receive an answer that is not in the
+    model's history — and the moment they asked a follow-up about it, the
+    model would have no idea what they meant. Nothing here is about a leak:
+    the reply goes to the same person who withdrew the message.
+
+    Two assistant turns rather than one, so this proves the dispatcher falls
+    back to the turn still standing — not merely that the withdrawn text is
+    absent, which a dispatcher that sent nothing at all would also satisfy.
+    """
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    run_id = _deliver(client, binding_id)
+    await _finish(engine, run_id, said="the earlier answer")
+    await _finish(engine, run_id, said="the later answer, about to be withdrawn")
+
+    async with engine.connect() as connection:
+        withdrawn_id = (
+            await connection.execute(
+                text(
+                    "SELECT id FROM session_messages WHERE source_run_id = :r "
+                    "ORDER BY sequence DESC LIMIT 1"
+                ),
+                {"r": run_id},
+            )
+        ).scalar_one()
+    await _withdraw(engine, withdrawn_id)
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+
+    assert "the earlier answer" in sender.after_opening()[0]["text"]
+    assert "the later answer" not in sender.after_opening()[0]["text"]
+
+
 async def test_the_delivery_that_produced_the_run_records_which_run(
     client: TestClient,
     engine: AsyncEngine,

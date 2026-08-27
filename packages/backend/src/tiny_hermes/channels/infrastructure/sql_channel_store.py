@@ -17,6 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.channels.application.ingestion import ChannelBindingRecord
 from tiny_hermes.channels.domain.blocked import BlockedNotice, notice_from_stored
+from tiny_hermes.channels.domain.command_receipt import (
+    CommandReceipt,
+    receipt_from_document,
+)
 from tiny_hermes.channels.infrastructure.tables import (
     ChannelBindingRow,
     ChannelConversationRow,
@@ -67,6 +71,22 @@ class PendingRefusal:
     event_row_id: UUID
     binding_id: UUID
     kind: str
+    external_user_id: str
+
+
+@dataclass(frozen=True)
+class PendingCommandReceipt:
+    """A `/undo` or `/new` that ran, and the sender still owed the receipt.
+
+    Its own type rather than a branch of `PendingReply`: a command has no
+    `run_id` and no Agent turn to read back, so nothing in `PendingReply`
+    would be populated except by inventing zeros — a shape that lies about
+    what happened is worse than a second, smaller shape that does not.
+    """
+
+    event_row_id: UUID
+    binding_id: UUID
+    receipt: CommandReceipt
     external_user_id: str
 
 
@@ -466,6 +486,67 @@ class SqlChannelStore:
             if row.unsupported_open_id
         ]
 
+    async def record_command_receipt(
+        self, event_row_id: UUID, receipt: CommandReceipt, external_user_id: str
+    ) -> None:
+        """Mark a claimed delivery as a command that ran, and who sent it.
+
+        Both columns together, the same reason `record_unsupported` writes
+        two: the scan needs the sender to answer, and a command produces no
+        `channel_conversations` row of its own — a first-ever message that
+        happens to be `/new` has nowhere else the sender's id would live.
+        """
+        await self._session.execute(
+            update(ChannelEventRow)
+            .where(ChannelEventRow.id == event_row_id)
+            .values(
+                command_receipt=receipt.document(),
+                command_open_id=external_user_id[:120],
+            )
+        )
+        await self._session.flush()
+
+    async def pending_command_receipts(
+        self, limit: int = 50
+    ) -> list["PendingCommandReceipt"]:
+        """Commands that ran and whose sender has not been told the result.
+
+        No join to `runs`, for the same reason `pending_refusals` has none:
+        a command is not a Run, so there is nothing there to join to. That is
+        why this is its own scan rather than a branch inside `pending_replies`
+        — that scan's whole predicate is "the Run finished".
+        """
+        rows = (
+            await self._session.execute(
+                select(
+                    ChannelEventRow.id,
+                    ChannelEventRow.channel_binding_id,
+                    ChannelEventRow.command_receipt,
+                    ChannelEventRow.command_open_id,
+                )
+                .where(
+                    ChannelEventRow.command_receipt.is_not(None),
+                    ChannelEventRow.replied_at.is_(None),
+                )
+                .order_by(ChannelEventRow.received_at, ChannelEventRow.id)
+                .limit(limit)
+            )
+        ).all()
+        found: list[PendingCommandReceipt] = []
+        for row in rows:
+            receipt = receipt_from_document(row.command_receipt)
+            if receipt is None or not row.command_open_id:
+                continue
+            found.append(
+                PendingCommandReceipt(
+                    event_row_id=row.id,
+                    binding_id=row.channel_binding_id,
+                    receipt=receipt,
+                    external_user_id=row.command_open_id,
+                )
+            )
+        return found
+
     async def binding_target(self, binding_id: UUID) -> "DeliveryTarget | None":
         """The reply credentials for a binding, with no conversation needed.
 
@@ -592,6 +673,16 @@ class SqlChannelStore:
             .where(
                 SessionMessageRow.source_run_id == RunRow.id,
                 SessionMessageRow.role == "assistant",
+                # Not "prevents a leak" — this reply goes to the same person
+                # who withdrew the message, so nothing leaks. It is that the
+                # channel and the model's own context must tell one story: a
+                # sender who received an answer no longer in the model's
+                # history gets no coherent response when they follow up on
+                # it. The `outerjoin` below already handles no row matching
+                # here (a Run can finish having said nothing), so a withdrawn
+                # newest turn just falls back to the next assistant turn, or
+                # to that same empty-reply path if there isn't one.
+                SessionMessageRow.withdrawn_at.is_(None),
             )
             .order_by(SessionMessageRow.sequence.desc())
             .limit(1)

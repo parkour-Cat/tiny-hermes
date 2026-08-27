@@ -26,6 +26,7 @@ from tiny_hermes.channels.application.webhook_service import (
     Unreadable,
 )
 from tiny_hermes.channels.domain.blocked import BlockedNotice
+from tiny_hermes.channels.domain.command_receipt import CommandReceipt
 from tiny_hermes.channels.domain.feishu import CHANNEL
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,10 @@ class BindingDirectory(Protocol):
 
     async def record_unsupported(
         self, event_row_id: UUID, kind: str, external_user_id: str
+    ) -> None: ...
+
+    async def record_command_receipt(
+        self, event_row_id: UUID, receipt: CommandReceipt, external_user_id: str
     ) -> None: ...
 
 
@@ -133,6 +138,21 @@ class FeishuChannelService:
         delivered = await self._ingestion.run_for(
             binding=binding, event=outcome.event, request_id=request_id
         )
+        if delivered.run is None:
+            # A command took the claim instead of becoming a Run: there is
+            # no `run_id` to attach and nothing that can be blocked (a
+            # command that never queued cannot be queued behind). What it
+            # does owe is the same thing `record_unsupported` owes above —
+            # a sender who is not told anything reads silence as a lost
+            # message. Recorded here rather than inside `run_for` because
+            # `event_row_id` (`outcome.claim_id`) is `ChannelIngestion`'s
+            # caller's to know, not its own — the same reason `attach_run`
+            # below lives here and not there.
+            if delivered.receipt is not None:
+                await self._bindings.record_command_receipt(
+                    outcome.claim_id, delivered.receipt, outcome.event.external_user_id
+                )
+            return Accepted(delivered=delivered)
         # The claim and the Run, joined. This call was missing for a whole
         # milestone: a live deployment held two claims with `run_id` NULL
         # beside two completed Runs, and nothing failed, because nothing

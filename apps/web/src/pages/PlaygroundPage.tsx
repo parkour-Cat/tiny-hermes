@@ -281,6 +281,12 @@ export function PlaygroundPage() {
           turns.map((message, index) => (
             <article className="workspace-row" key={`${message.role}-${index}`}>
               <Tag>{message.role}</Tag>
+              {message.withdrawn_at == null ? null : (
+                /* The row stays in the transcript because the person said it;
+                   this tag is the only thing separating it from a turn the
+                   model still reads. */
+                <Tag>{t("withdrawnTurn")}</Tag>
+              )}
               <Typography.Paragraph className="fact-note transcript-line">
                 {transcriptLineOf(message)}
               </Typography.Paragraph>

@@ -305,6 +305,7 @@ export const zhCN = {
   sessionBlocked: "当前 Session 被队列挡住",
   emptyPlayground: "还没有消息",
   messagesSection: "消息",
+  withdrawnTurn: "已撤回",
   toolsCallsSection: "工具",
   filesSection: "产物",
   emptyMessages: "还没有消息",

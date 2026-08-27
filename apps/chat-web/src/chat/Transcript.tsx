@@ -92,6 +92,11 @@ export function Transcript({
           return (
             <div className="bubble-wrap" key={key}>
               <article className="bubble-user">{text}</article>
+              {message.withdrawn_at == null ? null : (
+                /* 这一轮留在转写里，因为它确实被说过；这个标记是它和模型
+                   仍在读的一轮之间唯一的区别。 */
+                <p className="fact-note">{t("withdrawnTurn")}</p>
+              )}
               <div className="msg-actions">
                 <button type="button" onClick={() => void copy(key, text)}>
                   {copied === key ? t("copied") : t("copyMessage")}
@@ -111,6 +116,10 @@ export function Transcript({
           <article className="turn-agent" key={key}>
             <HermesMark size={22} />
             <div className="turn-body">
+              {message.withdrawn_at == null ? null : (
+                /* 与用户那一侧同一个理由：留着，但要看得出模型已经不读它了。 */
+                <p className="fact-note">{t("withdrawnTurn")}</p>
+              )}
               {text === "" ? null : <Prose text={text} />}
               {tools.map((tool) => (
                 <details className="tool-card" key={tool.callId || tool.name} open={tool.output === ""}>

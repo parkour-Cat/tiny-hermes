@@ -161,6 +161,48 @@ async def test_an_end_user_reads_their_own_session_messages(
     assert read.json()[0]["parts"][0]["text"] == "hello there"
 
 
+async def test_an_end_user_sees_which_of_their_turns_was_withdrawn(
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+    engine: AsyncEngine,
+    registered_issuer: None,
+    published_agent: None,
+) -> None:
+    """`/undo` 撤掉的那一轮仍然留在转写里（设计 §5.1 那一行「不过滤，但必须把
+    `withdrawn_at` 带出去」），所以这条路上必须有个东西说它被撤了——否则读的人
+    看到的就是一条什么都没发生过的消息。
+
+    读它的人正是发 `/undo` 的那个人，所以 `EndUserSessionMessageResponse` 是
+    这个事实唯一的出口。
+    """
+    del registered_issuer, published_agent
+    _sign_in(client, workspace_id, "zhang")
+    session_id = _start_session(client)
+    _submit_run(client, session_id, "withdraw-1", text="第一句")
+    second_run = _submit_run(client, session_id, "withdraw-2", text="第二句")
+
+    async with engine.begin() as connection:
+        # 按那条 Run 的 id 定位它自己写下的那条消息，不按下标，也不按正文——
+        # JSON 列里的中文是 `\uXXXX` 转义存的，`LIKE '%第二句%'` 一条都匹配
+        # 不到，而「一条都没改」的 UPDATE 是不会报错的。
+        withdrawn = await connection.execute(
+            text(
+                "UPDATE session_messages SET withdrawn_at = now() "
+                "WHERE source_run_id = :r RETURNING id"
+            ),
+            {"r": UUID(second_run)},
+        )
+        assert len(withdrawn.all()) == 1
+
+    read = client.get(f"/api/v1/end-user/sessions/{session_id}/messages")
+
+    assert read.status_code == 200, read.text
+    said = {message["parts"][0]["text"]: message for message in read.json()}
+    assert said["第二句"]["withdrawn_at"] is not None
+    assert said["第一句"]["withdrawn_at"] is None
+
+
 async def test_an_end_user_reads_their_own_run(
     client: TestClient,
     scope: dict[str, str],

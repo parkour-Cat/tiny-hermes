@@ -505,6 +505,86 @@ class StoredMessage:
     id: UUID
     sequence: int
     message: CanonicalMessage
+    #: When somebody took this turn back. `execution_context` never builds a
+    #: `StoredMessage` for a withdrawn row at all, so this stays `None` there;
+    #: `list_session_messages` is the one caller that leaves withdrawn rows in
+    #: and needs a way to say so, which is why the field exists here at all.
+    withdrawn_at: datetime | None = None
+
+
+class WithdrawScope(StrEnum):
+    """撤到哪里为止。"""
+
+    LAST_EXCHANGE = "last_exchange"
+    ALL = "all"
+
+
+@dataclass(frozen=True)
+class Withdrawal:
+    """一次撤回做成了什么。
+
+    `turns` 是**实际**撤掉的轮数而不是请求的轮数：请求 99 轮而只有 2 轮时，
+    回执必须说 2，否则用户以为自己丢了 99 轮。
+    """
+
+    messages: int
+    turns: int
+    echoed_text: str
+    #: 这次撤回顺手结束掉的 Run 数。`/new` 会把这个 Session 的未了结工作全部
+    #: 结束，而被结束的 Run 永远不会再答复——不报出来，用户只会发现自己有条
+    #: 消息石沉大海，而他刚被告知这是一段全新的对话，正好没有理由去找。
+    runs_ended: int = 0
+
+
+@dataclass(frozen=True)
+class StoppedRun:
+    """一个停着的 Run：等人批、等外部事件、被暂停，或者还排在队列里没轮到。
+
+    「停着」和「在跑」必须分开，因为只有停着的才可以取消：上游 Hermes 因为拆
+    在飞的工作留下的三个 issue，拆的都是**真的在跑**的工作。一个停着的 Run 没
+    有工具在执行——它等的是一个人、一个外部事件，或者前面那个 Run——所以取消它
+    不会把某个副作用截在半路。排队的 Run 连第一轮都还没开始，这条理由对它只有
+    更强。
+
+    `state_version` 一起带出来，是因为取消要拿它做乐观并发检查；分两次读会读
+    到两个不同的版本。
+    """
+
+    run_id: UUID
+    state_version: int
+
+
+@dataclass(frozen=True)
+class UnfinishedWork:
+    """这个 Session 现在挡着什么。
+
+    `reason` 是说给人听的那个词，也是 `SessionBusy` 带出去的那个：`running`、
+    `queued`、`parked`。
+
+    `cancellable` 非空时，`/new` 可以把这个 Session 的未了结工作**全部**结束。
+    全部，不是队首那一个：只结束队首，后面排队的会被提上来，拿着已经被撤掉的
+    历史跑完一整轮再答复——出站渠道和模型上下文于是讲两个不同的故事。
+
+    判据放在这个字段上而不是放在 `reason` 的字符串比较上，是因为「能不能取消」
+    必须由**有没有那些 Run 的 id 和版本**来决定——只有它是可执行的。元组的
+    顺序就是必须取消的顺序（见 `unfinished_work`）。
+    """
+
+    reason: str
+    cancellable: tuple[StoppedRun, ...] = ()
+
+
+@dataclass(frozen=True)
+class EndUserEscape:
+    """谁在用 `/new` 逃离一个停住的 Run。
+
+    带着 `cancel_end_user_run` 需要的三样东西。`None` 表示这次撤回不许取消任何
+    Run —— `/undo` 走的就是这一条。
+    """
+
+    workspace_id: UUID
+    end_user_id: UUID
+    request_id: str
 
 
 @dataclass(frozen=True)

@@ -9,8 +9,9 @@ one subject.
 subject's own sessions, and nothing else. `for_workspace` is the console's, and
 the route gates it on §4.6 before calling.
 
-Redacted messages are never returned by either. A message somebody had removed
-is not one a search may hand back through a side door.
+Redacted and withdrawn messages are never returned by either. A message
+somebody had removed, or a message somebody took back, is not one a search
+may hand back through a side door.
 """
 
 from collections.abc import Sequence
@@ -91,13 +92,17 @@ class SqlSessionSearch:
 def _base(
     workspace_id: UUID, request: SearchRequest
 ) -> Select[tuple[SessionMessageRow]]:
-    """Messages in this workspace that match, and are not redacted."""
+    """Messages in this workspace that match, and are not redacted or withdrawn."""
     return (
         select(SessionMessageRow)
         .join(SessionRow, SessionRow.id == SessionMessageRow.session_id)
         .where(
             SessionMessageRow.workspace_id == workspace_id,
             SessionMessageRow.redacted.is_(False),
+            # If the model can search a withdrawn message back into context,
+            # the withdrawal leaked — §14.3's retrieval tool would be a side
+            # door around the very thing this feature promises.
+            SessionMessageRow.withdrawn_at.is_(None),
             SessionMessageRow.search.op("@@")(
                 matching(request.query)
             ),

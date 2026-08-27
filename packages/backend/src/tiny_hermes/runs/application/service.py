@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -9,6 +10,7 @@ from tiny_hermes.runs.domain.models import (
     CallerType,
     CanonicalMessage,
     DeliveryMode,
+    EndUserEscape,
     ImageBlock,
     RunCapabilities,
     RunSignal,
@@ -16,7 +18,11 @@ from tiny_hermes.runs.domain.models import (
     RunTree,
     SessionMode,
     SessionSnapshot,
+    StoppedRun,
+    StoredMessage,
     TextBlock,
+    Withdrawal,
+    WithdrawScope,
     WorkspaceUsageSummary,
     fingerprint_request,
 )
@@ -152,6 +158,20 @@ class BudgetNotWidened(RunCoordinationError):
     ceiling and typed the number already there should find that out now, not
     when the Run stops at the same place a second time.
     """
+
+
+class SessionBusy(RunCoordinationError):
+    """有未了结的工作时，历史不能在半空中被改写。
+
+    上游 Hermes 选择在这里强行拆掉在飞的工作，代价是三个公开 issue（事件循环
+    被拆卸卡死、僵尸槽位静默丢消息、悬空子 agent 烧 token）。tiny-hermes 的
+    沙箱所有权和 Session FIFO 语义更强，拆得更贵——而且工具副作用已经发生，
+    把那一轮从上下文抹掉不会把副作用抹掉。
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 class RunCoordination:
@@ -351,7 +371,7 @@ class RunCoordination:
 
     async def read_end_user_session_messages(
         self, workspace_id: UUID, end_user_id: UUID, session_id: UUID
-    ) -> Sequence[CanonicalMessage]:
+    ) -> Sequence[StoredMessage]:
         """An end user's own read of their own conversation.
 
         No audit row, unlike `read_session_messages`: §6's audit is the
@@ -592,13 +612,13 @@ class RunCoordination:
 
     async def list_session_messages(
         self, workspace_id: UUID, actor: Actor, session_id: UUID
-    ) -> Sequence[CanonicalMessage]:
+    ) -> Sequence[StoredMessage]:
         await self._load_readable_session(workspace_id, actor, session_id)
         return await self._store.list_session_messages(workspace_id, session_id)
 
     async def read_session_messages(
         self, workspace_id: UUID, actor: Actor, session_id: UUID, request_id: str
-    ) -> Sequence[CanonicalMessage]:
+    ) -> Sequence[StoredMessage]:
         """§6: the console's read of message content.
 
         §4.6 opened "查看" for a developer at the price of this audit row —
@@ -617,6 +637,78 @@ class RunCoordination:
                 request_id,
             )
         return await self._store.list_session_messages(workspace_id, session_id)
+
+    async def withdraw_from_session(
+        self,
+        session_id: UUID,
+        scope: WithdrawScope,
+        *,
+        turns: int = 1,
+        escape_hatch: EndUserEscape | None = None,
+    ) -> Withdrawal | None:
+        """把一段历史挡在后续上下文之外。返回 `None` 表示没有可撤的。
+
+        `escape_hatch` 只有 `/new` 会带，`/undo` 永远不带。这个不对称是故意的：
+        `/new` 是逃生口——阻塞卡片对同一个人写着「被卡住时，可以发 /new 开始
+        一段新对话」，而那句话指的正是队首停在等审批/等外部事件/暂停上的时候
+        ——所以它有权结束那个停住的 Run。`/undo` 是对已经落定的历史动刀，没有
+        理由替用户放弃一个他没说要放弃的 Run。
+
+        `SessionBusy` 的三个 `reason` 都留着：`running`、`queued` 是真的忙，
+        `parked` 是「只有 `/new` 能过」的那一种。
+        """
+        work = await self._store.unfinished_work(session_id)
+        ended = 0
+        if work is not None:
+            if not work.cancellable or escape_hatch is None:
+                raise SessionBusy(work.reason)
+            ended = await self._end_stopped_runs(work.cancellable, escape_hatch)
+        ids, taken, text = await self._store.withdrawable(session_id, scope, turns)
+        changed = 0 if not ids else await self._store.mark_withdrawn(ids, at=datetime.now(UTC))
+        if changed == 0:
+            # 这次调用没改动任何一行。仍然要交回一个 `Withdrawal`，当且仅当它
+            # 真的结束了 Run —— 否则用户被告知「已经是一段新对话」，而他刚发的
+            # 几条消息永远不会有答复，且没有任何地方说过这件事。
+            if ended == 0:
+                return None
+            return Withdrawal(messages=0, turns=0, echoed_text="", runs_ended=ended)
+        return Withdrawal(
+            messages=changed, turns=taken, echoed_text=text, runs_ended=ended
+        )
+
+    async def _end_stopped_runs(
+        self, stopped: Sequence[StoppedRun], escape: EndUserEscape
+    ) -> int:
+        """结束这个 Session 全部未了结的工作，返回结束了几个。
+
+        走 `cancel_end_user_run`，不另开一条路：它的 docstring 描述的就是这一种
+        情况（「本人 can cancel a Run they started, once it has stopped anywhere
+        they cannot otherwise reach it」），而合法转移表是 `RunStateMachine` 的
+        地盘，这里不重写一份。
+
+        **全部**，不是队首那一个。只结束队首，排在后面的会被提上来，拿着已经被
+        撤掉的历史跑完一整轮，然后把答复发进用户以为是全新的对话里。
+
+        按 `stopped` 给的顺序来（排队的在前，队首在最后）——理由在
+        `unfinished_work` 的 docstring 里，它才是排这个顺序的地方。
+
+        取消没成功就不撤——否则用户拿到的是一段新对话，外加一个还能醒进来的
+        Run。拒绝是看得见的，醒进来不是。**这里不回滚已经发出去的取消**：这一层
+        没有 savepoint。挡住「撤一半」的是 `unfinished_work` 动手之前那道全有
+        或全无的检查，不是这个 `except`。
+        """
+        for run in stopped:
+            try:
+                await self.cancel_end_user_run(
+                    escape.workspace_id,
+                    escape.end_user_id,
+                    run.run_id,
+                    run.state_version,
+                    escape.request_id,
+                )
+            except RunCoordinationError as refused:
+                raise SessionBusy("cancel_failed") from refused
+        return len(stopped)
 
     async def _load_readable_session(
         self, workspace_id: UUID, actor: Actor, session_id: UUID

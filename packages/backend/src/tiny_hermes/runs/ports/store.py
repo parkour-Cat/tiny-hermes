@@ -26,7 +26,9 @@ from tiny_hermes.runs.domain.models import (
     SessionMode,
     SessionSnapshot,
     StoredMessage,
+    UnfinishedWork,
     WaitPolicy,
+    WithdrawScope,
     WorkspaceCleanupTarget,
     WorkspaceUsageSummary,
 )
@@ -523,7 +525,7 @@ class RunStore(Protocol):
 
     async def list_session_messages(
         self, workspace_id: UUID, session_id: UUID
-    ) -> Sequence[CanonicalMessage]: ...
+    ) -> Sequence[StoredMessage]: ...
 
     async def usage_summary(self, workspace_id: UUID) -> WorkspaceUsageSummary: ...
 
@@ -562,3 +564,35 @@ class RunStore(Protocol):
         run_id: UUID,
         document: dict[str, Any],
     ) -> None: ...
+
+    async def unfinished_work(self, session_id: UUID) -> UnfinishedWork | None:
+        """Whether this Session has unfinished work right now, and which kind.
+
+        `"running"` when the head Run is actually executing (or when anything
+        unfinished cannot legally be cancelled), `"queued"` when the head is
+        already terminal and the unfinished work sits behind it, and
+        `"parked"` when the head is stopped on a person or an external event.
+
+        `"parked"` carries `cancellable`: every unfinished Run in the Session,
+        in the order they must be cancelled. All of them, not just the head —
+        see `UnfinishedWork`.
+        """
+        ...
+
+    async def withdrawable(
+        self, session_id: UUID, scope: WithdrawScope, turns: int
+    ) -> tuple[list[UUID], int, str]:
+        """The row ids a withdrawal of this scope would take, the turn count
+        it actually reaches, and the text of the user turn it anchors on.
+        """
+        ...
+
+    async def mark_withdrawn(
+        self, message_ids: Sequence[UUID], *, at: datetime
+    ) -> int:
+        """Flip `withdrawn_at` on rows that do not have it yet.
+
+        Returns how many rows this call actually changed, which can be lower
+        than `len(message_ids)` — a row already withdrawn is left alone.
+        """
+        ...

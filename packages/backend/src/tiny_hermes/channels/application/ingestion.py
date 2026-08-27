@@ -13,11 +13,31 @@ from typing import Protocol
 from uuid import UUID
 
 from tiny_hermes.channels.domain.blocked import BlockedNotice, notice_from_document
+from tiny_hermes.channels.domain.command_receipt import CommandReceipt
+from tiny_hermes.channels.domain.commands import ChatCommand, CommandName, parse
 from tiny_hermes.channels.domain.events import ChannelEvent
 from tiny_hermes.channels.domain.image_reference import feishu_reference
 from tiny_hermes.identity.ports.end_user_store import UpsertedIdentity
-from tiny_hermes.runs.domain.models import ImageBlock, SessionMode, SessionSnapshot
+from tiny_hermes.runs.application.service import SessionBusy
+from tiny_hermes.runs.domain.models import (
+    EndUserEscape,
+    ImageBlock,
+    SessionMode,
+    SessionSnapshot,
+    Withdrawal,
+    WithdrawScope,
+)
 from tiny_hermes.runs.ports.store import AcceptedRun
+
+#: `/undo` erases only the most recent exchange; `/new` draws a line across
+#: the whole session (§8's decision that it stays one Session entity rather
+#: than minting a new one). `ChatCommand.turns` only varies for `UNDO` —
+#: `parse` never produces a `NEW` with anything but 1 — so `ALL` needing no
+#: count of its own is `withdraw_from_session`'s concern, not this map's.
+_SCOPES: dict[CommandName, WithdrawScope] = {
+    CommandName.UNDO: WithdrawScope.LAST_EXCHANGE,
+    CommandName.NEW: WithdrawScope.ALL,
+}
 
 
 class ErasedSubjectRefused(Exception):
@@ -64,9 +84,17 @@ class Conversations(Protocol):
 
 
 class RunEntry(Protocol):
-    """The two calls the web entry already makes. Same methods, same
-    arguments — if this needed its own variants, Feishu would be a second
-    execution path rather than a second transport."""
+    """`create_end_user_session` and `submit_end_user_run` are the two calls
+    the web entry already makes — same methods, same arguments, so Feishu
+    stays a second transport rather than a second execution path.
+
+    `withdraw_from_session` has no such precedent yet: this module is its
+    first caller. It is declared here anyway, alongside the other two,
+    because production wires all three to the same `RunCoordination` —
+    a command's "undo" and an ordinary message's "submit" are requests to
+    one Session, not to two different subsystems that happen to share a
+    constructor argument.
+    """
 
     async def create_end_user_session(
         self,
@@ -88,6 +116,15 @@ class RunEntry(Protocol):
         images: Sequence[ImageBlock] = (),
     ) -> AcceptedRun: ...
 
+    async def withdraw_from_session(
+        self,
+        session_id: UUID,
+        scope: WithdrawScope,
+        *,
+        turns: int = 1,
+        escape_hatch: EndUserEscape | None = None,
+    ) -> Withdrawal | None: ...
+
 
 @dataclass(frozen=True)
 class Delivered:
@@ -98,10 +135,18 @@ class Delivered:
     together, which is the shape that makes "queued, and here is why" the
     only thing a transport can express — a variant type would let one be
     handled and the other forgotten.
+
+    `run` is `None` exactly when `receipt` is not: a command took the claim
+    instead of becoming a Run, so there is nothing to attach and nothing
+    that can be blocked. Every existing reader of `run` predates this and
+    assumed it always present — each one has to grow a `None` branch, or a
+    command reaching that code crashes on the send path instead of failing
+    to reply.
     """
 
-    run: AcceptedRun
+    run: AcceptedRun | None
     blocked: BlockedNotice | None
+    receipt: CommandReceipt | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +176,20 @@ class ChannelIngestion:
         )
         if subject.erased_at is not None:
             raise ErasedSubjectRefused
+
+        # A command is not a message: it changes history instead of adding
+        # to it, so it takes a different path before a Session is even
+        # looked up. Everything that follows this branch — session lookup,
+        # creation, `submit_end_user_run` — is what makes the module
+        # docstring's "not a command, whatever it starts with, reaches the
+        # model untouched" claim true rather than aspirational: `parse`
+        # rejecting `command` is what lets `event.text` fall through here
+        # unchanged.
+        command = parse(event.text, has_images=bool(event.images))
+        if command is not None:
+            return await self._command(
+                binding, event, command, subject.end_user_id, request_id
+            )
 
         session_id = await self.conversations.session_for(
             binding.id, event.external_user_id
@@ -182,6 +241,96 @@ class ChannelIngestion:
         # cannot forget — the notice arrives attached to the thing it
         # describes.
         return Delivered(run=accepted, blocked=notice_from_document(accepted.document))
+
+    async def _command(
+        self,
+        binding: ChannelBindingRecord,
+        event: ChannelEvent,
+        command: ChatCommand,
+        end_user_id: UUID,
+        request_id: str,
+    ) -> Delivered:
+        """A command acts on a conversation that already exists; it does not
+        start one.
+
+        No session lookup found one here means this person has never
+        exchanged a message with this binding — there is nothing to undo
+        and nothing to draw a line across. Creating a Session in that case
+        would turn a stranger's first-ever contact into a conversation they
+        never started, purely because the words they happened to type
+        collided with `/undo` or `/new`. So this returns `outcome="nothing"`
+        without ever calling `create_end_user_session` or
+        `remember_session` — the two calls the ordinary path above uses to
+        make a conversation exist.
+        """
+        session_id = await self.conversations.session_for(
+            binding.id, event.external_user_id
+        )
+        if session_id is None:
+            return Delivered(
+                run=None, blocked=None, receipt=_receipt(command, "nothing")
+            )
+
+        try:
+            withdrawal = await self.runs.withdraw_from_session(
+                session_id,
+                _SCOPES[command.name],
+                turns=command.turns,
+                escape_hatch=_escape_for(command, binding, end_user_id, request_id),
+            )
+        except SessionBusy as busy:
+            return Delivered(
+                run=None,
+                blocked=None,
+                receipt=_receipt(command, "busy", busy_reason=busy.reason),
+            )
+        if withdrawal is None:
+            return Delivered(
+                run=None, blocked=None, receipt=_receipt(command, "nothing")
+            )
+        return Delivered(
+            run=None, blocked=None, receipt=_receipt(command, "done", withdrawal)
+        )
+
+
+def _escape_for(
+    command: ChatCommand,
+    binding: ChannelBindingRecord,
+    end_user_id: UUID,
+    request_id: str,
+) -> EndUserEscape | None:
+    """只有 `/new` 拿得到结束一个停住的队首 Run 的许可。
+
+    `blocked_card` 对同一个人写着「被卡住时，可以发 /new 开始一段新对话」，而
+    那句话指的正是队首停在等审批/等外部事件/暂停上的时候——这个许可就是让那句
+    话成立的东西。`/undo` 不带它：撤回是对已经落定的历史动刀，没有理由替用户
+    放弃一个他没说要放弃的 Run。
+    """
+    if command.name is not CommandName.NEW:
+        return None
+    return EndUserEscape(
+        workspace_id=binding.workspace_id,
+        end_user_id=end_user_id,
+        request_id=request_id,
+    )
+
+
+def _receipt(
+    command: ChatCommand,
+    outcome: str,
+    withdrawal: Withdrawal | None = None,
+    *,
+    busy_reason: str | None = None,
+) -> CommandReceipt:
+    return CommandReceipt(
+        command=command.name.value,
+        outcome=outcome,
+        messages=0 if withdrawal is None else withdrawal.messages,
+        turns=0 if withdrawal is None else withdrawal.turns,
+        echoed_text="" if withdrawal is None else withdrawal.echoed_text,
+        busy_reason=busy_reason,
+        runs_ended=0 if withdrawal is None else withdrawal.runs_ended,
+    )
 
 
 __all__ = [

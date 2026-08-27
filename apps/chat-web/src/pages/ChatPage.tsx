@@ -308,6 +308,7 @@ export function ChatPage() {
               transcriptMarkdown(alias, turns, {
                 user: t("userRole"),
                 agent: t("agentRole"),
+                withdrawn: t("withdrawnTurn"),
               }),
             );
           }}

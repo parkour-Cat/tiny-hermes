@@ -96,6 +96,20 @@ class FakeRuns:
         self.submitted.append((end_user_id, session_id, idempotency_key))
         return AcceptedRun(run_id=uuid4(), document=self.document, replayed=False)
 
+    async def withdraw_from_session(
+        self,
+        session_id: UUID,
+        scope: Any,
+        *,
+        turns: int = 1,
+        escape_hatch: Any = None,
+    ) -> Any:
+        # Never called here: every test in this file sends an ordinary
+        # message, and `run_for` only reaches `withdraw_from_session` on a
+        # recognised command (`test_command_ingestion.py` covers that path).
+        # Present only because `RunEntry` requires it structurally.
+        raise NotImplementedError
+
 
 def _ingestion(
     subjects: FakeSubjects, conversations: FakeConversations, runs: FakeRuns

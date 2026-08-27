@@ -81,10 +81,13 @@ from tiny_hermes.runs.domain.models import (
     SessionMode,
     SessionSnapshot,
     StateDecision,
+    StoppedRun,
     StoredMessage,
     TextBlock,
     TreeNode,
+    UnfinishedWork,
     WaitPolicy,
+    WithdrawScope,
     WorkspaceCleanupTarget,
     WorkspaceUsageByQuality,
     WorkspaceUsageSummary,
@@ -93,6 +96,7 @@ from tiny_hermes.runs.domain.models import (
 )
 from tiny_hermes.runs.domain.slice_policy import WAIT_CHILD_RUNS
 from tiny_hermes.runs.domain.state_machine import (
+    TRANSITIONS,
     InvalidStateMetadata,
     InvalidStateTransition,
     RunLimitReached,
@@ -162,6 +166,20 @@ RETRY_ERRORS: dict[str, RunCoordinationError] = {
 
 WAITING_HEAD_STATES = frozenset(
     {RunState.PAUSED, RunState.WAITING_APPROVAL, RunState.WAITING_EXTERNAL}
+)
+
+#: 同一组状态，写成 `runs.status` 里存的那些字符串。`unfinished_work` 比对的是
+#: 列的原值而不是 `RunState`，两边各自 `.value` 一次容易漏，所以只算这一次。
+_PARKED_STATUSES = frozenset(state.value for state in WAITING_HEAD_STATES)
+
+#: 能合法收下 `CANCEL_REQUESTED` 的状态，从状态机那张表里推出来而不是另抄一份
+#: ——`running` 只收 `SAFE_CANCEL_STARTED`，`cancelling` 一条取消边都没有，抄
+#: 一份就等着两边哪天不一样。`unfinished_work` 用它做事前判断：`/new` 要么能
+#: 把整个 Session 清干净，要么一个 Run 都不动。
+_CANCELLABLE_STATUSES = frozenset(
+    state.value
+    for (state, signal) in TRANSITIONS
+    if signal is RunSignal.CANCEL_REQUESTED
 )
 
 
@@ -824,6 +842,7 @@ class SqlRunStore:
         scoped = select(SessionMessageRow).where(
             SessionMessageRow.session_id == run.session_id,
             SessionMessageRow.redacted.is_(False),
+            SessionMessageRow.withdrawn_at.is_(None),
         )
         if owning is None or owning.session_mode == SessionMode.EPHEMERAL.value:
             scoped = scoped.where(SessionMessageRow.source_run_id == run.id)
@@ -864,6 +883,142 @@ class SqlRunStore:
             # apart).
             caller_type=None if owning is None else CallerType(owning.caller_type),
         )
+
+    async def unfinished_work(self, session_id: UUID) -> UnfinishedWork | None:
+        """这个 Session 现在有没有未了结的工作，有的话是哪一种。
+
+        判据是「有没有非终态的 Run」，不是 `head_run_id` 是否为空——排在队首
+        之后、还没被提上来的 Run 同样是未了结的工作，而 `head_run_id` 对它们
+        一无所知。
+
+        非终态里再分一刀，分的是**队首自己**的状态：停在 `WAITING_HEAD_STATES`
+        上时报 `parked` 并把它的 id 和版本带出去，因为只有这一种可以被取消
+        （理由见 `StoppedRun`）。这一刀故意不看队首后面还排着什么——阻塞卡片
+        正是在「队首停着、你的消息排在后面」时渲染的，而卡片承诺的出口就是
+        `/new`；把排队的算进来会让那句承诺在它唯一要兑现的场景里失效。
+
+        `cancellable` 带出的是这个 Session **全部**未了结的 Run，不只是队首：
+        只取消队首，后面排队的会被提上来，拿着已经被撤掉的历史跑完一整轮再答复。
+        顺序是载荷的一部分——排队的在前，停住的队首在最后。队首终态时
+        `_terminalize` 会把下一个提上来，先取消队首等于在中途改变自己正要读的
+        那张表；今天它并不动 `state_version`，所以先后其实都能过，但依赖这一点
+        等于依赖 `_terminalize` 的一个本函数没有理由知道的细节。
+
+        **全有或全无**：只要有一个非终态的 Run 收不下 `CANCEL_REQUESTED`
+        （`running`、`cancelling`），就一个都不给，报 `running`。这是事前检查，
+        不是回滚——这一层没有 savepoint，而撤一半比拒绝更糟，所以挡在动手之前。
+
+        先锁 Session 行：`accept_run`（`submit_run`/`submit_end_user_run` 都
+        经它）通过 `_lock_session` 锁的是同一行（`SessionRow.id == session_id`），
+        所以这里的 `with_for_update()` 与一次并发的 Run 提交确实会串行——不是
+        因为它们共享同一份连接，而是因为它们请求了同一把行锁。串行化到此为
+        止：它不保证撤回发生在提交「之前」或「之后」的哪一侧，只保证两者不会
+        在同一时刻各自读到对方尚未写完的一半。
+        """
+        await self._session.execute(
+            select(SessionRow.id).where(SessionRow.id == session_id).with_for_update()
+        )
+        rows = (
+            await self._session.execute(
+                select(
+                    RunRow.id,
+                    RunRow.status,
+                    RunRow.state_version,
+                    RunRow.session_sequence,
+                ).where(
+                    RunRow.session_id == session_id,
+                    RunRow.status.not_in(tuple(s.value for s in TERMINAL_STATES)),
+                )
+            )
+        ).all()
+        if not rows:
+            return None
+        owning = await self._session.get(SessionRow, session_id)
+        head = None if owning is None else owning.head_run_id
+        at_head = next((row for row in rows if row.id == head), None)
+        if at_head is None:
+            # 队首自己已经终态，未了结的全排在它后面——§6 点名的那一半，
+            # `head_run_id` 对它们一无所知。
+            return UnfinishedWork(reason="queued")
+        if at_head.status not in _PARKED_STATUSES:
+            return UnfinishedWork(reason="running")
+        if any(row.status not in _CANCELLABLE_STATUSES for row in rows):
+            # 队首停着，但后面站着一个取消不掉的。`running` 是这里最诚实的词：
+            # 它就是那个 Run 的状态。
+            return UnfinishedWork(reason="running")
+        behind = sorted(
+            (row for row in rows if row.id != head),
+            key=lambda row: row.session_sequence,
+        )
+        return UnfinishedWork(
+            reason="parked",
+            cancellable=tuple(
+                StoppedRun(run_id=row.id, state_version=row.state_version)
+                for row in (*behind, at_head)
+            ),
+        )
+
+    async def withdrawable(
+        self, session_id: UUID, scope: WithdrawScope, turns: int
+    ) -> tuple[list[UUID], int, str]:
+        """要撤的行、实际轮数、被撤那条 user 消息的原文。
+
+        `LAST_EXCHANGE` 的锚点必须是 user 消息（上游同样如此）：从一条 assistant
+        消息往回撤，撤出来的是半轮，重发时对话会错位。
+        """
+        found = (
+            await self._session.scalars(
+                select(SessionMessageRow)
+                .where(
+                    SessionMessageRow.session_id == session_id,
+                    SessionMessageRow.redacted.is_(False),
+                    SessionMessageRow.withdrawn_at.is_(None),
+                )
+                .order_by(SessionMessageRow.sequence)
+            )
+        ).all()
+        if not found:
+            return [], 0, ""
+        if scope is WithdrawScope.ALL:
+            anchors = [row for row in found if row.role == "user"]
+            text = _text_of(anchors[0]) if anchors else ""
+            return [row.id for row in found], len(anchors), text
+        users = [row for row in found if row.role == "user"]
+        if not users:
+            return [], 0, ""
+        index = max(len(users) - turns, 0)
+        anchor = users[index]
+        taken = [row for row in found if row.sequence >= anchor.sequence]
+        return [row.id for row in taken], len(users) - index, _text_of(anchor)
+
+    async def mark_withdrawn(self, message_ids: Sequence[UUID], *, at: datetime) -> int:
+        """置时间戳，且只置一次。
+
+        `withdrawn_at.is_(None)` 不是防御性的多余条件：撤回是幂等的，重放同一条
+        命令不得把第一次撤回的时刻改写成第二次的。
+        """
+        if not message_ids:
+            return 0
+        # `RETURNING id` rather than `rowcount`, for the same reason
+        # `forget_deliveries_before` gives: a `Result`'s `rowcount` is not
+        # typed as available on every dialect, while the ids the update
+        # actually named are both checkable and dialect-independent.
+        updated = await self._session.scalars(
+            update(SessionMessageRow)
+            .where(
+                SessionMessageRow.id.in_(message_ids),
+                SessionMessageRow.withdrawn_at.is_(None),
+            )
+            .values(withdrawn_at=at)
+            .returning(SessionMessageRow.id)
+        )
+        count = len(list(updated.all()))
+        await self._session.flush()
+        return count
+
+    async def withdrawn_at_of(self, message_id: UUID) -> datetime | None:
+        row = await self._session.get(SessionMessageRow, message_id)
+        return None if row is None else row.withdrawn_at
 
     async def _bound_skills(self, spec: AgentSpec) -> tuple[BoundSkill, ...]:
         """What the Version bound, in the order the author bound it.
@@ -1241,7 +1396,7 @@ class SqlRunStore:
             .with_for_update()
         )
 
-    async def _child_result(self, run: RunRow) -> dict[str, Any]:
+    async def child_result_for(self, run: RunRow) -> dict[str, Any]:
         """What a child reports, and deliberately not what it did.
 
         §13's seventh clause: an outcome, a sentence, and the Artifacts it was
@@ -1253,6 +1408,9 @@ class SqlRunStore:
         The summary is the child's last words rather than a generated
         precis: it is what the child itself chose to say it had done, and a
         second model call to compress it would be a claim nobody made.
+
+        Public rather than the private name this method carried before, purely
+        as a test seam — production still reaches this only from `_terminalize`.
         """
         said = await self._session.scalar(
             select(SessionMessageRow)
@@ -1260,6 +1418,11 @@ class SqlRunStore:
                 SessionMessageRow.session_id == run.session_id,
                 SessionMessageRow.role == "assistant",
                 SessionMessageRow.redacted.is_(False),
+                # A withdrawn message means it must not be quoted back as a
+                # result — the parent would be reading words the child took
+                # back, through a channel §13 never meant as a second
+                # transcript.
+                SessionMessageRow.withdrawn_at.is_(None),
             )
             .order_by(SessionMessageRow.sequence.desc())
             .limit(1)
@@ -1294,7 +1457,7 @@ class SqlRunStore:
             # can take an answer — another Worker holds it, or it is still
             # waiting on a sibling — and a row survives that where a call would
             # not. The sweep hands it over when the parent can take it.
-            run.delegation_result = await self._child_result(run)
+            run.delegation_result = await self.child_result_for(run)
         await self._session.execute(
             update(IdempotencyRecordRow)
             .where(IdempotencyRecordRow.run_id == run.id)
@@ -2203,7 +2366,7 @@ class SqlRunStore:
         self._session.add(run)
         await self._session.flush()
 
-        await self._copy_checkpoint_messages(session, source, run_id, now)
+        await self.copy_checkpoint_messages(session, source, run_id, now)
         session.next_run_sequence += 1
         if session.head_run_id is None:
             session.head_run_id = run_id
@@ -2575,7 +2738,20 @@ class SqlRunStore:
 
     async def list_session_messages(
         self, workspace_id: UUID, session_id: UUID
-    ) -> Sequence[CanonicalMessage]:
+    ) -> Sequence[StoredMessage]:
+        # Deliberately not filtered on `withdrawn_at`: this is the transcript a
+        # person reads, and a person who took a message back still needs to see
+        # that they said it and that it is marked withdrawn.
+        #
+        # `withdrawn_at` rides along on the DTO so the fact can be rendered.
+        # Carrying it here is necessary and not sufficient, and the first cut
+        # of this shipped believing otherwise: both response models built from
+        # `message.document()`, which has no such key, so the column reached
+        # exactly this line and stopped. What makes the fact reachable is the
+        # whole chain — this field, `SessionMessageResponse.withdrawn_at`,
+        # `EndUserSessionMessageResponse.withdrawn_at`, and the console's own
+        # transcript row. Anything that drops it on the way out puts the fact
+        # back out of reach, whatever this comment says.
         rows = (
             await self._session.scalars(
                 select(SessionMessageRow)
@@ -2587,7 +2763,15 @@ class SqlRunStore:
                 .order_by(SessionMessageRow.sequence)
             )
         ).all()
-        return [_to_message(row) for row in rows]
+        return [
+            StoredMessage(
+                id=row.id,
+                sequence=row.sequence,
+                message=_to_message(row),
+                withdrawn_at=row.withdrawn_at,
+            )
+            for row in rows
+        ]
 
     async def record_end_user_session_read(
         self,
@@ -2641,13 +2825,18 @@ class SqlRunStore:
             document,
         )
 
-    async def _copy_checkpoint_messages(
+    async def copy_checkpoint_messages(
         self, session: SessionRow, source: RunRow, run_id: UUID, now: datetime
-    ) -> None:
+    ) -> Sequence[SessionMessageRow]:
         """Re-point the source Run's authorized messages at the Derived Retry.
 
         Only references are copied; no message content is rewritten and no
         redacted message is exposed.
+
+        Public rather than the private name this method carried before, purely
+        as a test seam — production still reaches this only from `derive_retry`.
+        Returns what it copied so a caller (a test, here) can check what did
+        not make it across.
         """
         rows = (
             await self._session.scalars(
@@ -2656,25 +2845,33 @@ class SqlRunStore:
                     SessionMessageRow.session_id == session.id,
                     SessionMessageRow.source_run_id == source.id,
                     SessionMessageRow.redacted.is_(False),
+                    # A checkpoint is for continuing. Copying a message the
+                    # user withdrew into the new Run's history would hand it
+                    # straight back to the model on the very next round —
+                    # continuing with the history they took back is the same
+                    # as never having taken it back.
+                    SessionMessageRow.withdrawn_at.is_(None),
                 )
                 .order_by(SessionMessageRow.sequence)
             )
         ).all()
+        copied: list[SessionMessageRow] = []
         for row in rows:
-            self._session.add(
-                SessionMessageRow(
-                    id=uuid4(),
-                    session_id=session.id,
-                    workspace_id=session.workspace_id,
-                    sequence=session.next_message_sequence,
-                    role=row.role,
-                    content=row.content,
-                    source_run_id=run_id,
-                    redacted=False,
-                    created_at=now,
-                )
+            new_row = SessionMessageRow(
+                id=uuid4(),
+                session_id=session.id,
+                workspace_id=session.workspace_id,
+                sequence=session.next_message_sequence,
+                role=row.role,
+                content=row.content,
+                source_run_id=run_id,
+                redacted=False,
+                created_at=now,
             )
+            self._session.add(new_row)
+            copied.append(new_row)
             session.next_message_sequence += 1
+        return copied
 
     async def _claim_idempotency(
         self,
@@ -3377,6 +3574,17 @@ def _to_message(row: SessionMessageRow) -> CanonicalMessage:
     the version that could not represent them at all.
     """
     return message_from_document({"role": row.role, **row.content})
+
+
+def _text_of(row: SessionMessageRow) -> str:
+    """The words of one stored row, for echoing back to whoever just undid it.
+
+    Goes through `_to_message` rather than re-scanning `row.content["parts"]`
+    by hand: that is the one place this module already knows how to turn a
+    stored document into blocks, and a second reader here could drift from it
+    on a future block type.
+    """
+    return _to_message(row).text
 
 
 def _scan_lock_key(name: str) -> int:

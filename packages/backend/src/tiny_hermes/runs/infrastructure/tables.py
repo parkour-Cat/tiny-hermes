@@ -117,6 +117,11 @@ class SessionMessageRow(IdMixin, CreatedAtMixin, Base):
     )
     source_run_id: Mapped[UUID | None] = mapped_column(nullable=True)
     redacted: Mapped[bool] = mapped_column(default=False)
+    #: 用户收回了它。与 `redacted` 分开的原因写在 20260826_0047：擦除等于不存在，
+    #: 收回仍然要出现在转写记录里。
+    withdrawn_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class RunRow(IdMixin, CreatedAtMixin, Base):

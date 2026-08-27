@@ -111,4 +111,5 @@ export const enUS: Record<MessageKey, string> = {
   approvalReasonRequired: "Say why you are rejecting this",
   approvalExpired: "This confirmation ran out; the run has been paused",
   approvalAlreadyDecided: "This confirmation was already decided",
+  withdrawnTurn: "Withdrawn",
 };
