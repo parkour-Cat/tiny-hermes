@@ -57,3 +57,30 @@ test("a turn without retry does not offer it", () => {
   renderTranscript(false);
   expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
 });
+
+test("a withdrawn turn is visibly marked", () => {
+  // 发 /undo 的人就是读这份转写的人。那一轮仍然留在这里，因为它确实被说过；
+  // 这个标记是它和模型仍在读的一轮之间唯一的区别。
+  render(
+    <LocaleProvider>
+      <Transcript
+        turns={[
+          {
+            role: "user",
+            parts: [{ type: "text", text: "Summarize yesterday" }],
+            withdrawn_at: "2026-08-26T10:43:00Z",
+          },
+          { role: "assistant", parts: [{ type: "text", text: "Here is the summary." }] },
+        ]}
+        optimistic={null}
+        live={false}
+        artifacts={[]}
+        canRetry={false}
+        onDownload={() => undefined}
+        onRetry={() => undefined}
+      />
+    </LocaleProvider>,
+  );
+  expect(screen.getByText("Summarize yesterday")).toBeTruthy();
+  expect(screen.getAllByText("已撤回")).toHaveLength(1);
+});
