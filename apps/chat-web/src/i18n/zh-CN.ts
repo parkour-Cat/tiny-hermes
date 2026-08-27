@@ -109,6 +109,7 @@ export const zhCN = {
   approvalReasonRequired: "请说明拒绝的理由",
   approvalExpired: "这条确认已经过期，运行已暂停",
   approvalAlreadyDecided: "这条确认已经处理过了",
+  withdrawnTurn: "已撤回",
 } as const;
 
 export type MessageKey = keyof typeof zhCN;

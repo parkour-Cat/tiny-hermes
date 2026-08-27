@@ -147,6 +147,11 @@ export type CanonicalMessagePart = {
 export type CanonicalMessage = {
   role: string;
   parts: CanonicalMessagePart[];
+  /** When someone took this turn back, or null/absent while they have not.
+   *  The turn is still listed on purpose — dropping it would tell a reader
+   *  the message was never said — so the page has to say which turns the
+   *  model will no longer see. */
+  withdrawn_at?: string | null;
 };
 
 export type ArtifactResponse = {

@@ -20,7 +20,7 @@ test("a transcript becomes markdown the person can keep", () => {
         parts: [{ type: "tool_call", call_id: "c1", name: "file.read", arguments: { path: "a.md" } }],
       },
     ],
-    { user: "用户", agent: "智能体" },
+    { user: "用户", agent: "智能体", withdrawn: "已撤回" },
   );
   expect(markdown).toContain("# Darwin");
   expect(markdown).toContain("## 用户");
@@ -44,7 +44,7 @@ test("an exported transcript says which turns were taken back", () => {
       },
       { role: "assistant", parts: [{ type: "text", text: "Here is the summary." }] },
     ],
-    { user: "用户", agent: "智能体" },
+    { user: "用户", agent: "智能体", withdrawn: "已撤回" },
   );
   expect(markdown).toContain("Summarize yesterday");
   expect(markdown).toMatch(/##\s*用户.*已撤回/);

@@ -12,7 +12,7 @@ export function exportFilename(agentAlias: string, sessionId: string | null): st
 export function transcriptMarkdown(
   title: string,
   turns: CanonicalMessage[],
-  labels: { user: string; agent: string },
+  labels: { user: string; agent: string; withdrawn: string },
 ): string {
   const blocks = [`# ${title}`, ""];
   for (const message of turns) {
@@ -23,7 +23,10 @@ export function transcriptMarkdown(
     if (text === "" && tools.length === 0) {
       continue;
     }
-    blocks.push(`## ${heading}`, "");
+    // 导出的那份是用户留在手上的。界面上标了、导出里没标，等于把一个
+    // 比界面更持久的误会交给他。
+    const mark = message.withdrawn_at == null ? "" : ` (${labels.withdrawn})`;
+    blocks.push(`## ${heading}${mark}`, "");
     if (text !== "") {
       blocks.push(text, "");
     }
