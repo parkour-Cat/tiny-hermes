@@ -1,7 +1,7 @@
 # tiny-hermes — 给 AI 协作者的约定
 
 产品事实来源是 `docs/superpowers/specs/2026-08-09-tiny-hermes-product-design.md`（当前
-v2.5）。实现与它冲突时以它为准，除非你先改它并写明理由。
+v2.6）。实现与它冲突时以它为准，除非你先改它并写明理由。
 
 ## 怎么写代码
 
