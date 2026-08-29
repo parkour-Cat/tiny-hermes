@@ -438,6 +438,31 @@ class RepairResult:
     head_run_id: UUID | None
 
 
+@dataclass(frozen=True)
+class StoredSummary:
+    """A Session's one compaction summary, as `session_compactions` holds it.
+
+    `first_sequence`/`last_sequence` name the `session_messages` range this
+    summary stands in for — not by id, because §7.4.2 replaces this row
+    wholesale on the next compaction and a later summary's range does not
+    start where an earlier one's ids left off.
+    """
+
+    session_id: UUID
+    first_sequence: int
+    last_sequence: int
+    text: str
+    #: `"model"` for a Worker-written semantic summary, `"structural"` for the
+    #: deterministic fallback (counts only, no model involved) — the two are
+    #: not interchangeable quality, and a reader deciding how much to trust
+    #: this text needs to tell them apart.
+    source: str
+    #: Which endpoint wrote it, for a `"model"` summary. `None` for
+    #: `"structural"`, which names no endpoint because none was called.
+    endpoint_id: UUID | None
+    model: str | None
+
+
 class RunStore(Protocol):
     """Run Coordination persistence.
 
@@ -594,5 +619,23 @@ class RunStore(Protocol):
 
         Returns how many rows this call actually changed, which can be lower
         than `len(message_ids)` — a row already withdrawn is left alone.
+        """
+        ...
+
+    async def latest_summary(self, session_id: UUID) -> StoredSummary | None:
+        """The Session's current compaction summary, or `None` if it has
+        never been compacted. Never a history — see `StoredSummary` and
+        `save_summary`.
+        """
+        ...
+
+    async def save_summary(
+        self, summary: StoredSummary, *, workspace_id: UUID
+    ) -> None:
+        """Replace the Session's summary with this one.
+
+        Upserts on `session_id`, per §7.4.2: a second compaction updates the
+        first rather than adding beside it, so there is never more than one
+        row per Session to read back.
         """
         ...

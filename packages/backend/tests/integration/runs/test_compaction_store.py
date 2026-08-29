@@ -38,7 +38,9 @@ def seeded_session(
     return UUID(session_id), UUID(scope["X-Workspace-Id"])
 
 
-async def test_a_summary_comes_back_as_it_went_in(store, seeded_session) -> None:
+async def test_a_summary_comes_back_as_it_went_in(
+    store: SqlRunStore, seeded_session: tuple[UUID, UUID]
+) -> None:
     session_id, workspace_id = seeded_session
     written = StoredSummary(
         session_id=session_id,
@@ -55,7 +57,9 @@ async def test_a_summary_comes_back_as_it_went_in(store, seeded_session) -> None
     assert await store.latest_summary(session_id) == written
 
 
-async def test_a_second_summary_replaces_the_first(store, seeded_session) -> None:
+async def test_a_second_summary_replaces_the_first(
+    store: SqlRunStore, seeded_session: tuple[UUID, UUID]
+) -> None:
     session_id, workspace_id = seeded_session
     for last, text in ((40, "第一份"), (72, "第二份")):
         await store.save_summary(
@@ -70,7 +74,9 @@ async def test_a_second_summary_replaces_the_first(store, seeded_session) -> Non
     assert found.text == "第二份"
 
 
-async def test_a_session_with_no_compaction_has_no_summary(store, seeded_session) -> None:
+async def test_a_session_with_no_compaction_has_no_summary(
+    store: SqlRunStore, seeded_session: tuple[UUID, UUID]
+) -> None:
     session_id, _ = seeded_session
 
     assert await store.latest_summary(session_id) is None

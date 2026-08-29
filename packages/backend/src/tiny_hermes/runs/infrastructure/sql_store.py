@@ -109,6 +109,7 @@ from tiny_hermes.runs.infrastructure.tables import (
     RunBudgetScopeRow,
     RunEventRow,
     RunRow,
+    SessionCompactionRow,
     SessionMessageRow,
     SessionRow,
     WorkerLeaseRow,
@@ -136,6 +137,7 @@ from tiny_hermes.runs.ports.store import (
     RetryRunCommand,
     RunEventRecord,
     RunEventWindow,
+    StoredSummary,
     WidenBudgetCommand,
 )
 from tiny_hermes.skills.infrastructure.tables import SkillRow, SkillVersionRow
@@ -1019,6 +1021,58 @@ class SqlRunStore:
     async def withdrawn_at_of(self, message_id: UUID) -> datetime | None:
         row = await self._session.get(SessionMessageRow, message_id)
         return None if row is None else row.withdrawn_at
+
+    async def latest_summary(self, session_id: UUID) -> StoredSummary | None:
+        row = await self._session.scalar(
+            select(SessionCompactionRow).where(
+                SessionCompactionRow.session_id == session_id
+            )
+        )
+        if row is None:
+            return None
+        return StoredSummary(
+            session_id=row.session_id,
+            first_sequence=row.first_sequence,
+            last_sequence=row.last_sequence,
+            text=row.summary,
+            source=row.source,
+            endpoint_id=row.endpoint_id,
+            model=row.model,
+        )
+
+    async def save_summary(
+        self, summary: StoredSummary, *, workspace_id: UUID
+    ) -> None:
+        """Upsert on `session_id`, per `uq_session_compactions_session` — the
+        constraint that makes "only the latest is kept" true rather than a
+        claim this method merely intends.
+        """
+        await self._session.execute(
+            pg_insert(SessionCompactionRow)
+            .values(
+                id=uuid4(),
+                session_id=summary.session_id,
+                workspace_id=workspace_id,
+                first_sequence=summary.first_sequence,
+                last_sequence=summary.last_sequence,
+                summary=summary.text,
+                source=summary.source,
+                endpoint_id=summary.endpoint_id,
+                model=summary.model,
+            )
+            .on_conflict_do_update(
+                constraint="uq_session_compactions_session",
+                set_={
+                    "first_sequence": summary.first_sequence,
+                    "last_sequence": summary.last_sequence,
+                    "summary": summary.text,
+                    "source": summary.source,
+                    "endpoint_id": summary.endpoint_id,
+                    "model": summary.model,
+                },
+            )
+        )
+        await self._session.flush()
 
     async def _bound_skills(self, spec: AgentSpec) -> tuple[BoundSkill, ...]:
         """What the Version bound, in the order the author bound it.
