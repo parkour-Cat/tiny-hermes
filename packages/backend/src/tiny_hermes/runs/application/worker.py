@@ -1577,13 +1577,28 @@ class WorkerRuntime:
         the Session's one stored summary row (reused from step 2, or just
         written by `_save_summary` in step 5) — `session_compactions` is
         upserted, never appended, so `latest_summary` reads back exactly
-        that row, not some other compaction's.
+        that row, not some other compaction's. This assumes no concurrent
+        compaction for the same Session lands between `_plan_context`
+        producing this plan and this call reading it back — nothing in
+        either method holds a lock over that window, and a second Run slice
+        racing this one could, in principle, replace the row before this
+        read.
+
+        Raises if that assumption is wrong: `source == "model"` promising a
+        row that is not there. Returning `(None, None)` instead would write
+        an event indistinguishable from a `"structural"` one that forgot to
+        say so — exactly the ambiguity this event exists to remove — so a
+        broken invariant stops the write rather than being papered over
+        with a payload that merely looks fine.
         """
         if compacted.source != "model":
             return None, None
         stored = await self._latest_summary(claimed.run.session_id)
         if stored is None:
-            return None, None
+            raise RuntimeError(
+                "compaction record claims source == 'model' but no stored "
+                f"summary exists for session {claimed.run.session_id}"
+            )
         endpoint_id = str(stored.endpoint_id) if stored.endpoint_id is not None else None
         return endpoint_id, stored.model
 
