@@ -2,7 +2,7 @@ import asyncio
 import inspect
 import logging
 import shlex
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from time import monotonic
@@ -38,6 +38,7 @@ from tiny_hermes.runs.application.tool_answers import (
     answer_skill_propose,
 )
 from tiny_hermes.runs.domain.context_budget import (
+    CompactionRecord,
     ContextPlan,
     SegmentName,
     SkillSummary,
@@ -61,7 +62,9 @@ from tiny_hermes.runs.domain.models import (
     RunCapabilities,
     RunEventType,
     RunSignal,
+    StoredMessage,
     TextBlock,
+    ToolCallBlock,
     ToolResultBlock,
     WorkspaceCleanupTarget,
 )
@@ -70,6 +73,7 @@ from tiny_hermes.runs.domain.slice_policy import (
     SliceDecision,
     decide_after_round,
 )
+from tiny_hermes.runs.domain.summary_prompt import summary_prompt
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalGate
 from tiny_hermes.runs.ports.artifacts import ArtifactReads
@@ -97,6 +101,7 @@ from tiny_hermes.runs.ports.store import (
     RecordSliceCommand,
     RenewLeaseCommand,
     ReservedEvent,
+    StoredSummary,
 )
 from tiny_hermes.sandbox.application.controller import RefusalReason as SandboxRefusal
 from tiny_hermes.sandbox.application.controller import SandboxRefused
@@ -415,7 +420,7 @@ class WorkerRuntime:
                 context = await self._read_context(workspace_id, claimed.run.id)
                 if context is None:
                     return
-                plan = _plan(context, mcp)
+                plan = await self._plan_context(claimed, context, mcp)
                 if not plan.fits:
                     await self._overflow(claimed, handle, box, context, plan)
                     return
@@ -1554,6 +1559,153 @@ class WorkerRuntime:
                 claimed, RunEventType.CONTEXT_COMPACTED, plan.compacted.payload()
             )
 
+    async def _plan_context(
+        self,
+        claimed: ClaimedRun,
+        context: ExecutionContext,
+        mcp: tuple[BoundMcpTool, ...] = (),
+    ) -> ContextPlan:
+        """`_plan`'s decision, widened by the Session's persisted summary.
+
+        Product design §7.4.2: a compaction's summary is model-written,
+        generated once and persisted, and every later round reads what was
+        saved rather than asking a model again. The order below is that rule
+        turned into steps, and the order is the design — not an
+        implementation detail free to be rearranged:
+
+        1. Plan once, with no stored summary at all
+           (`_plan(context, mcp)`, no I/O). If that plan does not compact,
+           there is nothing here to widen — the plan already stands, and nothing
+           this round did needed a Session summary read at all.
+        2. It compacted, and structurally (`_plan` never passes a stored
+           summary in, so "compacted" here always means "structurally" —
+           there is no other kind it could produce). `latest_summary` says
+           what this Session has already written down, if anything.
+           A summary whose `last_sequence` already reaches this round's
+           compaction boundary already explains everything the round would
+           compact — no model call, just the same plan recomputed with that
+           text in hand, which is the only way `plan_context` will pick it
+           over the structural fallback it already built.
+        3. It does not reach far enough — including "there is no summary
+           yet". The auxiliary model is asked once, over exactly the turns
+           the stored summary has not already digested (`summary_prompt`'s
+           update form when one exists, its fresh form when none does).
+        4. It answered something usable: persisted with `save_summary`, and
+           step 1's plan is redone a third time with the new text — this is
+           the one call in the whole method that produces a `source ==
+           "model"` plan. It did not — a timeout, a refusal, an empty
+           response, any exception — step 1's plan goes out exactly as it
+           stood. §7.4.2's failure ladder, first rung: nothing past step 1
+           may turn a failed summary into a dropped message, and step 1's
+           plan already holds every original message this round has.
+        """
+        baseline = _plan(context, mcp)
+        if baseline.compacted is None:
+            return baseline
+
+        stored = await self._latest_summary(claimed.run.session_id)
+        if stored is not None and stored.last_sequence >= baseline.compacted.last_sequence:
+            return _plan(context, mcp, stored_summary=stored.text)
+
+        generated = await self._generate_summary(claimed, context, baseline.compacted, stored)
+        if generated is None:
+            return baseline
+
+        await self._save_summary(claimed, context, baseline.compacted, generated)
+        return _plan(context, mcp, stored_summary=generated)
+
+    async def _latest_summary(self, session_id: UUID) -> StoredSummary | None:
+        async with self._sessions() as session:
+            return await SqlRunStore(session).latest_summary(session_id)
+
+    async def _generate_summary(
+        self,
+        claimed: ClaimedRun,
+        context: ExecutionContext,
+        compacted: CompactionRecord,
+        stored: StoredSummary | None,
+    ) -> str | None:
+        """One call to this Run's own model endpoint, over the turns a
+        stored summary has not already digested.
+
+        `None` on any failure — a non-`completed` stop reason (which is what
+        a timeout, a refusal or an empty response all normalize to, see
+        `openai_model.normalize`) or an exception the call itself raised — so
+        the caller falls back to the structural summary `_plan` already
+        produced. §7.4.2's failure ladder, first rung.
+        """
+        ids = set(compacted.message_ids)
+        covered = [item for item in context.history if item.id in ids]
+        if stored is not None:
+            # The update form: only what the stored summary has not already
+            # seen. Re-reading turns it already digested would spend the call
+            # summarizing a summary, and `summary_prompt`'s update form exists
+            # precisely so that never has to happen.
+            covered = [item for item in covered if item.sequence > stored.last_sequence]
+        request = ModelRequest(
+            policy=context.spec.model_policy,
+            # Not `context.spec.personality`: this call is a platform
+            # operation on the transcript, not the Agent speaking in its own
+            # voice, and `summary_prompt` already states everything the model
+            # needs to know about the task.
+            personality="",
+            messages=(
+                CanonicalMessage(
+                    role="user",
+                    blocks=(
+                        TextBlock(
+                            text=summary_prompt(
+                                _transcript_text(covered),
+                                stored.text if stored is not None else None,
+                            )
+                        ),
+                    ),
+                ),
+            ),
+            round_index=0,
+        )
+        try:
+            response = await self._model.complete(request)
+        except Exception:
+            logger.exception(
+                "summary generation failed", extra={"run_id": str(claimed.run.id)}
+            )
+            return None
+        if response.stop_reason is not StopReason.COMPLETED:
+            return None
+        text = response.text.strip()
+        return text or None
+
+    async def _save_summary(
+        self,
+        claimed: ClaimedRun,
+        context: ExecutionContext,
+        compacted: CompactionRecord,
+        text: str,
+    ) -> None:
+        policy = context.spec.model_policy
+        async with self._sessions.begin() as session:
+            await SqlRunStore(session).save_summary(
+                StoredSummary(
+                    session_id=claimed.run.session_id,
+                    first_sequence=compacted.first_sequence,
+                    last_sequence=compacted.last_sequence,
+                    text=text,
+                    source="model",
+                    endpoint_id=(
+                        policy.endpoint_id
+                        if isinstance(policy, EndpointModelPolicy)
+                        else None
+                    ),
+                    # Task 3's brief scopes this Worker change to using the
+                    # Run's own endpoint, not to resolving what that endpoint
+                    # calls its model — a later task's dedicated summary
+                    # endpoint is where that lookup earns its keep.
+                    model=None,
+                ),
+                workspace_id=claimed.run.workspace_id,
+            )
+
     async def _overflow(
         self,
         claimed: ClaimedRun,
@@ -1877,6 +2029,29 @@ def _summaries(context: ExecutionContext) -> tuple[SkillSummary, ...]:
     )
 
 
+def _transcript_text(covered: Sequence[StoredMessage]) -> str:
+    """The covered turns, as words the summarizer can read.
+
+    Not `CanonicalMessage.text`: that drops tool calls and their results, and
+    a summary that cannot see a shell command or its exit code cannot write
+    §7.4.2's 关键事实 or 已作出的决定 sections truthfully — both are exactly
+    the kind of fact that only shows up in a tool round, never in a text
+    turn either side typed.
+    """
+    lines: list[str] = []
+    for item in covered:
+        for block in item.message.blocks:
+            if isinstance(block, TextBlock):
+                lines.append(f"{item.message.role}: {block.text}")
+            elif isinstance(block, ToolCallBlock):
+                lines.append(
+                    f"{item.message.role} called {block.name}({block.arguments})"
+                )
+            elif isinstance(block, ToolResultBlock):
+                lines.append(f"tool result for {block.call_id}: {block.output}")
+    return "\n".join(lines)
+
+
 def _cost_precheck(context: ExecutionContext, plan: ContextPlan) -> CeilingVerdict:
     """Whether one more round fits under this Run's spending limit.
 
@@ -1986,7 +2161,9 @@ def _schema_allowance(context: ExecutionContext) -> int:
 
 
 def _plan(
-    context: ExecutionContext, mcp: tuple[BoundMcpTool, ...] = ()
+    context: ExecutionContext,
+    mcp: tuple[BoundMcpTool, ...] = (),
+    stored_summary: str | None = None,
 ) -> ContextPlan:
     """Decide what this round may send, before it is sent.
 
@@ -1996,6 +2173,12 @@ def _plan(
     honestly compare the conversation to. The summaries still go out: a
     stand-in with no window is still an Agent whose skills it was bound to —
     and, for the same reason, still a Run whose subject has memories.
+
+    ``stored_summary`` only ever arrives from `_plan_context`, never chosen
+    here: this function stays the same one-shot, no-I/O calculation
+    `plan_context` itself is, called with `None` for a first, cheap read of
+    whether this round compacts at all, and again with a Session's persisted
+    summary once `_plan_context` has decided that summary is the one to use.
     """
     summaries = _summaries(context)
     if context.window is None:
@@ -2016,6 +2199,7 @@ def _plan(
         skill_summaries=summaries,
         memories=[fact.body for fact in context.memories],
         segments=(context.spec.context_budget or ContextBudget()).resolve(),
+        stored_summary=stored_summary,
     )
 
 
