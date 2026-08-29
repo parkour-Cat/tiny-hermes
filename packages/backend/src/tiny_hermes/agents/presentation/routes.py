@@ -559,20 +559,46 @@ def as_app_error(error: AgentCatalogError) -> AppError:
             ),
         )
     if isinstance(error, ContextBudgetUnsatisfied):
+        if error.summary is not None:
+            # A declared summary endpoint, not a segment table — its own
+            # carrier (`SummaryEndpointWindowTooSmall`), not `error.fit`,
+            # which is `None` on this branch. Reusing `fit`'s segment fields
+            # for two whole context windows is what produced a "Suggested
+            # targets: " sentence with nothing after it and no mention of a
+            # summary endpoint at all (Task 4 review).
+            summary = error.summary
+            return AppError(
+                code="context_budget_unsatisfied",
+                title="Context budget does not fit this endpoint",
+                status=422,
+                detail=(
+                    f"The summary endpoint {summary.summary_endpoint_id} has a "
+                    f"{summary.summary_window}-token context window, smaller "
+                    f"than the main endpoint's {summary.main_window}. Name a "
+                    "summary endpoint whose window is at least as large, or "
+                    "remove it to use the agent's own endpoint."
+                ),
+            )
+        fit = error.fit
+        if fit is None:
+            # Neither `summary` nor `fit` set is a construction bug in
+            # `ContextBudgetUnsatisfied` itself, not a state this route can
+            # meaningfully describe to a caller.
+            raise TypeError("ContextBudgetUnsatisfied carries neither fit nor summary")
+        # The advice travels with the refusal and is applied by nobody:
+        # §7.4.2 requires the author accept or change it themselves.
+        suggested = ", ".join(
+            f"{item.segment.value} {item.asked} to {item.suggested}" for item in fit.advice
+        )
         return AppError(
             code="context_budget_unsatisfied",
             title="Context budget does not fit this endpoint",
             status=422,
-            # The advice travels with the refusal and is applied by nobody:
-            # §7.4.2 requires the author accept or change it themselves.
             detail=(
-                f"The context budget asks for {error.fit.asked} tokens and this "
-                f"endpoint leaves {error.fit.allowance}. Suggested targets: "
-                + ", ".join(
-                    f"{advice.segment.value} {advice.asked} to {advice.suggested}"
-                    for advice in error.fit.advice
-                )
-                + ". Nothing is changed until you publish these."
+                f"The context budget asks for {fit.asked} tokens and this "
+                f"endpoint leaves {fit.allowance}."
+                + (f" Suggested targets: {suggested}." if suggested else "")
+                + " Nothing is changed until you publish these."
             ),
         )
     if isinstance(error, AgentNetworkOutsideWorkspace):

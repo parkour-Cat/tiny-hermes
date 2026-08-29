@@ -1,6 +1,6 @@
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Protocol
 from uuid import UUID
 
@@ -94,22 +94,59 @@ class ModelOutputLimitTooHigh(AgentCatalogError):
     """The draft asks for more output than the endpoint will produce."""
 
 
+@dataclass(frozen=True)
+class SummaryEndpointWindowTooSmall:
+    """A declared summary endpoint's own window, held against the main
+    endpoint's — two whole context windows, not a segment table.
+
+    `ContextBudgetUnsatisfied` used to carry this inside a `BudgetFit`
+    (`allowance=summary_window, asked=main_window, advice=()`), whose fields
+    are documented in `context_budget.py` as segment floors and segment
+    targets. Packing two window sizes into them made the names lie about
+    their contents, and `routes.py` — built to read a `BudgetFit` and
+    nothing else — then rendered them as a segment-budget sentence with a
+    dangling "Suggested targets: " and no mention of a summary endpoint at
+    all (Task 4 review). This type exists so the refusal's payload says what
+    it actually is.
+    """
+
+    summary_endpoint_id: UUID
+    summary_window: int
+    main_window: int
+
+
 class ContextBudgetUnsatisfied(AgentCatalogError):
-    """The segment targets do not fit the endpoint, though the minimums do.
+    """The segment targets do not fit the endpoint, though the minimums do —
+    or a declared summary endpoint's window is smaller than the main
+    endpoint's. One refusal code either way (`context_budget_unsatisfied`):
+    to an author, both mean "publish is refused until you change what you
+    asked for". Exactly one of `fit` / `summary` is set, and `routes.py`
+    reads whichever it is to build a message about the right thing.
 
     Carries the per-segment advice §7.4.2 asks for, and applies none of it. An
     author whose 4096-token tool schema budget were silently cut to 900 would
     have published an Agent that behaves unlike the one they wrote.
     """
 
-    def __init__(self, fit: BudgetFit, *, note: str | None = None) -> None:
-        # `note` exists for the one caller whose shortfall is not a segment
-        # table but a single number — the declared summary endpoint's window
-        # — so its refusal still says what is short in words, not only in
-        # `fit`'s two integers.
-        message = f"{fit.asked} tokens of targets, {fit.allowance} available"
-        super().__init__(f"{note}: {message}" if note else message)
+    def __init__(
+        self,
+        fit: BudgetFit | None = None,
+        *,
+        summary: SummaryEndpointWindowTooSmall | None = None,
+    ) -> None:
+        if summary is not None:
+            message = (
+                f"summary endpoint {summary.summary_endpoint_id} has a "
+                f"{summary.summary_window}-token window, smaller than the "
+                f"main endpoint's {summary.main_window}"
+            )
+        elif fit is not None:
+            message = f"{fit.asked} tokens of targets, {fit.allowance} available"
+        else:
+            raise TypeError("ContextBudgetUnsatisfied needs either fit or summary")
+        super().__init__(message)
         self.fit = fit
+        self.summary = summary
 
 
 class ContextWindowTooSmall(AgentCatalogError):
@@ -776,16 +813,11 @@ class AgentCatalog:
             raise ModelEndpointUnavailable
         if summary_endpoint.spec.context_window < endpoint.spec.context_window:
             raise ContextBudgetUnsatisfied(
-                BudgetFit(
-                    allowance=summary_endpoint.spec.context_window,
-                    floor=0,
-                    asked=endpoint.spec.context_window,
-                    advice=(),
-                ),
-                note=(
-                    "the summary endpoint's context window is smaller than "
-                    "the main endpoint's"
-                ),
+                summary=SummaryEndpointWindowTooSmall(
+                    summary_endpoint_id=summary_endpoint.id,
+                    summary_window=summary_endpoint.spec.context_window,
+                    main_window=endpoint.spec.context_window,
+                )
             )
 
     async def _check_network(

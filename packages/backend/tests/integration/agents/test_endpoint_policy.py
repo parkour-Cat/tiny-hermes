@@ -40,6 +40,26 @@ def endpoint_id(client: TestClient, admin_csrf: str) -> str:
     return str(created.json()["id"])
 
 
+@pytest.fixture
+def smaller_endpoint_id(client: TestClient, admin_csrf: str) -> str:
+    """A second endpoint with a genuinely smaller window than `ENDPOINT`'s
+    128,000 — for the `summary_endpoint_id` refusal below, which is about two
+    whole context windows and has nothing to do with the segment budget the
+    rest of this file's endpoint is sized for."""
+    created = client.post(
+        "/api/v1/model-endpoints",
+        headers={"X-CSRF-Token": admin_csrf},
+        json={
+            **ENDPOINT,
+            "name": "acme-summary-small",
+            "context_window": 32_000,
+            "max_output_tokens": 4_096,
+        },
+    )
+    assert created.status_code == 201
+    return str(created.json()["id"])
+
+
 def _agent(client: TestClient, scope: dict[str, str], alias: str = "analyst") -> str:
     created = client.post(
         "/api/v1/agents", headers=scope, json={"name": alias.title(), "alias": alias}
@@ -224,3 +244,37 @@ def test_an_unavailable_usage_endpoint_publishes_and_is_recorded_as_such(
     agent_id = _agent(client, scope)
     _save(client, scope, agent_id, provider="openai_compatible", endpoint_id=silent)
     assert _publish(client, scope, agent_id).status_code == 201
+
+
+def test_a_smaller_summary_endpoint_is_refused_through_the_route(
+    client: TestClient, scope: dict[str, str], endpoint_id: str, smaller_endpoint_id: str
+) -> None:
+    """Task 4's domain test (`tests/unit/agents/test_summary_endpoint.py`)
+    pins the exception's own `str()`. That is not what a developer reads:
+    `routes.py` is the only place that turns `ContextBudgetUnsatisfied` into
+    the HTTP `detail` a caller actually sees, and it used to rebuild that
+    detail from `error.fit` — which this refusal never set — producing a
+    segment-budget sentence naming no summary endpoint and dangling a
+    "Suggested targets: " with nothing after it. This asserts the response
+    body itself, through the real `/publish` route.
+    """
+    agent_id = _agent(client, scope)
+    _save(
+        client,
+        scope,
+        agent_id,
+        provider="openai_compatible",
+        endpoint_id=endpoint_id,
+        summary_endpoint_id=smaller_endpoint_id,
+    )
+    refused = _publish(client, scope, agent_id)
+    assert refused.status_code == 422
+    body = refused.json()
+    assert body["code"] == "context_budget_unsatisfied"
+    detail = body["detail"]
+    # Names which endpoint is the problem, and both of its numbers — not the
+    # segment sentence built from a `BudgetFit` this refusal never had.
+    assert smaller_endpoint_id in detail
+    assert "32000" in detail
+    assert "128000" in detail
+    assert "suggested targets" not in detail.lower()

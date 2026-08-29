@@ -267,9 +267,11 @@ async def test_targets_that_do_not_fit_are_refused_with_per_segment_advice() -> 
     with pytest.raises(ContextBudgetUnsatisfied) as refused:
         await catalog.publish(workspace_id, actor, agent_id, revision, "req-3")
 
-    advice = {entry.segment: entry.suggested for entry in refused.value.fit.advice}
+    fit = refused.value.fit
+    assert fit is not None
+    advice = {entry.segment: entry.suggested for entry in fit.advice}
     assert SegmentName.TOOL_SCHEMAS in advice
-    assert refused.value.fit.allowance == 4_096
+    assert fit.allowance == 4_096
 
 
 async def test_the_advice_does_not_apply_itself() -> None:
