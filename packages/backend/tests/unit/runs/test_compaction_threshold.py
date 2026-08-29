@@ -42,6 +42,16 @@ def mid_history() -> tuple[StoredMessage, ...]:
     )
 
 
+@pytest.fixture
+def short_history() -> tuple[StoredMessage, ...]:
+    """Nothing here is outside `PROTECTED_RECENT_MESSAGES` plus the current
+    request: two messages total, the last of which (the only ``user`` turn)
+    *is* the current request. `compactable` cannot reach 2 no matter how the
+    window is sized, so structural compaction is not geometrically possible —
+    the case `can_compact` exists to recognize."""
+    return _stored(_says("hello"), _says("hi there", role="assistant"))
+
+
 def _plan_with(history: tuple[StoredMessage, ...], *, threshold: float) -> ContextPlan:
     return plan_context(
         window=WINDOW,
@@ -84,3 +94,26 @@ def test_the_current_request_is_never_compacted_away(
     assert _last_text(plan.messages) == _last_text(
         tuple(stored.message for stored in mid_history)
     )
+
+
+def test_nothing_to_compact_survives_an_aggressive_threshold(
+    short_history: tuple[StoredMessage, ...],
+) -> None:
+    """Pins the `can_compact` gate directly, rather than relying on
+    `test_memory_segment.py` / `test_skill_summaries.py` to catch its
+    regression by accident (both fail for a reason incidental to this file —
+    a squeezed segment that already fit `allowance` but not a
+    threshold-scaled target — and either could be renamed or restructured
+    without anyone noticing the gate went with it).
+
+    A history with nothing outside the protected tail gives step four's
+    search no `through` to pick (`range(2, max(compactable, 0) + 1)` is
+    empty). Without `can_compact`, an aggressive threshold would still force
+    entry past the trim steps' early returns, land in that empty search, and
+    fall out the bottom as `paused(context_overflow)` — discarding a plan
+    that already fit for a reason unrelated to how much of it was spent.
+    """
+    plan = _plan_with(short_history, threshold=0.01)
+
+    assert plan.fits
+    assert plan.compacted is None
