@@ -102,8 +102,13 @@ class ContextBudgetUnsatisfied(AgentCatalogError):
     have published an Agent that behaves unlike the one they wrote.
     """
 
-    def __init__(self, fit: BudgetFit) -> None:
-        super().__init__(f"{fit.asked} tokens of targets, {fit.allowance} available")
+    def __init__(self, fit: BudgetFit, *, note: str | None = None) -> None:
+        # `note` exists for the one caller whose shortfall is not a segment
+        # table but a single number — the declared summary endpoint's window
+        # — so its refusal still says what is short in words, not only in
+        # `fit`'s two integers.
+        message = f"{fit.asked} tokens of targets, {fit.allowance} available"
+        super().__init__(f"{note}: {message}" if note else message)
         self.fit = fit
 
 
@@ -732,7 +737,8 @@ class AgentCatalog:
             return
         if self._endpoints is None:
             raise ModelEndpointUnavailable
-        endpoint = await self._endpoints.read(policy.endpoint_id)
+        endpoints = self._endpoints
+        endpoint = await endpoints.read(policy.endpoint_id)
         if endpoint is None or not endpoint.is_selectable:
             raise ModelEndpointUnavailable
         wanted = policy.max_output_tokens
@@ -742,6 +748,45 @@ class AgentCatalog:
             # nothing anywhere would say so.
             raise ModelOutputLimitTooHigh
         self._check_context_budget(spec, endpoint, wanted)
+        await self._check_summary_endpoint(endpoints, policy, endpoint)
+
+    async def _check_summary_endpoint(
+        self,
+        endpoints: ModelEndpointStore,
+        policy: EndpointModelPolicy,
+        endpoint: ModelEndpoint,
+    ) -> None:
+        """Refuse a declared summary endpoint whose window is smaller.
+
+        Upstream Hermes records this as its most common degradation: a
+        summarizer call that overflows its endpoint's context returns
+        nothing, and the compressor drops the middle turns with no summary at
+        all rather than fail loudly — silent, and only visible afterward as a
+        gap. Publish is where a static configuration can still be caught, so
+        this refuses here rather than let the Worker discover it mid-Run.
+
+        `None` (the default) is not checked: it means the Worker uses this
+        Agent's own endpoint, so the window being compared is the window
+        itself and always satisfies this.
+        """
+        if policy.summary_endpoint_id is None:
+            return
+        summary_endpoint = await endpoints.read(policy.summary_endpoint_id)
+        if summary_endpoint is None or not summary_endpoint.is_selectable:
+            raise ModelEndpointUnavailable
+        if summary_endpoint.spec.context_window < endpoint.spec.context_window:
+            raise ContextBudgetUnsatisfied(
+                BudgetFit(
+                    allowance=summary_endpoint.spec.context_window,
+                    floor=0,
+                    asked=endpoint.spec.context_window,
+                    advice=(),
+                ),
+                note=(
+                    "the summary endpoint's context window is smaller than "
+                    "the main endpoint's"
+                ),
+            )
 
     async def _check_network(
         self, workspace_id: UUID, spec: AgentSpec, actor: Actor | None = None,

@@ -34,7 +34,7 @@ _ENDPOINTS: dict[UUID, ModelEndpoint] = {}
 
 
 @pytest.fixture(autouse=True)
-def _reset_endpoints() -> None:
+def reset_endpoints() -> None:
     _ENDPOINTS.clear()
 
 

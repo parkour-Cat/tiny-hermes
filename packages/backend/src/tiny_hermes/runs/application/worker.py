@@ -11,7 +11,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from tiny_hermes.agents.domain.models import ContextBudget, EndpointModelPolicy
+from tiny_hermes.agents.domain.models import ContextBudget, EndpointModelPolicy, ModelPolicy
 from tiny_hermes.artifacts.application.service import ArtifactLimits, ArtifactRecorder
 from tiny_hermes.model_catalog.domain.pricing import (
     CeilingVerdict,
@@ -1678,8 +1678,11 @@ class WorkerRuntime:
         compacted: CompactionRecord,
         stored: StoredSummary | None,
     ) -> str | None:
-        """One call to this Run's own model endpoint, over the turns a
-        stored summary has not already digested.
+        """One call to this Run's summary endpoint, over the turns a stored
+        summary has not already digested.
+
+        This Agent's own endpoint unless it declared a different one for
+        summaries (`_summary_policy`) — the case Task 4 adds.
 
         `None` on any failure — a non-`completed` stop reason (which is what
         a timeout, a refusal or an empty response all normalize to, see
@@ -1696,7 +1699,7 @@ class WorkerRuntime:
             # precisely so that never has to happen.
             covered = [item for item in covered if item.sequence > stored.last_sequence]
         request = ModelRequest(
-            policy=context.spec.model_policy,
+            policy=_summary_policy(context),
             # Not `context.spec.personality`: this call is a platform
             # operation on the transcript, not the Agent speaking in its own
             # voice, and `summary_prompt` already states everything the model
@@ -1762,7 +1765,12 @@ class WorkerRuntime:
         on every ordinary round for the same `endpoint_id` — this is not new
         I/O the platform was avoiding, only I/O this call had not done yet.
         """
-        policy = context.spec.model_policy
+        # The same resolution `_generate_summary` used to build the request,
+        # not `context.spec.model_policy` directly — a declared summary
+        # endpoint means the call above already went to it, and this row
+        # would misname the answerer if it looked at the Agent's own policy
+        # instead.
+        policy = _summary_policy(context)
         endpoint_id = (
             policy.endpoint_id if isinstance(policy, EndpointModelPolicy) else None
         )
@@ -2197,6 +2205,26 @@ def _cost_precheck(context: ExecutionContext, plan: ContextPlan) -> CeilingVerdi
         consumed,
         projected,
     )
+
+
+def _summary_policy(context: ExecutionContext) -> ModelPolicy:
+    """The policy the summary call actually answers under.
+
+    One function for both the call (`_generate_summary`'s `ModelRequest`) and
+    the record of who answered (`_save_summary`), so they cannot drift apart —
+    a call routed to the declared summary endpoint that then got logged
+    against the main one would be a stored row nobody could trust.
+
+    Swaps in `summary_endpoint_id` when the Agent declared one; `None` keeps
+    the Agent's own policy untouched, because AgentCatalog already refused at
+    publish any declared endpoint whose window is smaller
+    (`_check_summary_endpoint`) — the undeclared default trivially clears the
+    same bar since it is the same window compared to itself.
+    """
+    policy = context.spec.model_policy
+    if isinstance(policy, EndpointModelPolicy) and policy.summary_endpoint_id is not None:
+        return policy.model_copy(update={"endpoint_id": policy.summary_endpoint_id})
+    return policy
 
 
 def _max_output(context: ExecutionContext) -> int:

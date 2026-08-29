@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -96,6 +96,13 @@ class EndpointModelPolicy(BaseModel):
     endpoint_id: UUID
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_output_tokens: int | None = Field(default=None, ge=1)
+    #: A different endpoint to write context-compaction summaries with.
+    #: `None` (the default) means this Agent's own endpoint — the Worker
+    #: falls back to it, and publish's window check has nothing to compare
+    #: because the window would be measured against itself. Omitted from the
+    #: normalized document when absent (`normalize_agent_spec`), so an Agent
+    #: that never names one keeps the content hash it always had.
+    summary_endpoint_id: UUID | None = None
 
 
 class ChatCompletionsDelivery(BaseModel):
@@ -779,6 +786,16 @@ def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
         # first published version. This one was not, so an empty binding set
         # has to carry no key at all to leave those hashes alone.
         normalized.pop("skills", None)
+    policy = normalized.get("model_policy")
+    # Unlike `temperature` and `max_output_tokens` beside it, which have
+    # always serialized as an explicit `null` when unset — this key did not
+    # exist when those did, so an Agent that names no summary endpoint has to
+    # carry no key at all, the same promise every widening above already
+    # makes for a field of its own.
+    if isinstance(policy, dict):
+        policy_document = cast(dict[str, object], policy)
+        if policy_document.get("summary_endpoint_id") is None:
+            policy_document.pop("summary_endpoint_id", None)
     encoded = json.dumps(
         normalized,
         ensure_ascii=False,
