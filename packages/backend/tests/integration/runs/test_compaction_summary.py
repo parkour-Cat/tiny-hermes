@@ -246,6 +246,80 @@ async def _stored_summary_row(engine: AsyncEngine, session_id: UUID) -> dict[str
         return dict(row) if row is not None else None
 
 
+async def _plant_summary_row(
+    engine: AsyncEngine,
+    session_id: UUID,
+    workspace_id: UUID,
+    *,
+    first_sequence: int,
+    last_sequence: int,
+    text_body: str,
+) -> None:
+    """A `session_compactions` row written directly, not through `save_summary`.
+
+    Only `test_a_summary_that_cuts_deeper_than_it_covers_falls_back` needs
+    this — it has to control the stored *text*'s size independently of its
+    recorded range, which no real compaction round can do (`_save_summary`
+    always persists exactly the text the model just returned).
+    """
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO session_compactions (id, session_id, workspace_id, "
+                "first_sequence, last_sequence, summary, source, endpoint_id, model, "
+                "created_at) "
+                "VALUES (gen_random_uuid(), :s, :w, :first, :last, :body, 'model', "
+                "NULL, NULL, now())"
+            ),
+            {
+                "s": session_id,
+                "w": workspace_id,
+                "first": first_sequence,
+                "last": last_sequence,
+                "body": text_body,
+            },
+        )
+
+
+async def _set_ceiling(engine: AsyncEngine, workspace_id: UUID, amount: str) -> None:
+    """The workspace's spending limit — `test_cost_valve.py`'s own helper,
+    rebuilt here rather than imported for the same reason the endpoint
+    fixtures above are: no precedent in this codebase for importing a
+    private, underscore-named test helper across files."""
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "UPDATE workspaces SET max_run_cost = :amount, cost_currency = 'USD' "
+                "WHERE id = :id"
+            ),
+            {"amount": amount, "id": workspace_id},
+        )
+
+
+class RefusingSummarizer:
+    """Ordinary rounds answer normally; the summarization call answers too,
+    but with a non-`completed` stop reason — a provider refusal or a window
+    genuinely too small for the prompt, never an exception.
+
+    Distinct from `FailingSummarizer`: that one proves the exception path
+    degrades and does not drop messages. This one proves the *other* failure
+    shape — an answer that came back, just not a usable one — is visible in
+    the logs the same way, not silently swallowed.
+    """
+
+    def __init__(self, *answers: ModelResponse) -> None:
+        self._answers = list(answers)
+        self.requests: list[ModelRequest] = []
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.requests.append(request)
+        if _is_summary_request(request):
+            return ModelResponse(
+                stop_reason=StopReason.FAILED, text="", failure="endpoint_refused"
+            )
+        return self._answers.pop(0) if self._answers else says("done")
+
+
 async def test_the_summary_is_generated_once_and_then_reused(
     client: TestClient,
     scope: dict[str, str],
@@ -270,13 +344,29 @@ async def test_the_summary_is_generated_once_and_then_reused(
 
     # Both rounds needed to compact — the seeded pair alone is over the small
     # endpoint's allowance, and nothing in this test ever removes it.
-    assert len(await payloads(engine, first_run, "context_compacted")) == 1
-    assert len(await payloads(engine, second_run, "context_compacted")) == 1
+    first_compacted = await payloads(engine, first_run, "context_compacted")
+    second_compacted = await payloads(engine, second_run, "context_compacted")
+    assert len(first_compacted) == 1
+    assert len(second_compacted) == 1
 
     assert model.calls == 1
     stored = await _stored_summary_row(engine, session_id)
     assert stored is not None
     assert stored["source"] == "model"
+
+    # Reusing the stored summary is not the same as ignoring it: the second
+    # round's own compaction record has to say `source == "model"` too, or an
+    # implementation that finds the stored summary and then discards it back
+    # to the structural one would pass every assertion above.
+    assert second_compacted[0]["source"] == "model"
+
+    # And the model itself has to have actually been shown that text as the
+    # compacted turn — not just that a row with the right `source` exists.
+    # `model.requests[-1]` is round two's own request: round two never calls
+    # the summarizer (reused, not regenerated), so nothing after round one's
+    # two calls (summarize, then answer) touches `summary_requests` again.
+    round_two_given = model.requests[-1].messages
+    assert any(message.text == stored["summary"] for message in round_two_given)
 
 
 async def test_a_failed_summary_falls_back_and_does_not_drop_messages(
@@ -347,8 +437,225 @@ async def test_a_later_compaction_updates_the_previous_summary(
     assert second["last_sequence"] > first["last_sequence"]
     assert model.calls == 2
     assert model.last_prompt_contained(first["summary"])
-    # `summary_prompt` itself is proven at the unit level; this is the one
-    # fact only the wiring can prove — that the Worker actually reached for
-    # the update form rather than reproving the whole conversation from
-    # scratch on every later compaction.
+    # `summary_prompt`'s own string shape (which form it opens with, that the
+    # previous text lands inside it) is proven in
+    # `tests/unit/runs/test_summary_prompt.py`, without a Worker or a
+    # database. What only this test can prove is the wiring: that the
+    # Worker actually reached for the update form on a real second
+    # compaction rather than reproving the whole conversation from scratch —
+    # `last_prompt_contained` above is that check; this one just pins the
+    # marker string the two files must agree on.
     assert summary_prompt("x", first["summary"]).startswith(_UPDATE_MARKER)
+
+
+async def test_a_summary_too_large_to_fit_falls_back_to_the_structural_plan(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    agent_on_the_small_endpoint: Any,
+) -> None:
+    """§7.4.2 lists 窗口不足 beside 超时 and 拒绝 as a generation failure this
+    round must degrade from — not a paused Run over a compaction the
+    structural summary already handled.
+
+    The model here answers, with `stop_reason == completed` and real text —
+    this is not `FailingSummarizer`'s exception or `RefusingSummarizer`'s
+    refusal — but the text is far bigger than what it replaced, so the
+    re-plan built from it does not fit the window at all.
+    """
+    agent = agent_on_the_small_endpoint()
+    session = start_session(client, scope, agent)
+    session_id = UUID(session)
+    workspace_id = UUID(scope["X-Workspace-Id"])
+    await _seed_old_turns(engine, session_id, workspace_id)
+
+    model = SummarizingRecording(says("nothing is left"), summary_text="超长摘要片段" * 20_000)
+    run = ask(client, scope, session, "and what is left?")
+    await drive(engine, model, None)
+
+    assert status(client, scope, run)["status"] == "completed"
+    compacted = await payloads(engine, run, "context_compacted")
+    assert len(compacted) == 1
+    assert compacted[0]["source"] == "structural"
+
+    # The oversized summary was still generated and still saved — a later
+    # round with more room to work with may still get to use it. Only this
+    # round's own re-plan had to fall back.
+    stored = await _stored_summary_row(engine, session_id)
+    assert stored is not None
+    assert stored["source"] == "model"
+
+
+async def test_a_summary_that_cuts_deeper_than_it_covers_falls_back(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    agent_on_the_small_endpoint: Any,
+) -> None:
+    """A stored summary can pass the numeric coverage check
+    (`stored.last_sequence >= this round's boundary`) and still be unusable:
+    `plan_context`'s own `through` search walks forward until the round
+    fits, and a bigger summary text can push that search past the range the
+    text was ever asked to explain. The resulting `CompactionRecord` would
+    claim message ids and a range the summarizer never read — nothing is
+    deleted from `session_messages` when that happens, but it is the
+    "middle turns silently gone" bug one level up: the model is told a
+    text explains turns it does not.
+    """
+    agent = agent_on_the_small_endpoint()
+
+    # A throwaway Session, seeded identically, purely to learn this
+    # endpoint's *structural* compaction boundary for this seed shape — the
+    # exact number depends on token math this test does not want to hand-
+    # encode, and the real Session below has the same shape so the same
+    # number applies to it.
+    probe_session = start_session(client, scope, agent)
+    probe_id = UUID(probe_session)
+    workspace_id = UUID(scope["X-Workspace-Id"])
+    await _seed_old_turns(engine, probe_id, workspace_id, pairs=8, size=3_000)
+    probe_run = ask(client, scope, probe_session, "and what is left?")
+    await drive(engine, FailingSummarizer(says("nothing is left")), None)
+    probe_compacted = (await payloads(engine, probe_run, "context_compacted"))[0]
+    assert probe_compacted["source"] == "structural"
+    baseline_last = probe_compacted["last_sequence"]
+
+    session = start_session(client, scope, agent)
+    session_id = UUID(session)
+    await _seed_old_turns(engine, session_id, workspace_id, pairs=8, size=3_000)
+    # Numerically sufficient (`last_sequence == baseline_last`, satisfying
+    # the coverage check on its own) but with a text bigger than the terse
+    # structural sentence that boundary was sized for. Calibrated against
+    # `plan_context` directly (not guessed): at this seed shape and this
+    # endpoint's window, this exact multiplier is the one where reusing the
+    # text still *fits* the window (so this is not
+    # `test_a_summary_too_large_to_fit_falls_back_to_the_structural_plan`'s
+    # case) but only by `plan_context` cutting one message past
+    # `baseline_last` — through 11, not 10.
+    await _plant_summary_row(
+        engine,
+        session_id,
+        workspace_id,
+        first_sequence=1,
+        last_sequence=baseline_last,
+        text_body="占位摘要，故意写得比结构摘要长很多。" * 150,
+    )
+
+    model = SummarizingRecording(says("nothing is left"))
+    run = ask(client, scope, session, "and what is left?")
+    await drive(engine, model, None)
+
+    assert status(client, scope, run)["status"] == "completed"
+    compacted = await payloads(engine, run, "context_compacted")
+    assert len(compacted) == 1
+    # Fell back to the structural plan rather than emitting a record that
+    # claims a wider range than the planted text was ever asked to cover.
+    assert compacted[0]["source"] == "structural"
+    assert compacted[0]["last_sequence"] == baseline_last
+    # And no model call was ever made over it — this is the reuse path
+    # (the numeric check passed), not the generate path.
+    assert model.calls == 0
+
+
+async def test_the_summarizer_is_never_asked_once_the_cost_ceiling_is_reached(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    agent_on_the_small_endpoint: Any,
+) -> None:
+    """§12.4 before §7.4.2. A Run already past its spending ceiling must not
+    pay for a summarization call — plus whatever retries a hung endpoint
+    costs — only to be stopped by the same ceiling moments later on the
+    baseline plan it would have gotten anyway.
+
+    A ceiling on an *unpriced* endpoint refuses every round outright
+    (`test_cost_valve.py::test_a_ceiling_meeting_an_unpriced_endpoint_stops_the_run`)
+    — the small endpoint here is never priced, so this is the cheapest
+    deterministic way to force `_cost_precheck` to fail before any model
+    call, without hand-computing a real cost.
+    """
+    agent = agent_on_the_small_endpoint()
+    session = start_session(client, scope, agent)
+    session_id = UUID(session)
+    workspace_id = UUID(scope["X-Workspace-Id"])
+    await _seed_old_turns(engine, session_id, workspace_id)
+    await _set_ceiling(engine, workspace_id, "10")
+
+    model = SummarizingRecording(says("nothing is left"))
+    run = ask(client, scope, session, "and what is left?")
+    await drive(engine, model, None)
+
+    reloaded = status(client, scope, run)
+    assert reloaded["status"] == "paused"
+    assert reloaded["pause_reason"] == "limit"
+    assert reloaded["budget"]["consumed_model_calls"] == 0
+    # The one fact §12.4 alone cannot prove: not just that no round ran, but
+    # that the summarizer specifically was never reached for — a summary
+    # call costs money on the real endpoint even though nothing here counts
+    # it against `consumed_model_calls`, which is exactly why it must never
+    # happen on a Run already refused.
+    assert model.calls == 0
+    assert model.requests == []
+    assert await _stored_summary_row(engine, session_id) is None
+
+
+async def test_a_refused_summary_is_logged_same_as_a_timeout(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    agent_on_the_small_endpoint: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`FailingSummarizer`'s exception already logs
+    (`logger.exception` in `_generate_summary`). An answer that came back
+    with a non-`completed` stop reason — a provider refusal, or a window
+    genuinely too small — is a different failure shape and must be exactly
+    as visible, not silently swallowed as a bare `None`.
+    """
+    agent = agent_on_the_small_endpoint()
+    session = start_session(client, scope, agent)
+    session_id = UUID(session)
+    workspace_id = UUID(scope["X-Workspace-Id"])
+    await _seed_old_turns(engine, session_id, workspace_id)
+
+    model = RefusingSummarizer(says("nothing is left"))
+    run = ask(client, scope, session, "and what is left?")
+    with caplog.at_level("WARNING", logger="tiny_hermes.runs.application.worker"):
+        await drive(engine, model, None)
+
+    assert status(client, scope, run)["status"] == "completed"
+    compacted = await payloads(engine, run, "context_compacted")
+    assert compacted[0]["source"] == "structural"
+    assert any(
+        record.levelname in ("WARNING", "ERROR")
+        and "summary" in record.getMessage().lower()
+        for record in caplog.records
+    )
+
+
+async def test_a_saved_summary_records_which_model_wrote_it(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    agent_on_the_small_endpoint: Any,
+) -> None:
+    """A summary is written once and reused — every Session summarized
+    under this row keeps whatever `model` was recorded here forever. Leaving
+    it `None` is a hole nothing can backfill later except by guessing, so
+    this has to be the real model string the endpoint declared, not merely
+    "some value or other"."""
+    agent = agent_on_the_small_endpoint()
+    session = start_session(client, scope, agent)
+    session_id = UUID(session)
+    workspace_id = UUID(scope["X-Workspace-Id"])
+    await _seed_old_turns(engine, session_id, workspace_id)
+
+    model = SummarizingRecording(says("nothing is left"))
+    run = ask(client, scope, session, "and what is left?")
+    await drive(engine, model, None)
+
+    assert status(client, scope, run)["status"] == "completed"
+    stored = await _stored_summary_row(engine, session_id)
+    assert stored is not None
+    assert stored["endpoint_id"] is not None
+    assert stored["model"] == SMALL_ENDPOINT["model"]
+
