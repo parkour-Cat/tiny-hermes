@@ -22,7 +22,14 @@ def summary_prompt(transcript: str, previous: str | None) -> str:
         if previous
         else "把下面这段对话压成一份结构化摘要。"
     )
-    body = "" if previous is None else f"\n\n既有摘要：\n{previous}"
+    # Same truthiness test as `head`'s, not `is None`: the two must agree on
+    # what "no previous summary" means, or an empty string would open with
+    # the fresh form's wording while still appending an empty "既有摘要："
+    # section underneath it — a shape nothing in this codebase ever sends
+    # (`_generate_summary` never saves an empty summary, so a real `previous`
+    # is always `None` or non-empty), but a pure function's two branches
+    # should not disagree about a case it can still be called with.
+    body = "" if not previous else f"\n\n既有摘要：\n{previous}"
     return (
         f"{head}\n\n"
         f"按这几节输出，没有内容的一节写「无」：\n"

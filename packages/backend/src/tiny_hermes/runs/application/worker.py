@@ -24,6 +24,7 @@ from tiny_hermes.model_catalog.domain.pricing import (
     within_ceiling,
 )
 from tiny_hermes.model_catalog.domain.pricing import unknown as unknown_cost
+from tiny_hermes.model_catalog.infrastructure.sql_store import SqlModelEndpointStore
 from tiny_hermes.runs.application.images import ImageSource, resolve_images
 from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
 from tiny_hermes.runs.application.tool_answers import (
@@ -1579,40 +1580,80 @@ class WorkerRuntime:
            this round did needed a Session summary read at all.
         2. It compacted, and structurally (`_plan` never passes a stored
            summary in, so "compacted" here always means "structurally" —
-           there is no other kind it could produce). `latest_summary` says
-           what this Session has already written down, if anything.
-           A summary whose `last_sequence` already reaches this round's
-           compaction boundary already explains everything the round would
-           compact — no model call, just the same plan recomputed with that
-           text in hand, which is the only way `plan_context` will pick it
-           over the structural fallback it already built.
-        3. It does not reach far enough — including "there is no summary
+           there is no other kind it could produce). §12.4 outranks §7.4.2:
+           a Run already past its spending ceiling on *this* baseline plan
+           gets no further — reaching for a stored summary or, worse, paying
+           for a model call to generate one, only to be stopped by the same
+           ceiling moments later, is spending this Run was never going to be
+           allowed to keep.
+        3. Under ceiling. `latest_summary` says what this Session has
+           already written down, if anything. A summary whose `last_sequence`
+           already reaches this round's compaction boundary already explains
+           everything the round would compact — no model call, just the same
+           plan recomputed with that text in hand.
+        4. It does not reach far enough — including "there is no summary
            yet". The auxiliary model is asked once, over exactly the turns
            the stored summary has not already digested (`summary_prompt`'s
            update form when one exists, its fresh form when none does).
-        4. It answered something usable: persisted with `save_summary`, and
-           step 1's plan is redone a third time with the new text — this is
-           the one call in the whole method that produces a `source ==
-           "model"` plan. It did not — a timeout, a refusal, an empty
-           response, any exception — step 1's plan goes out exactly as it
-           stood. §7.4.2's failure ladder, first rung: nothing past step 1
-           may turn a failed summary into a dropped message, and step 1's
-           plan already holds every original message this round has.
+        5. It answered something usable: persisted with `save_summary`
+           regardless of what happens next — the row is still a true
+           statement about the range it was asked to explain even if this
+           particular round cannot use it (a later round, with more room or
+           a shorter conversation, still can). It did not answer something
+           usable — a timeout, a refusal, an empty response, any exception —
+           step 1's plan goes out exactly as it stood. §7.4.2's failure
+           ladder, first rung.
+        6. Either way — reused from step 3, or just generated and saved in
+           step 5 — the widened plan earns the right to replace step 1's
+           plan only if `_honestly_widens` says so: it still has to fit the
+           window, and `plan_context`'s own `through` search must not have
+           cut deeper into the transcript than this particular summary text
+           was ever asked to cover. Neither is a hypothetical: a model
+           summary can be longer than the structural sentence it replaces,
+           and `plan_context` has no way to know that from the text alone.
+           Either failure is a generation failure exactly like a timeout —
+           step 1's plan goes out unchanged.
         """
         baseline = _plan(context, mcp)
         if baseline.compacted is None:
             return baseline
 
+        # Step 2: gate everything past this point on the same check
+        # `_execute_slice` runs again on whatever this method returns. This
+        # is an early exit, not a replacement for it — a Run that passes
+        # here can still be stopped by the real one downstream once the
+        # widened plan's own (usually smaller) estimate is known.
+        if not _cost_precheck(context, baseline).allowed:
+            return baseline
+
+        covered_last = baseline.compacted.last_sequence
         stored = await self._latest_summary(claimed.run.session_id)
-        if stored is not None and stored.last_sequence >= baseline.compacted.last_sequence:
-            return _plan(context, mcp, stored_summary=stored.text)
+        if stored is not None and stored.last_sequence >= covered_last:
+            candidate = _plan(context, mcp, stored_summary=stored.text)
+            if _honestly_widens(candidate, stored.last_sequence):
+                return candidate
+            logger.info(
+                "a stored summary covered enough by sequence number but its "
+                "text did not fit or forced a wider cut than it covers — "
+                "using the structural plan for this round",
+                extra={"run_id": str(claimed.run.id)},
+            )
+            return baseline
 
         generated = await self._generate_summary(claimed, context, baseline.compacted, stored)
         if generated is None:
             return baseline
 
         await self._save_summary(claimed, context, baseline.compacted, generated)
-        return _plan(context, mcp, stored_summary=generated)
+        candidate = _plan(context, mcp, stored_summary=generated)
+        if _honestly_widens(candidate, covered_last):
+            return candidate
+        logger.warning(
+            "a freshly generated summary did not fit or forced a wider cut "
+            "than it covers — using the structural plan for this round",
+            extra={"run_id": str(claimed.run.id)},
+        )
+        return baseline
 
     async def _latest_summary(self, session_id: UUID) -> StoredSummary | None:
         async with self._sessions() as session:
@@ -1672,9 +1713,24 @@ class WorkerRuntime:
             )
             return None
         if response.stop_reason is not StopReason.COMPLETED:
+            # As visible as the exception above: a refusal or a window truly
+            # too small for the prompt reaches here as an ordinary answer,
+            # not a raised error, and was silently indistinguishable from
+            # "nothing needed summarizing" before this logged.
+            logger.warning(
+                "summary generation did not complete: stop_reason=%s",
+                response.stop_reason.value,
+                extra={"run_id": str(claimed.run.id)},
+            )
             return None
         text = response.text.strip()
-        return text or None
+        if not text:
+            logger.warning(
+                "summary generation answered with no usable text",
+                extra={"run_id": str(claimed.run.id)},
+            )
+            return None
+        return text
 
     async def _save_summary(
         self,
@@ -1683,8 +1739,27 @@ class WorkerRuntime:
         compacted: CompactionRecord,
         text: str,
     ) -> None:
+        """Persist the model's answer, naming which model it was.
+
+        This row is written once and read forever after (§7.4.2) — a
+        Session summarized under this call keeps whatever `model` is
+        recorded here for as long as the summary is never regenerated, so
+        `None` here is not a gap a later pass could fill back in without
+        guessing. The read is one more query, in the same transaction as the
+        write, and `ModelRouter.complete` already does the identical lookup
+        on every ordinary round for the same `endpoint_id` — this is not new
+        I/O the platform was avoiding, only I/O this call had not done yet.
+        """
         policy = context.spec.model_policy
+        endpoint_id = (
+            policy.endpoint_id if isinstance(policy, EndpointModelPolicy) else None
+        )
         async with self._sessions.begin() as session:
+            model: str | None = None
+            if endpoint_id is not None:
+                endpoint = await SqlModelEndpointStore(session).read(endpoint_id)
+                if endpoint is not None:
+                    model = endpoint.spec.model
             await SqlRunStore(session).save_summary(
                 StoredSummary(
                     session_id=claimed.run.session_id,
@@ -1692,16 +1767,8 @@ class WorkerRuntime:
                     last_sequence=compacted.last_sequence,
                     text=text,
                     source="model",
-                    endpoint_id=(
-                        policy.endpoint_id
-                        if isinstance(policy, EndpointModelPolicy)
-                        else None
-                    ),
-                    # Task 3's brief scopes this Worker change to using the
-                    # Run's own endpoint, not to resolving what that endpoint
-                    # calls its model — a later task's dedicated summary
-                    # endpoint is where that lookup earns its keep.
-                    model=None,
+                    endpoint_id=endpoint_id,
+                    model=model,
                 ),
                 workspace_id=claimed.run.workspace_id,
             )
@@ -2050,6 +2117,38 @@ def _transcript_text(covered: Sequence[StoredMessage]) -> str:
             elif isinstance(block, ToolResultBlock):
                 lines.append(f"tool result for {block.call_id}: {block.output}")
     return "\n".join(lines)
+
+
+def _honestly_widens(plan: ContextPlan, covered_last: int) -> bool:
+    """Whether a summary-widened re-plan may replace the structural
+    baseline `_plan_context` built it to improve on.
+
+    Two ways it may not, and both are generation failures §7.4.2 already has
+    an answer for — the structural summary the caller started with:
+
+    - `plan.fits` is False. A model summary can be longer than the
+      structural sentence it replaced, and `plan_context`'s own answer to
+      "even the caller-given text did not make this small enough" is
+      `paused(context_overflow)` further up the call stack — but the
+      structural summary this call started with may still fit fine, and a
+      Run that would have continued on it must not be paused because a
+      *different*, longer summary text was tried in its place.
+    - `plan.compacted.last_sequence` reaches past `covered_last` — the last
+      sequence number the summary text handed to this call was ever asked to
+      explain. `plan_context`'s own `through` search walks forward until the
+      round fits, and a summary text bigger than the one it replaced can
+      push that search past its own coverage — producing a `CompactionRecord`
+      whose `message_ids` and range claim turns the summarizer never read.
+      Nothing is deleted from `session_messages` when this happens, but it is
+      the same shape, one level up, as the documented bug this design exists
+      to avoid: the middle of a conversation quietly no longer explained to
+      the model it is sent to.
+    """
+    return (
+        plan.fits
+        and plan.compacted is not None
+        and plan.compacted.last_sequence <= covered_last
+    )
 
 
 def _cost_precheck(context: ExecutionContext, plan: ContextPlan) -> CeilingVerdict:
