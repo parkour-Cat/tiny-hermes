@@ -249,21 +249,22 @@ IMAGE_TOKENS = 384
 #: requires, so the newest one survives whenever anything else can go instead.
 PROTECTED_RECENT_MESSAGES = 2
 
-#: The instance default, mirroring `DEFAULT_SEGMENTS`' role for the segment
-#: table: a platform administrator sets this and the hard bounds below, and
-#: an Agent author's `ContextBudget.compaction_threshold` adjusts within them
+#: The instance default, mirroring `DEFAULT_SEGMENTS`'s role for the segment
+#: table: what an unset `ContextBudget.compaction_threshold` resolves to
 #: (§7.4.2). A round that spends more than this fraction of the allowance is
 #: compacted even though it would still fit — the fix for a conversation that
 #: never gets close enough to the real edge to trigger the old criterion.
 DEFAULT_COMPACTION_THRESHOLD = 0.50
 
-#: The hard bounds an override may not cross. Checked at publish
-#: (`ContextBudgetUnsatisfied`, `AgentCatalog._check_compaction_threshold`)
-#: rather than by `ContextBudget`'s own `(0, 1]` field validator, which only
-#: rules out a ratio the type cannot mean at all — zero, negative, or more
-#: than the whole allowance. A value inside `(0, 1]` can still be outside
-#: what this platform's administrator configured, and only the publish check
-#: knows what that is.
+#: The hard bounds an override may not cross — fixed module constants, not a
+#: runtime administrator setting; there is no such knob yet, only these two
+#: numbers a platform operator would have to change and redeploy to move.
+#: Checked at publish (`ContextBudgetUnsatisfied`,
+#: `AgentCatalog._check_compaction_threshold`) rather than by
+#: `ContextBudget`'s own `(0, 1]` field validator: that validator only rules
+#: out a ratio the type cannot mean at all — zero, negative, or more than the
+#: whole allowance — while these bounds are a publish-authority decision, and
+#: a draft must stay saveable even while it is out of them.
 MIN_COMPACTION_THRESHOLD = 0.20
 MAX_COMPACTION_THRESHOLD = 0.90
 

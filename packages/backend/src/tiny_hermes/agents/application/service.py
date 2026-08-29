@@ -120,14 +120,19 @@ class SummaryEndpointWindowTooSmall:
 @dataclass(frozen=True)
 class CompactionThresholdOutsideBounds:
     """A declared ratio inside `ContextBudget`'s own `(0, 1]` but outside
-    what this platform's administrator configured.
+    `MIN_COMPACTION_THRESHOLD` / `MAX_COMPACTION_THRESHOLD`
+    (`runs.domain.context_budget`) — fixed module constants, not a runtime
+    administrator setting.
 
-    §7.4.2 gives the ratio the same authority split the segment table has:
-    the field validator on `ContextBudget.compaction_threshold` only rules
-    out a value the type cannot mean at all, so a second, platform-specific
-    bound has to live here — where `DEFAULT_SEGMENTS`' own hard caps live for
-    the segment table, and where the check that reads it has this Agent's
-    endpoint in hand.
+    §7.4.2 gives the ratio the same authority split the segment table has,
+    and the field validator on `ContextBudget.compaction_threshold` could
+    import these same two constants and enforce them directly — nothing
+    about the module boundary stops it. The reason this check lives at
+    publish instead is authority, not visibility: a draft must stay saveable
+    while an author is still working on it, even one whose threshold is
+    momentarily out of bounds, and only publish is allowed to refuse it —
+    the same reason `ContextBudgetUnsatisfied`'s segment-table refusal
+    (`fit`) also happens here rather than on `ContextBudget` itself.
     """
 
     value: float
@@ -1168,16 +1173,19 @@ class AgentCatalog:
         self._check_compaction_threshold(budget)
 
     def _check_compaction_threshold(self, budget: ContextBudget) -> None:
-        """Refuse a declared ratio outside this platform's configured bounds.
+        """Refuse a declared ratio outside `MIN_COMPACTION_THRESHOLD` /
+        `MAX_COMPACTION_THRESHOLD`.
 
         `ContextBudget.compaction_threshold`'s own field validator already
         refused a value outside `(0, 1]` at draft-save time — necessary, but
-        not this: an Agent author is only allowed to adjust *within* the
-        administrator's hard bounds (§7.4.2), the same split
-        `SegmentOverride.stay_inside_the_platform_caps` enforces for the
-        segment table. Those bounds are configuration this module can see and
-        `ContextBudget`'s own validator cannot, so the second check lives
-        here rather than on the field.
+        not this: an Agent author is only allowed to adjust *within* these
+        two bounds (§7.4.2's split for the segment table, given to the ratio
+        as well). The check lives here rather than on the field not because
+        the field validator could not import the same two constants — it
+        could, the same way this method does — but because bounds
+        enforcement is a publish-authority decision: an author has to be
+        able to save a draft whose threshold is momentarily out of bounds
+        while still working on it, and only publish is allowed to refuse it.
         """
         threshold = budget.compaction_threshold
         if threshold is None:

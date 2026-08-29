@@ -251,9 +251,14 @@ class ContextBudget(BaseModel):
     #: (`context_budget.DEFAULT_COMPACTION_THRESHOLD`), the same reading
     #: every other unset field in this class gets. The bound here is only
     #: what a ratio can mean at all — zero, negative, more than the whole
-    #: allowance; whether *this platform's* administrator allows the value
-    #: is a publish-time question (`AgentCatalog._check_compaction_threshold`),
-    #: because that answer is configuration this module cannot see.
+    #: allowance. Whether it is inside `MIN_COMPACTION_THRESHOLD` /
+    #: `MAX_COMPACTION_THRESHOLD` is checked at publish
+    #: (`AgentCatalog._check_compaction_threshold`) instead of here — not
+    #: because this module cannot import those constants (it already imports
+    #: `context_budget` above), but because bounds enforcement is a
+    #: publish-authority decision: an author must be able to save a draft
+    #: that is out of bounds while still working on it, and only publish
+    #: refuses it.
     compaction_threshold: float | None = Field(default=None, gt=0, le=1)
 
     @field_validator("segments")
