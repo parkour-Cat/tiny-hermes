@@ -17,7 +17,10 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from tiny_hermes.runs.application.worker import WorkerRuntime, WorkerSettings
+from tiny_hermes.runs.domain.context_budget import CompactionRecord, ContextPlan
+from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 
 from ..conftest import VALID_SPEC
 from .test_compaction_summary import FailingSummarizer, SummarizingRecording
@@ -192,3 +195,68 @@ async def test_a_fallback_says_so_and_names_no_model(
     # this event exists to remove.
     assert compacted[0]["endpoint_id"] is None
     assert compacted[0]["model"] is None
+
+
+async def test_a_model_source_with_no_stored_summary_raises_rather_than_writes(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    agent_on_the_small_endpoint: Any,
+) -> None:
+    """The invariant `_compaction_authorship` rests on — `source == "model"`
+    only when `_plan_context` just built the plan from a stored summary row —
+    is not something the type system enforces; nothing stops a caller from
+    handing it a `CompactionRecord` that claims `"model"` for a Session that
+    has none. That should never happen through the real flow, but "should
+    never happen" is exactly the case a silent `(None, None)` would hide:
+    the resulting event would say `source == "model"` with both fields
+    `null`, indistinguishable from a `"structural"` record that forgot to
+    say so. This constructs that broken state directly — a real Run and
+    Session (so `_record_planning` has somewhere to write), with no row in
+    `session_compactions` for it — and proves the method stops instead of
+    manufacturing a plausible-looking payload over a broken promise.
+    """
+    agent = agent_on_the_small_endpoint()
+    session = start_session(client, scope, agent)
+    session_id = UUID(session)
+    run_id = ask(client, scope, session, "hello")
+
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    worker = WorkerRuntime(
+        session_factory=sessions,
+        model=SummarizingRecording(says("done")),
+        notifier=NullWakeUpNotifier(),
+        settings=WorkerSettings(
+            worker_id="compaction-event-invariant",
+            lease_seconds=30,
+            max_slice_seconds=30,
+            idle_poll_seconds=1,
+        ),
+    )
+    claimed = await worker._claim()  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    assert claimed is not None
+    assert str(claimed.run.id) == run_id
+    assert claimed.run.session_id == session_id
+
+    broken_plan = ContextPlan(
+        messages=(),
+        fits=True,
+        input_estimate=0,
+        allowance=0,
+        compacted=CompactionRecord(
+            first_sequence=1,
+            last_sequence=1,
+            message_ids=(),
+            summary="claims a model wrote this",
+            freed_estimate=0,
+            source="model",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="session"):
+        await worker._record_planning(claimed, broken_plan)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+    # Not just that it raised — that nothing got written over the broken
+    # invariant. A version that raised *after* appending the event would
+    # still leave the misleading row behind for whoever reads it next.
+    assert await payloads(engine, run_id, "context_compacted") == []
