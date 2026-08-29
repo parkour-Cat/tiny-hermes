@@ -81,4 +81,6 @@ def test_the_current_request_is_never_compacted_away(
 ) -> None:
     plan = _plan_with(mid_history, threshold=0.01)
 
-    assert _last_text(plan.messages) == _last_text(mid_history)
+    assert _last_text(plan.messages) == _last_text(
+        tuple(stored.message for stored in mid_history)
+    )
