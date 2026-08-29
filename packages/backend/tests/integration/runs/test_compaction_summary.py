@@ -598,6 +598,69 @@ async def test_the_summarizer_is_never_asked_once_the_cost_ceiling_is_reached(
     assert await _stored_summary_row(engine, session_id) is None
 
 
+async def test_a_reused_summary_brings_a_run_back_under_the_cost_ceiling(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    small_endpoint: str,
+    agent_on_the_small_endpoint: Any,
+) -> None:
+    """The mirror of the CRITICAL fix, one call earlier in the method.
+
+    The cost gate has to front `_generate_summary` — the part that actually
+    spends — and nothing before it. The reuse branch (step 2) makes no model
+    call, so gating *that* on `baseline`'s estimate would measure a Run
+    against the bigger structural plan when a shorter reused summary could
+    have brought it back under the ceiling on its own: a Run paused that
+    should have continued, the same shape as the Critical this file already
+    covers, one step earlier in the method.
+
+    Calibrated against `plan_context` and `projected_cost` directly (not
+    guessed — the same approach
+    `test_a_summary_that_cuts_deeper_than_it_covers_falls_back` uses, see
+    that test's note). At this seed shape (`pairs=8, size=3_000`, the same
+    conversation `test_a_summary_that_cuts_deeper_than_it_covers_falls_back`
+    calibrates against) and $3/$15-per-million pricing, the structural
+    baseline projects to $0.088866 and reusing the short summary planted
+    below projects to $0.088599 — a ceiling of $0.0887 sits strictly between
+    the two, refusing the first and allowing the second.
+    """
+    priced = client.post(
+        f"/api/v1/model-endpoints/{small_endpoint}/pricing",
+        headers=scope,
+        json={"currency": "USD", "input_per_million": "3", "output_per_million": "15"},
+    )
+    assert priced.status_code == 201, priced.text
+    agent = agent_on_the_small_endpoint()
+    session = start_session(client, scope, agent)
+    session_id = UUID(session)
+    workspace_id = UUID(scope["X-Workspace-Id"])
+    await _seed_old_turns(engine, session_id, workspace_id, pairs=8, size=3_000)
+    await _plant_summary_row(
+        engine,
+        session_id,
+        workspace_id,
+        first_sequence=1,
+        last_sequence=10,
+        text_body="已处理，无新增。",
+    )
+    await _set_ceiling(engine, workspace_id, "0.0887")
+
+    model = SummarizingRecording(says("nothing is left"))
+    run = ask(client, scope, session, "and what is left?")
+    await drive(engine, model, None)
+
+    reloaded = status(client, scope, run)
+    assert reloaded["status"] == "completed"
+    # And it got there on the reused summary, not by skipping compaction —
+    # no model call was needed (the stored summary was sufficient), and the
+    # round's own compaction record says so.
+    assert model.calls == 0
+    compacted = await payloads(engine, run, "context_compacted")
+    assert len(compacted) == 1
+    assert compacted[0]["source"] == "model"
+
+
 async def test_a_refused_summary_is_logged_same_as_a_timeout(
     client: TestClient,
     scope: dict[str, str],
