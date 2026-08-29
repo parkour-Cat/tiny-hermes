@@ -1580,21 +1580,30 @@ class WorkerRuntime:
            this round did needed a Session summary read at all.
         2. It compacted, and structurally (`_plan` never passes a stored
            summary in, so "compacted" here always means "structurally" —
-           there is no other kind it could produce). §12.4 outranks §7.4.2:
-           a Run already past its spending ceiling on *this* baseline plan
-           gets no further — reaching for a stored summary or, worse, paying
-           for a model call to generate one, only to be stopped by the same
-           ceiling moments later, is spending this Run was never going to be
-           allowed to keep.
-        3. Under ceiling. `latest_summary` says what this Session has
-           already written down, if anything. A summary whose `last_sequence`
-           already reaches this round's compaction boundary already explains
-           everything the round would compact — no model call, just the same
-           plan recomputed with that text in hand.
-        4. It does not reach far enough — including "there is no summary
-           yet". The auxiliary model is asked once, over exactly the turns
-           the stored summary has not already digested (`summary_prompt`'s
-           update form when one exists, its fresh form when none does).
+           there is no other kind it could produce). `latest_summary` says
+           what this Session has already written down, if anything. A
+           summary whose `last_sequence` already reaches this round's
+           compaction boundary already explains everything the round would
+           compact — no model call, just the same plan recomputed with that
+           text in hand, and it earns the right to replace step 1's plan only
+           if `_honestly_widens` agrees (see step 6). This step spends
+           nothing — no model call, only the read already paid for by
+           needing to compact at all — so it is never gated on §12.4: a Run
+           one round from its ceiling that would have continued on a
+           *shorter* reused summary must not be measured against the bigger
+           structural estimate instead and paused for no reason.
+        3. It does not reach far enough — including "there is no summary
+           yet". This is the point past which a model call is actually about
+           to be spent, so §12.4 is checked here and nowhere earlier:
+           reaching for a stored summary in step 2 costs nothing and must not
+           be blocked by it, but paying for a summarization call — plus
+           whatever retries a hung endpoint costs — only to be stopped by the
+           very same ceiling moments later on the baseline plan it would have
+           gotten anyway is spending this Run was never allowed to keep.
+        4. Under ceiling. The auxiliary model is asked once, over exactly the
+           turns the stored summary has not already digested
+           (`summary_prompt`'s update form when one exists, its fresh form
+           when none does).
         5. It answered something usable: persisted with `save_summary`
            regardless of what happens next — the row is still a true
            statement about the range it was asked to explain even if this
@@ -1603,7 +1612,7 @@ class WorkerRuntime:
            usable — a timeout, a refusal, an empty response, any exception —
            step 1's plan goes out exactly as it stood. §7.4.2's failure
            ladder, first rung.
-        6. Either way — reused from step 3, or just generated and saved in
+        6. Either way — reused from step 2, or just generated and saved in
            step 5 — the widened plan earns the right to replace step 1's
            plan only if `_honestly_widens` says so: it still has to fit the
            window, and `plan_context`'s own `through` search must not have
@@ -1618,14 +1627,6 @@ class WorkerRuntime:
         if baseline.compacted is None:
             return baseline
 
-        # Step 2: gate everything past this point on the same check
-        # `_execute_slice` runs again on whatever this method returns. This
-        # is an early exit, not a replacement for it — a Run that passes
-        # here can still be stopped by the real one downstream once the
-        # widened plan's own (usually smaller) estimate is known.
-        if not _cost_precheck(context, baseline).allowed:
-            return baseline
-
         covered_last = baseline.compacted.last_sequence
         stored = await self._latest_summary(claimed.run.session_id)
         if stored is not None and stored.last_sequence >= covered_last:
@@ -1638,6 +1639,17 @@ class WorkerRuntime:
                 "using the structural plan for this round",
                 extra={"run_id": str(claimed.run.id)},
             )
+            return baseline
+
+        # Only past this point does a call actually get made. Gating any
+        # earlier — including in front of the free reuse read above — would
+        # measure a Run against `baseline`'s estimate when a reused summary
+        # could have returned something smaller, the mirror of the Critical
+        # this same plan already had to be checked against (see step 6):
+        # a Run paused that should have continued. `_execute_slice` runs its
+        # own, real check again on whatever this method returns either way —
+        # this is an early exit, not a replacement for it.
+        if not _cost_precheck(context, baseline).allowed:
             return baseline
 
         generated = await self._generate_summary(claimed, context, baseline.compacted, stored)
