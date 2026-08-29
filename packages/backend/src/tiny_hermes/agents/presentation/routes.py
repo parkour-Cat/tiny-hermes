@@ -579,12 +579,31 @@ def as_app_error(error: AgentCatalogError) -> AppError:
                     "remove it to use the agent's own endpoint."
                 ),
             )
+        if error.threshold is not None:
+            # A declared ratio, not a segment table — its own carrier
+            # (`CompactionThresholdOutsideBounds`), for the same reason
+            # `summary` gets one above: reusing `fit`'s segment fields for a
+            # single number that is not a segment would produce the same
+            # dangling "Suggested targets: " sentence Task 4 already found.
+            threshold = error.threshold
+            return AppError(
+                code="context_budget_unsatisfied",
+                title="Context budget does not fit this endpoint",
+                status=422,
+                detail=(
+                    f"compaction_threshold {threshold.value} is outside this "
+                    f"platform's bounds of {threshold.minimum} to "
+                    f"{threshold.maximum}. Choose a value inside them."
+                ),
+            )
         fit = error.fit
         if fit is None:
-            # Neither `summary` nor `fit` set is a construction bug in
-            # `ContextBudgetUnsatisfied` itself, not a state this route can
+            # None of `summary`, `threshold`, `fit` set is a construction bug
+            # in `ContextBudgetUnsatisfied` itself, not a state this route can
             # meaningfully describe to a caller.
-            raise TypeError("ContextBudgetUnsatisfied carries neither fit nor summary")
+            raise TypeError(
+                "ContextBudgetUnsatisfied carries neither fit, summary, nor threshold"
+            )
         # The advice travels with the refusal and is applied by nobody:
         # §7.4.2 requires the author accept or change it themselves.
         suggested = ", ".join(

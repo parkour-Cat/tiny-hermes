@@ -247,6 +247,14 @@ class ContextBudget(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     segments: tuple[SegmentOverride, ...] = ()
+    #: `None` means "use the platform default"
+    #: (`context_budget.DEFAULT_COMPACTION_THRESHOLD`), the same reading
+    #: every other unset field in this class gets. The bound here is only
+    #: what a ratio can mean at all — zero, negative, more than the whole
+    #: allowance; whether *this platform's* administrator allows the value
+    #: is a publish-time question (`AgentCatalog._check_compaction_threshold`),
+    #: because that answer is configuration this module cannot see.
+    compaction_threshold: float | None = Field(default=None, gt=0, le=1)
 
     @field_validator("segments")
     @classmethod
@@ -758,6 +766,16 @@ def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
         # platform table an absent budget means. A spec that declares none
         # carries no key, and hashes as it did before this field existed.
         normalized.pop("context_budget", None)
+    budget = normalized.get("context_budget")
+    # Same promise one field down, same reasoning as `summary_endpoint_id`
+    # below: `compaction_threshold` did not exist when `context_budget` did,
+    # so an Agent that names no ratio has to carry no key at all — otherwise
+    # every version published with a `segments` override, before this field
+    # existed, would hash differently the moment it was added.
+    if isinstance(budget, dict):
+        budget_document = cast(dict[str, object], budget)
+        if budget_document.get("compaction_threshold") is None:
+            budget_document.pop("compaction_threshold", None)
     if normalized.get("network") is None:
         # Same reasoning as `completion` and `context_budget`: there is no
         # default network *document*, only the absence of one, and a spec that

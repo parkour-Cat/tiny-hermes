@@ -39,6 +39,7 @@ from tiny_hermes.runs.application.tool_answers import (
     answer_skill_propose,
 )
 from tiny_hermes.runs.domain.context_budget import (
+    DEFAULT_COMPACTION_THRESHOLD,
     CompactionRecord,
     ContextPlan,
     SegmentName,
@@ -2381,7 +2382,19 @@ def _plan(
         memories=[fact.body for fact in context.memories],
         segments=(context.spec.context_budget or ContextBudget()).resolve(),
         stored_summary=stored_summary,
+        threshold=_compaction_threshold(context),
     )
+
+
+def _compaction_threshold(context: ExecutionContext) -> float:
+    """This Agent's ratio trigger, resolved the same way `_schema_allowance`
+    resolves a segment ceiling: read from the same `ContextBudget` the
+    planner uses, so an author who adjusted it gets the round they asked for.
+    """
+    budget = context.spec.context_budget
+    if budget is None or budget.compaction_threshold is None:
+        return DEFAULT_COMPACTION_THRESHOLD
+    return budget.compaction_threshold
 
 
 def _tool_schemas(

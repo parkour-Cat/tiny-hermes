@@ -31,6 +31,8 @@ from tiny_hermes.model_catalog.domain.models import ModelEndpoint
 from tiny_hermes.model_catalog.ports.store import ModelEndpointStore
 from tiny_hermes.outbound.domain.scope import OutboundScope, parse_entry
 from tiny_hermes.runs.domain.context_budget import (
+    MAX_COMPACTION_THRESHOLD,
+    MIN_COMPACTION_THRESHOLD,
     Accounting,
     BudgetFit,
     ContextWindow,
@@ -115,13 +117,33 @@ class SummaryEndpointWindowTooSmall:
     main_window: int
 
 
+@dataclass(frozen=True)
+class CompactionThresholdOutsideBounds:
+    """A declared ratio inside `ContextBudget`'s own `(0, 1]` but outside
+    what this platform's administrator configured.
+
+    §7.4.2 gives the ratio the same authority split the segment table has:
+    the field validator on `ContextBudget.compaction_threshold` only rules
+    out a value the type cannot mean at all, so a second, platform-specific
+    bound has to live here — where `DEFAULT_SEGMENTS`' own hard caps live for
+    the segment table, and where the check that reads it has this Agent's
+    endpoint in hand.
+    """
+
+    value: float
+    minimum: float
+    maximum: float
+
+
 class ContextBudgetUnsatisfied(AgentCatalogError):
     """The segment targets do not fit the endpoint, though the minimums do —
     or a declared summary endpoint's window is smaller than the main
-    endpoint's. One refusal code either way (`context_budget_unsatisfied`):
-    to an author, both mean "publish is refused until you change what you
-    asked for". Exactly one of `fit` / `summary` is set, and `routes.py`
-    reads whichever it is to build a message about the right thing.
+    endpoint's — or a declared compaction ratio is outside the platform's
+    configured bounds. One refusal code either way
+    (`context_budget_unsatisfied`): to an author, all three mean "publish is
+    refused until you change what you asked for". Exactly one of `fit` /
+    `summary` / `threshold` is set, and `routes.py` reads whichever it is to
+    build a message about the right thing.
 
     Carries the per-segment advice §7.4.2 asks for, and applies none of it. An
     author whose 4096-token tool schema budget were silently cut to 900 would
@@ -133,6 +155,7 @@ class ContextBudgetUnsatisfied(AgentCatalogError):
         fit: BudgetFit | None = None,
         *,
         summary: SummaryEndpointWindowTooSmall | None = None,
+        threshold: CompactionThresholdOutsideBounds | None = None,
     ) -> None:
         if summary is not None:
             message = (
@@ -140,13 +163,19 @@ class ContextBudgetUnsatisfied(AgentCatalogError):
                 f"{summary.summary_window}-token window, smaller than the "
                 f"main endpoint's {summary.main_window}"
             )
+        elif threshold is not None:
+            message = (
+                f"compaction_threshold {threshold.value} is outside this "
+                f"platform's bounds of {threshold.minimum} to {threshold.maximum}"
+            )
         elif fit is not None:
             message = f"{fit.asked} tokens of targets, {fit.allowance} available"
         else:
-            raise TypeError("ContextBudgetUnsatisfied needs either fit or summary")
+            raise TypeError("ContextBudgetUnsatisfied needs fit, summary, or threshold")
         super().__init__(message)
         self.fit = fit
         self.summary = summary
+        self.threshold = threshold
 
 
 class ContextWindowTooSmall(AgentCatalogError):
@@ -1136,6 +1165,31 @@ class AgentCatalog:
             raise ContextWindowTooSmall(fit.floor, fit.allowance)
         if not fit.targets_fit:
             raise ContextBudgetUnsatisfied(fit)
+        self._check_compaction_threshold(budget)
+
+    def _check_compaction_threshold(self, budget: ContextBudget) -> None:
+        """Refuse a declared ratio outside this platform's configured bounds.
+
+        `ContextBudget.compaction_threshold`'s own field validator already
+        refused a value outside `(0, 1]` at draft-save time — necessary, but
+        not this: an Agent author is only allowed to adjust *within* the
+        administrator's hard bounds (§7.4.2), the same split
+        `SegmentOverride.stay_inside_the_platform_caps` enforces for the
+        segment table. Those bounds are configuration this module can see and
+        `ContextBudget`'s own validator cannot, so the second check lives
+        here rather than on the field.
+        """
+        threshold = budget.compaction_threshold
+        if threshold is None:
+            return
+        if not (MIN_COMPACTION_THRESHOLD <= threshold <= MAX_COMPACTION_THRESHOLD):
+            raise ContextBudgetUnsatisfied(
+                threshold=CompactionThresholdOutsideBounds(
+                    value=threshold,
+                    minimum=MIN_COMPACTION_THRESHOLD,
+                    maximum=MAX_COMPACTION_THRESHOLD,
+                )
+            )
 
     async def _require_role(
         self, workspace_id: UUID, actor: Actor, allowed: set[Role]

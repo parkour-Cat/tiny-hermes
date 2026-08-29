@@ -249,6 +249,24 @@ IMAGE_TOKENS = 384
 #: requires, so the newest one survives whenever anything else can go instead.
 PROTECTED_RECENT_MESSAGES = 2
 
+#: The instance default, mirroring `DEFAULT_SEGMENTS`' role for the segment
+#: table: a platform administrator sets this and the hard bounds below, and
+#: an Agent author's `ContextBudget.compaction_threshold` adjusts within them
+#: (§7.4.2). A round that spends more than this fraction of the allowance is
+#: compacted even though it would still fit — the fix for a conversation that
+#: never gets close enough to the real edge to trigger the old criterion.
+DEFAULT_COMPACTION_THRESHOLD = 0.50
+
+#: The hard bounds an override may not cross. Checked at publish
+#: (`ContextBudgetUnsatisfied`, `AgentCatalog._check_compaction_threshold`)
+#: rather than by `ContextBudget`'s own `(0, 1]` field validator, which only
+#: rules out a ratio the type cannot mean at all — zero, negative, or more
+#: than the whole allowance. A value inside `(0, 1]` can still be outside
+#: what this platform's administrator configured, and only the publish check
+#: knows what that is.
+MIN_COMPACTION_THRESHOLD = 0.20
+MAX_COMPACTION_THRESHOLD = 0.90
+
 
 def estimate_tokens(text: str, tokenizer: str | None = None) -> int:
     """An upper bound on what this text will cost, in tokens.
@@ -719,6 +737,7 @@ def plan_context(
     memories: Sequence[str] = (),
     segments: Mapping[SegmentName, SegmentBudget] = DEFAULT_SEGMENTS,
     stored_summary: str | None = None,
+    threshold: float = DEFAULT_COMPACTION_THRESHOLD,
 ) -> ContextPlan:
     """Decide what this round sends.
 
@@ -743,6 +762,28 @@ def plan_context(
     caller's job. ``None`` falls back to `_summarize`'s structural summary,
     which is why every existing caller that never passes this keyword keeps
     seeing exactly what it saw before.
+
+    ``threshold`` changes only when the trim/compact cascade below is worth
+    entering, never what it may do once it has: a round that already fits
+    ``allowance`` but spends more than ``threshold`` of it is still walked
+    through steps one to four exactly as an overflowing one would be, and
+    every step keeps measuring "good enough to stop" against
+    ``allowance * threshold`` while `PROTECTED_RECENT_MESSAGES` and the
+    current request stay untouched, and step four's own accept test
+    (`spent <= allowance`, not the threshold) still governs how much of the
+    transcript compaction actually has to cover. That last point matters
+    most at a low threshold: without it, an aggressive setting would demand
+    compaction reach a target it can never satisfy without touching the two
+    things this function refuses to touch, and every round would end in
+    `paused(context_overflow)` instead of a small, harmless compaction.
+
+    ``threshold`` is also inert when structural compaction is not
+    geometrically possible at all — a history too short to have anything
+    outside `PROTECTED_RECENT_MESSAGES` and the current request. Trimming
+    tool results, unhit summaries or low-relevance memories can still make
+    such a round fit; forcing it past a low ratio anyway would only walk it
+    into step four's empty search range and out the bottom as
+    `paused(context_overflow)`, discarding a plan that already fit.
     """
     tokenizer = window.tokenizer
     allowance = window.input_allowance
@@ -785,6 +826,22 @@ def plan_context(
         (item.message for item in reversed(history) if item.message.role == "user"),
         None,
     )
+    # Step four's own boundary (the "Two things it may never reach" comment
+    # below), computed here rather than there: whether structural compaction
+    # is even geometrically possible does not depend on any trimming that
+    # happens between here and there, and `threshold`'s force-entry decision
+    # below needs the answer before step one runs.
+    protected = next(
+        (index for index, item in enumerate(history) if item.message is request),
+        len(history),
+    )
+    compactable = min(len(history) - PROTECTED_RECENT_MESSAGES, protected)
+    can_compact = compactable >= 2
+    # `threshold` only ever tightens this — see the docstring. When nothing
+    # could be compacted anyway, tightening it would just make every other
+    # step's "good enough" checks impossible to satisfy for no reason, so the
+    # cascade stays measured against `allowance` exactly as it always was.
+    trigger = allowance * threshold if can_compact else allowance
     # Skill summaries are in `fixed` because they are sent every round, but
     # they are not 不可裁剪内容 — step two of the order may take the unhit ones
     # out. So the floor is measured with them already gone: an Agent that bound
@@ -818,7 +875,7 @@ def plan_context(
 
     working = list(originals)
     spent = fixed + sum(_message_estimate(message, tokenizer) for message in working)
-    if spent <= allowance:
+    if spent <= trigger:
         return ContextPlan(
             messages=originals,
             fits=True,
@@ -829,11 +886,15 @@ def plan_context(
             memories=tuple(kept_memories),
         )
 
+    # `_trim_old_tool_results` still targets `allowance`, not `trigger`: how
+    # much of *this* segment a genuine overflow needs trimmed is a question
+    # about the real window, not about how early the cascade was entered —
+    # `threshold` decided that already, above.
     record = _trim_old_tool_results(working, tokenizer, fixed=fixed, allowance=allowance)
     if record is not None:
         trimmed.append(record)
         spent = fixed + sum(_message_estimate(message, tokenizer) for message in working)
-    if spent <= allowance:
+    if spent <= trigger:
         return ContextPlan(
             messages=tuple(working),
             fits=True,
@@ -859,7 +920,7 @@ def plan_context(
         surviving = tuple(item.text for item in kept)
         fixed -= kept_estimate - _summary_estimate(kept, tokenizer)
         spent = fixed + sum(_message_estimate(message, tokenizer) for message in working)
-        if spent <= allowance:
+        if spent <= trigger:
             return ContextPlan(
                 messages=tuple(working),
                 fits=True,
@@ -886,7 +947,7 @@ def plan_context(
             spent = fixed + sum(
                 _message_estimate(message, tokenizer) for message in working
             )
-            if spent <= allowance:
+            if spent <= trigger:
                 return ContextPlan(
                     messages=tuple(working),
                     fits=True,
@@ -902,15 +963,11 @@ def plan_context(
     # conversation is compacted as little as it can be rather than all at once.
     #
     # Two things it may never reach: the last turns, which 最近历史 keeps, and
-    # the current request, which §7.4.2 keeps whole. Both are computed as one
-    # ceiling before the walk starts rather than checked inside it — a bound
-    # the loop cannot step over is easier to be sure of than one it tests on
-    # its way past.
-    protected = next(
-        (index for index, item in enumerate(history) if item.message is request),
-        len(history),
-    )
-    compactable = min(len(working) - PROTECTED_RECENT_MESSAGES, protected)
+    # the current request, which §7.4.2 keeps whole. `protected` and
+    # `compactable` are that ceiling, computed above (`can_compact`) rather
+    # than here — a bound the loop cannot step over is easier to be sure of
+    # than one it tests on its way past, and `threshold`'s force-entry
+    # decision needed the same answer before step one ran.
     # Hints first, then without them. They cost tokens, and a summary carrying
     # them can be the difference between compaction fitting and not — at which
     # point the Run pauses with `context_overflow` and the person gets nothing
