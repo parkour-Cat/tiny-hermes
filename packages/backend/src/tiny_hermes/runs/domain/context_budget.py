@@ -357,6 +357,10 @@ class CompactionRecord:
     message_ids: tuple[UUID, ...]
     summary: str
     freed_estimate: int
+    #: Which of the two the model saw. A caller filtering a Run's history for
+    #: "was this compaction any good" needs this without re-parsing the
+    #: summary text, and the covered range alone cannot answer it.
+    source: str = "structural"
 
     @property
     def covered(self) -> int:
@@ -369,6 +373,7 @@ class CompactionRecord:
             "covered": self.covered,
             "message_ids": [str(value) for value in self.message_ids],
             "freed_estimate": self.freed_estimate,
+            "source": self.source,
         }
 
 
@@ -669,9 +674,14 @@ def _compact(
     tokenizer: str | None,
     *,
     with_hints: bool = True,
+    stored: str | None = None,
 ) -> tuple[CanonicalMessage, CompactionRecord]:
     covered = history[:through]
-    summary = _summarize(covered, with_hints=with_hints)
+    # A stored summary is model-written and already covers this range — §7.4.2
+    # gives structural compaction to the case where nothing was written, not
+    # to every round. Generating one anyway would spend the tokens `stored`
+    # exists to save and would not even be seen: `stored` wins below.
+    summary = stored if stored is not None else _summarize(covered, with_hints=with_hints)
     before = sum(_message_estimate(item.message, tokenizer) for item in covered)
     message = CanonicalMessage(
         role="user", blocks=(TextBlock(text=summary),), author="platform"
@@ -682,6 +692,7 @@ def _compact(
         message_ids=tuple(item.id for item in covered),
         summary=summary,
         freed_estimate=max(before - _message_estimate(message, tokenizer), 0),
+        source="model" if stored is not None else "structural",
     )
     return message, record
 
@@ -696,6 +707,7 @@ def plan_context(
     skill_summaries: Sequence[SkillSummary] = (),
     memories: Sequence[str] = (),
     segments: Mapping[SegmentName, SegmentBudget] = DEFAULT_SEGMENTS,
+    stored_summary: str | None = None,
 ) -> ContextPlan:
     """Decide what this round sends.
 
@@ -711,6 +723,15 @@ def plan_context(
     default, for the same reason the publish check resolves before it measures
     — an author who widened 技能摘要 is measured against what they widened it
     to, and one who narrowed it feels that on the next round.
+
+    ``stored_summary`` is a model-written summary the caller already has —
+    generated and persisted once, elsewhere, not here: this function has no
+    I/O, so it cannot fetch one and must not be handed the means to make one.
+    It does not know what range that summary covers, either; using what it is
+    given is all a pure function can do, and range correctness is the
+    caller's job. ``None`` falls back to `_summarize`'s structural summary,
+    which is why every existing caller that never passes this keyword keeps
+    seeing exactly what it saw before.
     """
     tokenizer = window.tokenizer
     allowance = window.input_allowance
@@ -884,10 +905,17 @@ def plan_context(
     # point the Run pauses with `context_overflow` and the person gets nothing
     # at all. Being able to search for a topic is worth less than the
     # conversation continuing, so it is the half that gets dropped.
-    for with_hints in (True, False):
+    #
+    # A `stored_summary` skips the second pass: hints are extracted from the
+    # structural summary `_compact` would otherwise generate, and `stored`
+    # replaces that text outright, so both passes would `_compact` to the same
+    # message. Running the second one anyway would not change the result —
+    # only spend the search again.
+    hint_passes = (True,) if stored_summary is not None else (True, False)
+    for with_hints in hint_passes:
         for through in range(2, max(compactable, 0) + 1):
             summary, compaction = _compact(
-                history, through, tokenizer, with_hints=with_hints
+                history, through, tokenizer, with_hints=with_hints, stored=stored_summary
             )
             candidate = [summary, *working[through:]]
             spent = fixed + sum(

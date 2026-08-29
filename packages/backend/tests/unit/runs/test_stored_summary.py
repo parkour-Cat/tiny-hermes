@@ -8,7 +8,6 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-
 from tiny_hermes.runs.domain.context_budget import ContextWindow, plan_context
 from tiny_hermes.runs.domain.models import CanonicalMessage, StoredMessage, TextBlock
 
@@ -80,7 +79,9 @@ def _all_text(messages: tuple[CanonicalMessage, ...]) -> list[str]:
     ]
 
 
-def test_a_stored_summary_is_what_the_model_sees(long_history) -> None:
+def test_a_stored_summary_is_what_the_model_sees(
+    long_history: tuple[StoredMessage, ...],
+) -> None:
     plan = _plan_with(long_history, stored_summary="用户在排查一条图片管道的故障。")
 
     assert plan.compacted is not None
@@ -89,7 +90,9 @@ def test_a_stored_summary_is_what_the_model_sees(long_history) -> None:
     assert plan.compacted.source == "model"
 
 
-def test_without_one_it_falls_back_to_the_structural_summary(long_history) -> None:
+def test_without_one_it_falls_back_to_the_structural_summary(
+    long_history: tuple[StoredMessage, ...],
+) -> None:
     plan = _plan_with(long_history, stored_summary=None)
 
     assert plan.compacted is not None
@@ -98,7 +101,9 @@ def test_without_one_it_falls_back_to_the_structural_summary(long_history) -> No
     assert plan.compacted.source == "structural"
 
 
-def test_the_stored_summary_is_not_used_when_nothing_is_compacted(short_history) -> None:
+def test_the_stored_summary_is_not_used_when_nothing_is_compacted(
+    short_history: tuple[StoredMessage, ...],
+) -> None:
     plan = _plan_with(short_history, stored_summary="不该出现")
 
     assert plan.compacted is None
