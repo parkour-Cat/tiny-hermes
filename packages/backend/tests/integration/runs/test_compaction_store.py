@@ -9,17 +9,29 @@ from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.store import StoredSummary
 
 
 @pytest.fixture
-async def store(engine: AsyncEngine) -> AsyncIterator[SqlRunStore]:
-    """A store bound to its own session, the same shape the Worker gets per slice."""
+async def db_session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
+    """One transaction, shared by `store` and the raw count query below.
+
+    `save_summary` and the row count under test have to see each other's
+    writes without a commit in between — the same reason
+    `test_withdrawal_reach.py`'s `db_session` fixture opens one transaction
+    and keeps every call in a test on it.
+    """
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory.begin() as session:
-        yield SqlRunStore(session)
+        yield session
+
+
+@pytest.fixture
+def store(db_session: AsyncSession) -> SqlRunStore:
+    return SqlRunStore(db_session)
 
 
 @pytest.fixture
@@ -58,12 +70,12 @@ async def test_a_summary_comes_back_as_it_went_in(
 
 
 async def test_a_second_summary_replaces_the_first(
-    store: SqlRunStore, seeded_session: tuple[UUID, UUID]
+    store: SqlRunStore, db_session: AsyncSession, seeded_session: tuple[UUID, UUID]
 ) -> None:
     session_id, workspace_id = seeded_session
-    for last, text in ((40, "第一份"), (72, "第二份")):
+    for last, text_ in ((40, "第一份"), (72, "第二份")):
         await store.save_summary(
-            StoredSummary(session_id, 1, last, text, "model", None, "m"),
+            StoredSummary(session_id, 1, last, text_, "model", None, "m"),
             workspace_id=workspace_id,
         )
 
@@ -72,6 +84,19 @@ async def test_a_second_summary_replaces_the_first(
     assert found is not None
     assert found.last_sequence == 72
     assert found.text == "第二份"
+
+    # `latest_summary` alone cannot tell "one row, updated twice" from "two
+    # rows, read back with the newest first" — a plain INSERT with no unique
+    # constraint would satisfy every assertion above while still keeping a
+    # history. Count the table directly, on the same transaction `store`
+    # wrote through, rather than inferring the count from the read path.
+    row_count = (
+        await db_session.execute(
+            text("SELECT count(*) FROM session_compactions WHERE session_id = :s"),
+            {"s": session_id},
+        )
+    ).scalar_one()
+    assert row_count == 1
 
 
 async def test_a_session_with_no_compaction_has_no_summary(
