@@ -20,6 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
+from tiny_hermes.agents.domain.models import EndpointModelPolicy
 from tiny_hermes.runs.domain.summary_prompt import summary_prompt
 from tiny_hermes.runs.ports.model import ModelRequest, ModelResponse, StopReason
 
@@ -51,21 +52,46 @@ def small_endpoint(client: TestClient, admin_csrf: str) -> str:
 
 
 @pytest.fixture
+def summary_endpoint(client: TestClient, admin_csrf: str) -> str:
+    """A second endpoint, distinct from `small_endpoint`, for the tests that
+    declare `summary_endpoint_id` and need to tell "the call went to the
+    Agent's own endpoint" apart from "the call went to the summary one" by
+    id rather than by size — same `context_window` as `SMALL_ENDPOINT` so it
+    never changes when compaction itself triggers, which is decided against
+    the *main* endpoint's window (`ContextBudget`/`ContextWindow`), not this
+    one's."""
+    created = client.post(
+        "/api/v1/model-endpoints",
+        headers={"X-CSRF-Token": admin_csrf},
+        json={
+            **SMALL_ENDPOINT,
+            "credential_ref": CREDENTIAL,
+            "name": f"acme-summary-{uuid4().hex[:8]}",
+        },
+    )
+    assert created.status_code == 201, created.text
+    return str(created.json()["id"])
+
+
+@pytest.fixture
 def agent_on_the_small_endpoint(
     client: TestClient, scope: dict[str, str], small_endpoint: str
 ) -> Any:
-    def build(tools: list[str] | None = None) -> str:
+    def build(tools: list[str] | None = None, summary_endpoint_id: str | None = None) -> str:
         alias = f"summary-{uuid4().hex[:8]}"
         agent = client.post(
             "/api/v1/agents", headers=scope, json={"name": "Summary", "alias": alias}
         ).json()
+        policy: dict[str, object] = {
+            "provider": "openai_compatible",
+            "endpoint_id": small_endpoint,
+        }
+        if summary_endpoint_id is not None:
+            policy["summary_endpoint_id"] = summary_endpoint_id
         spec = {
             **VALID_SPEC,
             "tools": tools or [],
-            "model_policy": {
-                "provider": "openai_compatible",
-                "endpoint_id": small_endpoint,
-            },
+            "model_policy": policy,
         }
         draft = client.put(
             f"/api/v1/agents/{agent['id']}/draft",
@@ -101,6 +127,20 @@ def _is_summary_request(request: ModelRequest) -> bool:
         return False
     said = request.messages[0].text
     return _FRESH_MARKER in said or _UPDATE_MARKER in said
+
+
+def _endpoint_of(request: ModelRequest) -> UUID | None:
+    """Which endpoint this request would actually be dispatched to.
+
+    `drive()` hands the spy to `WorkerRuntime` as `model=`, standing directly
+    in for `ModelProvider` — the same seam a real `ModelRouter.complete`
+    reads `request.policy.endpoint_id` from to pick which endpoint answers
+    (`model_router.py`). Reading `request.policy` here is that boundary, not
+    a value read back from `_summary_policy` before the call was ever made —
+    the distinction the routing tests below exist to keep.
+    """
+    policy = request.policy
+    return policy.endpoint_id if isinstance(policy, EndpointModelPolicy) else None
 
 
 class SummarizingRecording:
@@ -721,4 +761,74 @@ async def test_a_saved_summary_records_which_model_wrote_it(
     assert stored is not None
     assert stored["endpoint_id"] is not None
     assert stored["model"] == SMALL_ENDPOINT["model"]
+
+
+# -- Task 4: a declared summary endpoint actually changes where the call goes
+
+
+async def test_the_summary_call_is_routed_to_the_declared_summary_endpoint(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    agent_on_the_small_endpoint: Any,
+    small_endpoint: str,
+    summary_endpoint: str,
+) -> None:
+    """`test_a_saved_summary_records_which_model_wrote_it` above only proves
+    what got written to `session_compactions` afterward — an implementation
+    that resolved the summary endpoint correctly for that one row but never
+    actually dispatched the call to it would still pass that test. This
+    proves the call itself: what `request.policy.endpoint_id` was on the
+    exact `ModelRequest` the spy received, at the same boundary a real
+    `ModelRouter` would read it from (`_endpoint_of`).
+
+    Both halves matter. Only checking the summary call would miss a bug that
+    routes the *ordinary* round to the summarizer too — worse than not
+    routing at all, since it would answer the user's own turn from the wrong
+    model.
+    """
+    agent = agent_on_the_small_endpoint(summary_endpoint_id=summary_endpoint)
+    session = start_session(client, scope, agent)
+    session_id = UUID(session)
+    workspace_id = UUID(scope["X-Workspace-Id"])
+    await _seed_old_turns(engine, session_id, workspace_id)
+
+    model = SummarizingRecording(says("nothing is left"))
+    run = ask(client, scope, session, "and what is left?")
+    await drive(engine, model, None)
+
+    assert status(client, scope, run)["status"] == "completed"
+    assert model.calls == 1
+    assert _endpoint_of(model.summary_requests[0]) == UUID(summary_endpoint)
+
+    ordinary = [request for request in model.requests if not _is_summary_request(request)]
+    assert ordinary
+    assert all(_endpoint_of(request) == UUID(small_endpoint) for request in ordinary)
+
+
+async def test_no_summary_endpoint_means_the_summary_call_uses_the_agent_s_own(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    agent_on_the_small_endpoint: Any,
+    small_endpoint: str,
+) -> None:
+    """The default half of the same claim: an Agent that names no separate
+    summary endpoint gets its summarization call dispatched to its own —
+    not merely a policy object that says so (`_summary_policy`'s own return
+    value), but the request as the spy actually received it.
+    """
+    agent = agent_on_the_small_endpoint()
+    session = start_session(client, scope, agent)
+    session_id = UUID(session)
+    workspace_id = UUID(scope["X-Workspace-Id"])
+    await _seed_old_turns(engine, session_id, workspace_id)
+
+    model = SummarizingRecording(says("nothing is left"))
+    run = ask(client, scope, session, "and what is left?")
+    await drive(engine, model, None)
+
+    assert status(client, scope, run)["status"] == "completed"
+    assert model.calls == 1
+    assert _endpoint_of(model.summary_requests[0]) == UUID(small_endpoint)
 

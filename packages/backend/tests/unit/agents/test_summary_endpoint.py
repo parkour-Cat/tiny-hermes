@@ -12,7 +12,11 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
-from tiny_hermes.agents.application.service import AgentCatalog, ContextBudgetUnsatisfied
+from tiny_hermes.agents.application.service import (
+    AgentCatalog,
+    ContextBudgetUnsatisfied,
+    ModelEndpointUnavailable,
+)
 from tiny_hermes.agents.domain.models import AgentSpec, AgentVersion
 from tiny_hermes.agents.infrastructure.memory_store import MemoryAgentStore
 from tiny_hermes.model_catalog.domain.models import (
@@ -38,7 +42,9 @@ def reset_endpoints() -> None:
     _ENDPOINTS.clear()
 
 
-def _endpoint(context_window: int) -> ModelEndpoint:
+def _endpoint(
+    context_window: int, *, status: EndpointStatus = EndpointStatus.ACTIVE
+) -> ModelEndpoint:
     now = datetime.now(UTC)
     endpoint = ModelEndpoint(
         id=uuid4(),
@@ -51,7 +57,7 @@ def _endpoint(context_window: int) -> ModelEndpoint:
             usage_quality=UsageQuality.PROVIDER,
             credential_ref="TINY_HERMES_MODEL_KEY_ACME",
         ),
-        status=EndpointStatus.ACTIVE,
+        status=status,
         created_by=uuid4(),
         created_at=now,
         updated_at=now,
@@ -124,3 +130,26 @@ async def test_no_summary_endpoint_means_the_agent_s_own(publisher: _Publisher) 
 
     spec = AgentSpec.model_validate(version.spec)
     assert spec.model_policy.summary_endpoint_id is None  # type: ignore[union-attr]
+
+
+async def test_a_deactivated_summary_endpoint_is_refused_at_publish(
+    publisher: _Publisher,
+) -> None:
+    """The realistic way this state is reached: a tenant deactivates an
+    endpoint an Agent still names, rather than a typo naming one that never
+    existed. `_check_summary_endpoint` treats both the same
+    (`not endpoint.is_selectable`), and this pins the one an operator can
+    actually cause."""
+    main = _endpoint(128_000)
+    disabled = _endpoint(128_000, status=EndpointStatus.DISABLED)
+    spec: dict[str, object] = {
+        **valid_spec(),
+        "model_policy": {
+            "provider": "openai_compatible",
+            "endpoint_id": str(main.id),
+            "summary_endpoint_id": str(disabled.id),
+        },
+    }
+
+    with pytest.raises(ModelEndpointUnavailable):
+        await publisher.publish(spec)
