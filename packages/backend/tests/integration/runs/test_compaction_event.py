@@ -60,7 +60,7 @@ def agent_on_the_small_endpoint(
         agent = client.post(
             "/api/v1/agents", headers=scope, json={"name": "CompactionEvent", "alias": alias}
         ).json()
-        spec = {
+        spec: dict[str, Any] = {
             **VALID_SPEC,
             "tools": [],
             "model_policy": {"provider": "openai_compatible", "endpoint_id": small_endpoint},

@@ -367,6 +367,17 @@ class CompactionRecord:
         return len(self.message_ids)
 
     def payload(self) -> dict[str, Any]:
+        # Deliberately no `endpoint_id`/`model` here. This module has no I/O
+        # (module docstring) and a `CompactionRecord` is built by `_plan`,
+        # which only ever sees a summary as text — it cannot resolve which
+        # endpoint wrote it, and must not gain a store dependency just to
+        # try. The `CONTEXT_COMPACTED` event still needs both, so the Worker
+        # (`worker.py::_record_planning`) adds them when it writes the event,
+        # reading them back from the same `session_compactions` row
+        # `_save_summary` just persisted. `source` is the seam between the
+        # two: it is the one fact this module can state on its own, and it
+        # is what tells the Worker whether there is an endpoint to look up
+        # at all (`source == "model"`) or nothing to find (`"structural"`).
         return {
             "first_sequence": self.first_sequence,
             "last_sequence": self.last_sequence,

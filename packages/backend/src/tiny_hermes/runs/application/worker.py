@@ -1556,9 +1556,36 @@ class WorkerRuntime:
                 claimed, RunEventType.CONTEXT_TRIMMED, record.payload()
             )
         if plan.compacted is not None:
-            await self._append_event(
-                claimed, RunEventType.CONTEXT_COMPACTED, plan.compacted.payload()
-            )
+            payload = plan.compacted.payload()
+            endpoint_id, model = await self._compaction_authorship(claimed, plan.compacted)
+            payload["endpoint_id"] = endpoint_id
+            payload["model"] = model
+            await self._append_event(claimed, RunEventType.CONTEXT_COMPACTED, payload)
+
+    async def _compaction_authorship(
+        self, claimed: ClaimedRun, compacted: CompactionRecord
+    ) -> tuple[str | None, str | None]:
+        """Which endpoint and model wrote this compaction's summary, for the
+        `CONTEXT_COMPACTED` event.
+
+        `context_budget.py` has no I/O and cannot resolve this itself (see
+        `CompactionRecord.payload`'s comment) — it only knows `source`. A
+        `"structural"` record names no endpoint because none was called, the
+        same reason `StoredSummary.endpoint_id` is `None` on that path.
+
+        A `"model"` record means `_plan_context` just built this plan from
+        the Session's one stored summary row (reused from step 2, or just
+        written by `_save_summary` in step 5) — `session_compactions` is
+        upserted, never appended, so `latest_summary` reads back exactly
+        that row, not some other compaction's.
+        """
+        if compacted.source != "model":
+            return None, None
+        stored = await self._latest_summary(claimed.run.session_id)
+        if stored is None:
+            return None, None
+        endpoint_id = str(stored.endpoint_id) if stored.endpoint_id is not None else None
+        return endpoint_id, stored.model
 
     async def _plan_context(
         self,
