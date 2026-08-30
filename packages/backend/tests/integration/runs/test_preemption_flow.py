@@ -27,6 +27,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from tiny_hermes.runs.application.worker import WorkerRuntime
 from tiny_hermes.runs.domain.models import RunCapabilities, RunSnapshot
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.model import ModelRequest, ModelResponse
@@ -367,3 +368,57 @@ async def test_a_run_with_nobody_waiting_keeps_going(
     await worker.run_one_slice()
 
     assert (await store.read_run(running.id)).state.value != "completed"
+
+
+def _agent_with_no_declared_completion(client: TestClient, scope: dict[str, str]) -> str:
+    """An Agent whose Run finishes the moment the model says so — no
+    completion condition means `evidence.declared` is false and `judge()`
+    returns `done` straight off `StopReason.COMPLETED`, without ever
+    reaching the branch `user_waiting` matters to.
+    """
+    alias = f"plain-{uuid4().hex[:8]}"
+    agent = client.post(
+        "/api/v1/agents", headers=scope, json={"name": "Plain", "alias": alias}
+    ).json()
+    draft = client.put(
+        f"/api/v1/agents/{agent['id']}/draft",
+        headers=scope,
+        json={"expected_revision": 1, "spec": VALID_SPEC},
+    ).json()
+    published = client.post(
+        f"/api/v1/agents/{agent['id']}/publish",
+        headers=scope,
+        json={"expected_revision": draft["revision"]},
+    )
+    assert published.status_code in (200, 201), published.text
+    return str(agent["id"])
+
+
+async def test_a_done_round_never_bothers_checking_for_a_waiting_run(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+) -> None:
+    """MINOR 4: `_has_waiting_run` opens its own transaction every round,
+    including rounds `decide_after_round` was never going to consult it for
+    — a round judged `done` returns before `user_waiting` is ever read. That
+    query is a discarded round-trip in exactly this, the common, case.
+    """
+    calls = 0
+    original = WorkerRuntime._has_waiting_run
+
+    async def counting(self: WorkerRuntime, claimed: Any) -> bool:
+        nonlocal calls
+        calls += 1
+        return await original(self, claimed)
+
+    monkeypatch.setattr(WorkerRuntime, "_has_waiting_run", counting)
+
+    agent = _agent_with_no_declared_completion(client, scope)
+    session_id = _new_session(client, scope, agent)
+    _submit_into(client, scope, session_id, "only")
+
+    await drive(engine, Recording(claims_done("all done")), ScriptedSandbox())
+
+    assert calls == 0
