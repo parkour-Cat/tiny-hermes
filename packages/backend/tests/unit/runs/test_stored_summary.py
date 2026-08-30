@@ -8,7 +8,11 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from tiny_hermes.runs.domain.context_budget import ContextWindow, plan_context
+from tiny_hermes.runs.domain.context_budget import (
+    ContextWindow,
+    CoveredSummary,
+    plan_context,
+)
 from tiny_hermes.runs.domain.models import CanonicalMessage, StoredMessage, TextBlock
 
 RULES = "Stay inside the platform."
@@ -52,7 +56,7 @@ def short_history() -> tuple[StoredMessage, ...]:
 
 
 def _plan_with(
-    history: tuple[StoredMessage, ...], *, stored_summary: str | None
+    history: tuple[StoredMessage, ...], *, stored_summary: CoveredSummary | None
 ):
     return plan_context(
         window=WINDOW,
@@ -82,7 +86,10 @@ def _all_text(messages: tuple[CanonicalMessage, ...]) -> list[str]:
 def test_a_stored_summary_is_what_the_model_sees(
     long_history: tuple[StoredMessage, ...],
 ) -> None:
-    plan = _plan_with(long_history, stored_summary="用户在排查一条图片管道的故障。")
+    plan = _plan_with(
+        long_history,
+        stored_summary=CoveredSummary(text="用户在排查一条图片管道的故障。", last_sequence=4),
+    )
 
     assert plan.compacted is not None
     text = _first_text(plan.messages)
@@ -104,7 +111,58 @@ def test_without_one_it_falls_back_to_the_structural_summary(
 def test_the_stored_summary_is_not_used_when_nothing_is_compacted(
     short_history: tuple[StoredMessage, ...],
 ) -> None:
-    plan = _plan_with(short_history, stored_summary="不该出现")
+    plan = _plan_with(
+        short_history, stored_summary=CoveredSummary(text="不该出现", last_sequence=1)
+    )
 
     assert plan.compacted is None
     assert "不该出现" not in "".join(_all_text(plan.messages))
+
+
+@pytest.fixture
+def room_to_spare() -> tuple[StoredMessage, ...]:
+    """Long enough to compact, short enough that compacting the first two
+    turns is already enough — so the boundary search stops well before the end
+    of any range a stored summary is likely to cover."""
+    return _stored(
+        _says("the task, stated at some length: " + "t" * 550),
+        *(_says(f"round {index}: " + "w" * 200, role="assistant") for index in range(5)),
+        _says("what is left?"),
+    )
+
+
+def test_the_search_settles_early_when_there_is_room(
+    room_to_spare: tuple[StoredMessage, ...],
+) -> None:
+    """Pinned so the test below has a number to be about: without a stored
+    summary this shape compacts two turns and stops, because two is enough."""
+    plan = _plan_with(room_to_spare, stored_summary=None)
+
+    assert plan.compacted is not None
+    assert plan.compacted.last_sequence == 2
+
+
+def test_a_stored_summary_compacts_exactly_the_range_it_explains(
+    room_to_spare: tuple[StoredMessage, ...],
+) -> None:
+    """一份解释 1–5 的摘要，不能只顶替 1–2。
+
+    顶替少了不丢东西，坏的是另外两件：模型同时读到一份说「1–5 发生了这些」的
+    摘要和 3–5 的原文；`CONTEXT_COMPACTED` 说 `covered=2`、`freed_estimate`
+    也按两条算——运维照着这条记录去查模型读到了什么，读到的是一份少说了三条的
+    账。
+
+    所以边界不是搜出来的：摘要写下来时就已经说明了它解释到哪，`plan_context`
+    钉在那里，装不下就整份不用（`_honestly_widens` 那条回退路）。
+    """
+    covered = CoveredSummary(text="1 到 5 轮里用户确认了参数并让我继续。", last_sequence=5)
+
+    plan = _plan_with(room_to_spare, stored_summary=covered)
+
+    assert plan.fits
+    assert plan.compacted is not None
+    assert plan.compacted.last_sequence == 5
+    assert plan.compacted.covered == 5
+    assert "1 到 5 轮里用户确认了参数并让我继续。" in _first_text(plan.messages)
+    # 3–5 顶替掉了，不该再以原文出现一遍。
+    assert "round 2: " not in "".join(_all_text(plan.messages))
