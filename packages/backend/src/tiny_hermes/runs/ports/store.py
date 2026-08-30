@@ -653,10 +653,24 @@ class RunStore(Protocol):
         ...
 
     async def has_waiting_run(
-        self, session_id: UUID, run_started_at: datetime | None
+        self, session_id: UUID, run_id: UUID, run_started_at: datetime | None
     ) -> bool:
-        """Is there a `queued` Run in this Session created after
-        `run_started_at` — the current Run's own `started_at`.
+        """Would preempting `run_id` actually get a message handled right
+        away.
+
+        Not "does a `queued` Run exist somewhere behind me" — "is the Run
+        that `_terminalize` would actually hand the Session head to, itself
+        `queued` and created after `run_started_at`". The two are different
+        questions: `_terminalize` always hands the head to the earliest
+        `session_sequence` non-terminal Run, whichever status it is in. If a
+        `paused`/`interrupted`/`waiting_*` sibling sits closer to the head
+        than some later `queued` Run — reachable from the public API, e.g. a
+        user pauses a `queued` Run and only then sends a new message —
+        checking "does *some* `queued` Run exist" says yes while the Run that
+        actually becomes head is the paused one, which `claim_head`
+        (`_select_claimable`, `status == 'queued'`) will never pick up. The
+        Session stalls on a Run nobody will claim, and the arriving message
+        is never reached — exactly what preemption exists to prevent.
 
         v2.9.1 narrowed §12.1: the trigger is "arrived after I began
         executing", not "sits behind me in the queue". A burst of messages a
@@ -665,25 +679,15 @@ class RunStore(Protocol):
         `session_sequence`-behind-me test that whole queue preempted itself,
         so every message but the last got exactly one round.
 
-        `session_sequence` is dropped rather than reused as the bound: it
-        encodes *my own* position in the queue at the moment *I* was created,
-        which has nothing to say about the moment I actually started
+        `session_sequence` is not the bound compared against `run_started_at`:
+        it encodes *my own* position in the queue at the moment *I* was
+        created, which has nothing to say about the moment I actually started
         executing — a Run claimed five minutes after it was created has the
-        same `session_sequence` either way. The new question needs a clock
-        reading from when I started, and `started_at` is the only column that
-        is one; the other Run is compared by its own `created_at`, because
-        "did you arrive after that moment" is a time question, not a queue
-        position one.
-
-        The status filter is `== 'queued'`, not "non-terminal": `claim_head`
-        only ever picks up a Run whose status is `queued` — `paused`,
-        `interrupted` and the `waiting_*` states are all non-terminal, but
-        none of them is something a Worker will claim. Preemption's whole
-        point is handing the head to a Run that gets the arriving message
-        processed right away (§12.1: "使那条消息立即得到处理"); handing it to
-        anything else leaves the Session `completed` out from under itself
-        and stalled on a Run nothing will pick up, which is worse than not
-        preempting at all.
+        same `session_sequence` either way. `session_sequence` is still how
+        the successor is *found* (it orders the same query `_terminalize`
+        runs), but whether that successor counts as "waiting" is a time
+        question — its own `created_at` against `run_started_at` — not a
+        queue-position one.
 
         `None` in means this Run has no `started_at` to compare against — it
         answers `False` rather than guessing, because nothing can honestly be

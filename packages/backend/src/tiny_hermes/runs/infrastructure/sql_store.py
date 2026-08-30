@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, exists, func, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -962,9 +962,9 @@ class SqlRunStore:
         )
 
     async def has_waiting_run(
-        self, session_id: UUID, run_started_at: datetime | None
+        self, session_id: UUID, run_id: UUID, run_started_at: datetime | None
     ) -> bool:
-        """是否有一条消息是在这个 Run 开始执行之后才到、且现在真能被领走的。
+        """会不会因为让位真的让一条消息立即得到处理。
 
         v2.9.1 把 §12.1 的判据从「后面排着」收窄成「在我开始之后才到」：连发的
         几条消息各自建 Run，在第一条被 Worker 认领之前就已经排好队（§566），若
@@ -975,33 +975,44 @@ class SqlRunStore:
         变。真正标记「我开始」的只有 `started_at`；拿它去比对方的 `created_at`，
         才是一个关于时间先后、而不是队列位置的问题。
 
-        状态过滤是 `== 'queued'`，不是「非终态」：`_select_claimable` 领走的
-        只有 `status == 'queued'` 的 Run；`paused`、`interrupted`、
-        `waiting_*` 都不终态，但同样不是 `claim_head` 会碰的对象。让位的意义
-        是「把队首交给一个马上能被领走、真正处理那条消息的 Run」（§12.1：
-        「使那条消息立即得到处理」）——如果让给的是一个只有暂停恢复或超时才会
-        再动的 Run，头顶 Run 结束成 `completed`，Session 却卡在一个没有
-        Worker 会去领的位置上，比不让位更糟。
+        问的不是「后面有没有一条 queued 的消息」，是「我一旦终态、`_terminalize`
+        真正会把队首交给谁，那个 Run 是不是 queued、是不是在我开始之后才到」。
+        两个问题不等价：`_terminalize` 挑的是 `session_sequence` 最小的那个
+        非终态 Run，不管它是什么状态——如果队首和我之间还夹着一个更早、状态是
+        `paused`/`interrupted`/`waiting_*` 的同胞（比如用户对着一个排在我
+        后面的 queued Run 点了暂停），那个同胞才是真正的继任者，不是后面随便
+        哪条 queued 的消息。只看「存在 queued 消息」会在这种情况下照样让位，
+        队首却交给一个 `claim_head`（`_select_claimable` 要求
+        `status == 'queued'`）永远不会去领的 Run——Session 卡住，比不让位更糟。
+        这里的查询刻意复刻 `_terminalize` 挑继任者的那条语句
+        （`session_id` 匹配、排除自己、非终态、按 `session_sequence` 取最小的
+        一条），只在最后多判两件事：那条 Run 是不是 `queued`、是不是在
+        `run_started_at` 之后创建的。
 
         `run_started_at` 为 `None` 时直接判 `False`：一个从未发生过的时刻，不能
         拿来说别的 Run「在它之后」到达。`_has_waiting_run` 只在认领之后才调用这
         个方法，届时 `started_at` 必已写入，这一分支因此是防御性的，不是当前会
         走到的路径。
-
-        `EXISTS` 而不是取回行：调用方只需要真假，而一个 Session 后面可能排着很多条。
         """
         if run_started_at is None:
             return False
-        return bool(
-            await self._session.scalar(
-                select(
-                    exists().where(
-                        RunRow.session_id == session_id,
-                        RunRow.created_at > run_started_at,
-                        RunRow.status == RunState.QUEUED.value,
-                    )
+        successor = (
+            await self._session.execute(
+                select(RunRow.status, RunRow.created_at)
+                .where(
+                    RunRow.session_id == session_id,
+                    RunRow.id != run_id,
+                    RunRow.status.not_in(tuple(s.value for s in TERMINAL_STATES)),
                 )
+                .order_by(RunRow.session_sequence)
+                .limit(1)
             )
+        ).first()
+        if successor is None:
+            return False
+        return (
+            successor.status == RunState.QUEUED.value
+            and successor.created_at > run_started_at
         )
 
     async def withdrawable(

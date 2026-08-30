@@ -396,7 +396,8 @@ class WorkerRuntime:
             )
 
     async def _has_waiting_run(self, claimed: ClaimedRun) -> bool:
-        """§12.1: did a message arrive in this Session after this Run started?
+        """§12.1: would giving up the head right now actually get a message
+        handled, rather than just stop this Run?
 
         Queried fresh every round, at the same cost `_cost_precheck` pays to
         read the budget, rather than cached on the claim: caching would let
@@ -405,14 +406,16 @@ class WorkerRuntime:
         can become true partway through a Run that has been going for a
         while.
 
-        `claimed.run.started_at`, not `session_sequence` — v2.9.1's frame of
-        reference is when *this* Run began executing, and `started_at` is the
-        column that says so; see `SqlRunStore.has_waiting_run` for why a queue
-        position cannot answer the same question.
+        `claimed.run.id` is passed so the store can find *the* successor —
+        the same Run `_terminalize` would hand the head to — rather than
+        asking whether some `queued` Run exists anywhere behind this one; see
+        `SqlRunStore.has_waiting_run` for why those are different questions.
+        `claimed.run.started_at`, not `session_sequence`, is the frame of
+        reference: v2.9.1's rule is about when *this* Run began executing.
         """
         async with self._sessions.begin() as session:
             return await SqlRunStore(session).has_waiting_run(
-                claimed.run.session_id, claimed.run.started_at
+                claimed.run.session_id, claimed.run.id, claimed.run.started_at
             )
 
     async def _execute_slice(self, claimed: ClaimedRun) -> None:
