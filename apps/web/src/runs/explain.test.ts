@@ -6,12 +6,17 @@ import { eventNote, fill, outcomeLabel, statusNote } from "./explain";
 
 function situation(
   status: string,
-  { pause = null, wait = null }: { pause?: string | null; wait?: string | null } = {},
+  {
+    pause = null,
+    wait = null,
+    preempted = false,
+  }: { pause?: string | null; wait?: string | null; preempted?: boolean } = {},
 ) {
   return {
     status,
     pause_reason: pause,
     wait_kind: wait,
+    goal: { round: null, outcome: null, unmet: [], preempted },
   } as Parameters<typeof statusNote>[0];
 }
 
@@ -45,6 +50,18 @@ test("a run that overflowed the window says nothing was sent", () => {
 test("a run that is simply working needs no note", () => {
   expect(statusNote(situation("running"))).toBeNull();
   expect(statusNote(situation("completed"))).toBeNull();
+});
+
+test("a completed run says so when its goal was preempted rather than earned", () => {
+  // §12.1: a Run that never reached its own goal must not read as an
+  // ordinary success just because its status is `completed` — this is the
+  // rendering-layer check for that; `document()` carrying the fact is not
+  // enough if nothing built on it ever branches on it.
+  expect(statusNote(situation("completed", { preempted: true }))).toBe("runPreemptedNote");
+});
+
+test("a completed run that actually finished is not mistaken for a preempted one", () => {
+  expect(statusNote(situation("completed", { preempted: false }))).toBeNull();
 });
 
 test("every verdict the judge can return has a word", () => {
