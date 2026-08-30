@@ -1002,9 +1002,37 @@ def plan_context(
                     memories=tuple(kept_memories),
                 )
 
-    # Compaction did not make it fit. §7.4.2: 压缩失败后保留原文；若保留原文又
-    # 无法装入窗口，Run 进入 paused(context_overflow). The originals go back
-    # untouched, and the caller stops rather than deleting anything.
+    # Compaction did not make it fit — which since `threshold` exists is no
+    # longer the same question as "this round cannot be sent". A round over
+    # the ratio but under `allowance` is walked through the whole cascade, and
+    # step four's search can come back empty on it (one candidate boundary,
+    # and a summary dearer than the turns it stands in for), leaving a plan
+    # that fits the window perfectly well. `fits=False` here would be read by
+    # the Worker as `paused(context_overflow)` — a Run stopped for spending
+    # half its window. So the last word belongs to `allowance`, not to the
+    # search: the compaction was optional, the round is not.
+    #
+    # `working` rather than `originals`, because the trim records above
+    # describe `working` — returning the untrimmed list beside events saying
+    # tool results were replaced would be a plan that does not match its own
+    # account of itself.
+    kept_intact = fixed + sum(
+        _message_estimate(message, tokenizer) for message in working
+    )
+    if kept_intact <= allowance:
+        return ContextPlan(
+            messages=tuple(working),
+            fits=True,
+            input_estimate=kept_intact,
+            allowance=allowance,
+            trimmed=tuple(trimmed),
+            skill_summaries=surviving,
+            memories=tuple(kept_memories),
+        )
+
+    # §7.4.2: 压缩失败后保留原文；若保留原文又无法装入窗口，Run 进入
+    # paused(context_overflow). The originals go back untouched, and the
+    # caller stops rather than deleting anything.
     return ContextPlan(
         messages=originals,
         fits=False,
