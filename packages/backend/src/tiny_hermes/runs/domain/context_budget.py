@@ -748,6 +748,43 @@ def _compact(
     return message, record
 
 
+def _splits_a_tool_pair(history: Sequence[StoredMessage], through: int) -> bool:
+    """Whether cutting after the first ``through`` messages severs a
+    ``tool_calls`` message from a ``tool`` message answering it.
+
+    §7.4.2: 工具调用与工具结果不能拆开. This is the failure a real Feishu run
+    hit: message-count boundaries do not know a call from a result, so a cut
+    that happened to land between the two produced a `tool` message with no
+    call ahead of it, and the provider refused the whole request. Every other
+    boundary this module ever chooses is internally consistent on its own
+    terms — nothing is dropped, nothing is reordered — so nothing else in the
+    module needed to ask this question; a boundary is only wrong in the sense
+    that matters here, which is what the provider on the other end checks.
+
+    Only the forward direction is possible to get wrong: a `tool` message can
+    never precede the `tool_calls` message that produced its `call_id`, so a
+    result that ends up covered always has its call covered too. What can
+    happen is the call landing in ``history[:through]`` while its answer
+    survives in ``history[through:]`` — checked by comparing the two sets of
+    ids directly, which is exact instead of assuming the answer always
+    follows its call by exactly one message the way this module's own
+    ``called``/``answered`` helpers happen to construct it in tests.
+    """
+    called_ids = {
+        block.call_id
+        for item in history[:through]
+        for block in item.message.blocks
+        if isinstance(block, ToolCallBlock)
+    }
+    if not called_ids:
+        return False
+    return any(
+        isinstance(block, ToolResultBlock) and block.call_id in called_ids
+        for item in history[through:]
+        for block in item.message.blocks
+    )
+
+
 def plan_context(
     *,
     window: ContextWindow,
@@ -1016,7 +1053,23 @@ def plan_context(
     # any smaller one would.
     stored_text = None if stored_summary is None else stored_summary.text
     hint_passes = (True,) if stored_summary is not None else (True, False)
-    boundaries: Sequence[int] = range(2, max(compactable, 0) + 1)
+    # Filtered rather than stepped-over: the search below already walks
+    # `through` upward and stops at the first candidate that fits, so leaving
+    # an illegal `through` out of this sequence *is* "refuse it and try the
+    # next" — no separate advancing step is needed, and the smallest surviving
+    # candidate is, by construction, the smallest one that both fits and does
+    # not orphan a `tool` message. When every candidate in [2, compactable]
+    # would split some pair, `boundaries` is empty and the loop below simply
+    # never runs — falling through to the same "compaction did not help"
+    # ending step four already had for a search that found nothing, which
+    # keeps the guarantee this function's docstring already makes: a plan that
+    # already fits is returned untouched, and one that does not fit pauses
+    # with its originals intact rather than compacting to an invalid shape.
+    boundaries: Sequence[int] = tuple(
+        through
+        for through in range(2, max(compactable, 0) + 1)
+        if not _splits_a_tool_pair(history, through)
+    )
     if stored_summary is not None:
         # `+ 1` because `through` is a count of leading messages, not an index.
         # An unknown sequence, or one already inside the protected tail, leaves
@@ -1030,7 +1083,23 @@ def plan_context(
             ),
             None,
         )
-        boundaries = () if pinned is None or not 2 <= pinned <= compactable else (pinned,)
+        # A pinned boundary that splits a pair is refused outright rather than
+        # advanced past the orphaned result the way the unpinned search above
+        # is free to be. Advancing would compact turns the stored text was
+        # never asked to explain — the same "walked past its own range"
+        # failure `_honestly_widens` exists to catch on the read side, just
+        # produced here on the write side instead. Refusing leaves
+        # `boundaries` empty, `compacted` comes back `None`, and
+        # `worker.py::_plan_context` already treats that as a generation
+        # failure and falls back to its own structural (unpinned) plan — whose
+        # search is free to advance past the same pair because it never
+        # claimed to explain only the shorter range.
+        if pinned is not None and 2 <= pinned <= compactable and not _splits_a_tool_pair(
+            history, pinned
+        ):
+            boundaries = (pinned,)
+        else:
+            boundaries = ()
     for with_hints in hint_passes:
         for through in boundaries:
             summary, compaction = _compact(
