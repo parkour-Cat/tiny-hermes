@@ -406,10 +406,14 @@ class WorkerRuntime:
         can become true partway through a Run that has been going for a
         while.
 
-        `claimed.run.id` is passed so the store can find *the* successor —
-        the same Run `_terminalize` would hand the head to — rather than
-        asking whether some `queued` Run exists anywhere behind this one; see
-        `SqlRunStore.has_waiting_run` for why those are different questions.
+        `claimed.run.id` is passed because the store asks **two** questions
+        with it, about two different Runs: whether *the* successor — the same
+        Run `_terminalize` would hand the head to — is claimable, and whether
+        *some* `queued` sibling arrived after this Run started. §12.1's
+        trigger is the second; the first is what keeps preemption from
+        handing the Session to a Run nothing will pick up. Collapsing them
+        onto one row is a real bug this rule already had once: see
+        `SqlRunStore.has_waiting_run`, which spells out the case it drops.
         `claimed.run.started_at`, not `session_sequence`, is the frame of
         reference: v2.9.1's rule is about when *this* Run began executing.
         """
