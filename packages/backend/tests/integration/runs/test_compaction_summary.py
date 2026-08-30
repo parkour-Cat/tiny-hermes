@@ -1254,6 +1254,16 @@ async def test_a_summary_call_counts_against_the_max_model_calls_ceiling(
     default shape a deployment starts in. No pricing and no `_set_ceiling`
     call anywhere in this test, deliberately: what stops this Run has to be
     the call counter alone.
+
+    §12.4 withholds the streaming overshoot allowance from the call counter
+    specifically — Token and cost may be crossed by one call's actual usage
+    because a streamed response's final usage cannot be known before it is
+    spent, but a call either happens or it does not, so there is no
+    equivalent excuse here. One round would otherwise hide two calls (the
+    summarizer, then the round's own answer) against a ceiling of one; the
+    only way to honour "at most one" is for the summarizer to be refused
+    before it spends anything, leaving the round's own call the one that
+    runs.
     """
     agent = agent_on_the_small_endpoint(max_model_calls=1)
     session = start_session(client, scope, agent)
@@ -1268,14 +1278,16 @@ async def test_a_summary_call_counts_against_the_max_model_calls_ceiling(
     await drive(engine, model, None)
 
     reloaded = status(client, scope, run)
-    # One round hides two calls: the summarizer, then the round's own
-    # answer. `max_model_calls=1` allows only one, so the Run stops here —
-    # even though its own answer looked complete, and even though no cost
-    # ceiling was ever configured to stop it.
-    assert model.calls == 1
+    # The summarizer was never asked: spending that call would have left no
+    # room under `max_model_calls=1` for the round's own call to follow, so
+    # the round ran on the structural plan instead — a generation failure
+    # exactly like a timeout, §7.4.2's failure ladder, first rung. Exactly
+    # one call total, matching the ceiling exactly rather than overshooting
+    # it by one.
+    assert model.calls == 0
     assert reloaded["status"] == "paused"
     assert reloaded["pause_reason"] == "limit"
-    assert reloaded["budget"]["consumed_model_calls"] == 2
+    assert reloaded["budget"]["consumed_model_calls"] == 1
 
 
 async def test_an_unpriced_declared_summary_endpoint_makes_the_runs_cost_unknown(
