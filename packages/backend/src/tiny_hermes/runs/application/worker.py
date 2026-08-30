@@ -532,7 +532,50 @@ class WorkerRuntime:
                             author="platform",
                         ),
                     )
-                waiting = await self._has_waiting_run(claimed)
+                budget_allows = _budget_after(after, response, executed_ms)
+                slice_expired = (
+                    monotonic() - started
+                ) >= self._settings.max_slice_seconds
+                hold_slice = after.compat_deadline_at is not None and not compat_expired
+                # §12.1: `_has_waiting_run` opens its own transaction, worth
+                # paying only when the answer could change this round's
+                # outcome. Probing `decide_after_round` first, with
+                # `user_waiting` and `slice_expired` both forced off, answers
+                # that by reusing the real priority order rather than
+                # duplicating it by hand (a second, hand-copied ordering is
+                # exactly the kind of thing that quietly drifts from the
+                # first): a signal here means cancel, pause, budget, approval,
+                # delegation, the verdict itself or the compat window already
+                # decided this round, and the real query would only have been
+                # thrown away. `slice_expired` is forced off rather than
+                # passed through because it sits *below* `user_waiting` — a
+                # round that would otherwise merely end its slice still has
+                # to ask, because preemption outranks that too.
+                probed = decide_after_round(
+                    RoundOutcome(
+                        verdict=verdict,
+                        approval=work.approval,
+                        delegated=work.delegated,
+                        cancel_requested=after.cancel_requested,
+                        pause_requested=after.pause_requested,
+                        budget_allows=budget_allows,
+                        slice_expired=False,
+                        compat_window_expired=compat_expired,
+                        user_waiting=False,
+                    )
+                )
+                # `_has_waiting_run` reads in its own transaction, separate
+                # from the `after` read above and the record below — a
+                # sibling cancelled in that window is possible and unclosed:
+                # this round would still preempt for a message that no
+                # longer exists by the time it ends. Accepted rather than
+                # locked against, because the cost is bounded to this Run's
+                # own goal being cut one round short, not a stall — the
+                # cancelled sibling is simply skipped when `_terminalize`
+                # next looks for a successor.
+                waiting = (
+                    False if probed.signal is not None else await self._has_waiting_run(claimed)
+                )
                 decision = decide_after_round(
                     RoundOutcome(
                         verdict=verdict,
@@ -540,12 +583,9 @@ class WorkerRuntime:
                         delegated=work.delegated,
                         cancel_requested=after.cancel_requested,
                         pause_requested=after.pause_requested,
-                        budget_allows=_budget_after(after, response, executed_ms),
-                        slice_expired=(monotonic() - started)
-                        >= self._settings.max_slice_seconds,
-                        hold_slice=(
-                            after.compat_deadline_at is not None and not compat_expired
-                        ),
+                        budget_allows=budget_allows,
+                        slice_expired=slice_expired,
+                        hold_slice=hold_slice,
                         compat_window_expired=compat_expired,
                         user_waiting=waiting,
                     )

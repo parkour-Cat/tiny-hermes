@@ -406,7 +406,7 @@ async def test_a_done_round_never_bothers_checking_for_a_waiting_run(
     query is a discarded round-trip in exactly this, the common, case.
     """
     calls = 0
-    original = WorkerRuntime._has_waiting_run
+    original = WorkerRuntime._has_waiting_run  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
 
     async def counting(self: WorkerRuntime, claimed: Any) -> bool:
         nonlocal calls
