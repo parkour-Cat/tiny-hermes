@@ -13,7 +13,13 @@ from tiny_hermes.runs.domain.context_budget import (
     CoveredSummary,
     plan_context,
 )
-from tiny_hermes.runs.domain.models import CanonicalMessage, StoredMessage, TextBlock
+from tiny_hermes.runs.domain.models import (
+    CanonicalMessage,
+    StoredMessage,
+    TextBlock,
+    ToolCallBlock,
+    ToolResultBlock,
+)
 
 RULES = "Stay inside the platform."
 PERSONALITY = "You are a careful assistant."
@@ -32,6 +38,22 @@ def _stored(*messages: CanonicalMessage) -> tuple[StoredMessage, ...]:
 
 def _says(text: str, role: Any = "user") -> CanonicalMessage:
     return CanonicalMessage(role=role, blocks=(TextBlock(text=text),))
+
+
+def _called(command: str, call_id: str) -> CanonicalMessage:
+    return CanonicalMessage(
+        role="assistant",
+        blocks=(
+            ToolCallBlock(call_id=call_id, name="shell.exec", arguments={"command": command}),
+        ),
+    )
+
+
+def _answered(output: str, call_id: str) -> CanonicalMessage:
+    return CanonicalMessage(
+        role="tool",
+        blocks=(ToolResultBlock(call_id=call_id, output=output, exit_code=0, failed=False),),
+    )
 
 
 @pytest.fixture
@@ -166,3 +188,37 @@ def test_a_stored_summary_compacts_exactly_the_range_it_explains(
     assert "1 到 5 轮里用户确认了参数并让我继续。" in _first_text(plan.messages)
     # 3–5 顶替掉了，不该再以原文出现一遍。
     assert "round 2: " not in "".join(_all_text(plan.messages))
+
+
+def test_a_pinned_boundary_mid_pair_is_refused_rather_than_cut() -> None:
+    """The stored summary's own range can end between a `tool_calls` message
+    and the `tool` message answering it — nothing on the write side of a
+    summary knows about pairing, it only knows a sequence number to stop at.
+
+    The text genuinely covers those turns, so trimming the range would be
+    dishonest in the other direction (`_honestly_widens`'s territory); but
+    compacting to exactly that boundary produces a `tool` message with no
+    call ahead of it, which is what the provider rejects. Cutting there is
+    not an option, so the pinned boundary is refused outright rather than
+    silently extended past the pair — extending would compact a turn
+    (sequence 3, the answer) the stored text was never asked to explain, the
+    same "walked past its own range" failure `_honestly_widens` exists to
+    catch, just produced from this side instead. `worker.py::_plan_context`
+    already treats `compacted is None` here as a generation failure and falls
+    back to its own structural (unpinned) plan, whose search is free to
+    advance past the same pair because it never claimed to explain only 1-2.
+    """
+    history = _stored(
+        _says("the task, stated at some length: " + "t" * 550),
+        _called("./step-0", "c0"),
+        _answered("ok", "c0"),
+        *(_says(f"round {index}: " + "w" * 200, role="assistant") for index in range(4)),
+        _says("what is left?"),
+    )
+    # Sequence 2 is the `tool_calls` message; its answer is sequence 3.
+    covered = CoveredSummary(text="用户让我跑一个命令。", last_sequence=2)
+
+    plan = _plan_with(history, stored_summary=covered)
+
+    assert plan.compacted is None
+    assert plan.messages == tuple(item.message for item in history)
