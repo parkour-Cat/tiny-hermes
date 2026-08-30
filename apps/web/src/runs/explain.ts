@@ -1,7 +1,7 @@
 import type { RunEventFrame, RunResponse } from "../api/types";
 import type { MessageKey } from "../i18n/zh-CN";
 
-type Situation = Pick<RunResponse, "status" | "pause_reason" | "wait_kind">;
+type Situation = Pick<RunResponse, "status" | "pause_reason" | "wait_kind" | "goal">;
 
 /**
  * What a status means for this Run, when the word alone does not say.
@@ -13,6 +13,12 @@ type Situation = Pick<RunResponse, "status" | "pause_reason" | "wait_kind">;
  * tell whether they are the one holding it up.
  */
 export function statusNote(run: Situation): MessageKey | null {
+  if (run.status === "completed" && run.goal.preempted) {
+    // §12.1: `completed` alone reads as an ordinary success. This is the
+    // one place that distinction has to reach a person, or `goal_preempted`
+    // is a fact that sits in `document()` for nobody to act on.
+    return "runPreemptedNote";
+  }
   if (run.status === "waiting_external") {
     if (run.wait_kind === "timer") {
       return "waitingTimerNote";

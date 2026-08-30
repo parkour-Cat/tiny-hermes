@@ -197,6 +197,13 @@ export type GoalDocument = {
   round: number | null;
   outcome: string | null;
   unmet: string[];
+  /**
+   * True only when this round's own verdict said `continue` and the
+   * platform ended the Run anyway because a message arrived after it
+   * started (§12.1). A `completed` Run with this true did not reach its own
+   * goal — `outcome` still reads `continue`, which is why this exists.
+   */
+  preempted: boolean;
 };
 
 export type ChildRunRef = {

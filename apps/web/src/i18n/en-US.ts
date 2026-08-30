@@ -125,12 +125,17 @@ export const enUS: Record<MessageKey, string> = {
   runGoalRound: "Round",
   runGoalOutcome: "Last verdict",
   runGoalUnmet: "Checks that did not pass",
+  runGoalPreemptedSuffix: "(preempted, not reached)",
   runGoalNotJudged: "Not judged yet",
   goalOutcomeDone: "Done",
   goalOutcomeContinue: "Keep working",
   goalOutcomeWait: "Waiting",
   goalOutcomeFailed: "The round failed",
   goalOutcomeUndecidable: "Could not be decided",
+  runPreemptedNote:
+    'The last verdict was actually "keep working" — this run did not reach its own goal. '
+    + "A message arrived after it started, the platform handed the session head to it, and this run ended here instead. "
+    + "Widen the budget or resubmit to pick up where it left off.",
   waitingTimerNote:
     "This Run asked to continue later. It goes back in the queue at the wait deadline on its own, holding no execution slot and no sandbox in the meantime. Nobody has to do anything.",
   waitingExternalNote:

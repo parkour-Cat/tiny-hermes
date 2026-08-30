@@ -300,9 +300,15 @@ export function RunDetailPage() {
       key: "goal-outcome",
       label: t("runGoalOutcome"),
       // The raw value when this console has no word for it: a verdict it does
-      // not recognise is still the reason the Run is where it is.
-      children:
-        outcome === null ? (run.goal.outcome ?? t("runGoalNotJudged")) : t(outcome),
+      // not recognise is still the reason the Run is where it is. The
+      // preempted suffix rides on the same row rather than a separate fact:
+      // it qualifies this verdict, it is not a new one.
+      children: (
+        <>
+          {outcome === null ? (run.goal.outcome ?? t("runGoalNotJudged")) : t(outcome)}
+          {run.goal.preempted ? ` ${t("runGoalPreemptedSuffix")}` : null}
+        </>
+      ),
     },
     { key: "session-sequence", label: t("runSessionSequence"), children: run.session_sequence },
     { key: "state-version", label: t("runStateVersion"), children: run.state_version },
