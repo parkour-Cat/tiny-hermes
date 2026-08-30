@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, exists, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -961,33 +961,63 @@ class SqlRunStore:
             ),
         )
 
+    @staticmethod
+    def _successor_candidates(session_id: UUID, run_id: UUID) -> Any:
+        """The `session_sequence` order `_terminalize` hands the head down
+        in: same Session, excluding `run_id`, non-terminal, earliest first.
+
+        Shared with `_terminalize` (below) rather than hand-copied a second
+        time: the unique constraint on `(session_id, session_sequence)`
+        makes `order_by(session_sequence).limit(1)` total — there is exactly
+        one answer — so both callers agreeing is not a coincidence to
+        maintain by hand, it is one query used twice. `_terminalize` adds its
+        own `.with_for_update()` on top, since it is the one that mutates;
+        `has_waiting_run` reads without locking.
+        """
+        return (
+            select(RunRow)
+            .where(
+                RunRow.session_id == session_id,
+                RunRow.id != run_id,
+                RunRow.status.not_in(tuple(s.value for s in TERMINAL_STATES)),
+            )
+            .order_by(RunRow.session_sequence)
+            .limit(1)
+        )
+
     async def has_waiting_run(
         self, session_id: UUID, run_id: UUID, run_started_at: datetime | None
     ) -> bool:
-        """会不会因为让位真的让一条消息立即得到处理。
+        """Would preempting actually get a message handled, and did one
+        genuinely arrive while I was working.
 
-        v2.9.1 把 §12.1 的判据从「后面排着」收窄成「在我开始之后才到」：连发的
-        几条消息各自建 Run，在第一条被 Worker 认领之前就已经排好队（§566），若
-        仍以 `session_sequence`（我自己被创建时的队列位置）做参照，那一整队会
-        互相触发让位，导致除最后一条外每条都只跑一轮。`session_sequence` 答不
-        了「我开始执行的那一刻」这个问题——它记的是创建顺序，不是执行时间，一个
-        创建后等了五分钟才被认领的 Run，`session_sequence` 不会因为那五分钟而
-        变。真正标记「我开始」的只有 `started_at`；拿它去比对方的 `created_at`，
-        才是一个关于时间先后、而不是队列位置的问题。
+        Two separate questions about two separate Runs, both must hold:
 
-        问的不是「后面有没有一条 queued 的消息」，是「我一旦终态、`_terminalize`
-        真正会把队首交给谁，那个 Run 是不是 queued、是不是在我开始之后才到」。
-        两个问题不等价：`_terminalize` 挑的是 `session_sequence` 最小的那个
-        非终态 Run，不管它是什么状态——如果队首和我之间还夹着一个更早、状态是
-        `paused`/`interrupted`/`waiting_*` 的同胞（比如用户对着一个排在我
-        后面的 queued Run 点了暂停），那个同胞才是真正的继任者，不是后面随便
-        哪条 queued 的消息。只看「存在 queued 消息」会在这种情况下照样让位，
-        队首却交给一个 `claim_head`（`_select_claimable` 要求
-        `status == 'queued'`）永远不会去领的 Run——Session 卡住，比不让位更糟。
-        这里的查询刻意复刻 `_terminalize` 挑继任者的那条语句
-        （`session_id` 匹配、排除自己、非终态、按 `session_sequence` 取最小的
-        一条），只在最后多判两件事：那条 Run 是不是 `queued`、是不是在
-        `run_started_at` 之后创建的。
+        1. **Is the successor claimable?** `_terminalize` always hands the
+           head to the earliest `session_sequence` non-terminal Run,
+           whichever status it is in. If a `paused`/`interrupted`/
+           `waiting_*` sibling sits closer to the head than any `queued` one
+           — reachable from the public API, e.g. a user pauses a `queued`
+           Run and only then sends a new message — the head goes to that
+           sibling, which `claim_head` (`_select_claimable`,
+           `status == 'queued'`) will never pick up. Preempting would stall
+           the Session on a Run nobody claims.
+        2. **Did a message arrive after I started?** v2.9.1's §12.1 trigger
+           is an *existence* test over the whole Session — some `queued` Run
+           created after `run_started_at` — not a property of whichever Run
+           happens to be the successor. A burst of messages queues before
+           the first one is ever claimed (§566): the successor can be one of
+           those pre-existing, already-`queued` messages while a *later*
+           message — not the successor — is the one that actually arrived
+           mid-run. Requiring the arrival test on the successor specifically
+           would miss exactly that message and let this Run grind on past
+           the correction §12.1 exists for.
+
+        Collapsing the two onto one row — testing whether *the successor*
+        is both `queued` and arrived after `run_started_at` — under-delivers
+        §12.1: it silently drops the case above, a `queued` successor that
+        predates this Run's start with a genuine mid-run arrival sitting
+        behind it.
 
         `run_started_at` 为 `None` 时直接判 `False`：一个从未发生过的时刻，不能
         拿来说别的 Run「在它之后」到达。`_has_waiting_run` 只在认领之后才调用这
@@ -996,23 +1026,20 @@ class SqlRunStore:
         """
         if run_started_at is None:
             return False
-        successor = (
-            await self._session.execute(
-                select(RunRow.status, RunRow.created_at)
-                .where(
-                    RunRow.session_id == session_id,
-                    RunRow.id != run_id,
-                    RunRow.status.not_in(tuple(s.value for s in TERMINAL_STATES)),
-                )
-                .order_by(RunRow.session_sequence)
-                .limit(1)
-            )
-        ).first()
-        if successor is None:
+        successor = await self._session.scalar(self._successor_candidates(session_id, run_id))
+        if successor is None or RunState(successor.status) is not RunState.QUEUED:
             return False
-        return (
-            successor.status == RunState.QUEUED.value
-            and successor.created_at > run_started_at
+        return bool(
+            await self._session.scalar(
+                select(
+                    exists().where(
+                        RunRow.session_id == session_id,
+                        RunRow.id != run_id,
+                        RunRow.status == RunState.QUEUED.value,
+                        RunRow.created_at > run_started_at,
+                    )
+                )
+            )
         )
 
     async def withdrawable(
@@ -1689,15 +1716,7 @@ class SqlRunStore:
         if session.head_run_id != run.id:
             return
         successor = await self._session.scalar(
-            select(RunRow)
-            .where(
-                RunRow.session_id == session.id,
-                RunRow.id != run.id,
-                RunRow.status.not_in([state.value for state in TERMINAL_STATES]),
-            )
-            .order_by(RunRow.session_sequence)
-            .limit(1)
-            .with_for_update()
+            self._successor_candidates(session.id, run.id).with_for_update()
         )
         session.head_run_id = None if successor is None else successor.id
         if successor is not None:

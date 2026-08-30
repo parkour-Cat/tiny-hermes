@@ -655,39 +655,42 @@ class RunStore(Protocol):
     async def has_waiting_run(
         self, session_id: UUID, run_id: UUID, run_started_at: datetime | None
     ) -> bool:
-        """Would preempting `run_id` actually get a message handled right
-        away.
+        """Would preempting actually get a message handled, and did one
+        genuinely arrive while I was working.
 
-        Not "does a `queued` Run exist somewhere behind me" — "is the Run
-        that `_terminalize` would actually hand the Session head to, itself
-        `queued` and created after `run_started_at`". The two are different
-        questions: `_terminalize` always hands the head to the earliest
-        `session_sequence` non-terminal Run, whichever status it is in. If a
-        `paused`/`interrupted`/`waiting_*` sibling sits closer to the head
-        than some later `queued` Run — reachable from the public API, e.g. a
-        user pauses a `queued` Run and only then sends a new message —
-        checking "does *some* `queued` Run exist" says yes while the Run that
-        actually becomes head is the paused one, which `claim_head`
-        (`_select_claimable`, `status == 'queued'`) will never pick up. The
-        Session stalls on a Run nobody will claim, and the arriving message
-        is never reached — exactly what preemption exists to prevent.
+        Two separate questions about two separate Runs, both must hold:
 
-        v2.9.1 narrowed §12.1: the trigger is "arrived after I began
-        executing", not "sits behind me in the queue". A burst of messages a
-        user sends in one breath each create their own Run (§566), and all of
-        them queue before the first one is ever claimed — under the old
-        `session_sequence`-behind-me test that whole queue preempted itself,
-        so every message but the last got exactly one round.
+        1. **Is the successor claimable?** `_terminalize` always hands the
+           head to the earliest `session_sequence` non-terminal Run,
+           whichever status it is in. If a `paused`/`interrupted`/
+           `waiting_*` sibling sits closer to the head than any `queued` one
+           — reachable from the public API, e.g. a user pauses a `queued`
+           Run and only then sends a new message — the head goes to that
+           sibling, which `claim_head` (`_select_claimable`,
+           `status == 'queued'`) will never pick up. Preempting would stall
+           the Session on a Run nobody claims.
+        2. **Did a message arrive after I started?** v2.9.1's §12.1 trigger
+           is an *existence* test over the whole Session — some `queued` Run
+           created after `run_started_at` — not a property of whichever Run
+           happens to be the successor. A burst of messages queues before
+           the first one is ever claimed (§566): the successor can be one of
+           those pre-existing, already-`queued` messages while a *later*
+           message — not the successor — is the one that actually arrived
+           mid-run. Requiring the arrival test on the successor specifically
+           would miss exactly that message.
 
-        `session_sequence` is not the bound compared against `run_started_at`:
-        it encodes *my own* position in the queue at the moment *I* was
-        created, which has nothing to say about the moment I actually started
-        executing — a Run claimed five minutes after it was created has the
-        same `session_sequence` either way. `session_sequence` is still how
-        the successor is *found* (it orders the same query `_terminalize`
-        runs), but whether that successor counts as "waiting" is a time
-        question — its own `created_at` against `run_started_at` — not a
-        queue-position one.
+        Collapsing the two onto one row — testing whether *the successor*
+        is both `queued` and arrived after `run_started_at` — under-delivers
+        §12.1: it silently drops the case above, a `queued` successor that
+        predates this Run's start with a genuine mid-run arrival sitting
+        behind it. That was this method's own bug for one review round.
+
+        `session_sequence` orders how the successor is *found* (the same
+        query `_terminalize` runs — see `SqlRunStore._successor_candidates`),
+        but neither question above is a queue-position question:
+        claimability is the successor's `status`, and arrival is a time
+        comparison — some Run's own `created_at` against `run_started_at` —
+        against the whole Session, not against the successor's position.
 
         `None` in means this Run has no `started_at` to compare against — it
         answers `False` rather than guessing, because nothing can honestly be
