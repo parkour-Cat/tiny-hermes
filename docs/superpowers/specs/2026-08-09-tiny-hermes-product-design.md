@@ -1,7 +1,7 @@
-# tiny-hermes 产品与系统设计 v2.9.1
+# tiny-hermes 产品与系统设计 v2.9.2
 
-> 日期：2026-08-30  
-> 版本：v2.9.1  
+> 日期：2026-08-31  
+> 版本：v2.9.2  
 > 状态：已确认；M1 与 M2 已交付，可作为 M3 实施依据（§7.4.2 与 §12.1 已实现）  
 > 目标版本：首个企业预览版  
 > 许可证方向：Apache-2.0
@@ -22,6 +22,29 @@
 ### 1.1 v2.4 修订重点
 
 v2.4 补全重试链共享预算、RunEvent 并发序号、幂等并发创建、工作空间选择、累计执行时间与墙钟期限，并把 Runs API 的“已创建但排队受阻”与 Chat Completions 的 409 `session_blocked` 明确区分。M1 的跨 Run 共享只读层缩小为平台预构建的运行时 Docker 镜像层，不在运行时根据 Agent 依赖构建快照；同时增加 cache 重置信号、沙箱所有权校验、待提交对象登记和 M1 不交付审批系统的安全边界。v2.4 替代 v2.3 中对应定义。
+
+### 1.8 v2.9.2 修订重点
+
+v2.9.2 只改 §12.1 一句话的措辞：「`goal_outcome` 必须记下它是被打断的」改为
+「`goal` 文档必须记下它是被打断的（新增 `preempted` 字段），`goal_outcome`
+不因此改写」。
+
+起因是实现落地后代码评审的追问：`goal_outcome` 这个字段字面上仍然是判断器
+真实给出的 `continue`，被打断的事实记在同一个 `goal` 对象里新增的
+`preempted` 字段上，不在 `goal_outcome` 本身——这和旧措辞的字面不一致，需要
+判断哪一边该让步。
+
+结论是实现对，改的是措辞。`goal_outcome` 是判断器（`goal.judge`）对这一轮证据
+给出的裁决，`decide_after_round` 是否因此结束 Run 是平台另一层的决定——两者
+故意分属两个模块（`goal.py` 与 `slice_policy.py`），`decide_after_round`
+自己的 docstring 早就说明「The judge answers what happened to the goal; what
+happens to the Run is decided here」。把 `goal_outcome` 改写成
+`preempted`（或让它凭空多出一个第六种取值）会把这两层重新粘回一起，且会丢
+信息：`continue` 之外还带着 `goal_unmet`——被打断之前模型自己判定还差什么，
+这条信息只有 `outcome` 仍然是 `continue` 时才留得住。旧措辞真正要防的是
+「别让一个没达成目标的 Run 看起来像是`done`」——这一点 `goal_outcome` 从未
+被改写成 `done`，从未失守；新措辞把「记下被打断」这件事挂在 `goal` 文档整体
+上，不再误导读者以为答案必须落在 `outcome` 这一个字段里。
 
 ### 1.7 v2.9.1 修订重点
 
@@ -714,8 +737,11 @@ RunEvent 至少记录：
 而让他等到任务自己跑完才被听见，是把机器的进度排在人的意图前面。上游 Hermes 的同一条
 规则是 `any real user message preempts the continuation loop`。
 
-**状态是 `completed`，但 `goal_outcome` 必须记下它是被打断的**，不得记为完成。一个没
-达成目标的 Run 在列表里显示为 `completed` 已经够容易误读，若连原因都不留，运维就只能猜。
+**状态是 `completed`，但 `goal` 文档必须记下它是被打断的**（`preempted` 字段），
+`goal_outcome` 不因此改写、仍然是判断器本轮给出的裁决（通常是 `continue`，连同
+`unmet` 一起留着）。一个没达成目标的 Run 在列表里显示为 `completed` 已经够容易
+误读，若连原因都不留，运维就只能猜；但让位是平台的决定，不是判断器改口，两者不
+应该在同一个字段里打架（v2.9.2）。
 
 **不适用于「停」的语义。** 取消、暂停这类控制命令按 §566 仍然越过消息队列，且不依赖
 本条——一条要求停止的指令是否被执行，不能取决于模型或 Goal 判断器同不同意。
