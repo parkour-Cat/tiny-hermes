@@ -45,6 +45,12 @@ class RoundOutcome:
     #: how long to wait and whether one answer is enough, because both are
     #: decided when the delegation is made rather than when it is settled.
     delegated: DelegationWait | None = None
+    #: §12.1: whether another message is already queued behind this Run in the
+    #: same Session. This module is I/O-free and cannot look that up itself —
+    #: the caller (the Worker, via `SqlRunStore.has_waiting_run`) queries it
+    #: and hands the answer in as a fact, the same way `cancel_requested` and
+    #: `pause_requested` arrive as facts rather than lookups.
+    user_waiting: bool = False
 
 
 @dataclass(frozen=True)
@@ -169,6 +175,20 @@ def decide_after_round(outcome: RoundOutcome) -> SliceDecision:
             wait_kind=WAIT_TIMER,
             wait_seconds=outcome.verdict.wait_seconds,
         )
+    if outcome.user_waiting:
+        # §12.1: a round judged `continue`, with a message already queued
+        # behind this Run in the same Session, gives up the head so that
+        # message gets handled. Below cancel, pause, budget, approval and
+        # delegation — those are "must stop"; this is "should stop" — and
+        # below done/failed/undecidable/wait, which have already decided
+        # where this Run goes; preemption only claims the round that would
+        # otherwise have kept going.
+        #
+        # `COMPLETED`, not a pause: a paused Run still holds the Session head
+        # (§564 — only a terminal state releases it), so pausing would leave
+        # the queued message exactly as stuck as it was. The goal was not
+        # met; `goal_preempted` on the snapshot is what says so.
+        return SliceDecision(RunSignal.COMPLETED)
     if outcome.compat_window_expired:
         return SliceDecision(RunSignal.SAFE_PAUSE_REACHED, PauseReason.COMPAT_TIMEOUT)
     if outcome.slice_expired:

@@ -153,6 +153,7 @@ def test_a_running_run_says_which_round_it_is_on_and_why_it_continued() -> None:
         "round": 5,
         "outcome": "continue",
         "unmet": ["/workspace/data/report.md", "pytest -q"],
+        "preempted": False,
     }
 
 
@@ -163,6 +164,7 @@ def test_the_goal_is_reported_before_any_round_has_been_judged() -> None:
         "round": None,
         "outcome": None,
         "unmet": [],
+        "preempted": False,
     }
 
 
@@ -177,4 +179,9 @@ def test_a_run_that_met_every_declared_condition_reports_none_unmet() -> None:
         goal_outcome="done",
     ).document()
 
-    assert document["goal"] == {"round": 3, "outcome": "done", "unmet": []}
+    assert document["goal"] == {
+        "round": 3,
+        "outcome": "done",
+        "unmet": [],
+        "preempted": False,
+    }

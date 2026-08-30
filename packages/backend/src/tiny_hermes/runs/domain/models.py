@@ -1010,6 +1010,12 @@ class RunSnapshot:
     current_round: int | None = None
     goal_outcome: str | None = None
     goal_unmet: tuple[str, ...] = ()
+    #: §12.1: true when this Run reached `completed` by giving up the Session
+    #: head to a queued message rather than by meeting its goal. Recorded
+    #: because `completed` alone would read as "goal met" — the two are
+    #: distinguishable only through this field, not through `goal_outcome`,
+    #: which `decide_after_round` never revisits for a preempted round.
+    goal_preempted: bool = False
     #: The Runs this one delegated (§13), oldest first. Empty for the ordinary
     #: Run, which is most of them. Carried on the snapshot rather than fetched
     #: from a second endpoint because "is this a tree" is part of what a Run
@@ -1061,6 +1067,7 @@ class RunSnapshot:
             "round": self.current_round,
             "outcome": self.goal_outcome,
             "unmet": list(self.goal_unmet),
+            "preempted": self.goal_preempted,
         }
 
     def _queue_document(self) -> dict[str, Any]:
