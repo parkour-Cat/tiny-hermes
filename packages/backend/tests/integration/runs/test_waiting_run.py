@@ -124,6 +124,34 @@ async def session_with_a_finished_run_behind(
     return UUID(session_id), head_row, finished_row
 
 
+@pytest.fixture
+async def session_with_a_paused_sibling_queued_after_start(
+    client: TestClient, scope: dict[str, str], session_id: str, engine: AsyncEngine
+) -> tuple[UUID, Row[Any], Row[Any]]:
+    """A sibling that arrived after the head Run started, non-terminal, but
+    `paused` rather than `queued`.
+
+    Not something `claim_head` will ever pick up — `_select_claimable` only
+    matches `status == 'queued'` — so it stands in for the class of Runs
+    `has_waiting_run` must not call "waiting": preempting for one of these
+    hands the Session head to something no Worker will claim.
+    """
+    head = _submit(client, scope, session_id, "head")
+    await _mark_started(engine, UUID(str(head["id"])))
+    paused = _submit(client, scope, session_id, "paused")
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "UPDATE runs SET status = 'paused', pause_reason = 'manual' "
+                "WHERE id = :id"
+            ),
+            {"id": UUID(str(paused["id"]))},
+        )
+    head_row = await _run_row(engine, UUID(str(head["id"])))
+    paused_row = await _run_row(engine, UUID(str(paused["id"])))
+    return UUID(session_id), head_row, paused_row
+
+
 async def test_a_run_alone_in_its_session_has_nobody_waiting(
     store: SqlRunStore, session_with_one_running_run: tuple[UUID, Row[Any]]
 ) -> None:
@@ -159,6 +187,20 @@ async def test_a_terminal_run_behind_it_is_not_waiting(
     session_with_a_finished_run_behind: tuple[UUID, Row[Any], Row[Any]],
 ) -> None:
     session_id, head, _finished = session_with_a_finished_run_behind
+
+    assert await store.has_waiting_run(session_id, head.started_at) is False
+
+
+async def test_a_paused_sibling_queued_after_start_does_not_preempt(
+    store: SqlRunStore,
+    session_with_a_paused_sibling_queued_after_start: tuple[UUID, Row[Any], Row[Any]],
+) -> None:
+    """`paused` is not terminal, but it is also not `queued`: preempting for
+    it would hand the Session head to a Run `claim_head` will never pick up,
+    stalling the Session on nothing. Only a Run a Worker can actually claim
+    next counts as "waiting" — see `has_waiting_run`'s docstring.
+    """
+    session_id, head, _paused = session_with_a_paused_sibling_queued_after_start
 
     assert await store.has_waiting_run(session_id, head.started_at) is False
 
