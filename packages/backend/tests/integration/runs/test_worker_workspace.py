@@ -215,6 +215,44 @@ class Recording:
         )
 
 
+class _SubmittingRecording(Recording):
+    """`Recording`, but submits a second message into the Session the instant
+    its first round begins.
+
+    `WorkerRuntime` claims the head Run (setting `started_at`) before it ever
+    calls a model — `complete` is the one hook available here to inject a
+    message and be sure its `created_at` lands after that claim. Mirrors
+    `test_preemption_flow.py`'s `_SubmittingModel`; duplicated rather than
+    imported because this file's `Recording` already differs (it snapshots
+    the sandbox's call log per request) and multiplying inheritance across
+    the two would cost more clarity than the few lines saved.
+    """
+
+    def __init__(
+        self,
+        sandbox: "GatewaySandbox",
+        *answers: ModelResponse,
+        client: TestClient,
+        scope: dict[str, str],
+        session_id: str,
+    ) -> None:
+        super().__init__(sandbox, *answers)
+        self._client = client
+        self._scope = scope
+        self._session_id = session_id
+        self._submitted = False
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        if not self._submitted:
+            self._submitted = True
+            self._client.post(
+                "/api/v1/runs",
+                headers={**self._scope, "Idempotency-Key": uuid4().hex},
+                json={"session_id": self._session_id, "input": "meanwhile"},
+            )
+        return await super().complete(request)
+
+
 @dataclass
 class GatewaySandbox:
     """The Controller's whole surface over an in-memory file tree."""
@@ -734,3 +772,47 @@ async def test_slice_boundary_flow_checkpoints_then_keeps_the_frozen_instance(
     assert await _revisions(engine) == 1
     assert "keep" in sandbox.calls
     assert "destroy" not in sandbox.calls
+
+
+async def test_a_preempted_write_round_still_says_it_was_preempted(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    objects: MinioObjectStore,
+    workspace_id: str,
+    tooled_agent: Callable[[list[str]], str],
+) -> None:
+    """§12.1's disclosed gap: `_checkpoint_round`'s interim commit records its
+    round through a neutralized `SliceDecision(None, limit_reached=...)` —
+    deliberately, per its own docstring, so a completed-but-container-may-
+    still-run Run is never briefly recorded as `completed`. But
+    `_checkpoint`'s `goal_preempted` was computed from that same neutralized
+    decision, so a round that both wrote to the sandbox and was preempted
+    lost the one fact that would have told a reader it did not finish on its
+    own — the checkpoint the Run actually ends on says `goal_preempted: False`
+    no matter what really happened.
+    """
+    agent = tooled_agent(["shell.exec"])
+    run, session_id = _submit(client, scope, agent)
+    sandbox = GatewaySandbox(effects=[_write_effect("out.txt", b"made mid-round")])
+    # `meanwhile` is submitted from inside `complete`, i.e. after the claim
+    # that sets this Run's `started_at` — the mid-round arrival §12.1's
+    # v2.9.1 wording requires, not one already queued before the claim.
+    model = _SubmittingRecording(
+        sandbox, _tool(), client=client, scope=scope, session_id=session_id
+    )
+
+    await _drive(engine, model, sandbox, objects)
+
+    # The round did write, and did commit: the gap this test closes is not
+    # about whether the write happened, only about whether the checkpoint it
+    # committed under says so.
+    assert await _revisions(engine) == 1
+    assert (await _run_row(engine, run)).status == "completed"
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as db:
+        snapshot = await SqlRunStore(db).get_run(UUID(workspace_id), UUID(run), PLATFORM)
+    assert snapshot is not None
+    assert snapshot.goal_preempted is True
+    assert snapshot.document()["goal"]["preempted"] is True
