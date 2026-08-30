@@ -9,7 +9,7 @@ from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.store import StoredSummary
@@ -105,3 +105,39 @@ async def test_a_session_with_no_compaction_has_no_summary(
     session_id, _ = seeded_session
 
     assert await store.latest_summary(session_id) is None
+
+
+async def test_the_row_carries_no_column_without_a_reader(engine: AsyncEngine) -> None:
+    """每一列都得有人读。
+
+    `source` 曾经在这张表上，注释写着「判断这段文字该信到什么程度的读者需要
+    分得出两者」。没有那个读者：`_save_summary` 永远写 `"model"`，
+    `"structural"` 一次都没写过（结构摘要不落库，每轮免费重算），`_plan_context`
+    只用 `last_sequence` 和 `text`。**一条注释不得声称代码没有的保护。**
+
+    分得出模型摘要和结构摘要的那个读者在别处，而且是真的：
+    `CONTEXT_COMPACTED` 事件的 `source`，由 `CompactionRecord` 写、运行台渲染。
+
+    活着的读者：`session_id`/`workspace_id` 定位与租户隔离，`first_sequence` 与
+    `last_sequence` 是撤回作废摘要的判据（`_forget_summaries_covering`）与复用
+    判据，`summary` 是发给模型的正文，`endpoint_id`/`model` 是事件里那句「谁写
+    的」。
+    """
+    async with engine.connect() as connection:
+        columns = await connection.run_sync(
+            lambda sync: {
+                column["name"] for column in inspect(sync).get_columns("session_compactions")
+            }
+        )
+
+    assert columns == {
+        "id",
+        "created_at",
+        "session_id",
+        "workspace_id",
+        "first_sequence",
+        "last_sequence",
+        "summary",
+        "endpoint_id",
+        "model",
+    }
