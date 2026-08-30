@@ -310,6 +310,37 @@ async def test_the_preempted_run_says_why_it_ended(
     assert snapshot.document()["goal"]["preempted"] is True
 
 
+async def test_the_preempted_run_says_why_on_its_timeline_too(
+    worker: _Worker,
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_with_a_continuing_run: tuple[str, Row[Any]],
+) -> None:
+    """`document()` is not the only surface a reader has: the SSE timeline
+    replays `goal_verdict` events independently, and a payload that only
+    ever said `{"round", "outcome", "unmet"}` left every past round on that
+    timeline looking like an ordinary `continue` — indistinguishable from
+    one that was about to run its next round on its own.
+    """
+    session_id, running = session_with_a_continuing_run
+
+    await worker.run_one_slice_while_a_message_arrives(client, scope, session_id, "queued")
+
+    async with engine.connect() as connection:
+        payload = (
+            await connection.execute(
+                text(
+                    "SELECT payload FROM run_events WHERE run_id = :run "
+                    "AND event_type = 'goal_verdict' ORDER BY sequence DESC LIMIT 1"
+                ),
+                {"run": running.id},
+            )
+        ).scalar_one()
+    assert payload["outcome"] == "continue"
+    assert payload["preempted"] is True
+
+
 async def test_a_message_already_queued_before_start_does_not_preempt(
     worker: _Worker,
     store: _RunReader,
