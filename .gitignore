@@ -23,3 +23,6 @@ test-results/
 data/
 *.log
 tests/e2e/.auth/
+
+# 本机代理的 fake-IP 绕过，只属于开发机
+deploy/compose/compose.override.yaml
