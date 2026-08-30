@@ -57,6 +57,7 @@ from tiny_hermes.runs.domain.goal import (
 from tiny_hermes.runs.domain.models import (
     SAFETY_PREAMBLE,
     Block,
+    BudgetSummary,
     CacheStateHint,
     CanonicalMessage,
     CheckpointEffectStatus,
@@ -1711,6 +1712,19 @@ class WorkerRuntime:
         # this is an early exit, not a replacement for it.
         if not _cost_precheck(context, baseline).allowed:
             return baseline
+        if not _calls_precheck(context.budget):
+            # §12.4 withholds the streaming-usage overshoot allowance from
+            # the call counter specifically — Token and cost may be crossed
+            # by one call's real usage because a streamed response's final
+            # usage is only known once the call ends, but a call either
+            # happens or it does not, so that excuse does not apply here.
+            # The round's own call is the one guaranteed to follow whatever
+            # this method returns (`_execute_slice` runs it right after,
+            # gated only on cost), so spending this call must leave room for
+            # that one too — otherwise a ceiling of `max_model_calls=1`
+            # would let a single round spend two calls, the summarizer's and
+            # the round's own, before anything noticed.
+            return baseline
 
         generated = await self._generate_summary(claimed, context, baseline.compacted, stored)
         if generated is None:
@@ -2350,6 +2364,25 @@ def _honestly_widens(plan: ContextPlan, covered_last: int) -> bool:
         and plan.compacted is not None
         and plan.compacted.last_sequence == covered_last
     )
+
+
+def _calls_precheck(budget: BudgetSummary) -> bool:
+    """Whether a summarization call may be spent without stranding the
+    round's own call — the one guaranteed to follow it in the same
+    iteration — with nowhere left under `max_model_calls` to land.
+
+    Unlike `_cost_precheck`, this does not grant §12.4's streaming-usage
+    overshoot allowance: that allowance exists because a provider's final
+    usage is only known once a call ends, and a ceiling checked against an
+    estimate can be crossed by that call's real number. A call has no such
+    gap — it either happens or it does not — so §12.4 gives Token and cost
+    the excuse and withholds it from the call counter. Reserving room for
+    both calls (this one and the round's) is what keeps that counter exact:
+    checking only this call in isolation would let it spend the ceiling's
+    last slot and leave the round's own call, made right after regardless,
+    to overshoot by one.
+    """
+    return budget.consumed_model_calls + 1 < budget.max_model_calls
 
 
 def _cost_precheck(context: ExecutionContext, plan: ContextPlan) -> CeilingVerdict:
