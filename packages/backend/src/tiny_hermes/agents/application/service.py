@@ -767,6 +767,13 @@ class AgentCatalog:
             await self._check_http_tools(workspace_id, actor, draft.spec)
             await self._check_mcp_tools(workspace_id, actor, draft.spec)
             await self._check_delegation(workspace_id, draft.spec)
+            # Its own line here rather than inside `_check_context_budget`,
+            # where it used to sit: that method is only reached for an
+            # endpoint-backed policy, and the ratio's bounds belong to the
+            # platform rather than to any endpoint. Left there, an author
+            # publishing on the deterministic stand-in walked past a bound the
+            # method's docstring said publish enforced.
+            self._check_compaction_threshold(draft.spec.context_budget or ContextBudget())
             # Again here, and not only on save: this draft was measured against
             # whatever the ceiling was the day it was written.
             self._check_ceilings(draft.spec)
@@ -1170,7 +1177,6 @@ class AgentCatalog:
             raise ContextWindowTooSmall(fit.floor, fit.allowance)
         if not fit.targets_fit:
             raise ContextBudgetUnsatisfied(fit)
-        self._check_compaction_threshold(budget)
 
     def _check_compaction_threshold(self, budget: ContextBudget) -> None:
         """Refuse a declared ratio outside `MIN_COMPACTION_THRESHOLD` /
@@ -1186,6 +1192,11 @@ class AgentCatalog:
         enforcement is a publish-authority decision: an author has to be
         able to save a draft whose threshold is momentarily out of bounds
         while still working on it, and only publish is allowed to refuse it.
+
+        Called straight from `publish`, not from `_check_context_budget`:
+        these two numbers are the platform's, not an endpoint's, so an Agent
+        on a provider with no window to measure — the deterministic stand-in —
+        is held to them exactly the same.
         """
         threshold = budget.compaction_threshold
         if threshold is None:
