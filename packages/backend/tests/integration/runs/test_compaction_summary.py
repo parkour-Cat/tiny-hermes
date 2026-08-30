@@ -538,14 +538,22 @@ async def test_a_summary_that_cuts_deeper_than_it_covers_falls_back(
     agent_on_the_small_endpoint: Any,
 ) -> None:
     """A stored summary can pass the numeric coverage check
-    (`stored.last_sequence >= this round's boundary`) and still be unusable:
-    `plan_context`'s own `through` search walks forward until the round
-    fits, and a bigger summary text can push that search past the range the
-    text was ever asked to explain. The resulting `CompactionRecord` would
-    claim message ids and a range the summarizer never read — nothing is
-    deleted from `session_messages` when that happens, but it is the
-    "middle turns silently gone" bug one level up: the model is told a
-    text explains turns it does not.
+    (`stored.last_sequence >= this round's boundary`) and still be unusable,
+    and the Run has to degrade to the structural plan rather than stretch to
+    accommodate it.
+
+    The name is historical and kept deliberately. `plan_context` used to
+    *search* for a boundary: it walked forward until the round fit, so a text
+    bigger than the terse structural sentence could buy itself room by cutting
+    one message deeper than the range it was ever asked to explain — a
+    `CompactionRecord` claiming message ids the summarizer never read. That
+    move no longer exists: given a `CoveredSummary` the boundary is pinned to
+    the range the text covers, and a text too big for that range simply does
+    not fit, so nothing is compacted with it at all. This test's outcome is
+    unchanged and still worth guarding — the fallback fires, the round goes
+    out on the structural summary, and no model call is spent — but it now
+    fires on `plan.fits`, not on a coverage comparison. See
+    `test_summary_widening.py`, which asserts that distinction directly.
     """
     agent = agent_on_the_small_endpoint()
 
@@ -569,13 +577,22 @@ async def test_a_summary_that_cuts_deeper_than_it_covers_falls_back(
     await _seed_old_turns(engine, session_id, workspace_id, pairs=8, size=3_000)
     # Numerically sufficient (`last_sequence == baseline_last`, satisfying
     # the coverage check on its own) but with a text bigger than the terse
-    # structural sentence that boundary was sized for. Calibrated against
-    # `plan_context` directly (not guessed): at this seed shape and this
-    # endpoint's window, this exact multiplier is the one where reusing the
-    # text still *fits* the window (so this is not
+    # structural sentence that boundary was sized for.
+    #
+    # What the multiplier is calibrated to, since a later reader tuning it
+    # needs the real reason: it is the size at which the text is too big to
+    # stand at `baseline_last` while still being nowhere near
     # `test_a_summary_too_large_to_fit_falls_back_to_the_structural_plan`'s
-    # case) but only by `plan_context` cutting one message past
-    # `baseline_last` — through 11, not 10.
+    # 20_000-fold text, which no boundary in this history could absorb. The
+    # gap between those two is what keeps this a distinct case rather than a
+    # second copy of that test.
+    #
+    # It was originally calibrated for a different property — under the old
+    # boundary *search* this was the exact size that fit at through 11 but not
+    # at through 10, making the search step one message past its coverage.
+    # `plan_context` pins the boundary now and never takes that step, so that
+    # property is gone; the number is kept because the size relation above
+    # still holds and still exercises the path this test is named for.
     await _plant_summary_row(
         engine,
         session_id,
@@ -592,8 +609,9 @@ async def test_a_summary_that_cuts_deeper_than_it_covers_falls_back(
     assert status(client, scope, run)["status"] == "completed"
     compacted = await payloads(engine, run, "context_compacted")
     assert len(compacted) == 1
-    # Fell back to the structural plan rather than emitting a record that
-    # claims a wider range than the planted text was ever asked to cover.
+    # Fell back to the structural plan rather than stretching to fit the
+    # planted text — and the structural plan compacts the same range the
+    # planted text claimed, so nothing about the round's own boundary moved.
     assert compacted[0]["source"] == "structural"
     assert compacted[0]["last_sequence"] == baseline_last
     # And no model call was ever made over it — this is the reuse path

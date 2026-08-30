@@ -1684,9 +1684,18 @@ class WorkerRuntime:
             if _honestly_widens(candidate, stored.last_sequence):
                 return candidate
             logger.info(
-                "a stored summary covered enough by sequence number but did "
-                "not fit at the range it explains — using the structural plan "
-                "for this round",
+                # Not "did not fit": `plan_context` never returns a compacted
+                # plan that failed to fit, so a refusal here is one of two
+                # situations this Worker cannot tell apart from the plan in
+                # hand — the pinned boundary held nothing that fit, or the
+                # covered range left no boundary to stand at (it has moved
+                # inside the protected recent history). Naming only the first
+                # would send an operator to investigate window sizing for a
+                # case that is not about size.
+                "a stored summary covered enough by sequence number, but this "
+                "round would not compact at the range that summary explains — "
+                "either nothing fit there or no boundary sat there. Using the "
+                "structural plan for this round",
                 extra={"run_id": str(claimed.run.id)},
             )
             return baseline
@@ -1715,8 +1724,11 @@ class WorkerRuntime:
         if _honestly_widens(candidate, covered_last):
             return candidate
         logger.warning(
-            "a freshly generated summary did not fit at the range it "
-            "explains — using the structural plan for this round",
+            # Same two indistinguishable situations as the reuse path's log
+            # above, and the same reason for not naming just one of them.
+            "a freshly generated summary was saved, but this round would not "
+            "compact at the range it explains — either nothing fit there or no "
+            "boundary sat there. Using the structural plan for this round",
             extra={"run_id": str(claimed.run.id)},
         )
         return baseline
@@ -2196,8 +2208,9 @@ def _honestly_widens(plan: ContextPlan, covered_last: int) -> bool:
     """Whether a summary-widened re-plan may replace the structural
     baseline `_plan_context` built it to improve on.
 
-    Two ways it may not, and both are generation failures §7.4.2 already has
-    an answer for — the structural summary the caller started with:
+    Three ways it may not, and every one of them is a generation failure
+    §7.4.2 already has an answer for — the structural summary the caller
+    started with:
 
     - `plan.fits` is False. A model summary can be longer than the
       structural sentence it replaced, and `plan_context`'s own answer to
@@ -2206,6 +2219,16 @@ def _honestly_widens(plan: ContextPlan, covered_last: int) -> bool:
       structural summary this call started with may still fit fine, and a
       Run that would have continued on it must not be paused because a
       *different*, longer summary text was tried in its place.
+    - `plan.compacted` is None. Nothing was compacted with this text at all:
+      either the pinned boundary held nothing that fit, or the covered range
+      left no boundary to stand at — the sequence is not in this round's
+      history, or it has moved inside the protected recent turns. This has to
+      be its own check rather than something `plan.fits` implies, because
+      since `plan_context` started returning fitting originals when its
+      compaction search comes back empty, a plan can now be `fits=True` and
+      carry no compaction whatsoever. Accepting one would send the round out
+      with the summary silently dropped and no `CONTEXT_COMPACTED` event
+      saying so.
     - `plan.compacted.last_sequence` is not exactly `covered_last` — the last
       sequence the summary text handed to this call was asked to explain. A
       record that reaches past it claims turns the summarizer never read; one
@@ -2215,11 +2238,9 @@ def _honestly_widens(plan: ContextPlan, covered_last: int) -> bool:
 
       Neither is what `plan_context` does any more: given a `CoveredSummary`
       it pins the boundary instead of searching, so the only way this
-      comparison can fail is a plan that did not honour the pin, or one that
-      compacted nothing because the covered range had moved inside the
-      protected tail. It is kept as the corroboration, not as the mechanism —
-      the guarantee lives in the pin, and this says so out loud rather than
-      trusting it silently.
+      comparison can fail is a plan that did not honour the pin. It is kept as
+      the corroboration, not as the mechanism — the guarantee lives in the
+      pin, and this says so out loud rather than trusting it silently.
     """
     return (
         plan.fits
