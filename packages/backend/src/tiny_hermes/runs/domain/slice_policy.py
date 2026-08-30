@@ -176,11 +176,24 @@ def decide_after_round(outcome: RoundOutcome) -> SliceDecision:
             wait_kind=WAIT_TIMER,
             wait_seconds=outcome.verdict.wait_seconds,
         )
+    if outcome.compat_window_expired:
+        # Above `user_waiting`, deliberately: a `chat_completions` caller is
+        # blocked on this Run inside its own sync deadline (§7.4's compat
+        # window), and `completions.py` tells that caller apart from every
+        # other pause by one specific fact — `state is PAUSED and
+        # pause_reason is COMPAT_TIMEOUT`. If preemption ran first, a Run
+        # whose window had *already* elapsed would end `completed` instead,
+        # that check would never match, and the sync caller would get
+        # whatever partial answer this Run had rather than the timeout it
+        # actually hit. The window expiring is this Run's own problem to
+        # report accurately; a message arriving for the *next* Run can wait
+        # the one round it takes this Run to report it.
+        return SliceDecision(RunSignal.SAFE_PAUSE_REACHED, PauseReason.COMPAT_TIMEOUT)
     if outcome.user_waiting:
         # §12.1: a round judged `continue`, with a message that arrived in
         # this Run's Session after this Run started, gives up the head so
-        # that message gets handled. Below cancel, pause, budget, approval and
-        # delegation — those are "must stop"; this is "should stop" — and
+        # that message gets handled. Below cancel, pause, budget, approval,
+        # delegation and the compat window — those all outrank it — and
         # below done/failed/undecidable/wait, which have already decided
         # where this Run goes; preemption only claims the round that would
         # otherwise have kept going.
@@ -190,8 +203,6 @@ def decide_after_round(outcome: RoundOutcome) -> SliceDecision:
         # the queued message exactly as stuck as it was. The goal was not
         # met; `goal_preempted` on the snapshot is what says so.
         return SliceDecision(RunSignal.COMPLETED)
-    if outcome.compat_window_expired:
-        return SliceDecision(RunSignal.SAFE_PAUSE_REACHED, PauseReason.COMPAT_TIMEOUT)
     if outcome.slice_expired:
         if outcome.hold_slice:
             return SliceDecision(None)
