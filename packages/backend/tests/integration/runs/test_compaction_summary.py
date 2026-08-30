@@ -80,7 +80,11 @@ def summary_endpoint(client: TestClient, admin_csrf: str) -> str:
 def agent_on_the_small_endpoint(
     client: TestClient, scope: dict[str, str], small_endpoint: str
 ) -> Any:
-    def build(tools: list[str] | None = None, summary_endpoint_id: str | None = None) -> str:
+    def build(
+        tools: list[str] | None = None,
+        summary_endpoint_id: str | None = None,
+        max_model_calls: int | None = None,
+    ) -> str:
         alias = f"summary-{uuid4().hex[:8]}"
         agent = client.post(
             "/api/v1/agents", headers=scope, json={"name": "Summary", "alias": alias}
@@ -91,11 +95,13 @@ def agent_on_the_small_endpoint(
         }
         if summary_endpoint_id is not None:
             policy["summary_endpoint_id"] = summary_endpoint_id
-        spec = {
+        spec: dict[str, Any] = {
             **VALID_SPEC,
             "tools": tools or [],
             "model_policy": policy,
         }
+        if max_model_calls is not None:
+            spec["limits"] = {**VALID_SPEC["limits"], "max_model_calls": max_model_calls}
         draft = client.put(
             f"/api/v1/agents/{agent['id']}/draft",
             headers=scope,
@@ -1174,4 +1180,139 @@ async def test_a_summary_calls_cost_can_push_a_later_round_past_the_ceiling(
     assert model.calls == 1
     assert reloaded["status"] == "paused"
     assert reloaded["pause_reason"] == "limit"
+
+
+# -- Review fixes: price pinning, the call-count valve, and an unpriced
+# declared summary endpoint's consequence
+
+
+async def test_the_default_summary_call_is_billed_at_the_runs_pinned_main_price(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    agent_on_the_small_endpoint: Any,
+    small_endpoint: str,
+) -> None:
+    """§12.4 pins a Run's price at creation so a mid-Run repricing cannot
+    change what it is charged. The default summary call (no
+    `summary_endpoint_id` declared) resolves to this Run's own main
+    endpoint — `_summary_policy` returns the main policy unchanged — so its
+    price is that same pin, `context.prices`, not a fresh read. Reading
+    live here would let one endpoint answer at two different prices within
+    one Run depending only on which call asked.
+    """
+    _price(client, scope, small_endpoint, input_price="3", output_price="15")
+    agent = agent_on_the_small_endpoint()
+    session = start_session(client, scope, agent)
+    session_id = UUID(session)
+    workspace_id = UUID(scope["X-Workspace-Id"])
+    await _seed_old_turns(engine, session_id, workspace_id)
+
+    run = ask(client, scope, session, "and what is left?")
+    # Repriced after the Run was created — and so after its
+    # `model_pricing_version_id` was already pinned — but before the Worker
+    # ever runs a round. The ordinary shape of "an admin changed the price
+    # mid-Run".
+    _price(client, scope, small_endpoint, input_price="30", output_price="150")
+
+    ordinary_answer = ModelResponse(
+        stop_reason=StopReason.COMPLETED, text="nothing is left", input_tokens=1, output_tokens=1
+    )
+    model = SummarizingRecording(
+        ordinary_answer, summary_input_tokens=500, summary_output_tokens=50
+    )
+    await drive(engine, model, None)
+
+    assert status(client, scope, run)["status"] == "completed"
+    billed = await payloads(engine, run, "context_summary_billed")
+    assert len(billed) == 1
+
+    pinned_price = TokenPrices(
+        currency="USD", input_per_million=Decimal("3"), output_per_million=Decimal("15")
+    )
+    expected = cost_of(pinned_price, input_tokens=500, output_tokens=50)
+    assert Decimal(billed[0]["cost"]) == expected.amount
+
+    # Not the live $30/$150 price — billing that instead is exactly the bug
+    # this test guards against.
+    live_price = TokenPrices(
+        currency="USD", input_per_million=Decimal("30"), output_per_million=Decimal("150")
+    )
+    wrong = cost_of(live_price, input_tokens=500, output_tokens=50)
+    assert Decimal(billed[0]["cost"]) != wrong.amount
+
+
+async def test_a_summary_call_counts_against_the_max_model_calls_ceiling(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    agent_on_the_small_endpoint: Any,
+) -> None:
+    """Product decision, §12.4: the call counter moves for a summarization
+    call too, not only tokens and cost — it is the one valve that still
+    works with no price and no cost ceiling configured at all, which is the
+    default shape a deployment starts in. No pricing and no `_set_ceiling`
+    call anywhere in this test, deliberately: what stops this Run has to be
+    the call counter alone.
+    """
+    agent = agent_on_the_small_endpoint(max_model_calls=1)
+    session = start_session(client, scope, agent)
+    session_id = UUID(session)
+    workspace_id = UUID(scope["X-Workspace-Id"])
+    await _seed_old_turns(engine, session_id, workspace_id)
+
+    model = SummarizingRecording(
+        says("nothing is left"), summary_input_tokens=10, summary_output_tokens=10
+    )
+    run = ask(client, scope, session, "and what is left?")
+    await drive(engine, model, None)
+
+    reloaded = status(client, scope, run)
+    # One round hides two calls: the summarizer, then the round's own
+    # answer. `max_model_calls=1` allows only one, so the Run stops here —
+    # even though its own answer looked complete, and even though no cost
+    # ceiling was ever configured to stop it.
+    assert model.calls == 1
+    assert reloaded["status"] == "paused"
+    assert reloaded["pause_reason"] == "limit"
+    assert reloaded["budget"]["consumed_model_calls"] == 2
+
+
+async def test_an_unpriced_declared_summary_endpoint_makes_the_runs_cost_unknown(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    agent_on_the_small_endpoint: Any,
+    small_endpoint: str,
+    summary_endpoint: str,
+) -> None:
+    """Decision, §12.4: an unpriced declared summary endpoint is accepted at
+    publish — the same choice this platform already makes for an unpriced
+    *main* endpoint — and bills `unknown()`, which then poisons the whole
+    Run-tree's `consumed_cost` forever. Not a special case: the ordinary
+    §12.4 rule ("one unpriced round makes the whole total unknown") working
+    on a new source of a round.
+    """
+    _price(client, scope, small_endpoint, input_price="3", output_price="15")
+    # summary_endpoint is deliberately left unpriced.
+    agent = agent_on_the_small_endpoint(summary_endpoint_id=summary_endpoint)
+    session = start_session(client, scope, agent)
+    session_id = UUID(session)
+    workspace_id = UUID(scope["X-Workspace-Id"])
+    await _seed_old_turns(engine, session_id, workspace_id)
+
+    ordinary_answer = ModelResponse(
+        stop_reason=StopReason.COMPLETED, text="nothing is left", input_tokens=1, output_tokens=1
+    )
+    model = SummarizingRecording(
+        ordinary_answer, summary_input_tokens=500, summary_output_tokens=50
+    )
+    run = ask(client, scope, session, "and what is left?")
+    await drive(engine, model, None)
+
+    assert status(client, scope, run)["status"] == "completed"
+    row = await _budget_row(engine, UUID(run))
+    assert row is not None
+    assert row["cost_quality"] == "unknown"
+    assert row["consumed_cost"] is None
 
