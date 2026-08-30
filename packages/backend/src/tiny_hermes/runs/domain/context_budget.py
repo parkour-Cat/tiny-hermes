@@ -698,6 +698,27 @@ def _summarize(covered: Sequence[StoredMessage], *, with_hints: bool = True) -> 
     return " ".join(parts)
 
 
+@dataclass(frozen=True)
+class CoveredSummary:
+    """A summary the caller already has, and the range it was written about.
+
+    The two travel together because neither is usable alone. `plan_context`
+    has no I/O and cannot look up what a bare string covers, and a summary
+    standing in for a range other than its own is wrong in both directions:
+    reach further than it covers and the model is told a text explains turns
+    the summarizer never read; reach less far and the model reads a summary of
+    turns it is also sent verbatim, while `CONTEXT_COMPACTED` reports the
+    shorter range as though that were all the text was about.
+    """
+
+    text: str
+    #: The last `session_messages` sequence the text was asked to explain.
+    #: The near end is not carried: compaction always starts at the oldest
+    #: turn in `history`, so the range's start is `history[0].sequence` by
+    #: construction and a second number could only disagree with it.
+    last_sequence: int
+
+
 def _compact(
     history: Sequence[StoredMessage],
     through: int,
@@ -737,7 +758,7 @@ def plan_context(
     skill_summaries: Sequence[SkillSummary] = (),
     memories: Sequence[str] = (),
     segments: Mapping[SegmentName, SegmentBudget] = DEFAULT_SEGMENTS,
-    stored_summary: str | None = None,
+    stored_summary: CoveredSummary | None = None,
     threshold: float = DEFAULT_COMPACTION_THRESHOLD,
 ) -> ContextPlan:
     """Decide what this round sends.
@@ -758,11 +779,12 @@ def plan_context(
     ``stored_summary`` is a model-written summary the caller already has —
     generated and persisted once, elsewhere, not here: this function has no
     I/O, so it cannot fetch one and must not be handed the means to make one.
-    It does not know what range that summary covers, either; using what it is
-    given is all a pure function can do, and range correctness is the
-    caller's job. ``None`` falls back to `_summarize`'s structural summary,
-    which is why every existing caller that never passes this keyword keeps
-    seeing exactly what it saw before.
+    It arrives as a `CoveredSummary` rather than a bare string because the
+    range it explains decides where it may stand: step four does not search
+    for a boundary when one is given, it pins the boundary to that range.
+    ``None`` falls back to `_summarize`'s structural summary, which is why
+    every existing caller that never passes this keyword keeps seeing exactly
+    what it saw before.
 
     ``threshold`` changes only when the trim/compact cascade below is worth
     entering, never what it may do once it has: a round that already fits
@@ -980,11 +1002,39 @@ def plan_context(
     # replaces that text outright, so both passes would `_compact` to the same
     # message. Running the second one anyway would not change the result —
     # only spend the search again.
+    #
+    # And a `stored_summary` does not get a search at all — it gets the one
+    # boundary its own text is about. Searching would let a short reused
+    # summary settle earlier than the range it explains, which loses nothing
+    # from the round but makes two things untrue at once: the model reads a
+    # summary of turns it is also sent verbatim, and `CONTEXT_COMPACTED`
+    # reports the shorter range as if that were the whole of what the text
+    # covers. Walking *past* the range is the mirror failure `_honestly_widens`
+    # was written for; pinning is what makes both unreachable rather than
+    # detected. Nothing is lost by pinning: `spent` falls as `through` rises
+    # (one summary replaces more turns), so the pinned boundary fits whenever
+    # any smaller one would.
+    stored_text = None if stored_summary is None else stored_summary.text
     hint_passes = (True,) if stored_summary is not None else (True, False)
+    boundaries: Sequence[int] = range(2, max(compactable, 0) + 1)
+    if stored_summary is not None:
+        # `+ 1` because `through` is a count of leading messages, not an index.
+        # An unknown sequence, or one already inside the protected tail, leaves
+        # no boundary this text may honestly stand at — so nothing is compacted
+        # with it and the caller falls back to its own structural plan.
+        pinned = next(
+            (
+                index + 1
+                for index, item in enumerate(history)
+                if item.sequence == stored_summary.last_sequence
+            ),
+            None,
+        )
+        boundaries = () if pinned is None or not 2 <= pinned <= compactable else (pinned,)
     for with_hints in hint_passes:
-        for through in range(2, max(compactable, 0) + 1):
+        for through in boundaries:
             summary, compaction = _compact(
-                history, through, tokenizer, with_hints=with_hints, stored=stored_summary
+                history, through, tokenizer, with_hints=with_hints, stored=stored_text
             )
             candidate = [summary, *working[through:]]
             spent = fixed + sum(

@@ -42,6 +42,7 @@ from tiny_hermes.runs.domain.context_budget import (
     DEFAULT_COMPACTION_THRESHOLD,
     CompactionRecord,
     ContextPlan,
+    CoveredSummary,
     SegmentName,
     SkillSummary,
     plan_context,
@@ -1629,8 +1630,9 @@ class WorkerRuntime:
            summary whose `last_sequence` already reaches this round's
            compaction boundary already explains everything the round would
            compact — no model call, just the same plan recomputed with that
-           text in hand, and it earns the right to replace step 1's plan only
-           if `_honestly_widens` agrees (see step 6). This step spends
+           text in hand, standing in for its *own* range rather than this
+           round's shorter one (step 6), and it earns the right to replace
+           step 1's plan only if `_honestly_widens` agrees. This step spends
            nothing — no model call, only the read already paid for by
            needing to compact at all — so it is never gated on §12.4: a Run
            one round from its ceiling that would have continued on a
@@ -1657,15 +1659,15 @@ class WorkerRuntime:
            step 1's plan goes out exactly as it stood. §7.4.2's failure
            ladder, first rung.
         6. Either way — reused from step 2, or just generated and saved in
-           step 5 — the widened plan earns the right to replace step 1's
-           plan only if `_honestly_widens` says so: it still has to fit the
-           window, and `plan_context`'s own `through` search must not have
-           cut deeper into the transcript than this particular summary text
-           was ever asked to cover. Neither is a hypothetical: a model
-           summary can be longer than the structural sentence it replaces,
-           and `plan_context` has no way to know that from the text alone.
-           Either failure is a generation failure exactly like a timeout —
-           step 1's plan goes out unchanged.
+           step 5 — the summary goes to `plan_context` as a `CoveredSummary`,
+           text and range together, and stands in for exactly that range or
+           not at all: the boundary is pinned there rather than searched for.
+           So the only question left for `_honestly_widens` is whether the
+           pinned plan fits, and that is not hypothetical — a model summary
+           can be longer than the structural sentence it replaces, and at its
+           own boundary it may not fit where the structural one did. Not
+           fitting is a generation failure exactly like a timeout: step 1's
+           plan goes out unchanged.
         """
         baseline = _plan(context, mcp)
         if baseline.compacted is None:
@@ -1674,13 +1676,17 @@ class WorkerRuntime:
         covered_last = baseline.compacted.last_sequence
         stored = await self._latest_summary(claimed.run.session_id)
         if stored is not None and stored.last_sequence >= covered_last:
-            candidate = _plan(context, mcp, stored_summary=stored.text)
+            candidate = _plan(
+                context,
+                mcp,
+                stored_summary=CoveredSummary(stored.text, stored.last_sequence),
+            )
             if _honestly_widens(candidate, stored.last_sequence):
                 return candidate
             logger.info(
-                "a stored summary covered enough by sequence number but its "
-                "text did not fit or forced a wider cut than it covers — "
-                "using the structural plan for this round",
+                "a stored summary covered enough by sequence number but did "
+                "not fit at the range it explains — using the structural plan "
+                "for this round",
                 extra={"run_id": str(claimed.run.id)},
             )
             return baseline
@@ -1701,12 +1707,16 @@ class WorkerRuntime:
             return baseline
 
         await self._save_summary(claimed, context, baseline.compacted, generated)
-        candidate = _plan(context, mcp, stored_summary=generated)
+        candidate = _plan(
+            context,
+            mcp,
+            stored_summary=CoveredSummary(generated, covered_last),
+        )
         if _honestly_widens(candidate, covered_last):
             return candidate
         logger.warning(
-            "a freshly generated summary did not fit or forced a wider cut "
-            "than it covers — using the structural plan for this round",
+            "a freshly generated summary did not fit at the range it "
+            "explains — using the structural plan for this round",
             extra={"run_id": str(claimed.run.id)},
         )
         return baseline
@@ -2196,21 +2206,25 @@ def _honestly_widens(plan: ContextPlan, covered_last: int) -> bool:
       structural summary this call started with may still fit fine, and a
       Run that would have continued on it must not be paused because a
       *different*, longer summary text was tried in its place.
-    - `plan.compacted.last_sequence` reaches past `covered_last` — the last
-      sequence number the summary text handed to this call was ever asked to
-      explain. `plan_context`'s own `through` search walks forward until the
-      round fits, and a summary text bigger than the one it replaced can
-      push that search past its own coverage — producing a `CompactionRecord`
-      whose `message_ids` and range claim turns the summarizer never read.
-      Nothing is deleted from `session_messages` when this happens, but it is
-      the same shape, one level up, as the documented bug this design exists
-      to avoid: the middle of a conversation quietly no longer explained to
-      the model it is sent to.
+    - `plan.compacted.last_sequence` is not exactly `covered_last` — the last
+      sequence the summary text handed to this call was asked to explain. A
+      record that reaches past it claims turns the summarizer never read; one
+      that stops short leaves the model reading a summary of turns it is also
+      sent verbatim, and writes an event reporting the shorter range as
+      though that were all the text covers.
+
+      Neither is what `plan_context` does any more: given a `CoveredSummary`
+      it pins the boundary instead of searching, so the only way this
+      comparison can fail is a plan that did not honour the pin, or one that
+      compacted nothing because the covered range had moved inside the
+      protected tail. It is kept as the corroboration, not as the mechanism —
+      the guarantee lives in the pin, and this says so out loud rather than
+      trusting it silently.
     """
     return (
         plan.fits
         and plan.compacted is not None
-        and plan.compacted.last_sequence <= covered_last
+        and plan.compacted.last_sequence == covered_last
     )
 
 
@@ -2345,7 +2359,7 @@ def _schema_allowance(context: ExecutionContext) -> int:
 def _plan(
     context: ExecutionContext,
     mcp: tuple[BoundMcpTool, ...] = (),
-    stored_summary: str | None = None,
+    stored_summary: CoveredSummary | None = None,
 ) -> ContextPlan:
     """Decide what this round may send, before it is sent.
 

@@ -88,7 +88,7 @@ def test_a_stored_summary_is_what_the_model_sees(
 ) -> None:
     plan = _plan_with(
         long_history,
-        stored_summary=CoveredSummary(text="用户在排查一条图片管道的故障。", last_sequence=4),
+        stored_summary=CoveredSummary(text="用户在排查一条图片管道的故障。", last_sequence=7),
     )
 
     assert plan.compacted is not None
