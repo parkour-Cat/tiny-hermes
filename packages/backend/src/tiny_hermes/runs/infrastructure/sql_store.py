@@ -994,10 +994,15 @@ class SqlRunStore:
         return [row.id for row in taken], len(users) - index, _text_of(anchor)
 
     async def mark_withdrawn(self, message_ids: Sequence[UUID], *, at: datetime) -> int:
-        """置时间戳，且只置一次。
+        """置时间戳，且只置一次；顺带作废覆盖到它们的那份压缩摘要。
 
         `withdrawn_at.is_(None)` 不是防御性的多余条件：撤回是幂等的，重放同一条
         命令不得把第一次撤回的时刻改写成第二次的。
+
+        摘要那一步和撤回同一个事务，不是另开一个方法让调用方记得调：一份提炼过
+        被撤内容的摘要，下一轮会被 `_plan_context` 原样发回模型（复用判据只看
+        `last_sequence` 够不够远），撤回就漏在这条路上。作废之后下一次压缩重新
+        生成一份——不去改摘要正文，那是拿模型写的话猜它哪几句该删。
         """
         if not message_ids:
             return 0
@@ -1014,9 +1019,35 @@ class SqlRunStore:
             .values(withdrawn_at=at)
             .returning(SessionMessageRow.id)
         )
-        count = len(list(updated.all()))
+        withdrawn = list(updated.all())
+        await self._forget_summaries_covering(withdrawn)
         await self._session.flush()
-        return count
+        return len(withdrawn)
+
+    async def _forget_summaries_covering(self, message_ids: Sequence[UUID]) -> None:
+        """删掉正文范围里含有这些消息的摘要行。
+
+        判据是 `first_sequence <= sequence <= last_sequence`——摘要覆盖的是一个
+        序号区间，只比 `last_sequence` 会把区间之前的历史也算进去。这是
+        `StoredSummary.first_sequence` 的读者。
+
+        只看这次真正落笔的那几行（`mark_withdrawn` 的 RETURNING）：已经撤过的
+        消息，当时就作废过一次，之后重新生成的摘要是从不含它们的历史里写出来
+        的，不该被同一条命令的重放再扔一次。
+        """
+        if not message_ids:
+            return
+        covered = (
+            select(SessionMessageRow.id)
+            .where(
+                SessionMessageRow.id.in_(message_ids),
+                SessionMessageRow.session_id == SessionCompactionRow.session_id,
+                SessionMessageRow.sequence >= SessionCompactionRow.first_sequence,
+                SessionMessageRow.sequence <= SessionCompactionRow.last_sequence,
+            )
+            .exists()
+        )
+        await self._session.execute(delete(SessionCompactionRow).where(covered))
 
     async def withdrawn_at_of(self, message_id: UUID) -> datetime | None:
         row = await self._session.get(SessionMessageRow, message_id)

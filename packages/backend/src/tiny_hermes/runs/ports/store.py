@@ -615,10 +615,16 @@ class RunStore(Protocol):
     async def mark_withdrawn(
         self, message_ids: Sequence[UUID], *, at: datetime
     ) -> int:
-        """Flip `withdrawn_at` on rows that do not have it yet.
+        """Flip `withdrawn_at` on rows that do not have it yet, and drop any
+        stored compaction summary whose covered range holds one of them.
 
         Returns how many rows this call actually changed, which can be lower
         than `len(message_ids)` — a row already withdrawn is left alone.
+
+        The summary goes in the same step, not as a second call the caller has
+        to remember: a summary that distilled withdrawn turns is reused whole
+        on the next round, and a withdrawal that leaves it standing is one
+        §14.3 does not actually make invisible.
         """
         ...
 
