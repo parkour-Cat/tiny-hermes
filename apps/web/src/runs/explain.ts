@@ -103,14 +103,19 @@ function text(
 /**
  * What the platform did to the context before a round, said in words.
  *
- * `context_trimmed` and `context_compacted` are the two events that report a
- * decision nobody asked for: the conversation was too large for the window, so
- * the round was sent something other than what the transcript holds. An event
- * name and a JSON blob leave a reader guessing whether anything was lost —
- * nothing is, and that is the part worth writing out.
+ * `context_trimmed` and `context_compacted` report a decision nobody asked
+ * for: the conversation was too large for the window, so the round was sent
+ * something other than what the transcript holds. An event name and a JSON
+ * blob leave a reader guessing whether anything was lost — nothing is, and
+ * that is the part worth writing out. Every number on those two is a plan
+ * estimate, and the messages say so: neither is usage, neither is billed.
  *
- * Every number here is a plan estimate, and the messages say so. None of them
- * is usage, and none of them is billed.
+ * `context_summary_billed`, handled a few branches down, is not a third of
+ * that kind — it is the one event here whose numbers are real usage and
+ * real money, because a summarization call actually happened on a real
+ * endpoint. Telling it apart from the two above in the sentence, not just
+ * the event name, is the exact confusion `context_summary_billed` exists to
+ * prevent.
  */
 export function eventNote(frame: Pick<RunEventFrame, "event_type" | "payload">): EventNote | null {
   if (frame.event_type === "context_trimmed") {
@@ -244,6 +249,7 @@ export function eventNote(frame: Pick<RunEventFrame, "event_type" | "payload">):
     const names = text(frame.payload, { model: "model", endpoint: "endpoint_id" });
     const inputTokens = frame.payload.input_tokens;
     const outputTokens = frame.payload.output_tokens;
+    const modelCalls = frame.payload.model_calls;
     const counts = {
       tokens: String(tokens),
       // Individually, not through `filled`: unlike `context_trimmed`'s
@@ -253,6 +259,12 @@ export function eventNote(frame: Pick<RunEventFrame, "event_type" | "payload">):
       // not silence.
       inputTokens: typeof inputTokens === "number" ? String(inputTokens) : "—",
       outputTokens: typeof outputTokens === "number" ? String(outputTokens) : "—",
+      // From the payload, not a hardcoded "one" in the message string: a
+      // sentence claiming a call count the event itself does not carry is
+      // the same gap `model_calls` was added to this payload to close. `—`
+      // on an event written before that field existed, the same honest gap
+      // as the two above rather than a guessed "1".
+      calls: typeof modelCalls === "number" ? String(modelCalls) : "—",
     };
     const cost = frame.payload.cost;
     const currency = frame.payload.cost_currency;
