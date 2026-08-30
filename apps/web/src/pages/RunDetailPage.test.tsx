@@ -61,7 +61,7 @@ function run(overrides: Record<string, unknown> = {}) {
     available_actions: ["pause", "cancel"],
     checkpoint_replay_safe: true,
     checkpoint_effect_status: "none",
-    goal: { round: null, outcome: null, unmet: [] },
+    goal: { round: null, outcome: null, unmet: [], preempted: false },
     created_at: "2026-08-10T02:00:00Z",
     started_at: "2026-08-10T02:00:05Z",
     finished_at: null,
@@ -147,6 +147,49 @@ test("概要 states the Run's status, its state version, its checkpoint, and eve
   expect(card.getByText(`480 / ${t("budgetUnlimited")}`)).toBeInTheDocument();
   expect(card.getByText("0 / 2")).toBeInTheDocument();
   expect(card.getByText(moment("2026-08-10T03:00:00Z"))).toBeInTheDocument();
+});
+
+test("a preempted Run says so in a banner and next to its goal outcome", async () => {
+  // MINOR (review): the earlier fix only asserted at `statusNote`, the
+  // rendering-decision layer, not the component — this is the layer this
+  // repo keeps losing things at, so this test renders the real page.
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () =>
+      HttpResponse.json(
+        run({
+          status: "completed",
+          goal: { round: 3, outcome: "continue", unmet: ["pytest -q"], preempted: true },
+        }),
+      ),
+    ),
+  );
+  stream();
+
+  renderRun();
+
+  expect(await screen.findByText(t("runPreemptedNote"))).toBeInTheDocument();
+  const card = within(await summary());
+  expect(card.getByText(t("goalOutcomeContinue"), { exact: false })).toBeInTheDocument();
+  expect(card.getByText(t("runGoalPreemptedSuffix"), { exact: false })).toBeInTheDocument();
+});
+
+test("a Run that actually finished gets no preempted banner", async () => {
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () =>
+      HttpResponse.json(
+        run({
+          status: "completed",
+          goal: { round: 2, outcome: "done", unmet: [], preempted: false },
+        }),
+      ),
+    ),
+  );
+  stream();
+
+  renderRun();
+  await summary();
+
+  expect(screen.queryByText(t("runPreemptedNote"))).not.toBeInTheDocument();
 });
 
 test("the Runs this one descends from are links to them", async () => {
