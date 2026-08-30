@@ -568,11 +568,16 @@ class WorkerRuntime:
                 # from the `after` read above and the record below — a
                 # sibling cancelled in that window is possible and unclosed:
                 # this round would still preempt for a message that no
-                # longer exists by the time it ends. Accepted rather than
-                # locked against, because the cost is bounded to this Run's
-                # own goal being cut one round short, not a stall — the
-                # cancelled sibling is simply skipped when `_terminalize`
-                # next looks for a successor.
+                # longer exists by the time `_terminalize` actually looks.
+                # Accepted rather than locked against. Not claiming a bound
+                # this doesn't have: whether that read is later a stall
+                # (`_terminalize` lands on a `paused` Run once the cancelled
+                # one is gone) or clean (the next `queued` Run in line) is
+                # `_terminalize`'s own successor-selection outcome, decided
+                # fresh at that moment — this race neither causes nor rules
+                # out either one. What the race itself is bounded to is
+                # narrower: this round's own goal being cut short on
+                # information that was already stale by the time it acted.
                 waiting = (
                     False if probed.signal is not None else await self._has_waiting_run(claimed)
                 )
