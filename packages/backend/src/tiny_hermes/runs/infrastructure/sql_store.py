@@ -964,7 +964,7 @@ class SqlRunStore:
     async def has_waiting_run(
         self, session_id: UUID, run_started_at: datetime | None
     ) -> bool:
-        """是否有一条消息是在这个 Run 开始执行之后才到的。
+        """是否有一条消息是在这个 Run 开始执行之后才到、且现在真能被领走的。
 
         v2.9.1 把 §12.1 的判据从「后面排着」收窄成「在我开始之后才到」：连发的
         几条消息各自建 Run，在第一条被 Worker 认领之前就已经排好队（§566），若
@@ -974,6 +974,14 @@ class SqlRunStore:
         创建后等了五分钟才被认领的 Run，`session_sequence` 不会因为那五分钟而
         变。真正标记「我开始」的只有 `started_at`；拿它去比对方的 `created_at`，
         才是一个关于时间先后、而不是队列位置的问题。
+
+        状态过滤是 `== 'queued'`，不是「非终态」：`_select_claimable` 领走的
+        只有 `status == 'queued'` 的 Run；`paused`、`interrupted`、
+        `waiting_*` 都不终态，但同样不是 `claim_head` 会碰的对象。让位的意义
+        是「把队首交给一个马上能被领走、真正处理那条消息的 Run」（§12.1：
+        「使那条消息立即得到处理」）——如果让给的是一个只有暂停恢复或超时才会
+        再动的 Run，头顶 Run 结束成 `completed`，Session 却卡在一个没有
+        Worker 会去领的位置上，比不让位更糟。
 
         `run_started_at` 为 `None` 时直接判 `False`：一个从未发生过的时刻，不能
         拿来说别的 Run「在它之后」到达。`_has_waiting_run` 只在认领之后才调用这
@@ -990,7 +998,7 @@ class SqlRunStore:
                     exists().where(
                         RunRow.session_id == session_id,
                         RunRow.created_at > run_started_at,
-                        RunRow.status.not_in(tuple(s.value for s in TERMINAL_STATES)),
+                        RunRow.status == RunState.QUEUED.value,
                     )
                 )
             )

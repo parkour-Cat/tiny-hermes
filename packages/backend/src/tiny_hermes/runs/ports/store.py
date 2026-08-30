@@ -655,7 +655,7 @@ class RunStore(Protocol):
     async def has_waiting_run(
         self, session_id: UUID, run_started_at: datetime | None
     ) -> bool:
-        """Is there a queued, unfinished Run in this Session created after
+        """Is there a `queued` Run in this Session created after
         `run_started_at` — the current Run's own `started_at`.
 
         v2.9.1 narrowed §12.1: the trigger is "arrived after I began
@@ -674,6 +674,16 @@ class RunStore(Protocol):
         is one; the other Run is compared by its own `created_at`, because
         "did you arrive after that moment" is a time question, not a queue
         position one.
+
+        The status filter is `== 'queued'`, not "non-terminal": `claim_head`
+        only ever picks up a Run whose status is `queued` — `paused`,
+        `interrupted` and the `waiting_*` states are all non-terminal, but
+        none of them is something a Worker will claim. Preemption's whole
+        point is handing the head to a Run that gets the arriving message
+        processed right away (§12.1: "使那条消息立即得到处理"); handing it to
+        anything else leaves the Session `completed` out from under itself
+        and stalled on a Run nothing will pick up, which is worse than not
+        preempting at all.
 
         `None` in means this Run has no `started_at` to compare against — it
         answers `False` rather than guessing, because nothing can honestly be
