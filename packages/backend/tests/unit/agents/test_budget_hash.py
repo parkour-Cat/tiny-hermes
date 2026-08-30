@@ -199,3 +199,28 @@ async def test_a_threshold_inside_the_platform_bounds_publishes(
     )
 
     assert version.version_number == 1
+
+
+async def test_a_threshold_outside_the_bounds_is_refused_without_an_endpoint(
+    publisher: _Publisher,
+) -> None:
+    """The stand-in provider declares no window, and `_check_context_budget`
+    has nothing to measure against — but the ratio's bounds are the
+    platform's, not the endpoint's, and an author is not allowed past them by
+    picking a provider that happens to skip the window check.
+
+    Before this, `_check_compaction_threshold` was only reachable through
+    `_check_endpoint`, which returns at its first line for any policy that is
+    not an `EndpointModelPolicy`: the docstring described a publish-authority
+    bound that a `deterministic` Agent never met.
+    """
+    above_the_platform_bound = MAX_COMPACTION_THRESHOLD + 0.01
+    assert above_the_platform_bound <= 1
+
+    with pytest.raises(ContextBudgetUnsatisfied):
+        await publisher.publish(
+            {
+                **valid_spec(),
+                "context_budget": {"compaction_threshold": above_the_platform_bound},
+            }
+        )
