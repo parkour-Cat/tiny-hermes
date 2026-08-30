@@ -396,17 +396,23 @@ class WorkerRuntime:
             )
 
     async def _has_waiting_run(self, claimed: ClaimedRun) -> bool:
-        """§12.1: is anyone queued behind this Run in its Session right now?
+        """§12.1: did a message arrive in this Session after this Run started?
 
         Queried fresh every round, at the same cost `_cost_precheck` pays to
         read the budget, rather than cached on the claim: caching would let
         this round's preemption decision rest on last round's facts, and
-        "somebody is waiting" is exactly the kind of thing that can become
-        true partway through a Run that has been going for a while.
+        "somebody arrived after I started" is exactly the kind of thing that
+        can become true partway through a Run that has been going for a
+        while.
+
+        `claimed.run.started_at`, not `session_sequence` — v2.9.1's frame of
+        reference is when *this* Run began executing, and `started_at` is the
+        column that says so; see `SqlRunStore.has_waiting_run` for why a queue
+        position cannot answer the same question.
         """
         async with self._sessions.begin() as session:
             return await SqlRunStore(session).has_waiting_run(
-                claimed.run.session_id, claimed.run.session_sequence
+                claimed.run.session_id, claimed.run.started_at
             )
 
     async def _execute_slice(self, claimed: ClaimedRun) -> None:

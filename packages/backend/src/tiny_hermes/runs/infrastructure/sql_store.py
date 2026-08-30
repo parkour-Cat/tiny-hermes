@@ -961,21 +961,35 @@ class SqlRunStore:
             ),
         )
 
-    async def has_waiting_run(self, session_id: UUID, after_sequence: int) -> bool:
-        """是否有人排在这个 Run 后面。
+    async def has_waiting_run(
+        self, session_id: UUID, run_started_at: datetime | None
+    ) -> bool:
+        """是否有一条消息是在这个 Run 开始执行之后才到的。
 
-        §12.1 的让位规则要的就是这一个事实。参照系是 `session_sequence` 而不是
-        `head_run_id`：让位是为了让**后面**那条消息跑起来，而「谁是队首」在这一刻
-        必然是提问者自己，问它得不到答案。
+        v2.9.1 把 §12.1 的判据从「后面排着」收窄成「在我开始之后才到」：连发的
+        几条消息各自建 Run，在第一条被 Worker 认领之前就已经排好队（§566），若
+        仍以 `session_sequence`（我自己被创建时的队列位置）做参照，那一整队会
+        互相触发让位，导致除最后一条外每条都只跑一轮。`session_sequence` 答不
+        了「我开始执行的那一刻」这个问题——它记的是创建顺序，不是执行时间，一个
+        创建后等了五分钟才被认领的 Run，`session_sequence` 不会因为那五分钟而
+        变。真正标记「我开始」的只有 `started_at`；拿它去比对方的 `created_at`，
+        才是一个关于时间先后、而不是队列位置的问题。
+
+        `run_started_at` 为 `None` 时直接判 `False`：一个从未发生过的时刻，不能
+        拿来说别的 Run「在它之后」到达。`_has_waiting_run` 只在认领之后才调用这
+        个方法，届时 `started_at` 必已写入，这一分支因此是防御性的，不是当前会
+        走到的路径。
 
         `EXISTS` 而不是取回行：调用方只需要真假，而一个 Session 后面可能排着很多条。
         """
+        if run_started_at is None:
+            return False
         return bool(
             await self._session.scalar(
                 select(
                     exists().where(
                         RunRow.session_id == session_id,
-                        RunRow.session_sequence > after_sequence,
+                        RunRow.created_at > run_started_at,
                         RunRow.status.not_in(tuple(s.value for s in TERMINAL_STATES)),
                     )
                 )

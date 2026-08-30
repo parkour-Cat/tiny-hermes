@@ -652,14 +652,35 @@ class RunStore(Protocol):
         """
         ...
 
-    async def has_waiting_run(self, session_id: UUID, after_sequence: int) -> bool:
-        """Is anyone queued behind `after_sequence` in this Session, right now.
+    async def has_waiting_run(
+        self, session_id: UUID, run_started_at: datetime | None
+    ) -> bool:
+        """Is there a queued, unfinished Run in this Session created after
+        `run_started_at` — the current Run's own `started_at`.
 
-        The reference frame is a `session_sequence`, not `head_run_id` — see
-        `unfinished_work`'s own docstring for why the two questions are not
-        interchangeable. §12.1's preemption rule needs exactly this one fact:
-        a Run deciding whether to keep going asks about the Runs after
-        *itself*, not about who currently sits at the head.
+        v2.9.1 narrowed §12.1: the trigger is "arrived after I began
+        executing", not "sits behind me in the queue". A burst of messages a
+        user sends in one breath each create their own Run (§566), and all of
+        them queue before the first one is ever claimed — under the old
+        `session_sequence`-behind-me test that whole queue preempted itself,
+        so every message but the last got exactly one round.
+
+        `session_sequence` is dropped rather than reused as the bound: it
+        encodes *my own* position in the queue at the moment *I* was created,
+        which has nothing to say about the moment I actually started
+        executing — a Run claimed five minutes after it was created has the
+        same `session_sequence` either way. The new question needs a clock
+        reading from when I started, and `started_at` is the only column that
+        is one; the other Run is compared by its own `created_at`, because
+        "did you arrive after that moment" is a time question, not a queue
+        position one.
+
+        `None` in means this Run has no `started_at` to compare against — it
+        answers `False` rather than guessing, because nothing can honestly be
+        said to have arrived "after" a moment that never happened. In
+        practice `_has_waiting_run` only ever calls this once a claim has set
+        `started_at`, so the `None` branch is a defensive answer, not a path
+        the Worker exercises today.
         """
         ...
 
