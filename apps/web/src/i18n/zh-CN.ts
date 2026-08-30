@@ -144,7 +144,11 @@ export const zhCN = {
   contextTrimmedMemory:
     "为了装进模型窗口，{dropped} 条低相关记忆没有随这一轮发出，预计省出 {freed} 个 token（这是计划估算，不是用量）。",
   contextCompactedNote:
-    "第 {first}–{last} 条消息（共 {covered} 条）被一条结构化摘要顶替，预计省出 {freed} 个 token（这是计划估算，不是用量）。原文一条不少地留在会话记录里；摘要由平台按固定规则生成，没有为此多调一次模型。",
+    "第 {first}–{last} 条消息（共 {covered} 条）被一条摘要顶替，预计省出 {freed} 个 token（这是计划估算，不是用量）。原文一条不少地留在会话记录里。这条记录没有写下摘要是谁写的，所以它对这件事什么也没说。",
+  contextCompactedStructuralNote:
+    "第 {first}–{last} 条消息（共 {covered} 条）被一条结构化摘要顶替，预计省出 {freed} 个 token（这是计划估算，不是用量）。原文一条不少地留在会话记录里；这一份由平台按固定规则生成，没有为此多调一次模型——它列出那段里有过什么，不讲那段说了什么。",
+  contextCompactedModelNote:
+    "第 {first}–{last} 条消息（共 {covered} 条）被一条模型写的摘要顶替，预计省出 {freed} 个 token（这是计划估算，不是用量）。原文一条不少地留在会话记录里。它多花了一次模型调用：模型 {model}，端点 {endpoint}。模型读到的那一段就是这份摘要，答复在这一段上出错，先从这里查。",
   runBlockedBy: "阻塞于",
   runStartedAt: "开始时间",
   runSession: "会话",
