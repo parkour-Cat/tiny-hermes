@@ -275,3 +275,49 @@ async def test_a_further_back_queued_run_does_not_preempt_when_the_true_successo
     session_id, a, _b, _c = session_with_a_paused_run_ahead_of_a_later_queued_one
 
     assert await store.has_waiting_run(session_id, a.id, a.started_at) is False
+
+
+@pytest.fixture
+async def session_with_a_queued_successor_ahead_of_a_message_that_arrived_mid_run(
+    client: TestClient, scope: dict[str, str], session_id: str, engine: AsyncEngine
+) -> tuple[UUID, Row[Any], Row[Any], Row[Any]]:
+    """A running; B queued right behind it, created *before* A started (part
+    of the same burst — §566, not an interruption); C queued, created
+    *after* A started — the mid-run correction §12.1 exists for.
+
+    The successor `_terminalize` would hand the head to is B, and B is
+    `queued` — claimable. Whether *B itself* arrived after A started is a
+    different question from whether *anyone* did, and C answers the second:
+    a message genuinely arrived while A was working, and A must still give
+    it up even though the Run that gets the head next is B, not C.
+    """
+    a = _submit(client, scope, session_id, "a")
+    b = _submit(client, scope, session_id, "b")
+    await _mark_started(engine, UUID(str(a["id"])))
+    c = _submit(client, scope, session_id, "c")
+    a_row = await _run_row(engine, UUID(str(a["id"])))
+    b_row = await _run_row(engine, UUID(str(b["id"])))
+    c_row = await _run_row(engine, UUID(str(c["id"])))
+    return UUID(session_id), a_row, b_row, c_row
+
+
+async def test_a_message_arriving_mid_run_still_preempts_when_the_successor_was_already_queued(
+    store: SqlRunStore,
+    session_with_a_queued_successor_ahead_of_a_message_that_arrived_mid_run: tuple[
+        UUID, Row[Any], Row[Any], Row[Any]
+    ],
+) -> None:
+    """The other half of the fix `test_a_further_back_queued_run_does_not_preempt_...`
+    pins: claimability (is the successor `queued`?) and arrival (did *some*
+    message show up after I started?) are two separate questions about two
+    separate Runs. Requiring the arrival test on the successor specifically
+    — B, created before A started — would wrongly say no here and let A grind
+    on while C, the actual mid-run correction, waits. §12.1's trigger is an
+    existence test over the whole Session, not a property of whichever Run
+    happens to be next in line.
+    """
+    session_id, a, _b, _c = (
+        session_with_a_queued_successor_ahead_of_a_message_that_arrived_mid_run
+    )
+
+    assert await store.has_waiting_run(session_id, a.id, a.started_at) is True
