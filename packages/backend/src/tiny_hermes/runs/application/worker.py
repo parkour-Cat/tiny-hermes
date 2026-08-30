@@ -1197,6 +1197,15 @@ class WorkerRuntime:
         # The commit itself keeps the lease (`signal=None`); the round's real
         # signal is applied after the sandbox's fate is confirmed, because a
         # completed Run whose container may still run is not completed.
+        #
+        # `goal_preempted` must not be neutralized along with it: that flag
+        # describes what this round's own verdict and disposition were, not
+        # what state the Run transitions to right now, and the interim commit
+        # is the checkpoint the Run actually ends on if the sandbox close
+        # below never gets a second write. `preempted_decision=decision`
+        # keeps the real, un-neutralized disposition available to
+        # `_checkpoint` for that one fact, while `signal=None` still keeps
+        # the transition itself deferred.
         slice_command = self._slice_command(
             claimed,
             handle,
@@ -1208,6 +1217,7 @@ class WorkerRuntime:
             events=events,
             judged=judged,
             prices=after.prices,
+            preempted_decision=decision,
         )
         try:
             await sandbox.freeze(
@@ -2108,6 +2118,7 @@ class WorkerRuntime:
         cleanup_sandbox_id: UUID | None = None,
         judged: "_Judged | None" = None,
         prices: TokenPrices | None = None,
+        preempted_decision: SliceDecision | None = None,
     ) -> RecordSliceCommand:
         if judged is not None:
             # Every write of a judged round carries the verdict, whichever path
@@ -2126,7 +2137,18 @@ class WorkerRuntime:
             wait_kind=decision.wait_kind,
             wait_seconds=decision.wait_seconds,
             wait_policy=decision.wait_policy,
-            checkpoint=_checkpoint(response, judged, decision),
+            # `preempted_decision` defaults to `decision` because in every
+            # ordinary call the two questions — "what transition does this
+            # write record?" and "was this round's own verdict overridden by
+            # preemption?" — have one answer between them. `_checkpoint_round`
+            # is the one caller where they differ: its interim commit passes
+            # a neutralized `decision` (`signal=None`, so the transition is
+            # deferred until the sandbox's fate is confirmed) alongside the
+            # real one here, so `goal_preempted` still describes what this
+            # round's disposition actually was.
+            checkpoint=_checkpoint(
+                response, judged, decision if preempted_decision is None else preempted_decision
+            ),
             checkpoint_replay_safe=response.replay_safe,
             checkpoint_effect_status=(
                 CheckpointEffectStatus.UNKNOWN
