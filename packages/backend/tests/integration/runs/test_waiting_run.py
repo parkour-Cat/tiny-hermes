@@ -1,7 +1,10 @@
 """后面有没有人在等——判定自动续跑该不该让位的那个事实。
 
-参照系是当前 Run 的 `session_sequence`，不是 `head_run_id`：让位是为了让**后面**
-那条消息跑起来，而队首是谁与「我后面有没有人」是两件事。
+v2.9.1 把参照系从 `session_sequence`（位置）收窄成当前 Run 自己的 `started_at`
+（时间，§12.1）：判据是「在我开始之后才到」，不是「后面排着」。一段消息如果在
+Worker 认领这个 Run 之前就已经排好队，用 `session_sequence` 一样会命中「后面排
+着」，但那是排队，不是插话——用户连发三条消息，后两条在第一条开始执行前就已入
+队，不该因此各自只跑一轮就被打断。
 """
 
 from collections.abc import AsyncIterator
@@ -37,16 +40,28 @@ def _submit(
 
 
 async def _run_row(engine: AsyncEngine, run_id: UUID) -> Row[Any]:
-    """`id`/`session_sequence` for one Run, read back the way the fixtures below
-    hand it to the tests — the tests assert on `.session_sequence` directly.
+    """`id`/`started_at` for one Run — the column these tests key off of, in
+    place of the `session_sequence` the old version of this file used.
     """
     async with engine.connect() as connection:
         return (
             await connection.execute(
-                text("SELECT id, session_sequence FROM runs WHERE id = :id"),
+                text("SELECT id, started_at FROM runs WHERE id = :id"),
                 {"id": run_id},
             )
         ).one()
+
+
+async def _mark_started(engine: AsyncEngine, run_id: UUID) -> None:
+    """Stand in for a Worker's claim: only `started_at` matters to
+    `has_waiting_run`, and setting it directly keeps these tests from also
+    depending on the claim/lease machinery they are not testing.
+    """
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE runs SET status = 'running', started_at = now() WHERE id = :id"),
+            {"id": run_id},
+        )
 
 
 @pytest.fixture
@@ -54,15 +69,35 @@ async def session_with_one_running_run(
     client: TestClient, scope: dict[str, str], session_id: str, engine: AsyncEngine
 ) -> tuple[UUID, Row[Any]]:
     run = _submit(client, scope, session_id, "only")
+    await _mark_started(engine, UUID(str(run["id"])))
     row = await _run_row(engine, UUID(str(run["id"])))
     return UUID(session_id), row
 
 
 @pytest.fixture
-async def session_with_a_queued_run_behind(
+async def session_with_a_message_queued_before_the_run_started(
     client: TestClient, scope: dict[str, str], session_id: str, engine: AsyncEngine
 ) -> tuple[UUID, Row[Any], Row[Any]]:
+    """The burst case: both messages exist before a Worker ever claims the
+    first one — §566's queue, not a mid-run interruption.
+    """
     head = _submit(client, scope, session_id, "head")
+    queued = _submit(client, scope, session_id, "queued")
+    await _mark_started(engine, UUID(str(head["id"])))
+    head_row = await _run_row(engine, UUID(str(head["id"])))
+    queued_row = await _run_row(engine, UUID(str(queued["id"])))
+    return UUID(session_id), head_row, queued_row
+
+
+@pytest.fixture
+async def session_with_a_message_queued_after_the_run_started(
+    client: TestClient, scope: dict[str, str], session_id: str, engine: AsyncEngine
+) -> tuple[UUID, Row[Any], Row[Any]]:
+    """The interruption case: the second message does not exist yet when the
+    first Run starts executing — it arrives mid-run.
+    """
+    head = _submit(client, scope, session_id, "head")
+    await _mark_started(engine, UUID(str(head["id"])))
     queued = _submit(client, scope, session_id, "queued")
     head_row = await _run_row(engine, UUID(str(head["id"])))
     queued_row = await _run_row(engine, UUID(str(queued["id"])))
@@ -74,6 +109,7 @@ async def session_with_a_finished_run_behind(
     client: TestClient, scope: dict[str, str], session_id: str, engine: AsyncEngine
 ) -> tuple[UUID, Row[Any], Row[Any]]:
     head = _submit(client, scope, session_id, "head")
+    await _mark_started(engine, UUID(str(head["id"])))
     finished = _submit(client, scope, session_id, "finished")
     async with engine.begin() as connection:
         await connection.execute(
@@ -93,16 +129,29 @@ async def test_a_run_alone_in_its_session_has_nobody_waiting(
 ) -> None:
     session_id, run = session_with_one_running_run
 
-    assert await store.has_waiting_run(session_id, run.session_sequence) is False
+    assert await store.has_waiting_run(session_id, run.started_at) is False
 
 
-async def test_a_queued_run_behind_it_is_somebody_waiting(
+async def test_a_message_queued_before_the_run_started_is_not_waiting(
     store: SqlRunStore,
-    session_with_a_queued_run_behind: tuple[UUID, Row[Any], Row[Any]],
+    session_with_a_message_queued_before_the_run_started: tuple[UUID, Row[Any], Row[Any]],
 ) -> None:
-    session_id, head, _queued = session_with_a_queued_run_behind
+    """The distinction §12.1 was narrowed to draw: already-queued is not
+    mid-run interruption, even though something genuinely sits behind the
+    head Run right now.
+    """
+    session_id, head, _queued = session_with_a_message_queued_before_the_run_started
 
-    assert await store.has_waiting_run(session_id, head.session_sequence) is True
+    assert await store.has_waiting_run(session_id, head.started_at) is False
+
+
+async def test_a_message_queued_after_the_run_started_is_waiting(
+    store: SqlRunStore,
+    session_with_a_message_queued_after_the_run_started: tuple[UUID, Row[Any], Row[Any]],
+) -> None:
+    session_id, head, _queued = session_with_a_message_queued_after_the_run_started
+
+    assert await store.has_waiting_run(session_id, head.started_at) is True
 
 
 async def test_a_terminal_run_behind_it_is_not_waiting(
@@ -111,14 +160,28 @@ async def test_a_terminal_run_behind_it_is_not_waiting(
 ) -> None:
     session_id, head, _finished = session_with_a_finished_run_behind
 
-    assert await store.has_waiting_run(session_id, head.session_sequence) is False
+    assert await store.has_waiting_run(session_id, head.started_at) is False
 
 
 async def test_a_run_ahead_of_it_does_not_count(
     store: SqlRunStore,
-    session_with_a_queued_run_behind: tuple[UUID, Row[Any], Row[Any]],
+    session_with_a_message_queued_after_the_run_started: tuple[UUID, Row[Any], Row[Any]],
 ) -> None:
-    session_id, _head, queued = session_with_a_queued_run_behind
+    session_id, _head, queued = session_with_a_message_queued_after_the_run_started
 
-    # 从排队那条自己的角度看，它后面没有人。
-    assert await store.has_waiting_run(session_id, queued.session_sequence) is False
+    # 从排队那条自己的角度看，它自己还没被 Worker 认领，`started_at` 是 NULL——
+    # 没有「我开始之后」这个参照系，也就谈不上有谁排在它后面。
+    assert queued.started_at is None
+    assert await store.has_waiting_run(session_id, queued.started_at) is False
+
+
+async def test_a_run_with_no_started_at_has_no_frame_of_reference(
+    store: SqlRunStore, session_id: str
+) -> None:
+    """A defensive edge case rather than one the Worker can trigger today:
+    `_has_waiting_run` is only ever called on a Run the claim just started,
+    so `started_at` is always set by the time it asks. Still, `None` in means
+    "no basis to say anyone arrived after me" rather than an error — treating
+    it as `True` would prefer a guess over an honest unknown.
+    """
+    assert await store.has_waiting_run(UUID(session_id), None) is False

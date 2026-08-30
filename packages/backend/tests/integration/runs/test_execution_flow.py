@@ -171,13 +171,17 @@ async def test_three_runs_drain_in_session_order_over_one_stack(
 
     # One Run executes at a time, and only the executing Run holds a lease.
     #
-    # Not six: §12.1 preemption means "two rounds each" was only ever true for
-    # a Run with nobody behind it. flow-1 and flow-2 each have a successor
-    # already queued the moment their first round is judged `continue`, so
-    # `decide_after_round` gives up the head right there instead of looping
-    # to a second round — one snapshot apiece. Only flow-3, last in the
-    # queue, runs both of its rounds itself.
-    assert len(model.snapshots) == 4
+    # Six, not four: v2.9.1 narrowed §12.1 so a `continue` only gives up the
+    # head for a message that arrived *after this Run started* — not merely
+    # one that is queued behind it. All three Runs here are submitted before
+    # the worker loop ever claims the first one (`submit_run` runs to
+    # completion for flow-1, flow-2 and flow-3 before the `while` loop
+    # below makes its first `run_once`), so flow-2 already existed before
+    # flow-1's `started_at`, and flow-3 before flow-2's. That is the burst
+    # case the rule was narrowed to exclude, not the mid-run interruption it
+    # targets — nobody here preempts anybody, and every Run runs its full,
+    # un-preempted two-round shape.
+    assert len(model.snapshots) == 6  # three Runs, two rounds each
     for snapshot in model.snapshots:
         assert len(snapshot.running) == 1
         assert snapshot.leased == snapshot.running
@@ -188,12 +192,6 @@ async def test_three_runs_drain_in_session_order_over_one_stack(
     assert [row.session_sequence for row in finished] == [1, 2, 3]
     assert [row.status for row in finished] == ["completed"] * 3
 
-    # flow-1 and flow-2 are preempted straight out of their only round: the
-    # signal is decided before `slice_expired` is ever consulted (§12.1 in
-    # `decide_after_round` outranks it), so neither sees `run_slice_ended`.
-    # flow-3 has nobody waiting behind it and runs the un-preempted two-round
-    # shape the whole test used to assume for all three.
-    preempted_shape = ["run_created", "run_lease_acquired", "run_completed", "goal_verdict"]
     unpreempted_shape = [
         "run_created",
         "run_lease_acquired",
@@ -203,11 +201,9 @@ async def test_three_runs_drain_in_session_order_over_one_stack(
         "run_completed",
         "goal_verdict",
     ]
-    for frames, expected in zip(
-        transcripts, [preempted_shape, preempted_shape, unpreempted_shape], strict=True
-    ):
+    for frames in transcripts:
         _assert_contiguous(frames)
-        assert _transcript(frames) == expected
+        assert _transcript(frames) == unpreempted_shape
 
     rows = await _audit_rows(engine)
     assert [row.result for row in rows] == ["succeeded"] * len(rows)

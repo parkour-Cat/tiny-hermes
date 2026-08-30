@@ -8,6 +8,14 @@
 `goal_preempted` 用真实的读路径核对：`SqlRunStore.get_run` 就是
 `RunResponse.from_domain` 用来把 checkpoint 变成 API 里 `goal.preempted` 的那条
 路径，绕过它——比如直接查 `runs` 表——只会证明写对了，不证明有人读得到。
+
+v2.9.1 把 §12.1 的判据收窄成「在我开始之后才到」（见 spec §12.1、
+`SqlRunStore.has_waiting_run`）。`test_a_message_arriving_mid_round_preempts_the_run`
+和 `test_a_message_already_queued_before_start_does_not_preempt` 是这条收窄的
+对照组：两者的 Session 形状完全一样，唯一的差别是第二条消息相对头顶 Run
+`started_at` 的时间点——mid-round 用 `_SubmittingModel`
+在模型被调用（也就是 claim、`started_at` 落定之后）那一刻才提交它，而
+already-queued 在 Worker 认领之前就把它提交好。
 """
 
 from collections.abc import AsyncIterator
@@ -21,6 +29,7 @@ from sqlalchemy.engine import Row
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from tiny_hermes.runs.domain.models import RunCapabilities, RunSnapshot
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
+from tiny_hermes.runs.ports.model import ModelRequest, ModelResponse
 
 from ..conftest import VALID_SPEC
 from .test_worker_goal import ScriptedSandbox, claims_done
@@ -142,6 +151,60 @@ class _Worker:
             ScriptedSandbox(failing=(VERIFY,)),
         )
 
+    async def run_one_slice_while_a_message_arrives(
+        self, client: TestClient, scope: dict[str, str], session_id: str, key: str
+    ) -> None:
+        """The mid-round case: the second message is submitted only once the
+        Worker has already claimed the head Run and is asking the model for
+        its round — see `_SubmittingModel`.
+        """
+        await drive(
+            self._engine,
+            _SubmittingModel(
+                Recording(claims_done("all done")),
+                client=client,
+                scope=scope,
+                session_id=session_id,
+                key=key,
+            ),
+            ScriptedSandbox(failing=(VERIFY,)),
+        )
+
+
+class _SubmittingModel:
+    """Answers from a script, and submits one message into the Session the
+    instant its round begins.
+
+    `WorkerRuntime` claims the Run (setting `started_at`) before it ever calls
+    a model — `complete` is the one hook this test can use to inject a
+    message and be sure its `created_at` lands after that claim, which is
+    exactly the ordering `test_a_message_arriving_mid_round_preempts_the_run`
+    needs to prove: not "queued behind the head Run" but "arrived after the
+    head Run started".
+    """
+
+    def __init__(
+        self,
+        inner: Recording,
+        *,
+        client: TestClient,
+        scope: dict[str, str],
+        session_id: str,
+        key: str,
+    ) -> None:
+        self._inner = inner
+        self._client = client
+        self._scope = scope
+        self._session_id = session_id
+        self._key = key
+        self._submitted = False
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        if not self._submitted:
+            self._submitted = True
+            _submit_into(self._client, self._scope, self._session_id, self._key)
+        return await self._inner.complete(request)
+
 
 @pytest.fixture
 def worker(engine: AsyncEngine) -> _Worker:
@@ -149,11 +212,30 @@ def worker(engine: AsyncEngine) -> _Worker:
 
 
 @pytest.fixture
-async def session_with_a_continuing_run_and_a_queued_message(
+async def session_with_a_continuing_run(
     client: TestClient, scope: dict[str, str], engine: AsyncEngine
-) -> AsyncIterator[tuple[UUID, Row[Any], Row[Any]]]:
+) -> AsyncIterator[tuple[str, Row[Any]]]:
+    """Just the head Run — nothing else exists in the Session yet. What
+    happens next (a message arriving mid-round, one already queued, or
+    nobody at all) is each test's own concern, added on top of this.
+    """
     # Generous budget: preemption has to win on the very first round, so
     # nothing here should depend on how many rounds the agent is allowed.
+    agent = _agent_that_never_verifies(client, scope, rounds=4)
+    session_id = _new_session(client, scope, agent)
+    running_id = UUID(_submit_into(client, scope, session_id, "head"))
+    running = await _run_row(engine, running_id)
+    yield session_id, running
+
+
+@pytest.fixture
+async def session_with_a_message_already_queued_before_start(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine
+) -> AsyncIterator[tuple[UUID, Row[Any], Row[Any]]]:
+    """The burst case: both messages exist before a Worker ever claims the
+    head Run. §12.1's v2.9.1 wording says this is not preemption — see the
+    module docstring for the contrast with the mid-round fixture.
+    """
     agent = _agent_that_never_verifies(client, scope, rounds=4)
     session_id = _new_session(client, scope, agent)
     running_id = UUID(_submit_into(client, scope, session_id, "head"))
@@ -177,17 +259,31 @@ async def session_with_a_continuing_run_alone(
     yield UUID(session_id), running
 
 
-async def test_a_waiting_message_actually_runs_after_the_preemption(
+async def test_a_message_arriving_mid_round_preempts_the_run(
     worker: _Worker,
     store: _RunReader,
-    session_with_a_continuing_run_and_a_queued_message: tuple[UUID, Row[Any], Row[Any]],
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_with_a_continuing_run: tuple[str, Row[Any]],
 ) -> None:
-    _session_id, running, queued = session_with_a_continuing_run_and_a_queued_message
+    session_id, running = session_with_a_continuing_run
 
-    # First slice: the head Run's own round judges `continue`, finds the
-    # queued message behind it, and gives up the head instead of looping.
-    await worker.run_one_slice()
+    # First slice: the head Run's own round judges `continue`; a message
+    # arrives while that round is in flight (see `_SubmittingModel`), and the
+    # Run gives up the head instead of looping.
+    await worker.run_one_slice_while_a_message_arrives(client, scope, session_id, "queued")
     assert (await store.read_run(running.id)).state.value == "completed"
+
+    async with engine.connect() as connection:
+        queued_id = (
+            await connection.execute(
+                text(
+                    "SELECT id FROM runs WHERE session_id = :session AND id != :head"
+                ),
+                {"session": UUID(session_id), "head": running.id},
+            )
+        ).scalar_one()
 
     # Giving up the head only makes the queued Run claimable — nothing
     # claims it until a Worker asks again. Without this second slice, the
@@ -195,21 +291,39 @@ async def test_a_waiting_message_actually_runs_after_the_preemption(
     # message never runs at all, which is exactly the bug this task exists
     # to catch.
     await worker.run_one_slice()
-    assert (await store.read_run(queued.id)).state.value != "queued"
+    assert (await store.read_run(queued_id)).state.value != "queued"
 
 
 async def test_the_preempted_run_says_why_it_ended(
     worker: _Worker,
     store: _RunReader,
-    session_with_a_continuing_run_and_a_queued_message: tuple[UUID, Row[Any], Row[Any]],
+    client: TestClient,
+    scope: dict[str, str],
+    session_with_a_continuing_run: tuple[str, Row[Any]],
 ) -> None:
-    _session_id, running, _queued = session_with_a_continuing_run_and_a_queued_message
+    session_id, running = session_with_a_continuing_run
 
-    await worker.run_one_slice()
+    await worker.run_one_slice_while_a_message_arrives(client, scope, session_id, "queued")
 
     snapshot = await store.read_run(running.id)
     assert snapshot.goal_preempted is True
     assert snapshot.document()["goal"]["preempted"] is True
+
+
+async def test_a_message_already_queued_before_start_does_not_preempt(
+    worker: _Worker,
+    store: _RunReader,
+    session_with_a_message_already_queued_before_start: tuple[UUID, Row[Any], Row[Any]],
+) -> None:
+    """The distinction v2.9.1 exists to draw: a message that queued before
+    the head Run ever started is not the mid-run interruption §12.1 targets,
+    even though something genuinely sits behind the head Run right now.
+    """
+    _session_id, running, _queued = session_with_a_message_already_queued_before_start
+
+    await worker.run_one_slice()
+
+    assert (await store.read_run(running.id)).state.value != "completed"
 
 
 async def test_a_run_with_nobody_waiting_keeps_going(
