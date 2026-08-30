@@ -16,6 +16,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
     text,
 )
@@ -122,6 +123,45 @@ class SessionMessageRow(IdMixin, CreatedAtMixin, Base):
     withdrawn_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class SessionCompactionRow(IdMixin, CreatedAtMixin, Base):
+    """The one summary a compacted Session currently has.
+
+    One row per Session, not a history: §7.4.2 has every later compaction
+    *update* the previous summary rather than write a fresh one, so the
+    previous row is the only thing ever read. `uq_session_compactions_session`
+    is what makes that true — without it, "only the latest is kept" would be a
+    claim this table doesn't enforce. The originals a compaction covers are
+    never deleted, so nothing here needs to preserve older summaries for
+    traceability; that trail is the `CONTEXT_COMPACTED` `RunEvent` instead.
+
+    Only model-written summaries land here, which is why no column records
+    which kind this is: the structural one is never persisted — it costs
+    nothing to recompute and `plan_context` rebuilds it every round. A row
+    also does not outlive the turns it distilled: withdrawing any message
+    inside its covered range deletes it (`mark_withdrawn`), so the next
+    compaction writes one from history the user has not taken back.
+    """
+
+    __tablename__ = "session_compactions"
+    __table_args__ = (
+        UniqueConstraint("session_id", name="uq_session_compactions_session"),
+        ForeignKeyConstraint(
+            ["session_id", "workspace_id"],
+            ["sessions.id", "sessions.workspace_id"],
+            name="fk_session_compactions_session",
+            ondelete="CASCADE",
+        ),
+    )
+
+    session_id: Mapped[UUID] = mapped_column()
+    workspace_id: Mapped[UUID] = mapped_column(index=True)
+    first_sequence: Mapped[int] = mapped_column(Integer)
+    last_sequence: Mapped[int] = mapped_column(Integer)
+    summary: Mapped[str] = mapped_column(Text)
+    endpoint_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    model: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
 
 class RunRow(IdMixin, CreatedAtMixin, Base):

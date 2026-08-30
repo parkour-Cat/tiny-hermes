@@ -140,6 +140,14 @@ def calls_shell(command: str, call_id: str, said: str = "") -> ModelResponse:
     )
 
 
+def fails() -> ModelResponse:
+    """A round the model refused. Used here to script the Worker's own
+    auxiliary summarization call into `§7.4.2`'s first failure rung, so a
+    `Recording` scripted for one ordinary round is not silently consumed by
+    it — see `test_compaction_summary.py` for that call's own behaviour."""
+    return ModelResponse(stop_reason=StopReason.FAILED, text="", failure="scripted_refusal")
+
+
 async def test_a_tool_result_too_large_to_carry_is_trimmed_and_recorded(
     client: TestClient,
     scope: dict[str, str],
@@ -201,19 +209,28 @@ async def test_an_old_conversation_is_compacted_with_its_range_and_ids(
     await drive(engine, first, StandInSandbox(output="ok\n"))
 
     second = ask(client, scope, session, "and what is left?")
-    model = Recording(says("nothing is left"))
+    # This Session has no stored summary yet, so the Worker also asks this
+    # same model to write one before it asks the round's own question — see
+    # `test_compaction_summary.py` for that call. Scripted to fail here: this
+    # test is about the *structural* shape §7.4.2 requires either way, and a
+    # scripted failure is the one answer that reliably lands on it rather
+    # than on whatever the summarizer happened to be given.
+    model = Recording(fails(), says("nothing is left"))
     await drive(engine, model, StandInSandbox(output="ok\n"))
 
     assert status(client, scope, second)["status"] == "completed"
     compacted = await payloads(engine, second, "context_compacted")
     assert len(compacted) == 1
+    assert compacted[0]["source"] == "structural"
     assert compacted[0]["first_sequence"] == 1
     assert compacted[0]["covered"] == len(compacted[0]["message_ids"])
     assert compacted[0]["covered"] >= 2
 
     # The summary stands where the covered turns did, and the question the Run
-    # was actually asked is still the last thing the model sees, whole.
-    given = model.requests[0].messages
+    # was actually asked is still the last thing the model sees, whole. The
+    # round's own request is the *last* one this model saw — the first was
+    # the summarization attempt that failed.
+    given = model.requests[-1].messages
     assert "compacted by the platform" in given[0].text
     assert given[-1].text == "and what is left?"
     assert len(given) == 5 - compacted[0]["covered"] + 1

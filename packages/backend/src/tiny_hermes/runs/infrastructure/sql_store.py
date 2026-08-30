@@ -109,6 +109,7 @@ from tiny_hermes.runs.infrastructure.tables import (
     RunBudgetScopeRow,
     RunEventRow,
     RunRow,
+    SessionCompactionRow,
     SessionMessageRow,
     SessionRow,
     WorkerLeaseRow,
@@ -129,6 +130,7 @@ from tiny_hermes.runs.ports.store import (
     CreateSessionCommand,
     ExecutionContext,
     RecordSliceCommand,
+    RecordSummaryUsageCommand,
     RenewedLease,
     RenewLeaseCommand,
     RepairResult,
@@ -136,6 +138,7 @@ from tiny_hermes.runs.ports.store import (
     RetryRunCommand,
     RunEventRecord,
     RunEventWindow,
+    StoredSummary,
     WidenBudgetCommand,
 )
 from tiny_hermes.skills.infrastructure.tables import SkillRow, SkillVersionRow
@@ -992,10 +995,15 @@ class SqlRunStore:
         return [row.id for row in taken], len(users) - index, _text_of(anchor)
 
     async def mark_withdrawn(self, message_ids: Sequence[UUID], *, at: datetime) -> int:
-        """置时间戳，且只置一次。
+        """置时间戳，且只置一次；顺带作废覆盖到它们的那份压缩摘要。
 
         `withdrawn_at.is_(None)` 不是防御性的多余条件：撤回是幂等的，重放同一条
         命令不得把第一次撤回的时刻改写成第二次的。
+
+        摘要那一步和撤回同一个事务，不是另开一个方法让调用方记得调：一份提炼过
+        被撤内容的摘要，下一轮会被 `_plan_context` 原样发回模型（复用判据只看
+        `last_sequence` 够不够远），撤回就漏在这条路上。作废之后下一次压缩重新
+        生成一份——不去改摘要正文，那是拿模型写的话猜它哪几句该删。
         """
         if not message_ids:
             return 0
@@ -1012,13 +1020,174 @@ class SqlRunStore:
             .values(withdrawn_at=at)
             .returning(SessionMessageRow.id)
         )
-        count = len(list(updated.all()))
+        withdrawn = list(updated.all())
+        await self._forget_summaries_covering(withdrawn)
         await self._session.flush()
-        return count
+        return len(withdrawn)
+
+    async def _forget_summaries_covering(self, message_ids: Sequence[UUID]) -> None:
+        """删掉正文范围里含有这些消息的摘要行。
+
+        判据是 `first_sequence <= sequence <= last_sequence`——摘要覆盖的是一个
+        序号区间，只比 `last_sequence` 会把区间之前的历史也算进去。这是
+        `StoredSummary.first_sequence` 的读者。
+
+        只看这次真正落笔的那几行（`mark_withdrawn` 的 RETURNING）：已经撤过的
+        消息，当时就作废过一次，之后重新生成的摘要是从不含它们的历史里写出来
+        的，不该被同一条命令的重放再扔一次。
+        """
+        if not message_ids:
+            return
+        covered = (
+            select(SessionMessageRow.id)
+            .where(
+                SessionMessageRow.id.in_(message_ids),
+                SessionMessageRow.session_id == SessionCompactionRow.session_id,
+                SessionMessageRow.sequence >= SessionCompactionRow.first_sequence,
+                SessionMessageRow.sequence <= SessionCompactionRow.last_sequence,
+            )
+            .exists()
+        )
+        await self._session.execute(delete(SessionCompactionRow).where(covered))
 
     async def withdrawn_at_of(self, message_id: UUID) -> datetime | None:
         row = await self._session.get(SessionMessageRow, message_id)
         return None if row is None else row.withdrawn_at
+
+    async def latest_summary(self, session_id: UUID) -> StoredSummary | None:
+        row = await self._session.scalar(
+            select(SessionCompactionRow).where(
+                SessionCompactionRow.session_id == session_id
+            )
+        )
+        if row is None:
+            return None
+        return StoredSummary(
+            session_id=row.session_id,
+            first_sequence=row.first_sequence,
+            last_sequence=row.last_sequence,
+            text=row.summary,
+            endpoint_id=row.endpoint_id,
+            model=row.model,
+        )
+
+    async def save_summary(
+        self, summary: StoredSummary, *, workspace_id: UUID
+    ) -> None:
+        """Upsert on `session_id`, per `uq_session_compactions_session` — the
+        constraint that makes "only the latest is kept" true rather than a
+        claim this method merely intends.
+        """
+        await self._session.execute(
+            pg_insert(SessionCompactionRow)
+            .values(
+                id=uuid4(),
+                session_id=summary.session_id,
+                workspace_id=workspace_id,
+                first_sequence=summary.first_sequence,
+                last_sequence=summary.last_sequence,
+                summary=summary.text,
+                endpoint_id=summary.endpoint_id,
+                model=summary.model,
+            )
+            .on_conflict_do_update(
+                constraint="uq_session_compactions_session",
+                set_={
+                    "first_sequence": summary.first_sequence,
+                    "last_sequence": summary.last_sequence,
+                    "summary": summary.text,
+                    "endpoint_id": summary.endpoint_id,
+                    "model": summary.model,
+                },
+            )
+        )
+        await self._session.flush()
+
+    async def record_summary_usage(self, command: RecordSummaryUsageCommand) -> None:
+        """Bill a summarization call, and append its event, in one
+        transaction — see `RecordSummaryUsageCommand`.
+
+        Not `_consume_budget`: that also moves `consumed_execution_ms`, which
+        a summarization call must never touch — `executed_ms` is never even
+        measured for it. `consumed_model_calls` moves here
+        instead, deliberately (§12.4, product decision): the call counter,
+        the token counter and the cost counter are one valve honoured
+        together, not two of three, and the call counter is the one that
+        still functions on a deployment with no price, or no `max_cost`,
+        configured — the default shape, where the other two can say nothing
+        at all.
+        """
+        consumed = await self._session.scalar(
+            update(RunBudgetScopeRow)
+            .where(RunBudgetScopeRow.root_run_id == command.root_run_id)
+            .values(
+                consumed_model_calls=(
+                    RunBudgetScopeRow.consumed_model_calls + command.model_calls
+                ),
+                consumed_tokens=RunBudgetScopeRow.consumed_tokens + command.tokens,
+                version=RunBudgetScopeRow.version + 1,
+            )
+            .returning(RunBudgetScopeRow.version)
+            .execution_options(synchronize_session=False)
+        )
+        if consumed is None:
+            raise UnknownRun
+        budget = await self._session.get(RunBudgetScopeRow, command.root_run_id)
+        if budget is not None:
+            _accumulate_cost(budget, command.cost)
+            # Written before the refresh below for the same reason
+            # `_consume_budget` orders its own two calls this way: the refresh
+            # re-reads the row, and without a flush first it would discard
+            # what `_accumulate_cost` just set in memory.
+            await self._session.flush()
+            await self._session.refresh(budget)
+        await self.append_events(
+            AppendEventsCommand(
+                workspace_id=command.workspace_id,
+                run_id=command.run_id,
+                events=(command.event,),
+            )
+        )
+
+    async def current_prices_for(self, endpoint_id: UUID) -> TokenPrices | None:
+        """The price in force for this endpoint right now.
+
+        For a genuinely different, declared summary endpoint only
+        (§7.4.2 Task 4's `summary_endpoint_id`) — **never** for a Run's own
+        main endpoint. That price is pinned at Run creation
+        (`runs.model_pricing_version_id`, read back as `context.prices`) so a
+        later repricing cannot change what an already-running Run is charged;
+        calling this instead for the main endpoint would read today's price
+        and quietly break that pin. A declared summary endpoint has no
+        equivalent pin — `model_pricing_version_id` is a single column, and it
+        already names the main endpoint's version — so the price in force at
+        call time is the only one there is for it. Same query
+        `_current_pricing` runs, just keyed directly on an endpoint rather
+        than resolved through a Version's spec. `Worker._bill_summary_call` is
+        the caller that actually holds the "which endpoint is this" decision
+        and chooses between this and `context.prices`; this method has no way
+        to enforce that choice itself.
+        """
+        row = await self._session.scalar(
+            select(ModelPricingVersionRow)
+            .where(
+                ModelPricingVersionRow.endpoint_id == endpoint_id,
+                ModelPricingVersionRow.effective_at <= datetime.now(UTC),
+            )
+            .order_by(
+                ModelPricingVersionRow.effective_at.desc(),
+                ModelPricingVersionRow.version_number.desc(),
+            )
+            .limit(1)
+        )
+        if row is None:
+            return None
+        return TokenPrices(
+            currency=row.currency,
+            input_per_million=row.input_per_million,
+            output_per_million=row.output_per_million,
+            cached_input_per_million=row.cached_input_per_million,
+        )
 
     async def _bound_skills(self, spec: AgentSpec) -> tuple[BoundSkill, ...]:
         """What the Version bound, in the order the author bound it.

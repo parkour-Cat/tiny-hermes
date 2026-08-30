@@ -93,6 +93,156 @@ test("a compaction says which messages it stood in for", () => {
   expect(sentence).not.toContain("{");
 });
 
+// The three shapes `source` can arrive in. §7.4.2 added the field for one
+// reason: an operator looking at a compacted session has to be able to tell
+// whether the model read a semantic summary or a list saying "38 messages were
+// here". A sentence that asserts one of the two for every compaction is worse
+// than no sentence — it sends the reader away from the summarizer on exactly
+// the rounds where the summarizer is the suspect.
+
+test("a model-written summary names the model and the endpoint that wrote it", () => {
+  const said = eventNote(
+    frame("context_compacted", {
+      ...COMPACTION,
+      source: "model",
+      endpoint_id: "6f2f2a1e-0b6d-4a1a-9b7b-7d0a2b7f9c31",
+      model: "acme-large",
+    }),
+  );
+
+  const sentence = fill(enUS[said?.key ?? "appName"], said?.values ?? {});
+  expect(sentence).toContain("acme-large");
+  expect(sentence).toContain("6f2f2a1e-0b6d-4a1a-9b7b-7d0a2b7f9c31");
+  // The sentence the operator would otherwise read straight above a payload
+  // that contradicts it.
+  expect(sentence).not.toContain("no extra model call");
+  expect(fill(t(said?.key ?? "appName"), said?.values ?? {})).not.toContain("没有为此多调");
+});
+
+test("a model-written summary whose endpoint went unrecorded still says a model wrote it", () => {
+  // `endpoint_id`/`model` are null whenever the summary call went to the
+  // deterministic stand-in, which names no endpoint. That is not a reason to
+  // fall back to the structural sentence: a model still wrote this text.
+  const said = eventNote(
+    frame("context_compacted", { ...COMPACTION, source: "model", endpoint_id: null, model: null }),
+  );
+
+  const sentence = fill(enUS[said?.key ?? "appName"], said?.values ?? {});
+  expect(sentence).not.toContain("no extra model call");
+  expect(sentence).toContain("—");
+  expect(sentence).not.toContain("{");
+});
+
+test("a structural summary is the one that may say no model was called", () => {
+  const said = eventNote(frame("context_compacted", { ...COMPACTION, source: "structural" }));
+
+  const sentence = fill(enUS[said?.key ?? "appName"], said?.values ?? {});
+  expect(sentence).toContain("no extra model call");
+  expect(fill(t(said?.key ?? "appName"), said?.values ?? {})).toContain("没有为此多调");
+});
+
+test("a compaction that does not say who wrote it claims neither", () => {
+  // Events written before §7.4.2 carry no `source`. Guessing "structural"
+  // because that is all the old build could do would be this console asserting
+  // something the event does not say.
+  const said = eventNote(frame("context_compacted", COMPACTION));
+
+  const sentence = fill(enUS[said?.key ?? "appName"], said?.values ?? {});
+  expect(sentence).not.toContain("no extra model call");
+  expect(said?.key).not.toBe(
+    eventNote(frame("context_compacted", { ...COMPACTION, source: "model" }))?.key,
+  );
+  expect(said?.key).not.toBe(
+    eventNote(frame("context_compacted", { ...COMPACTION, source: "structural" }))?.key,
+  );
+});
+
+// v2.8: a summarization call bills real money and a real slot on this Run's
+// call budget, and `context_summary_billed` is the only place on the
+// timeline that says so — a reader watching `consumed_model_calls` or
+// `consumed_cost` move needs to land here, not on a raw payload.
+const SUMMARY_BILLED = {
+  endpoint_id: "6f2f2a1e-0b6d-4a1a-9b7b-7d0a2b7f9c31",
+  model: "acme-large",
+  input_tokens: 500,
+  output_tokens: 50,
+  tokens: 550,
+  cost: "0.010500",
+  cost_currency: "USD",
+  cost_quality: "provider",
+};
+
+test("a billed summary call names its tokens, cost, and who answered", () => {
+  const said = eventNote(frame("context_summary_billed", SUMMARY_BILLED));
+  const sentence = fill(enUS[said?.key ?? "appName"], said?.values ?? {});
+  expect(sentence).toContain("550");
+  expect(sentence).toContain("500");
+  expect(sentence).toContain("50");
+  expect(sentence).toContain("0.010500");
+  expect(sentence).toContain("USD");
+  expect(sentence).toContain("acme-large");
+  expect(sentence).toContain(SUMMARY_BILLED.endpoint_id);
+  expect(fill(t(said?.key ?? "appName"), said?.values ?? {})).toContain("acme-large");
+});
+
+test("a billed summary call with no configured price says cost is unknown, never 0", () => {
+  const said = eventNote(
+    frame("context_summary_billed", {
+      ...SUMMARY_BILLED,
+      cost: null,
+      cost_currency: null,
+      cost_quality: "unknown",
+    }),
+  );
+  const sentence = fill(enUS[said?.key ?? "appName"], said?.values ?? {});
+  expect(sentence).toContain("unknown");
+  expect(fill(t(said?.key ?? "appName"), said?.values ?? {})).toContain("未知");
+  // The known-cost sentence, not this one — the two must not collapse into
+  // the same words the way `context_compacted`'s three sources must not.
+  expect(said?.key).not.toBe(eventNote(frame("context_summary_billed", SUMMARY_BILLED))?.key);
+});
+
+test("a billed summary call with no reported usage still names the call itself", () => {
+  // The call still moved `consumed_model_calls` even when the provider
+  // reported nothing to bill — see `_bill_summary_call`'s own reasoning.
+  const said = eventNote(
+    frame("context_summary_billed", {
+      ...SUMMARY_BILLED,
+      input_tokens: null,
+      output_tokens: null,
+      tokens: 0,
+      cost: null,
+      cost_currency: null,
+      cost_quality: "unknown",
+    }),
+  );
+  const sentence = fill(enUS[said?.key ?? "appName"], said?.values ?? {});
+  expect(sentence).toContain("—");
+  expect(sentence).not.toContain("{");
+});
+
+test("a billed summary call names how many calls it counted as, from the payload", () => {
+  // The number has to come from `model_calls`, not a hardcoded "one" in the
+  // message string — the same gap `model_calls` was added to this payload
+  // to close (see `_summary_billed_payload`'s docstring).
+  const said = eventNote(frame("context_summary_billed", { ...SUMMARY_BILLED, model_calls: 1 }));
+  const sentence = fill(enUS[said?.key ?? "appName"], said?.values ?? {});
+  expect(sentence).toContain("1 model call");
+});
+
+test("a summary-billed payload written before model_calls existed still gets a sentence", () => {
+  // `SUMMARY_BILLED` carries no `model_calls` — the honest shape of an event
+  // written before this field existed — and the sentence must say so with a
+  // dash, not a guessed number.
+  const said = eventNote(frame("context_summary_billed", SUMMARY_BILLED));
+  const sentence = fill(enUS[said?.key ?? "appName"], said?.values ?? {});
+  expect(sentence).toContain("—");
+});
+
+test("a summary-billed payload this console does not fully understand gets no sentence", () => {
+  expect(eventNote(frame("context_summary_billed", { model: "x" }))).toBeNull();
+});
+
 test("each trimmable segment has its own words", () => {
   for (const segment of ["old_tool_results", "skill_summaries", "memory"]) {
     expect(eventNote(frame("context_trimmed", { ...TRIM, segment }))).not.toBeNull();

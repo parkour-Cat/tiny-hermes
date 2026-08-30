@@ -1,6 +1,6 @@
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Protocol
 from uuid import UUID
 
@@ -31,6 +31,8 @@ from tiny_hermes.model_catalog.domain.models import ModelEndpoint
 from tiny_hermes.model_catalog.ports.store import ModelEndpointStore
 from tiny_hermes.outbound.domain.scope import OutboundScope, parse_entry
 from tiny_hermes.runs.domain.context_budget import (
+    MAX_COMPACTION_THRESHOLD,
+    MIN_COMPACTION_THRESHOLD,
     Accounting,
     BudgetFit,
     ContextWindow,
@@ -94,17 +96,91 @@ class ModelOutputLimitTooHigh(AgentCatalogError):
     """The draft asks for more output than the endpoint will produce."""
 
 
+@dataclass(frozen=True)
+class SummaryEndpointWindowTooSmall:
+    """A declared summary endpoint's own window, held against the main
+    endpoint's — two whole context windows, not a segment table.
+
+    `ContextBudgetUnsatisfied` used to carry this inside a `BudgetFit`
+    (`allowance=summary_window, asked=main_window, advice=()`), whose fields
+    are documented in `context_budget.py` as segment floors and segment
+    targets. Packing two window sizes into them made the names lie about
+    their contents, and `routes.py` — built to read a `BudgetFit` and
+    nothing else — then rendered them as a segment-budget sentence with a
+    dangling "Suggested targets: " and no mention of a summary endpoint at
+    all (Task 4 review). This type exists so the refusal's payload says what
+    it actually is.
+    """
+
+    summary_endpoint_id: UUID
+    summary_window: int
+    main_window: int
+
+
+@dataclass(frozen=True)
+class CompactionThresholdOutsideBounds:
+    """A declared ratio inside `ContextBudget`'s own `(0, 1]` but outside
+    `MIN_COMPACTION_THRESHOLD` / `MAX_COMPACTION_THRESHOLD`
+    (`runs.domain.context_budget`) — fixed module constants, not a runtime
+    administrator setting.
+
+    §7.4.2 gives the ratio the same authority split the segment table has,
+    and the field validator on `ContextBudget.compaction_threshold` could
+    import these same two constants and enforce them directly — nothing
+    about the module boundary stops it. The reason this check lives at
+    publish instead is authority, not visibility: a draft must stay saveable
+    while an author is still working on it, even one whose threshold is
+    momentarily out of bounds, and only publish is allowed to refuse it —
+    the same reason `ContextBudgetUnsatisfied`'s segment-table refusal
+    (`fit`) also happens here rather than on `ContextBudget` itself.
+    """
+
+    value: float
+    minimum: float
+    maximum: float
+
+
 class ContextBudgetUnsatisfied(AgentCatalogError):
-    """The segment targets do not fit the endpoint, though the minimums do.
+    """The segment targets do not fit the endpoint, though the minimums do —
+    or a declared summary endpoint's window is smaller than the main
+    endpoint's — or a declared compaction ratio is outside the platform's
+    configured bounds. One refusal code either way
+    (`context_budget_unsatisfied`): to an author, all three mean "publish is
+    refused until you change what you asked for". Exactly one of `fit` /
+    `summary` / `threshold` is set, and `routes.py` reads whichever it is to
+    build a message about the right thing.
 
     Carries the per-segment advice §7.4.2 asks for, and applies none of it. An
     author whose 4096-token tool schema budget were silently cut to 900 would
     have published an Agent that behaves unlike the one they wrote.
     """
 
-    def __init__(self, fit: BudgetFit) -> None:
-        super().__init__(f"{fit.asked} tokens of targets, {fit.allowance} available")
+    def __init__(
+        self,
+        fit: BudgetFit | None = None,
+        *,
+        summary: SummaryEndpointWindowTooSmall | None = None,
+        threshold: CompactionThresholdOutsideBounds | None = None,
+    ) -> None:
+        if summary is not None:
+            message = (
+                f"summary endpoint {summary.summary_endpoint_id} has a "
+                f"{summary.summary_window}-token window, smaller than the "
+                f"main endpoint's {summary.main_window}"
+            )
+        elif threshold is not None:
+            message = (
+                f"compaction_threshold {threshold.value} is outside this "
+                f"platform's bounds of {threshold.minimum} to {threshold.maximum}"
+            )
+        elif fit is not None:
+            message = f"{fit.asked} tokens of targets, {fit.allowance} available"
+        else:
+            raise TypeError("ContextBudgetUnsatisfied needs fit, summary, or threshold")
+        super().__init__(message)
         self.fit = fit
+        self.summary = summary
+        self.threshold = threshold
 
 
 class ContextWindowTooSmall(AgentCatalogError):
@@ -691,6 +767,13 @@ class AgentCatalog:
             await self._check_http_tools(workspace_id, actor, draft.spec)
             await self._check_mcp_tools(workspace_id, actor, draft.spec)
             await self._check_delegation(workspace_id, draft.spec)
+            # Its own line here rather than inside `_check_context_budget`,
+            # where it used to sit: that method is only reached for an
+            # endpoint-backed policy, and the ratio's bounds belong to the
+            # platform rather than to any endpoint. Left there, an author
+            # publishing on the deterministic stand-in walked past a bound the
+            # method's docstring said publish enforced.
+            self._check_compaction_threshold(draft.spec.context_budget or ContextBudget())
             # Again here, and not only on save: this draft was measured against
             # whatever the ceiling was the day it was written.
             self._check_ceilings(draft.spec)
@@ -732,7 +815,8 @@ class AgentCatalog:
             return
         if self._endpoints is None:
             raise ModelEndpointUnavailable
-        endpoint = await self._endpoints.read(policy.endpoint_id)
+        endpoints = self._endpoints
+        endpoint = await endpoints.read(policy.endpoint_id)
         if endpoint is None or not endpoint.is_selectable:
             raise ModelEndpointUnavailable
         wanted = policy.max_output_tokens
@@ -742,6 +826,40 @@ class AgentCatalog:
             # nothing anywhere would say so.
             raise ModelOutputLimitTooHigh
         self._check_context_budget(spec, endpoint, wanted)
+        await self._check_summary_endpoint(endpoints, policy, endpoint)
+
+    async def _check_summary_endpoint(
+        self,
+        endpoints: ModelEndpointStore,
+        policy: EndpointModelPolicy,
+        endpoint: ModelEndpoint,
+    ) -> None:
+        """Refuse a declared summary endpoint whose window is smaller.
+
+        Upstream Hermes records this as its most common degradation: a
+        summarizer call that overflows its endpoint's context returns
+        nothing, and the compressor drops the middle turns with no summary at
+        all rather than fail loudly — silent, and only visible afterward as a
+        gap. Publish is where a static configuration can still be caught, so
+        this refuses here rather than let the Worker discover it mid-Run.
+
+        `None` (the default) is not checked: it means the Worker uses this
+        Agent's own endpoint, so the window being compared is the window
+        itself and always satisfies this.
+        """
+        if policy.summary_endpoint_id is None:
+            return
+        summary_endpoint = await endpoints.read(policy.summary_endpoint_id)
+        if summary_endpoint is None or not summary_endpoint.is_selectable:
+            raise ModelEndpointUnavailable
+        if summary_endpoint.spec.context_window < endpoint.spec.context_window:
+            raise ContextBudgetUnsatisfied(
+                summary=SummaryEndpointWindowTooSmall(
+                    summary_endpoint_id=summary_endpoint.id,
+                    summary_window=summary_endpoint.spec.context_window,
+                    main_window=endpoint.spec.context_window,
+                )
+            )
 
     async def _check_network(
         self, workspace_id: UUID, spec: AgentSpec, actor: Actor | None = None,
@@ -1059,6 +1177,38 @@ class AgentCatalog:
             raise ContextWindowTooSmall(fit.floor, fit.allowance)
         if not fit.targets_fit:
             raise ContextBudgetUnsatisfied(fit)
+
+    def _check_compaction_threshold(self, budget: ContextBudget) -> None:
+        """Refuse a declared ratio outside `MIN_COMPACTION_THRESHOLD` /
+        `MAX_COMPACTION_THRESHOLD`.
+
+        `ContextBudget.compaction_threshold`'s own field validator already
+        refused a value outside `(0, 1]` at draft-save time — necessary, but
+        not this: an Agent author is only allowed to adjust *within* these
+        two bounds (§7.4.2's split for the segment table, given to the ratio
+        as well). The check lives here rather than on the field not because
+        the field validator could not import the same two constants — it
+        could, the same way this method does — but because bounds
+        enforcement is a publish-authority decision: an author has to be
+        able to save a draft whose threshold is momentarily out of bounds
+        while still working on it, and only publish is allowed to refuse it.
+
+        Called straight from `publish`, not from `_check_context_budget`:
+        these two numbers are the platform's, not an endpoint's, so an Agent
+        on a provider with no window to measure — the deterministic stand-in —
+        is held to them exactly the same.
+        """
+        threshold = budget.compaction_threshold
+        if threshold is None:
+            return
+        if not (MIN_COMPACTION_THRESHOLD <= threshold <= MAX_COMPACTION_THRESHOLD):
+            raise ContextBudgetUnsatisfied(
+                threshold=CompactionThresholdOutsideBounds(
+                    value=threshold,
+                    minimum=MIN_COMPACTION_THRESHOLD,
+                    maximum=MAX_COMPACTION_THRESHOLD,
+                )
+            )
 
     async def _require_role(
         self, workspace_id: UUID, actor: Actor, allowed: set[Role]

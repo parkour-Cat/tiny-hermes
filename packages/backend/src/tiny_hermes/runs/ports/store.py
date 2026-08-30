@@ -216,6 +216,46 @@ class RecordSliceCommand:
 
 
 @dataclass(frozen=True)
+class RecordSummaryUsageCommand:
+    """One summarization call's usage and cost, billed to its Run-tree's
+    shared budget, with the `CONTEXT_SUMMARY_BILLED` event that explains it.
+
+    Deliberately not `RecordSliceCommand`: a summarization call produces no
+    `SliceDecision`, appends no transcript turn, and happens inside
+    `_plan_context` — before the round it is planning for has even built its
+    own request. Bundled with its event in one transaction (like
+    `RecordSliceCommand` bundles the checkpoint with its accounting) so a
+    crash cannot leave a moved counter with nothing on the timeline saying
+    why, or an event on the timeline the counter never actually reflects.
+    """
+
+    workspace_id: UUID
+    run_id: UUID
+    #: `RunRow.budget_root_run_id` — the shared scope, not necessarily this
+    #: Run's own id (§13's delegation tree shares one).
+    root_run_id: UUID
+    #: `ModelResponse.model_calls` — moved for every summarization call that
+    #: got a response back, whatever it reported. §12.4, product decision:
+    #: the call counter, the token counter and the cost counter are one
+    #: valve honoured together, not two of three, and the call counter is
+    #: the one that still works on a deployment with no price, or no
+    #: `max_cost`, configured — the default shape.
+    model_calls: int
+    #: What may be added to the shared budget. `ModelResponse.billable_tokens`
+    #: — zero when the endpoint's `usage_quality` is `unavailable` or nothing
+    #: was reported, never `None`, for the same reason
+    #: `RecordSliceCommand.tokens` is an `int`.
+    tokens: int
+    #: What this platform believes the call cost, always a `Cost` rather than
+    #: `Cost | None`: this command is built for every response the caller got
+    #: back, not only ones that reported usage, so there is always something
+    #: to say — `unknown()` when nothing was reported, same as `cost_of`
+    #: already answers on its own.
+    cost: Cost
+    event: ReservedEvent
+
+
+@dataclass(frozen=True)
 class ExecutionContext:
     """What a Worker needs to run one round, read through the store.
 
@@ -438,6 +478,39 @@ class RepairResult:
     head_run_id: UUID | None
 
 
+@dataclass(frozen=True)
+class StoredSummary:
+    """A Session's one compaction summary, as `session_compactions` holds it.
+
+    `first_sequence`/`last_sequence` name the `session_messages` range this
+    summary stands in for — not by id, because §7.4.2 replaces this row
+    wholesale on the next compaction and a later summary's range does not
+    start where an earlier one's ids left off. Both ends are read:
+    `_plan_context` reuses a summary by `last_sequence`, and a withdrawal
+    drops one whose range holds a message the user took back
+    (`mark_withdrawn`), which needs the near end too.
+
+    Every row here is model-written, so there is no `source` to record: a
+    structural summary is not persisted at all — it costs nothing to
+    recompute and `plan_context` regenerates it every round from the
+    transcript. The distinction an operator needs is on the
+    `CONTEXT_COMPACTED` event, where `CompactionRecord.source` states which
+    of the two that round's model actually read.
+    """
+
+    session_id: UUID
+    first_sequence: int
+    last_sequence: int
+    text: str
+    #: Which endpoint wrote it, and under what model name — the two facts
+    #: `_record_planning` reads back to name an author on the event. Both are
+    #: `None` when the summary call went to a provider that names no endpoint
+    #: (the deterministic stand-in), which is a gap in the record, not a
+    #: different kind of summary.
+    endpoint_id: UUID | None
+    model: str | None
+
+
 class RunStore(Protocol):
     """Run Coordination persistence.
 
@@ -590,9 +663,39 @@ class RunStore(Protocol):
     async def mark_withdrawn(
         self, message_ids: Sequence[UUID], *, at: datetime
     ) -> int:
-        """Flip `withdrawn_at` on rows that do not have it yet.
+        """Flip `withdrawn_at` on rows that do not have it yet, and drop any
+        stored compaction summary whose covered range holds one of them.
 
         Returns how many rows this call actually changed, which can be lower
         than `len(message_ids)` — a row already withdrawn is left alone.
+
+        The summary goes in the same step, not as a second call the caller has
+        to remember: a summary that distilled withdrawn turns is reused whole
+        on the next round, and a withdrawal that leaves it standing is one
+        §14.3 does not actually make invisible.
+        """
+        ...
+
+    async def latest_summary(self, session_id: UUID) -> StoredSummary | None:
+        """The Session's current compaction summary, or `None` if it has
+        never been compacted. Never a history — see `StoredSummary` and
+        `save_summary`.
+        """
+        ...
+
+    async def save_summary(
+        self, summary: StoredSummary, *, workspace_id: UUID
+    ) -> None:
+        """Replace the Session's summary with this one.
+
+        Upserts on `session_id`, per §7.4.2: a second compaction updates the
+        first rather than adding beside it, so there is never more than one
+        row per Session to read back.
+        """
+        ...
+
+    async def record_summary_usage(self, command: RecordSummaryUsageCommand) -> None:
+        """Bill one summarization call, and say so on the Run's timeline, in
+        one transaction. See `RecordSummaryUsageCommand`.
         """
         ...

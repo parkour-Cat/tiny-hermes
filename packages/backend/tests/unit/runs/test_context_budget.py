@@ -226,6 +226,89 @@ def test_a_long_conversation_is_compacted_and_the_range_is_recorded() -> None:
     assert len(result.messages) == len(history) - compaction.covered + 1
 
 
+def _no_orphaned_tool_results(messages: tuple[CanonicalMessage, ...]) -> bool:
+    """A `tool` message may only appear after the call it answers.
+
+    Mirrors what an OpenAI-shaped provider actually checks: every
+    `ToolResultBlock.call_id` in this list must have been introduced by a
+    `ToolCallBlock` in an earlier message of the *same* list — the summary
+    message a compaction inserts does not carry one, so a result surviving
+    behind it with no call ahead is exactly the shape the provider rejected.
+    """
+    seen: set[str] = set()
+    for message in messages:
+        for block in message.blocks:
+            if isinstance(block, ToolResultBlock) and block.call_id not in seen:
+                return False
+            if isinstance(block, ToolCallBlock):
+                seen.add(block.call_id)
+    return True
+
+
+def test_a_compaction_boundary_never_splits_a_tool_call_from_its_result() -> None:
+    """The shape that broke a real Feishu run: compaction picked at message
+    count alone chose to cut between a `tool_calls` message and the `tool`
+    message answering it, and the provider rejected the whole request —
+    'Messages with role tool must be a response to a preceding message with
+    tool_calls'. §7.4.2: 工具调用与工具结果不能拆开.
+
+    Message count alone would stop at the smallest boundary that fits, and
+    that is `through=2` here — right between the call and its answer, as
+    `test_the_search_settles_early_when_there_is_room` in
+    `test_stored_summary.py` shows for the plain-message version of this same
+    shape. The fix must walk past the pair instead, to `through=3`.
+    """
+    history = stored(
+        says("the task, stated at some length: " + "t" * 550),
+        called("./step-0", "c0"),
+        answered("ok", "c0"),
+        *(says(f"round {index}: " + "w" * 200, role="assistant") for index in range(4)),
+        says("what is left?"),
+    )
+    result = plan(history, ContextWindow(1_200, reserved_output_tokens=200))
+
+    assert result.fits is True
+    assert _no_orphaned_tool_results(result.messages)
+    compaction = result.compacted
+    assert compaction is not None
+    # Advanced past the pair, not stopped short of it: the call's answer
+    # (sequence 3) is inside the covered range too, not left standing alone.
+    assert compaction.last_sequence >= 3
+    assert compaction.message_ids == tuple(
+        item.id for item in history[: compaction.covered]
+    )
+
+
+def test_when_every_boundary_would_split_a_pair_the_originals_are_kept() -> None:
+    """No legal boundary exists in [2, compactable] at all: the call sits
+    right after the start of the compactable range, its answer sits just
+    outside it (protected by `PROTECTED_RECENT_MESSAGES`), and every
+    candidate boundary in between would have to include the call without its
+    answer.
+
+    §7.4.2's failure ladder still applies: this round already fits `allowance`
+    without any compaction, so nothing may be dropped and the Run may not be
+    paused just because structural compaction found no legal place to cut —
+    `threshold=0.0` forces the cascade to run anyway, to prove step four's
+    empty search is what produces this result, not the round fitting from the
+    start.
+    """
+    history = stored(
+        says("start the task"),
+        called("./step-0", "c0"),
+        says("padding a", role="assistant"),
+        says("padding b", role="assistant"),
+        says("padding d", role="assistant"),
+        answered("ok", "c0"),
+        says("what is left?"),
+    )
+    result = plan(history, ROOMY, threshold=0.0)
+
+    assert result.fits is True
+    assert result.compacted is None
+    assert result.messages == tuple(item.message for item in history)
+
+
 def test_the_summary_says_what_it_replaced_and_where_to_find_it() -> None:
     """Structured, not written by a model: assertable, free, and repeatable."""
     rounds: list[CanonicalMessage] = []

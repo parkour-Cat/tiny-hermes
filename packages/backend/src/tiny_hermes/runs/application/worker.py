@@ -2,7 +2,7 @@ import asyncio
 import inspect
 import logging
 import shlex
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from time import monotonic
@@ -11,7 +11,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from tiny_hermes.agents.domain.models import ContextBudget, EndpointModelPolicy
+from tiny_hermes.agents.domain.models import ContextBudget, EndpointModelPolicy, ModelPolicy
 from tiny_hermes.artifacts.application.service import ArtifactLimits, ArtifactRecorder
 from tiny_hermes.model_catalog.domain.pricing import (
     CeilingVerdict,
@@ -24,6 +24,7 @@ from tiny_hermes.model_catalog.domain.pricing import (
     within_ceiling,
 )
 from tiny_hermes.model_catalog.domain.pricing import unknown as unknown_cost
+from tiny_hermes.model_catalog.infrastructure.sql_store import SqlModelEndpointStore
 from tiny_hermes.runs.application.images import ImageSource, resolve_images
 from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
 from tiny_hermes.runs.application.tool_answers import (
@@ -38,7 +39,10 @@ from tiny_hermes.runs.application.tool_answers import (
     answer_skill_propose,
 )
 from tiny_hermes.runs.domain.context_budget import (
+    DEFAULT_COMPACTION_THRESHOLD,
+    CompactionRecord,
     ContextPlan,
+    CoveredSummary,
     SegmentName,
     SkillSummary,
     plan_context,
@@ -53,6 +57,7 @@ from tiny_hermes.runs.domain.goal import (
 from tiny_hermes.runs.domain.models import (
     SAFETY_PREAMBLE,
     Block,
+    BudgetSummary,
     CacheStateHint,
     CanonicalMessage,
     CheckpointEffectStatus,
@@ -61,7 +66,9 @@ from tiny_hermes.runs.domain.models import (
     RunCapabilities,
     RunEventType,
     RunSignal,
+    StoredMessage,
     TextBlock,
+    ToolCallBlock,
     ToolResultBlock,
     WorkspaceCleanupTarget,
 )
@@ -70,6 +77,7 @@ from tiny_hermes.runs.domain.slice_policy import (
     SliceDecision,
     decide_after_round,
 )
+from tiny_hermes.runs.domain.summary_prompt import summary_prompt
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalGate
 from tiny_hermes.runs.ports.artifacts import ArtifactReads
@@ -95,8 +103,10 @@ from tiny_hermes.runs.ports.store import (
     ClaimRunCommand,
     ExecutionContext,
     RecordSliceCommand,
+    RecordSummaryUsageCommand,
     RenewLeaseCommand,
     ReservedEvent,
+    StoredSummary,
 )
 from tiny_hermes.sandbox.application.controller import RefusalReason as SandboxRefusal
 from tiny_hermes.sandbox.application.controller import SandboxRefused
@@ -415,7 +425,7 @@ class WorkerRuntime:
                 context = await self._read_context(workspace_id, claimed.run.id)
                 if context is None:
                     return
-                plan = _plan(context, mcp)
+                plan = await self._plan_context(claimed, context, mcp)
                 if not plan.fits:
                     await self._overflow(claimed, handle, box, context, plan)
                     return
@@ -1550,8 +1560,419 @@ class WorkerRuntime:
                 claimed, RunEventType.CONTEXT_TRIMMED, record.payload()
             )
         if plan.compacted is not None:
-            await self._append_event(
-                claimed, RunEventType.CONTEXT_COMPACTED, plan.compacted.payload()
+            payload = plan.compacted.payload()
+            endpoint_id, model = await self._compaction_authorship(claimed, plan.compacted)
+            payload["endpoint_id"] = endpoint_id
+            payload["model"] = model
+            await self._append_event(claimed, RunEventType.CONTEXT_COMPACTED, payload)
+
+    async def _compaction_authorship(
+        self, claimed: ClaimedRun, compacted: CompactionRecord
+    ) -> tuple[str | None, str | None]:
+        """Which endpoint and model wrote this compaction's summary, for the
+        `CONTEXT_COMPACTED` event.
+
+        `context_budget.py` has no I/O and cannot resolve this itself (see
+        `CompactionRecord.payload`'s comment) — it only knows `source`. A
+        `"structural"` record names no endpoint because none was called, and
+        it has no row to read either: a structural summary is never persisted,
+        which is why `session_compactions` records no source of its own.
+
+        A `"model"` record means `_plan_context` just built this plan from
+        the Session's one stored summary row (reused from step 2, or just
+        written by `_save_summary` in step 5) — `session_compactions` is
+        upserted, never appended, so `latest_summary` reads back exactly
+        that row, not some other compaction's. This assumes no concurrent
+        compaction for the same Session lands between `_plan_context`
+        producing this plan and this call reading it back — nothing in
+        either method holds a lock over that window, and a second Run slice
+        racing this one could, in principle, replace the row before this
+        read.
+
+        Raises if that assumption is wrong: `source == "model"` promising a
+        row that is not there. Returning `(None, None)` instead would write
+        an event indistinguishable from a `"structural"` one that forgot to
+        say so — exactly the ambiguity this event exists to remove — so a
+        broken invariant stops the write rather than being papered over
+        with a payload that merely looks fine.
+        """
+        if compacted.source != "model":
+            return None, None
+        stored = await self._latest_summary(claimed.run.session_id)
+        if stored is None:
+            raise RuntimeError(
+                "compaction record claims source == 'model' but no stored "
+                f"summary exists for session {claimed.run.session_id}"
+            )
+        endpoint_id = str(stored.endpoint_id) if stored.endpoint_id is not None else None
+        return endpoint_id, stored.model
+
+    async def _plan_context(
+        self,
+        claimed: ClaimedRun,
+        context: ExecutionContext,
+        mcp: tuple[BoundMcpTool, ...] = (),
+    ) -> ContextPlan:
+        """`_plan`'s decision, widened by the Session's persisted summary.
+
+        Product design §7.4.2: a compaction's summary is model-written,
+        generated once and persisted, and every later round reads what was
+        saved rather than asking a model again. The order below is that rule
+        turned into steps, and the order is the design — not an
+        implementation detail free to be rearranged:
+
+        1. Plan once, with no stored summary at all
+           (`_plan(context, mcp)`, no I/O). If that plan does not compact,
+           there is nothing here to widen — the plan already stands, and nothing
+           this round did needed a Session summary read at all.
+        2. It compacted, and structurally (`_plan` never passes a stored
+           summary in, so "compacted" here always means "structurally" —
+           there is no other kind it could produce). `latest_summary` says
+           what this Session has already written down, if anything. A
+           summary whose `last_sequence` already reaches this round's
+           compaction boundary already explains everything the round would
+           compact — no model call, just the same plan recomputed with that
+           text in hand, standing in for its *own* range rather than this
+           round's shorter one (step 6), and it earns the right to replace
+           step 1's plan only if `_honestly_widens` agrees. This step spends
+           nothing — no model call, only the read already paid for by
+           needing to compact at all — so it is never gated on §12.4: a Run
+           one round from its ceiling that would have continued on a
+           *shorter* reused summary must not be measured against the bigger
+           structural estimate instead and paused for no reason.
+        3. It does not reach far enough — including "there is no summary
+           yet". This is the point past which a model call is actually about
+           to be spent, so §12.4 is checked here and nowhere earlier:
+           reaching for a stored summary in step 2 costs nothing and must not
+           be blocked by it, but paying for a summarization call — plus
+           whatever retries a hung endpoint costs — only to be stopped by the
+           very same ceiling moments later on the baseline plan it would have
+           gotten anyway is spending this Run was never allowed to keep.
+        4. Under ceiling. The auxiliary model is asked once, over exactly the
+           turns the stored summary has not already digested
+           (`summary_prompt`'s update form when one exists, its fresh form
+           when none does).
+        5. It answered something usable: persisted with `save_summary`
+           regardless of what happens next — the row is still a true
+           statement about the range it was asked to explain even if this
+           particular round cannot use it (a later round, with more room or
+           a shorter conversation, still can). It did not answer something
+           usable — a timeout, a refusal, an empty response, any exception —
+           step 1's plan goes out exactly as it stood. §7.4.2's failure
+           ladder, first rung.
+        6. Either way — reused from step 2, or just generated and saved in
+           step 5 — the summary goes to `plan_context` as a `CoveredSummary`,
+           text and range together, and stands in for exactly that range or
+           not at all: the boundary is pinned there rather than searched for.
+           So the only question left for `_honestly_widens` is whether the
+           pinned plan fits, and that is not hypothetical — a model summary
+           can be longer than the structural sentence it replaces, and at its
+           own boundary it may not fit where the structural one did. Not
+           fitting is a generation failure exactly like a timeout: step 1's
+           plan goes out unchanged.
+        """
+        baseline = _plan(context, mcp)
+        if baseline.compacted is None:
+            return baseline
+
+        covered_last = baseline.compacted.last_sequence
+        stored = await self._latest_summary(claimed.run.session_id)
+        if stored is not None and stored.last_sequence >= covered_last:
+            candidate = _plan(
+                context,
+                mcp,
+                stored_summary=CoveredSummary(stored.text, stored.last_sequence),
+            )
+            if _honestly_widens(candidate, stored.last_sequence):
+                return candidate
+            logger.info(
+                # Not "did not fit": `plan_context` never returns a compacted
+                # plan that failed to fit, so a refusal here is one of two
+                # situations this Worker cannot tell apart from the plan in
+                # hand — the pinned boundary held nothing that fit, or the
+                # covered range left no boundary to stand at (it has moved
+                # inside the protected recent history). Naming only the first
+                # would send an operator to investigate window sizing for a
+                # case that is not about size.
+                "a stored summary covered enough by sequence number, but this "
+                "round would not compact at the range that summary explains — "
+                "either nothing fit there or no boundary sat there. Using the "
+                "structural plan for this round",
+                extra={"run_id": str(claimed.run.id)},
+            )
+            return baseline
+
+        # Only past this point does a call actually get made. Gating any
+        # earlier — including in front of the free reuse read above — would
+        # measure a Run against `baseline`'s estimate when a reused summary
+        # could have returned something smaller, the mirror of the Critical
+        # this same plan already had to be checked against (see step 6):
+        # a Run paused that should have continued. `_execute_slice` runs its
+        # own, real check again on whatever this method returns either way —
+        # this is an early exit, not a replacement for it.
+        if not _cost_precheck(context, baseline).allowed:
+            return baseline
+        if not _calls_precheck(context.budget):
+            # §12.4 withholds the streaming-usage overshoot allowance from
+            # the call counter specifically — Token and cost may be crossed
+            # by one call's real usage because a streamed response's final
+            # usage is only known once the call ends, but a call either
+            # happens or it does not, so that excuse does not apply here.
+            # The round's own call is the one guaranteed to follow whatever
+            # this method returns (`_execute_slice` runs it right after,
+            # gated only on cost), so spending this call must leave room for
+            # that one too — otherwise a ceiling of `max_model_calls=1`
+            # would let a single round spend two calls, the summarizer's and
+            # the round's own, before anything noticed.
+            return baseline
+
+        generated = await self._generate_summary(claimed, context, baseline.compacted, stored)
+        if generated is None:
+            return baseline
+
+        await self._save_summary(claimed, context, baseline.compacted, generated)
+        candidate = _plan(
+            context,
+            mcp,
+            stored_summary=CoveredSummary(generated, covered_last),
+        )
+        if _honestly_widens(candidate, covered_last):
+            return candidate
+        logger.warning(
+            # Same two indistinguishable situations as the reuse path's log
+            # above, and the same reason for not naming just one of them.
+            "a freshly generated summary was saved, but this round would not "
+            "compact at the range it explains — either nothing fit there or no "
+            "boundary sat there. Using the structural plan for this round",
+            extra={"run_id": str(claimed.run.id)},
+        )
+        return baseline
+
+    async def _latest_summary(self, session_id: UUID) -> StoredSummary | None:
+        async with self._sessions() as session:
+            return await SqlRunStore(session).latest_summary(session_id)
+
+    async def _generate_summary(
+        self,
+        claimed: ClaimedRun,
+        context: ExecutionContext,
+        compacted: CompactionRecord,
+        stored: StoredSummary | None,
+    ) -> str | None:
+        """One call to this Run's summary endpoint, over the turns a stored
+        summary has not already digested.
+
+        This Agent's own endpoint unless it declared a different one for
+        summaries (`_summary_policy`) — the case Task 4 adds.
+
+        `None` on any failure — a non-`completed` stop reason (which is what
+        a timeout, a refusal or an empty response all normalize to, see
+        `openai_model.normalize`) or an exception the call itself raised — so
+        the caller falls back to the structural summary `_plan` already
+        produced. §7.4.2's failure ladder, first rung.
+        """
+        ids = set(compacted.message_ids)
+        covered = [item for item in context.history if item.id in ids]
+        if stored is not None:
+            # The update form: only what the stored summary has not already
+            # seen. Re-reading turns it already digested would spend the call
+            # summarizing a summary, and `summary_prompt`'s update form exists
+            # precisely so that never has to happen.
+            covered = [item for item in covered if item.sequence > stored.last_sequence]
+        request = ModelRequest(
+            policy=_summary_policy(context),
+            # Not `context.spec.personality`: this call is a platform
+            # operation on the transcript, not the Agent speaking in its own
+            # voice, and `summary_prompt` already states everything the model
+            # needs to know about the task.
+            personality="",
+            messages=(
+                CanonicalMessage(
+                    role="user",
+                    blocks=(
+                        TextBlock(
+                            text=summary_prompt(
+                                _transcript_text(covered),
+                                stored.text if stored is not None else None,
+                            )
+                        ),
+                    ),
+                ),
+            ),
+            round_index=0,
+        )
+        try:
+            response = await self._model.complete(request)
+        except Exception:
+            logger.exception(
+                "summary generation failed", extra={"run_id": str(claimed.run.id)}
+            )
+            return None
+        # §12.4 applies to this call the same as to any other, whatever it
+        # answered — billed before the `stop_reason` check below, since a
+        # refusal or a too-small window still spent whatever the provider
+        # reports here. Only the exception above skips this, and not because
+        # it proves the request "never reached the provider": a timed-out
+        # call may well have reached it and been billed by it — this code
+        # cannot tell the two apart, and `FailingSummarizer`'s own docstring
+        # already calls a timeout "the honest shape" of that exception. What
+        # actually gates billing is narrower and true: there is no
+        # `ModelResponse` to read usage from. A timed-out call the provider
+        # billed and this platform never hears back from is a gap, the same
+        # kind `_cost_precheck` already names for streaming — not a
+        # guarantee this code makes.
+        await self._bill_summary_call(claimed, context, response)
+        if response.stop_reason is not StopReason.COMPLETED:
+            # As visible as the exception above: a refusal or a window truly
+            # too small for the prompt reaches here as an ordinary answer,
+            # not a raised error, and was silently indistinguishable from
+            # "nothing needed summarizing" before this logged.
+            logger.warning(
+                "summary generation did not complete: stop_reason=%s",
+                response.stop_reason.value,
+                extra={"run_id": str(claimed.run.id)},
+            )
+            return None
+        text = response.text.strip()
+        if not text:
+            logger.warning(
+                "summary generation answered with no usable text",
+                extra={"run_id": str(claimed.run.id)},
+            )
+            return None
+        return text
+
+    async def _bill_summary_call(
+        self, claimed: ClaimedRun, context: ExecutionContext, response: ModelResponse
+    ) -> None:
+        """Bill one summarization call to the Run-tree's shared budget, and
+        record it as its own `CONTEXT_SUMMARY_BILLED` event, in one write.
+
+        Called for every response the caller got back, whatever it reported —
+        including one with no usage at all. §12.4 treats the call counter
+        beside the token and cost counters as one valve, honoured together,
+        not two of three: the call counter is the one that still works on a
+        deployment with no price, or no `max_cost`, configured — the default
+        shape — and gating it behind "usage was reported" would leave exactly
+        that deployment unprotected against a summarizer that never stops
+        being asked. `tokens` and `cost` do not need a separate case for "no
+        usage" here: `response.billable_tokens` is already `0` and `cost_of`
+        already answers `unknown()` when nothing was reported, so passing
+        `response`'s raw fields through keeps both honest either way.
+
+        Priced at the summary endpoint's own rate, pinned when — the default,
+        no `summary_endpoint_id` declared — that endpoint is this Run's own
+        main one: `_summary_policy` then resolves to the main policy
+        unchanged, and its price is already fixed in `context.prices`
+        (`runs.model_pricing_version_id`, read once at Run creation so a
+        later repricing cannot change what an already-running Run is
+        charged). Reading a live price for that same endpoint instead would
+        let it answer at two different prices within one Run depending only
+        on which call asked — the bug this branch exists to not have. Only a
+        genuinely different, declared summary endpoint has no such pin to
+        read back (`model_pricing_version_id` names one endpoint, the main
+        one), so `current_prices_for` — the price in force right now — is
+        the only one there is to bill *that* endpoint at.
+
+        A declared summary endpoint with no price configured is accepted at
+        publish (`_check_summary_endpoint` checks its window, never its
+        price — the same choice this platform already makes for the *main*
+        endpoint, which publishes unpriced today too) and bills `unknown()`
+        here forever after: §12.4's `_accumulate_cost` turns the whole
+        Run-tree's `consumed_cost` permanently unknown the first time any
+        round cannot be priced, summary or ordinary, and nothing turns it
+        back. A workspace with a cost ceiling then has its very next round
+        refused (`within_ceiling` refuses a ceiling that meets an unknown
+        cost outright) — visibly, via `RUN_LIMIT_REACHED`, not silently. This
+        is the existing rule working as designed on a new source, not a
+        special case invented for it.
+        """
+        main_policy = context.spec.model_policy
+        main_endpoint_id = (
+            main_policy.endpoint_id
+            if isinstance(main_policy, EndpointModelPolicy)
+            else None
+        )
+        policy = _summary_policy(context)
+        endpoint_id = (
+            policy.endpoint_id if isinstance(policy, EndpointModelPolicy) else None
+        )
+        async with self._sessions.begin() as session:
+            model: str | None = None
+            prices: TokenPrices | None = None
+            if endpoint_id is not None:
+                endpoint = await SqlModelEndpointStore(session).read(endpoint_id)
+                if endpoint is not None:
+                    model = endpoint.spec.model
+                prices = (
+                    context.prices
+                    if endpoint_id == main_endpoint_id
+                    else await SqlRunStore(session).current_prices_for(endpoint_id)
+                )
+            cost = cost_of(
+                prices,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                usage_quality=response.usage_quality,
+            )
+            await SqlRunStore(session).record_summary_usage(
+                RecordSummaryUsageCommand(
+                    workspace_id=claimed.run.workspace_id,
+                    run_id=claimed.run.id,
+                    root_run_id=claimed.run.budget_root_run_id,
+                    model_calls=response.model_calls,
+                    tokens=response.billable_tokens,
+                    cost=cost,
+                    event=ReservedEvent(
+                        event_type=RunEventType.CONTEXT_SUMMARY_BILLED,
+                        payload=_summary_billed_payload(endpoint_id, model, response, cost),
+                    ),
+                )
+            )
+
+    async def _save_summary(
+        self,
+        claimed: ClaimedRun,
+        context: ExecutionContext,
+        compacted: CompactionRecord,
+        text: str,
+    ) -> None:
+        """Persist the model's answer, naming which model it was.
+
+        This row is written once and read forever after (§7.4.2) — a
+        Session summarized under this call keeps whatever `model` is
+        recorded here for as long as the summary is never regenerated, so
+        `None` here is not a gap a later pass could fill back in without
+        guessing. The read is one more query, in the same transaction as the
+        write, and `ModelRouter.complete` already does the identical lookup
+        on every ordinary round for the same `endpoint_id` — this is not new
+        I/O the platform was avoiding, only I/O this call had not done yet.
+        """
+        # The same resolution `_generate_summary` used to build the request,
+        # not `context.spec.model_policy` directly — a declared summary
+        # endpoint means the call above already went to it, and this row
+        # would misname the answerer if it looked at the Agent's own policy
+        # instead.
+        policy = _summary_policy(context)
+        endpoint_id = (
+            policy.endpoint_id if isinstance(policy, EndpointModelPolicy) else None
+        )
+        async with self._sessions.begin() as session:
+            model: str | None = None
+            if endpoint_id is not None:
+                endpoint = await SqlModelEndpointStore(session).read(endpoint_id)
+                if endpoint is not None:
+                    model = endpoint.spec.model
+            await SqlRunStore(session).save_summary(
+                StoredSummary(
+                    session_id=claimed.run.session_id,
+                    first_sequence=compacted.first_sequence,
+                    last_sequence=compacted.last_sequence,
+                    text=text,
+                    endpoint_id=endpoint_id,
+                    model=model,
+                ),
+                workspace_id=claimed.run.workspace_id,
             )
 
     async def _overflow(
@@ -1877,6 +2298,93 @@ def _summaries(context: ExecutionContext) -> tuple[SkillSummary, ...]:
     )
 
 
+def _transcript_text(covered: Sequence[StoredMessage]) -> str:
+    """The covered turns, as words the summarizer can read.
+
+    Not `CanonicalMessage.text`: that drops tool calls and their results, and
+    a summary that cannot see a shell command or its exit code cannot write
+    §7.4.2's 关键事实 or 已作出的决定 sections truthfully — both are exactly
+    the kind of fact that only shows up in a tool round, never in a text
+    turn either side typed.
+    """
+    lines: list[str] = []
+    for item in covered:
+        for block in item.message.blocks:
+            if isinstance(block, TextBlock):
+                lines.append(f"{item.message.role}: {block.text}")
+            elif isinstance(block, ToolCallBlock):
+                lines.append(
+                    f"{item.message.role} called {block.name}({block.arguments})"
+                )
+            elif isinstance(block, ToolResultBlock):
+                lines.append(f"tool result for {block.call_id}: {block.output}")
+    return "\n".join(lines)
+
+
+def _honestly_widens(plan: ContextPlan, covered_last: int) -> bool:
+    """Whether a summary-widened re-plan may replace the structural
+    baseline `_plan_context` built it to improve on.
+
+    Three ways it may not, and every one of them is a generation failure
+    §7.4.2 already has an answer for — the structural summary the caller
+    started with:
+
+    - `plan.fits` is False. A model summary can be longer than the
+      structural sentence it replaced, and `plan_context`'s own answer to
+      "even the caller-given text did not make this small enough" is
+      `paused(context_overflow)` further up the call stack — but the
+      structural summary this call started with may still fit fine, and a
+      Run that would have continued on it must not be paused because a
+      *different*, longer summary text was tried in its place.
+    - `plan.compacted` is None. Nothing was compacted with this text at all:
+      either the pinned boundary held nothing that fit, or the covered range
+      left no boundary to stand at — the sequence is not in this round's
+      history, or it has moved inside the protected recent turns. This has to
+      be its own check rather than something `plan.fits` implies, because
+      since `plan_context` started returning fitting originals when its
+      compaction search comes back empty, a plan can now be `fits=True` and
+      carry no compaction whatsoever. Accepting one would send the round out
+      with the summary silently dropped and no `CONTEXT_COMPACTED` event
+      saying so.
+    - `plan.compacted.last_sequence` is not exactly `covered_last` — the last
+      sequence the summary text handed to this call was asked to explain. A
+      record that reaches past it claims turns the summarizer never read; one
+      that stops short leaves the model reading a summary of turns it is also
+      sent verbatim, and writes an event reporting the shorter range as
+      though that were all the text covers.
+
+      Neither is what `plan_context` does any more: given a `CoveredSummary`
+      it pins the boundary instead of searching, so the only way this
+      comparison can fail is a plan that did not honour the pin. It is kept as
+      the corroboration, not as the mechanism — the guarantee lives in the
+      pin, and this says so out loud rather than trusting it silently.
+    """
+    return (
+        plan.fits
+        and plan.compacted is not None
+        and plan.compacted.last_sequence == covered_last
+    )
+
+
+def _calls_precheck(budget: BudgetSummary) -> bool:
+    """Whether a summarization call may be spent without stranding the
+    round's own call — the one guaranteed to follow it in the same
+    iteration — with nowhere left under `max_model_calls` to land.
+
+    Unlike `_cost_precheck`, this does not grant §12.4's streaming-usage
+    overshoot allowance: that allowance exists because a provider's final
+    usage is only known once a call ends, and a ceiling checked against an
+    estimate can be crossed by that call's real number. A call has no such
+    gap — it either happens or it does not — so §12.4 gives Token and cost
+    the excuse and withholds it from the call counter. Reserving room for
+    both calls (this one and the round's) is what keeps that counter exact:
+    checking only this call in isolation would let it spend the ceiling's
+    last slot and leave the round's own call, made right after regardless,
+    to overshoot by one.
+    """
+    return budget.consumed_model_calls + 1 < budget.max_model_calls
+
+
 def _cost_precheck(context: ExecutionContext, plan: ContextPlan) -> CeilingVerdict:
     """Whether one more round fits under this Run's spending limit.
 
@@ -1913,6 +2421,26 @@ def _cost_precheck(context: ExecutionContext, plan: ContextPlan) -> CeilingVerdi
     )
 
 
+def _summary_policy(context: ExecutionContext) -> ModelPolicy:
+    """The policy the summary call actually answers under.
+
+    One function for both the call (`_generate_summary`'s `ModelRequest`) and
+    the record of who answered (`_save_summary`), so they cannot drift apart —
+    a call routed to the declared summary endpoint that then got logged
+    against the main one would be a stored row nobody could trust.
+
+    Swaps in `summary_endpoint_id` when the Agent declared one; `None` keeps
+    the Agent's own policy untouched, because AgentCatalog already refused at
+    publish any declared endpoint whose window is smaller
+    (`_check_summary_endpoint`) — the undeclared default trivially clears the
+    same bar since it is the same window compared to itself.
+    """
+    policy = context.spec.model_policy
+    if isinstance(policy, EndpointModelPolicy) and policy.summary_endpoint_id is not None:
+        return policy.model_copy(update={"endpoint_id": policy.summary_endpoint_id})
+    return policy
+
+
 def _max_output(context: ExecutionContext) -> int:
     """The largest answer this Run may be charged for.
 
@@ -1936,6 +2464,40 @@ def _cost_from(response: ModelResponse, prices: TokenPrices | None = None) -> Co
         output_tokens=response.output_tokens,
         usage_quality=response.usage_quality,
     )
+
+
+def _summary_billed_payload(
+    endpoint_id: UUID | None, model: str | None, response: ModelResponse, cost: Cost
+) -> dict[str, Any]:
+    """What `CONTEXT_SUMMARY_BILLED` says: who answered, what it reported,
+    and what this platform believes that cost — the facts an operator
+    watching `consumed_model_calls` or `consumed_cost` move needs to explain
+    a movement nothing else on the Run's timeline accounts for. That includes
+    `model_calls` itself, not just the counters it moves: a payload that
+    named the tokens and the cost but left the call count to be inferred
+    from a hardcoded "one call" in the UI copy would be the counter's own
+    movement asserted nowhere the reader watching it could check. Written
+    even when `response` reported nothing (`cost` is `unknown()`, the token
+    fields are `None`/`0`): the call still moved `consumed_model_calls`, and
+    a reader has to be able to tell that apart from a call that moved
+    nothing at all, not just from one that also moved money.
+
+    `cost.amount` is written as a string, not the `Decimal` itself: the JSON
+    column `RunEventRow.payload` lands on has no encoder for `Decimal`
+    (`shared/database.py` sets none), and the API's own convention for a
+    cost figure is already a decimal string (`UsageByQualityResponse`).
+    """
+    return {
+        "endpoint_id": str(endpoint_id) if endpoint_id is not None else None,
+        "model": model,
+        "model_calls": response.model_calls,
+        "input_tokens": response.input_tokens,
+        "output_tokens": response.output_tokens,
+        "tokens": response.billable_tokens,
+        "cost": str(cost.amount) if cost.known else None,
+        "cost_currency": cost.currency,
+        "cost_quality": cost.quality.value,
+    }
 
 
 def _claim_of(claimed: ClaimedRun) -> EgressClaim:
@@ -1986,7 +2548,9 @@ def _schema_allowance(context: ExecutionContext) -> int:
 
 
 def _plan(
-    context: ExecutionContext, mcp: tuple[BoundMcpTool, ...] = ()
+    context: ExecutionContext,
+    mcp: tuple[BoundMcpTool, ...] = (),
+    stored_summary: CoveredSummary | None = None,
 ) -> ContextPlan:
     """Decide what this round may send, before it is sent.
 
@@ -1996,6 +2560,12 @@ def _plan(
     honestly compare the conversation to. The summaries still go out: a
     stand-in with no window is still an Agent whose skills it was bound to —
     and, for the same reason, still a Run whose subject has memories.
+
+    ``stored_summary`` only ever arrives from `_plan_context`, never chosen
+    here: this function stays the same one-shot, no-I/O calculation
+    `plan_context` itself is, called with `None` for a first, cheap read of
+    whether this round compacts at all, and again with a Session's persisted
+    summary once `_plan_context` has decided that summary is the one to use.
     """
     summaries = _summaries(context)
     if context.window is None:
@@ -2016,7 +2586,20 @@ def _plan(
         skill_summaries=summaries,
         memories=[fact.body for fact in context.memories],
         segments=(context.spec.context_budget or ContextBudget()).resolve(),
+        stored_summary=stored_summary,
+        threshold=_compaction_threshold(context),
     )
+
+
+def _compaction_threshold(context: ExecutionContext) -> float:
+    """This Agent's ratio trigger, resolved the same way `_schema_allowance`
+    resolves a segment ceiling: read from the same `ContextBudget` the
+    planner uses, so an author who adjusted it gets the round they asked for.
+    """
+    budget = context.spec.context_budget
+    if budget is None or budget.compaction_threshold is None:
+        return DEFAULT_COMPACTION_THRESHOLD
+    return budget.compaction_threshold
 
 
 def _tool_schemas(

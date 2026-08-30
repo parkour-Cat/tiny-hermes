@@ -249,6 +249,25 @@ IMAGE_TOKENS = 384
 #: requires, so the newest one survives whenever anything else can go instead.
 PROTECTED_RECENT_MESSAGES = 2
 
+#: The instance default, mirroring `DEFAULT_SEGMENTS`'s role for the segment
+#: table: what an unset `ContextBudget.compaction_threshold` resolves to
+#: (§7.4.2). A round that spends more than this fraction of the allowance is
+#: compacted even though it would still fit — the fix for a conversation that
+#: never gets close enough to the real edge to trigger the old criterion.
+DEFAULT_COMPACTION_THRESHOLD = 0.50
+
+#: The hard bounds an override may not cross — fixed module constants, not a
+#: runtime administrator setting; there is no such knob yet, only these two
+#: numbers a platform operator would have to change and redeploy to move.
+#: Checked at publish (`ContextBudgetUnsatisfied`,
+#: `AgentCatalog._check_compaction_threshold`) rather than by
+#: `ContextBudget`'s own `(0, 1]` field validator: that validator only rules
+#: out a ratio the type cannot mean at all — zero, negative, or more than the
+#: whole allowance — while these bounds are a publish-authority decision, and
+#: a draft must stay saveable even while it is out of them.
+MIN_COMPACTION_THRESHOLD = 0.20
+MAX_COMPACTION_THRESHOLD = 0.90
+
 
 def estimate_tokens(text: str, tokenizer: str | None = None) -> int:
     """An upper bound on what this text will cost, in tokens.
@@ -357,18 +376,34 @@ class CompactionRecord:
     message_ids: tuple[UUID, ...]
     summary: str
     freed_estimate: int
+    #: Which of the two the model saw. A caller filtering a Run's history for
+    #: "was this compaction any good" needs this without re-parsing the
+    #: summary text, and the covered range alone cannot answer it.
+    source: str = "structural"
 
     @property
     def covered(self) -> int:
         return len(self.message_ids)
 
     def payload(self) -> dict[str, Any]:
+        # Deliberately no `endpoint_id`/`model` here. This module has no I/O
+        # (module docstring) and a `CompactionRecord` is built by `_plan`,
+        # which only ever sees a summary as text — it cannot resolve which
+        # endpoint wrote it, and must not gain a store dependency just to
+        # try. The `CONTEXT_COMPACTED` event still needs both, so the Worker
+        # (`worker.py::_record_planning`) adds them when it writes the event,
+        # reading them back from the same `session_compactions` row
+        # `_save_summary` just persisted. `source` is the seam between the
+        # two: it is the one fact this module can state on its own, and it
+        # is what tells the Worker whether there is an endpoint to look up
+        # at all (`source == "model"`) or nothing to find (`"structural"`).
         return {
             "first_sequence": self.first_sequence,
             "last_sequence": self.last_sequence,
             "covered": self.covered,
             "message_ids": [str(value) for value in self.message_ids],
             "freed_estimate": self.freed_estimate,
+            "source": self.source,
         }
 
 
@@ -663,15 +698,41 @@ def _summarize(covered: Sequence[StoredMessage], *, with_hints: bool = True) -> 
     return " ".join(parts)
 
 
+@dataclass(frozen=True)
+class CoveredSummary:
+    """A summary the caller already has, and the range it was written about.
+
+    The two travel together because neither is usable alone. `plan_context`
+    has no I/O and cannot look up what a bare string covers, and a summary
+    standing in for a range other than its own is wrong in both directions:
+    reach further than it covers and the model is told a text explains turns
+    the summarizer never read; reach less far and the model reads a summary of
+    turns it is also sent verbatim, while `CONTEXT_COMPACTED` reports the
+    shorter range as though that were all the text was about.
+    """
+
+    text: str
+    #: The last `session_messages` sequence the text was asked to explain.
+    #: The near end is not carried: compaction always starts at the oldest
+    #: turn in `history`, so the range's start is `history[0].sequence` by
+    #: construction and a second number could only disagree with it.
+    last_sequence: int
+
+
 def _compact(
     history: Sequence[StoredMessage],
     through: int,
     tokenizer: str | None,
     *,
     with_hints: bool = True,
+    stored: str | None = None,
 ) -> tuple[CanonicalMessage, CompactionRecord]:
     covered = history[:through]
-    summary = _summarize(covered, with_hints=with_hints)
+    # A stored summary is model-written and already covers this range — §7.4.2
+    # gives structural compaction to the case where nothing was written, not
+    # to every round. Generating one anyway would spend the tokens `stored`
+    # exists to save and would not even be seen: `stored` wins below.
+    summary = stored if stored is not None else _summarize(covered, with_hints=with_hints)
     before = sum(_message_estimate(item.message, tokenizer) for item in covered)
     message = CanonicalMessage(
         role="user", blocks=(TextBlock(text=summary),), author="platform"
@@ -682,8 +743,46 @@ def _compact(
         message_ids=tuple(item.id for item in covered),
         summary=summary,
         freed_estimate=max(before - _message_estimate(message, tokenizer), 0),
+        source="model" if stored is not None else "structural",
     )
     return message, record
+
+
+def _splits_a_tool_pair(history: Sequence[StoredMessage], through: int) -> bool:
+    """Whether cutting after the first ``through`` messages severs a
+    ``tool_calls`` message from a ``tool`` message answering it.
+
+    §7.4.2: 工具调用与工具结果不能拆开. This is the failure a real Feishu run
+    hit: message-count boundaries do not know a call from a result, so a cut
+    that happened to land between the two produced a `tool` message with no
+    call ahead of it, and the provider refused the whole request. Every other
+    boundary this module ever chooses is internally consistent on its own
+    terms — nothing is dropped, nothing is reordered — so nothing else in the
+    module needed to ask this question; a boundary is only wrong in the sense
+    that matters here, which is what the provider on the other end checks.
+
+    Only the forward direction is possible to get wrong: a `tool` message can
+    never precede the `tool_calls` message that produced its `call_id`, so a
+    result that ends up covered always has its call covered too. What can
+    happen is the call landing in ``history[:through]`` while its answer
+    survives in ``history[through:]`` — checked by comparing the two sets of
+    ids directly, which is exact instead of assuming the answer always
+    follows its call by exactly one message the way this module's own
+    ``called``/``answered`` helpers happen to construct it in tests.
+    """
+    called_ids = {
+        block.call_id
+        for item in history[:through]
+        for block in item.message.blocks
+        if isinstance(block, ToolCallBlock)
+    }
+    if not called_ids:
+        return False
+    return any(
+        isinstance(block, ToolResultBlock) and block.call_id in called_ids
+        for item in history[through:]
+        for block in item.message.blocks
+    )
 
 
 def plan_context(
@@ -696,6 +795,8 @@ def plan_context(
     skill_summaries: Sequence[SkillSummary] = (),
     memories: Sequence[str] = (),
     segments: Mapping[SegmentName, SegmentBudget] = DEFAULT_SEGMENTS,
+    stored_summary: CoveredSummary | None = None,
+    threshold: float = DEFAULT_COMPACTION_THRESHOLD,
 ) -> ContextPlan:
     """Decide what this round sends.
 
@@ -711,6 +812,38 @@ def plan_context(
     default, for the same reason the publish check resolves before it measures
     — an author who widened 技能摘要 is measured against what they widened it
     to, and one who narrowed it feels that on the next round.
+
+    ``stored_summary`` is a model-written summary the caller already has —
+    generated and persisted once, elsewhere, not here: this function has no
+    I/O, so it cannot fetch one and must not be handed the means to make one.
+    It arrives as a `CoveredSummary` rather than a bare string because the
+    range it explains decides where it may stand: step four does not search
+    for a boundary when one is given, it pins the boundary to that range.
+    ``None`` falls back to `_summarize`'s structural summary, which is why
+    every existing caller that never passes this keyword keeps seeing exactly
+    what it saw before.
+
+    ``threshold`` changes only when the trim/compact cascade below is worth
+    entering, never what it may do once it has: a round that already fits
+    ``allowance`` but spends more than ``threshold`` of it is still walked
+    through steps one to four exactly as an overflowing one would be, and
+    every step keeps measuring "good enough to stop" against
+    ``allowance * threshold`` while `PROTECTED_RECENT_MESSAGES` and the
+    current request stay untouched, and step four's own accept test
+    (`spent <= allowance`, not the threshold) still governs how much of the
+    transcript compaction actually has to cover. That last point matters
+    most at a low threshold: without it, an aggressive setting would demand
+    compaction reach a target it can never satisfy without touching the two
+    things this function refuses to touch, and every round would end in
+    `paused(context_overflow)` instead of a small, harmless compaction.
+
+    ``threshold`` is also inert when structural compaction is not
+    geometrically possible at all — a history too short to have anything
+    outside `PROTECTED_RECENT_MESSAGES` and the current request. Trimming
+    tool results, unhit summaries or low-relevance memories can still make
+    such a round fit; forcing it past a low ratio anyway would only walk it
+    into step four's empty search range and out the bottom as
+    `paused(context_overflow)`, discarding a plan that already fit.
     """
     tokenizer = window.tokenizer
     allowance = window.input_allowance
@@ -753,6 +886,22 @@ def plan_context(
         (item.message for item in reversed(history) if item.message.role == "user"),
         None,
     )
+    # Step four's own boundary (the "Two things it may never reach" comment
+    # below), computed here rather than there: whether structural compaction
+    # is even geometrically possible does not depend on any trimming that
+    # happens between here and there, and `threshold`'s force-entry decision
+    # below needs the answer before step one runs.
+    protected = next(
+        (index for index, item in enumerate(history) if item.message is request),
+        len(history),
+    )
+    compactable = min(len(history) - PROTECTED_RECENT_MESSAGES, protected)
+    can_compact = compactable >= 2
+    # `threshold` only ever tightens this — see the docstring. When nothing
+    # could be compacted anyway, tightening it would just make every other
+    # step's "good enough" checks impossible to satisfy for no reason, so the
+    # cascade stays measured against `allowance` exactly as it always was.
+    trigger = allowance * threshold if can_compact else allowance
     # Skill summaries are in `fixed` because they are sent every round, but
     # they are not 不可裁剪内容 — step two of the order may take the unhit ones
     # out. So the floor is measured with them already gone: an Agent that bound
@@ -786,7 +935,7 @@ def plan_context(
 
     working = list(originals)
     spent = fixed + sum(_message_estimate(message, tokenizer) for message in working)
-    if spent <= allowance:
+    if spent <= trigger:
         return ContextPlan(
             messages=originals,
             fits=True,
@@ -797,11 +946,15 @@ def plan_context(
             memories=tuple(kept_memories),
         )
 
+    # `_trim_old_tool_results` still targets `allowance`, not `trigger`: how
+    # much of *this* segment a genuine overflow needs trimmed is a question
+    # about the real window, not about how early the cascade was entered —
+    # `threshold` decided that already, above.
     record = _trim_old_tool_results(working, tokenizer, fixed=fixed, allowance=allowance)
     if record is not None:
         trimmed.append(record)
         spent = fixed + sum(_message_estimate(message, tokenizer) for message in working)
-    if spent <= allowance:
+    if spent <= trigger:
         return ContextPlan(
             messages=tuple(working),
             fits=True,
@@ -827,7 +980,7 @@ def plan_context(
         surviving = tuple(item.text for item in kept)
         fixed -= kept_estimate - _summary_estimate(kept, tokenizer)
         spent = fixed + sum(_message_estimate(message, tokenizer) for message in working)
-        if spent <= allowance:
+        if spent <= trigger:
             return ContextPlan(
                 messages=tuple(working),
                 fits=True,
@@ -854,7 +1007,7 @@ def plan_context(
             spent = fixed + sum(
                 _message_estimate(message, tokenizer) for message in working
             )
-            if spent <= allowance:
+            if spent <= trigger:
                 return ContextPlan(
                     messages=tuple(working),
                     fits=True,
@@ -870,24 +1023,87 @@ def plan_context(
     # conversation is compacted as little as it can be rather than all at once.
     #
     # Two things it may never reach: the last turns, which 最近历史 keeps, and
-    # the current request, which §7.4.2 keeps whole. Both are computed as one
-    # ceiling before the walk starts rather than checked inside it — a bound
-    # the loop cannot step over is easier to be sure of than one it tests on
-    # its way past.
-    protected = next(
-        (index for index, item in enumerate(history) if item.message is request),
-        len(history),
-    )
-    compactable = min(len(working) - PROTECTED_RECENT_MESSAGES, protected)
+    # the current request, which §7.4.2 keeps whole. `protected` and
+    # `compactable` are that ceiling, computed above (`can_compact`) rather
+    # than here — a bound the loop cannot step over is easier to be sure of
+    # than one it tests on its way past, and `threshold`'s force-entry
+    # decision needed the same answer before step one ran.
     # Hints first, then without them. They cost tokens, and a summary carrying
     # them can be the difference between compaction fitting and not — at which
     # point the Run pauses with `context_overflow` and the person gets nothing
     # at all. Being able to search for a topic is worth less than the
     # conversation continuing, so it is the half that gets dropped.
-    for with_hints in (True, False):
-        for through in range(2, max(compactable, 0) + 1):
+    #
+    # A `stored_summary` skips the second pass: hints are extracted from the
+    # structural summary `_compact` would otherwise generate, and `stored`
+    # replaces that text outright, so both passes would `_compact` to the same
+    # message. Running the second one anyway would not change the result —
+    # only spend the search again.
+    #
+    # And a `stored_summary` does not get a search at all — it gets the one
+    # boundary its own text is about. Searching would let a short reused
+    # summary settle earlier than the range it explains, which loses nothing
+    # from the round but makes two things untrue at once: the model reads a
+    # summary of turns it is also sent verbatim, and `CONTEXT_COMPACTED`
+    # reports the shorter range as if that were the whole of what the text
+    # covers. Walking *past* the range is the mirror failure `_honestly_widens`
+    # was written for; pinning is what makes both unreachable rather than
+    # detected. Nothing is lost by pinning: `spent` falls as `through` rises
+    # (one summary replaces more turns), so the pinned boundary fits whenever
+    # any smaller one would.
+    stored_text = None if stored_summary is None else stored_summary.text
+    hint_passes = (True,) if stored_summary is not None else (True, False)
+    # Filtered rather than stepped-over: the search below already walks
+    # `through` upward and stops at the first candidate that fits, so leaving
+    # an illegal `through` out of this sequence *is* "refuse it and try the
+    # next" — no separate advancing step is needed, and the smallest surviving
+    # candidate is, by construction, the smallest one that both fits and does
+    # not orphan a `tool` message. When every candidate in [2, compactable]
+    # would split some pair, `boundaries` is empty and the loop below simply
+    # never runs — falling through to the same "compaction did not help"
+    # ending step four already had for a search that found nothing, which
+    # keeps the guarantee this function's docstring already makes: a plan that
+    # already fits is returned untouched, and one that does not fit pauses
+    # with its originals intact rather than compacting to an invalid shape.
+    boundaries: Sequence[int] = tuple(
+        through
+        for through in range(2, max(compactable, 0) + 1)
+        if not _splits_a_tool_pair(history, through)
+    )
+    if stored_summary is not None:
+        # `+ 1` because `through` is a count of leading messages, not an index.
+        # An unknown sequence, or one already inside the protected tail, leaves
+        # no boundary this text may honestly stand at — so nothing is compacted
+        # with it and the caller falls back to its own structural plan.
+        pinned = next(
+            (
+                index + 1
+                for index, item in enumerate(history)
+                if item.sequence == stored_summary.last_sequence
+            ),
+            None,
+        )
+        # A pinned boundary that splits a pair is refused outright rather than
+        # advanced past the orphaned result the way the unpinned search above
+        # is free to be. Advancing would compact turns the stored text was
+        # never asked to explain — the same "walked past its own range"
+        # failure `_honestly_widens` exists to catch on the read side, just
+        # produced here on the write side instead. Refusing leaves
+        # `boundaries` empty, `compacted` comes back `None`, and
+        # `worker.py::_plan_context` already treats that as a generation
+        # failure and falls back to its own structural (unpinned) plan — whose
+        # search is free to advance past the same pair because it never
+        # claimed to explain only the shorter range.
+        if pinned is not None and 2 <= pinned <= compactable and not _splits_a_tool_pair(
+            history, pinned
+        ):
+            boundaries = (pinned,)
+        else:
+            boundaries = ()
+    for with_hints in hint_passes:
+        for through in boundaries:
             summary, compaction = _compact(
-                history, through, tokenizer, with_hints=with_hints
+                history, through, tokenizer, with_hints=with_hints, stored=stored_text
             )
             candidate = [summary, *working[through:]]
             spent = fixed + sum(
@@ -905,9 +1121,37 @@ def plan_context(
                     memories=tuple(kept_memories),
                 )
 
-    # Compaction did not make it fit. §7.4.2: 压缩失败后保留原文；若保留原文又
-    # 无法装入窗口，Run 进入 paused(context_overflow). The originals go back
-    # untouched, and the caller stops rather than deleting anything.
+    # Compaction did not make it fit — which since `threshold` exists is no
+    # longer the same question as "this round cannot be sent". A round over
+    # the ratio but under `allowance` is walked through the whole cascade, and
+    # step four's search can come back empty on it (one candidate boundary,
+    # and a summary dearer than the turns it stands in for), leaving a plan
+    # that fits the window perfectly well. `fits=False` here would be read by
+    # the Worker as `paused(context_overflow)` — a Run stopped for spending
+    # half its window. So the last word belongs to `allowance`, not to the
+    # search: the compaction was optional, the round is not.
+    #
+    # `working` rather than `originals`, because the trim records above
+    # describe `working` — returning the untrimmed list beside events saying
+    # tool results were replaced would be a plan that does not match its own
+    # account of itself.
+    kept_intact = fixed + sum(
+        _message_estimate(message, tokenizer) for message in working
+    )
+    if kept_intact <= allowance:
+        return ContextPlan(
+            messages=tuple(working),
+            fits=True,
+            input_estimate=kept_intact,
+            allowance=allowance,
+            trimmed=tuple(trimmed),
+            skill_summaries=surviving,
+            memories=tuple(kept_memories),
+        )
+
+    # §7.4.2: 压缩失败后保留原文；若保留原文又无法装入窗口，Run 进入
+    # paused(context_overflow). The originals go back untouched, and the
+    # caller stops rather than deleting anything.
     return ContextPlan(
         messages=originals,
         fits=False,

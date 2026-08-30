@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -96,6 +96,13 @@ class EndpointModelPolicy(BaseModel):
     endpoint_id: UUID
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_output_tokens: int | None = Field(default=None, ge=1)
+    #: A different endpoint to write context-compaction summaries with.
+    #: `None` (the default) means this Agent's own endpoint — the Worker
+    #: falls back to it, and publish's window check has nothing to compare
+    #: because the window would be measured against itself. Omitted from the
+    #: normalized document when absent (`normalize_agent_spec`), so an Agent
+    #: that never names one keeps the content hash it always had.
+    summary_endpoint_id: UUID | None = None
 
 
 class ChatCompletionsDelivery(BaseModel):
@@ -240,6 +247,19 @@ class ContextBudget(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     segments: tuple[SegmentOverride, ...] = ()
+    #: `None` means "use the platform default"
+    #: (`context_budget.DEFAULT_COMPACTION_THRESHOLD`), the same reading
+    #: every other unset field in this class gets. The bound here is only
+    #: what a ratio can mean at all — zero, negative, more than the whole
+    #: allowance. Whether it is inside `MIN_COMPACTION_THRESHOLD` /
+    #: `MAX_COMPACTION_THRESHOLD` is checked at publish
+    #: (`AgentCatalog._check_compaction_threshold`) instead of here — not
+    #: because this module cannot import those constants (it already imports
+    #: `context_budget` above), but because bounds enforcement is a
+    #: publish-authority decision: an author must be able to save a draft
+    #: that is out of bounds while still working on it, and only publish
+    #: refuses it.
+    compaction_threshold: float | None = Field(default=None, gt=0, le=1)
 
     @field_validator("segments")
     @classmethod
@@ -751,6 +771,16 @@ def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
         # platform table an absent budget means. A spec that declares none
         # carries no key, and hashes as it did before this field existed.
         normalized.pop("context_budget", None)
+    budget = normalized.get("context_budget")
+    # Same promise one field down, same reasoning as `summary_endpoint_id`
+    # below: `compaction_threshold` did not exist when `context_budget` did,
+    # so an Agent that names no ratio has to carry no key at all — otherwise
+    # every version published with a `segments` override, before this field
+    # existed, would hash differently the moment it was added.
+    if isinstance(budget, dict):
+        budget_document = cast(dict[str, object], budget)
+        if budget_document.get("compaction_threshold") is None:
+            budget_document.pop("compaction_threshold", None)
     if normalized.get("network") is None:
         # Same reasoning as `completion` and `context_budget`: there is no
         # default network *document*, only the absence of one, and a spec that
@@ -779,6 +809,16 @@ def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
         # first published version. This one was not, so an empty binding set
         # has to carry no key at all to leave those hashes alone.
         normalized.pop("skills", None)
+    policy = normalized.get("model_policy")
+    # Unlike `temperature` and `max_output_tokens` beside it, which have
+    # always serialized as an explicit `null` when unset — this key did not
+    # exist when those did, so an Agent that names no summary endpoint has to
+    # carry no key at all, the same promise every widening above already
+    # makes for a field of its own.
+    if isinstance(policy, dict):
+        policy_document = cast(dict[str, object], policy)
+        if policy_document.get("summary_endpoint_id") is None:
+            policy_document.pop("summary_endpoint_id", None)
     encoded = json.dumps(
         normalized,
         ensure_ascii=False,

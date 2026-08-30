@@ -23,6 +23,7 @@ from tiny_hermes.memory.domain.search import request_for
 from tiny_hermes.memory.infrastructure.sql_search import SqlSessionSearch
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.infrastructure.tables import RunRow, SessionRow
+from tiny_hermes.runs.ports.store import StoredSummary
 
 
 @pytest.fixture
@@ -317,3 +318,76 @@ async def test_a_withdrawn_message_is_not_copied_into_a_checkpoint(
     )
 
     assert withdrawn_id not in {row.id for row in copied}
+
+
+async def _sequence_of(db_session: AsyncSession, message_id: UUID) -> int:
+    return (
+        await db_session.execute(
+            text("SELECT sequence FROM session_messages WHERE id = :id"),
+            {"id": message_id},
+        )
+    ).scalar_one()
+
+
+async def test_a_stored_summary_covering_a_withdrawn_message_is_dropped(
+    store: SqlRunStore,
+    db_session: AsyncSession,
+    scope: dict[str, str],
+    seeded_session_with_two_messages: tuple[UUID, UUID, UUID],
+) -> None:
+    """判定表还差一行：`session_compactions`。
+
+    一份模型写的摘要把 1–40 提炼成了一段话。用户 `/undo` 撤到那个范围里，下一轮
+    `covered_last` 掉到 20，`_plan_context` 的复用判据 `40 >= 20` 照样成立，于是
+    那段话被原样发回模型——里面提炼的正是用户刚收回的那几轮。撤回是 §14.3 说的
+    「不可见」，它没有「除了被摘要过的那部分」这个例外。
+
+    `_honestly_widens` 拦不住：它只管上界。
+    """
+    session_id, _first_id, second_id = seeded_session_with_two_messages
+    withdrawn_sequence = await _sequence_of(db_session, second_id)
+    await store.save_summary(
+        StoredSummary(
+            session_id=session_id,
+            first_sequence=1,
+            last_sequence=withdrawn_sequence,
+            text="用户确认了那批参数，并让我按它继续。",
+            endpoint_id=None,
+            model="deepseek-v4-flash",
+        ),
+        workspace_id=UUID(scope["X-Workspace-Id"]),
+    )
+
+    await store.mark_withdrawn([second_id], at=datetime.now(UTC))
+
+    assert await store.latest_summary(session_id) is None
+
+
+async def test_a_stored_summary_that_never_saw_the_withdrawn_message_stands(
+    store: SqlRunStore,
+    db_session: AsyncSession,
+    scope: dict[str, str],
+    seeded_session_with_two_messages: tuple[UUID, UUID, UUID],
+) -> None:
+    """反面同样要钉住：一个把摘要一律删掉的实现也能过上面那一条，代价是每次
+    `/undo` 都白扔一次已经付过钱的摘要调用。"""
+    session_id, first_id, second_id = seeded_session_with_two_messages
+    covered_through = await _sequence_of(db_session, first_id)
+    assert await _sequence_of(db_session, second_id) > covered_through
+    await store.save_summary(
+        StoredSummary(
+            session_id=session_id,
+            first_sequence=1,
+            last_sequence=covered_through,
+            text="用户在排查一条飞书图片管道的故障。",
+            endpoint_id=None,
+            model="deepseek-v4-flash",
+        ),
+        workspace_id=UUID(scope["X-Workspace-Id"]),
+    )
+
+    await store.mark_withdrawn([second_id], at=datetime.now(UTC))
+
+    found = await store.latest_summary(session_id)
+    assert found is not None
+    assert found.text == "用户在排查一条飞书图片管道的故障。"
