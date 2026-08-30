@@ -170,7 +170,14 @@ async def test_three_runs_drain_in_session_order_over_one_stack(
     transcripts = await asyncio.gather(*readers)
 
     # One Run executes at a time, and only the executing Run holds a lease.
-    assert len(model.snapshots) == 6  # three Runs, two rounds each
+    #
+    # Not six: §12.1 preemption means "two rounds each" was only ever true for
+    # a Run with nobody behind it. flow-1 and flow-2 each have a successor
+    # already queued the moment their first round is judged `continue`, so
+    # `decide_after_round` gives up the head right there instead of looping
+    # to a second round — one snapshot apiece. Only flow-3, last in the
+    # queue, runs both of its rounds itself.
+    assert len(model.snapshots) == 4
     for snapshot in model.snapshots:
         assert len(snapshot.running) == 1
         assert snapshot.leased == snapshot.running
@@ -181,17 +188,26 @@ async def test_three_runs_drain_in_session_order_over_one_stack(
     assert [row.session_sequence for row in finished] == [1, 2, 3]
     assert [row.status for row in finished] == ["completed"] * 3
 
-    for frames in transcripts:
+    # flow-1 and flow-2 are preempted straight out of their only round: the
+    # signal is decided before `slice_expired` is ever consulted (§12.1 in
+    # `decide_after_round` outranks it), so neither sees `run_slice_ended`.
+    # flow-3 has nobody waiting behind it and runs the un-preempted two-round
+    # shape the whole test used to assume for all three.
+    preempted_shape = ["run_created", "run_lease_acquired", "run_completed", "goal_verdict"]
+    unpreempted_shape = [
+        "run_created",
+        "run_lease_acquired",
+        "run_slice_ended",
+        "goal_verdict",
+        "run_lease_acquired",
+        "run_completed",
+        "goal_verdict",
+    ]
+    for frames, expected in zip(
+        transcripts, [preempted_shape, preempted_shape, unpreempted_shape], strict=True
+    ):
         _assert_contiguous(frames)
-        assert _transcript(frames) == [
-            "run_created",
-            "run_lease_acquired",
-            "run_slice_ended",
-            "goal_verdict",
-            "run_lease_acquired",
-            "run_completed",
-            "goal_verdict",
-        ]
+        assert _transcript(frames) == expected
 
     rows = await _audit_rows(engine)
     assert [row.result for row in rows] == ["succeeded"] * len(rows)

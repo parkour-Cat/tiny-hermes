@@ -50,6 +50,7 @@ from tiny_hermes.runs.domain.context_budget import (
 from tiny_hermes.runs.domain.goal import (
     CompletionCheck,
     GoalEvidence,
+    GoalOutcome,
     GoalProposal,
     GoalVerdict,
     judge,
@@ -394,6 +395,20 @@ class WorkerRuntime:
                 )
             )
 
+    async def _has_waiting_run(self, claimed: ClaimedRun) -> bool:
+        """§12.1: is anyone queued behind this Run in its Session right now?
+
+        Queried fresh every round, at the same cost `_cost_precheck` pays to
+        read the budget, rather than cached on the claim: caching would let
+        this round's preemption decision rest on last round's facts, and
+        "somebody is waiting" is exactly the kind of thing that can become
+        true partway through a Run that has been going for a while.
+        """
+        async with self._sessions.begin() as session:
+            return await SqlRunStore(session).has_waiting_run(
+                claimed.run.session_id, claimed.run.session_sequence
+            )
+
     async def _execute_slice(self, claimed: ClaimedRun) -> None:
         workspace_id = claimed.run.workspace_id
         handle = _LeaseHandle(lease_id=claimed.lease_id, version=claimed.lease_version)
@@ -508,6 +523,7 @@ class WorkerRuntime:
                             author="platform",
                         ),
                     )
+                waiting = await self._has_waiting_run(claimed)
                 decision = decide_after_round(
                     RoundOutcome(
                         verdict=verdict,
@@ -522,6 +538,7 @@ class WorkerRuntime:
                             after.compat_deadline_at is not None and not compat_expired
                         ),
                         compat_window_expired=compat_expired,
+                        user_waiting=waiting,
                     )
                 )
 
@@ -2103,7 +2120,7 @@ class WorkerRuntime:
             wait_kind=decision.wait_kind,
             wait_seconds=decision.wait_seconds,
             wait_policy=decision.wait_policy,
-            checkpoint=_checkpoint(response, judged),
+            checkpoint=_checkpoint(response, judged, decision),
             checkpoint_replay_safe=response.replay_safe,
             checkpoint_effect_status=(
                 CheckpointEffectStatus.UNKNOWN
@@ -2667,7 +2684,9 @@ def _budget_after(
 
 
 def _checkpoint(
-    response: ModelResponse, judged: "_Judged | None" = None
+    response: ModelResponse,
+    judged: "_Judged | None" = None,
+    decision: SliceDecision | None = None,
 ) -> dict[str, object]:
     """What the round was, in terms a reader of the Run can act on.
 
@@ -2691,6 +2710,18 @@ def _checkpoint(
         checkpoint["round"] = judged.round
         checkpoint["goal_outcome"] = judged.verdict.outcome.value
         checkpoint["goal_unmet"] = list(judged.verdict.unmet)
+        # §12.1: neither fact alone tells a preempted round from an ordinary
+        # one. The signal alone cannot distinguish "done" from "cut off
+        # early" — both end the Run the same way — and the verdict alone
+        # cannot distinguish "continue, preempted" from "continue, going on
+        # to the next round" — both are `GoalOutcome.CONTINUE`. Only the
+        # conjunction — this round's own verdict said continue, and it ended
+        # the Run anyway — says the head was given up rather than earned.
+        checkpoint["goal_preempted"] = (
+            decision is not None
+            and decision.signal is RunSignal.COMPLETED
+            and judged.verdict.outcome is GoalOutcome.CONTINUE
+        )
     return checkpoint
 
 

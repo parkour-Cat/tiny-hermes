@@ -3286,6 +3286,7 @@ class SqlRunStore:
             current_round=_round(run.checkpoint),
             goal_outcome=_goal_outcome(run.checkpoint),
             goal_unmet=_goal_unmet(run.checkpoint),
+            goal_preempted=_goal_preempted(run.checkpoint),
             created_at=run.created_at,
             started_at=run.started_at,
             finished_at=run.finished_at,
@@ -3739,6 +3740,20 @@ def _goal_outcome(checkpoint: dict[str, Any] | None) -> str | None:
         return None
     value: Any = checkpoint.get("goal_outcome")
     return str(value) if isinstance(value, str) and value else None
+
+
+def _goal_preempted(checkpoint: dict[str, Any] | None) -> bool:
+    """§12.1: did the last judged round give up the Session head to a queued
+    message rather than end because its goal was met?
+
+    Out of the checkpoint rather than a column of its own, for the same
+    reason `_goal_outcome` is: it describes one round, and a column would
+    have to be kept in step with it. Absent (and so `False`) for every Run
+    recorded before the Worker started writing this key.
+    """
+    if not checkpoint:
+        return False
+    return checkpoint.get("goal_preempted") is True
 
 
 def _goal_unmet(checkpoint: dict[str, Any] | None) -> tuple[str, ...]:
