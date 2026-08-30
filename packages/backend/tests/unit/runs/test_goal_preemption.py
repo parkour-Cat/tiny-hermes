@@ -4,19 +4,23 @@
 「这不对」，让他等到任务跑完才被听见，是把机器的进度排在人的意图前面。
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from tiny_hermes.runs.domain.goal import GoalOutcome, GoalVerdict
 from tiny_hermes.runs.domain.models import (
     BudgetSummary,
     CheckpointEffectStatus,
+    PauseReason,
     QueueStatus,
     RunSignal,
     RunSnapshot,
     RunState,
+    WaitPolicy,
 )
 from tiny_hermes.runs.domain.slice_policy import RoundOutcome, decide_after_round
+from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalVerdict
+from tiny_hermes.runs.ports.children import DelegationWait
 
 
 def _continuing(
@@ -24,21 +28,30 @@ def _continuing(
     user_waiting: bool,
     cancel_requested: bool = False,
     pause_requested: bool = False,
+    budget_allows: bool = True,
+    approval: ApprovalCheck | None = None,
+    delegated: DelegationWait | None = None,
+    compat_window_expired: bool = False,
     outcome: GoalOutcome = GoalOutcome.CONTINUE,
+    wait_seconds: int | None = None,
 ) -> RoundOutcome:
-    """一轮判为 continue 的结果，除了要试的那一项之外什么都不拦着它继续。
+    """一轮判为 continue（或指定的其它裁决）的结果，除了要试的那一项之外
+    什么都不拦着它继续。
 
     默认值全部设成「不会让 Run 停下来」的那一侧，这样任何一条测试变红时，
     红的原因只能是它自己改的那一项。
     """
     return RoundOutcome(
-        verdict=GoalVerdict(outcome=outcome, unmet=(), instruction="继续"),
-        approval=None,
-        delegated=None,
+        verdict=GoalVerdict(
+            outcome=outcome, unmet=(), instruction="继续", wait_seconds=wait_seconds
+        ),
+        approval=approval,
+        delegated=delegated,
         cancel_requested=cancel_requested,
         pause_requested=pause_requested,
-        budget_allows=True,
+        budget_allows=budget_allows,
         slice_expired=False,
+        compat_window_expired=compat_window_expired,
         user_waiting=user_waiting,
     )
 
@@ -74,6 +87,85 @@ def test_a_done_verdict_is_not_turned_into_a_preemption() -> None:
     )
 
     assert decision.signal is RunSignal.COMPLETED
+
+
+def test_an_exhausted_budget_still_outranks_a_waiting_message() -> None:
+    decision = decide_after_round(_continuing(user_waiting=True, budget_allows=False))
+
+    assert decision.signal is RunSignal.SAFE_PAUSE_REACHED
+    assert decision.pause_reason is PauseReason.LIMIT
+
+
+def test_a_pending_approval_still_outranks_a_waiting_message() -> None:
+    decision = decide_after_round(
+        _continuing(
+            user_waiting=True,
+            approval=ApprovalCheck(
+                verdict=ApprovalVerdict.REQUESTED,
+                # Real wall-clock time, not the fixed `now` the budget/snapshot
+                # fixtures use below: `_awaiting` computes `remaining` against
+                # `datetime.now(UTC)`, so a fixed past timestamp here would
+                # read as an already-expired approval and hit the wrong branch.
+                expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            ),
+        )
+    )
+
+    assert decision.signal is RunSignal.APPROVAL_REQUESTED
+
+
+def test_a_fresh_delegation_still_outranks_a_waiting_message() -> None:
+    decision = decide_after_round(
+        _continuing(
+            user_waiting=True,
+            delegated=DelegationWait(
+                child_run_ids=(uuid4(),), policy=WaitPolicy.ALL, seconds=60
+            ),
+        )
+    )
+
+    assert decision.signal is RunSignal.EXTERNAL_WAIT_STARTED
+
+
+def test_a_failed_verdict_is_not_turned_into_a_preemption() -> None:
+    # A round that broke is reported as broken, not as one somebody cut short.
+    decision = decide_after_round(
+        _continuing(user_waiting=True, outcome=GoalOutcome.FAILED)
+    )
+
+    assert decision.signal is RunSignal.FAILED
+
+
+def test_an_undecidable_verdict_is_not_turned_into_a_preemption() -> None:
+    decision = decide_after_round(
+        _continuing(user_waiting=True, outcome=GoalOutcome.UNDECIDABLE)
+    )
+
+    assert decision.signal is RunSignal.SAFE_PAUSE_REACHED
+    assert decision.pause_reason is PauseReason.OPERATOR
+
+
+def test_a_wait_verdict_is_not_turned_into_a_preemption() -> None:
+    decision = decide_after_round(
+        _continuing(user_waiting=True, outcome=GoalOutcome.WAIT, wait_seconds=30)
+    )
+
+    assert decision.signal is RunSignal.EXTERNAL_WAIT_STARTED
+
+
+def test_the_compat_window_still_outranks_a_waiting_message() -> None:
+    """MINOR 3: a `chat_completions` caller blocked on its own sync deadline
+    needs `pause_reason is COMPAT_TIMEOUT` to tell that pause apart from
+    every other one (`completions.py`'s `_unfinished`). A message arriving
+    for the *next* Run does not get to turn that report into a `completed`
+    instead.
+    """
+    decision = decide_after_round(
+        _continuing(user_waiting=True, compat_window_expired=True)
+    )
+
+    assert decision.signal is RunSignal.SAFE_PAUSE_REACHED
+    assert decision.pause_reason is PauseReason.COMPAT_TIMEOUT
 
 
 def _budget() -> BudgetSummary:
