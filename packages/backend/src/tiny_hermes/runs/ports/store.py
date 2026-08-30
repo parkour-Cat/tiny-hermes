@@ -652,6 +652,17 @@ class RunStore(Protocol):
         """
         ...
 
+    async def has_waiting_run(self, session_id: UUID, after_sequence: int) -> bool:
+        """Is anyone queued behind `after_sequence` in this Session, right now.
+
+        The reference frame is a `session_sequence`, not `head_run_id` — see
+        `unfinished_work`'s own docstring for why the two questions are not
+        interchangeable. §12.1's preemption rule needs exactly this one fact:
+        a Run deciding whether to keep going asks about the Runs after
+        *itself*, not about who currently sits at the head.
+        """
+        ...
+
     async def withdrawable(
         self, session_id: UUID, scope: WithdrawScope, turns: int
     ) -> tuple[list[UUID], int, str]:

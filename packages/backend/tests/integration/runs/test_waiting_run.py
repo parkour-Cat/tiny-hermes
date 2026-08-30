@@ -100,7 +100,7 @@ async def test_a_queued_run_behind_it_is_somebody_waiting(
     store: SqlRunStore,
     session_with_a_queued_run_behind: tuple[UUID, Row[Any], Row[Any]],
 ) -> None:
-    session_id, head, queued = session_with_a_queued_run_behind
+    session_id, head, _queued = session_with_a_queued_run_behind
 
     assert await store.has_waiting_run(session_id, head.session_sequence) is True
 
@@ -109,7 +109,7 @@ async def test_a_terminal_run_behind_it_is_not_waiting(
     store: SqlRunStore,
     session_with_a_finished_run_behind: tuple[UUID, Row[Any], Row[Any]],
 ) -> None:
-    session_id, head, finished = session_with_a_finished_run_behind
+    session_id, head, _finished = session_with_a_finished_run_behind
 
     assert await store.has_waiting_run(session_id, head.session_sequence) is False
 
@@ -118,7 +118,7 @@ async def test_a_run_ahead_of_it_does_not_count(
     store: SqlRunStore,
     session_with_a_queued_run_behind: tuple[UUID, Row[Any], Row[Any]],
 ) -> None:
-    session_id, head, queued = session_with_a_queued_run_behind
+    session_id, _head, queued = session_with_a_queued_run_behind
 
     # 从排队那条自己的角度看，它后面没有人。
     assert await store.has_waiting_run(session_id, queued.session_sequence) is False

@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, exists, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -959,6 +959,27 @@ class SqlRunStore:
                 StoppedRun(run_id=row.id, state_version=row.state_version)
                 for row in (*behind, at_head)
             ),
+        )
+
+    async def has_waiting_run(self, session_id: UUID, after_sequence: int) -> bool:
+        """是否有人排在这个 Run 后面。
+
+        §12.1 的让位规则要的就是这一个事实。参照系是 `session_sequence` 而不是
+        `head_run_id`：让位是为了让**后面**那条消息跑起来，而「谁是队首」在这一刻
+        必然是提问者自己，问它得不到答案。
+
+        `EXISTS` 而不是取回行：调用方只需要真假，而一个 Session 后面可能排着很多条。
+        """
+        return bool(
+            await self._session.scalar(
+                select(
+                    exists().where(
+                        RunRow.session_id == session_id,
+                        RunRow.session_sequence > after_sequence,
+                        RunRow.status.not_in(tuple(s.value for s in TERMINAL_STATES)),
+                    )
+                )
+            )
         )
 
     async def withdrawable(
