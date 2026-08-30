@@ -445,20 +445,28 @@ class StoredSummary:
     `first_sequence`/`last_sequence` name the `session_messages` range this
     summary stands in for — not by id, because §7.4.2 replaces this row
     wholesale on the next compaction and a later summary's range does not
-    start where an earlier one's ids left off.
+    start where an earlier one's ids left off. Both ends are read:
+    `_plan_context` reuses a summary by `last_sequence`, and a withdrawal
+    drops one whose range holds a message the user took back
+    (`mark_withdrawn`), which needs the near end too.
+
+    Every row here is model-written, so there is no `source` to record: a
+    structural summary is not persisted at all — it costs nothing to
+    recompute and `plan_context` regenerates it every round from the
+    transcript. The distinction an operator needs is on the
+    `CONTEXT_COMPACTED` event, where `CompactionRecord.source` states which
+    of the two that round's model actually read.
     """
 
     session_id: UUID
     first_sequence: int
     last_sequence: int
     text: str
-    #: `"model"` for a Worker-written semantic summary, `"structural"` for the
-    #: deterministic fallback (counts only, no model involved) — the two are
-    #: not interchangeable quality, and a reader deciding how much to trust
-    #: this text needs to tell them apart.
-    source: str
-    #: Which endpoint wrote it, for a `"model"` summary. `None` for
-    #: `"structural"`, which names no endpoint because none was called.
+    #: Which endpoint wrote it, and under what model name — the two facts
+    #: `_record_planning` reads back to name an author on the event. Both are
+    #: `None` when the summary call went to a provider that names no endpoint
+    #: (the deterministic stand-in), which is a gap in the record, not a
+    #: different kind of summary.
     endpoint_id: UUID | None
     model: str | None
 

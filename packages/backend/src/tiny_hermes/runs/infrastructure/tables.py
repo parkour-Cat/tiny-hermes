@@ -135,14 +135,18 @@ class SessionCompactionRow(IdMixin, CreatedAtMixin, Base):
     claim this table doesn't enforce. The originals a compaction covers are
     never deleted, so nothing here needs to preserve older summaries for
     traceability; that trail is the `CONTEXT_COMPACTED` `RunEvent` instead.
+
+    Only model-written summaries land here, which is why no column records
+    which kind this is: the structural one is never persisted — it costs
+    nothing to recompute and `plan_context` rebuilds it every round. A row
+    also does not outlive the turns it distilled: withdrawing any message
+    inside its covered range deletes it (`mark_withdrawn`), so the next
+    compaction writes one from history the user has not taken back.
     """
 
     __tablename__ = "session_compactions"
     __table_args__ = (
         UniqueConstraint("session_id", name="uq_session_compactions_session"),
-        CheckConstraint(
-            "source IN ('model', 'structural')", name="ck_session_compactions_source"
-        ),
         ForeignKeyConstraint(
             ["session_id", "workspace_id"],
             ["sessions.id", "sessions.workspace_id"],
@@ -156,7 +160,6 @@ class SessionCompactionRow(IdMixin, CreatedAtMixin, Base):
     first_sequence: Mapped[int] = mapped_column(Integer)
     last_sequence: Mapped[int] = mapped_column(Integer)
     summary: Mapped[str] = mapped_column(Text)
-    source: Mapped[str] = mapped_column(String(16))
     endpoint_id: Mapped[UUID | None] = mapped_column(nullable=True)
     model: Mapped[str | None] = mapped_column(String(200), nullable=True)
 

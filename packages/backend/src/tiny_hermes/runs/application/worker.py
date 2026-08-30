@@ -1571,8 +1571,9 @@ class WorkerRuntime:
 
         `context_budget.py` has no I/O and cannot resolve this itself (see
         `CompactionRecord.payload`'s comment) — it only knows `source`. A
-        `"structural"` record names no endpoint because none was called, the
-        same reason `StoredSummary.endpoint_id` is `None` on that path.
+        `"structural"` record names no endpoint because none was called, and
+        it has no row to read either: a structural summary is never persisted,
+        which is why `session_compactions` records no source of its own.
 
         A `"model"` record means `_plan_context` just built this plan from
         the Session's one stored summary row (reused from step 2, or just
@@ -1829,7 +1830,6 @@ class WorkerRuntime:
                     first_sequence=compacted.first_sequence,
                     last_sequence=compacted.last_sequence,
                     text=text,
-                    source="model",
                     endpoint_id=endpoint_id,
                     model=model,
                 ),

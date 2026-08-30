@@ -277,7 +277,7 @@ async def _stored_summary_row(engine: AsyncEngine, session_id: UUID) -> dict[str
         row = (
             await connection.execute(
                 text(
-                    "SELECT first_sequence, last_sequence, summary, source, "
+                    "SELECT first_sequence, last_sequence, summary, "
                     "endpoint_id, model FROM session_compactions WHERE session_id = :s"
                 ),
                 {"s": session_id},
@@ -306,9 +306,9 @@ async def _plant_summary_row(
         await connection.execute(
             text(
                 "INSERT INTO session_compactions (id, session_id, workspace_id, "
-                "first_sequence, last_sequence, summary, source, endpoint_id, model, "
+                "first_sequence, last_sequence, summary, endpoint_id, model, "
                 "created_at) "
-                "VALUES (gen_random_uuid(), :s, :w, :first, :last, :body, 'model', "
+                "VALUES (gen_random_uuid(), :s, :w, :first, :last, :body, "
                 "NULL, NULL, now())"
             ),
             {
@@ -392,7 +392,6 @@ async def test_the_summary_is_generated_once_and_then_reused(
     assert model.calls == 1
     stored = await _stored_summary_row(engine, session_id)
     assert stored is not None
-    assert stored["source"] == "model"
 
     # Reusing the stored summary is not the same as ignoring it: the second
     # round's own compaction record has to say `source == "model"` too, or an
@@ -488,6 +487,12 @@ async def test_a_later_compaction_updates_the_previous_summary(
     assert summary_prompt("x", first["summary"]).startswith(_UPDATE_MARKER)
 
 
+#: The answer the model gives in the oversized case below, named so the row
+#: read back afterwards can be checked against it by value rather than by the
+#: `source` column that used to stand in for "a model wrote this".
+OVERSIZED_SUMMARY = "超长摘要片段" * 20_000
+
+
 async def test_a_summary_too_large_to_fit_falls_back_to_the_structural_plan(
     client: TestClient,
     scope: dict[str, str],
@@ -509,7 +514,7 @@ async def test_a_summary_too_large_to_fit_falls_back_to_the_structural_plan(
     workspace_id = UUID(scope["X-Workspace-Id"])
     await _seed_old_turns(engine, session_id, workspace_id)
 
-    model = SummarizingRecording(says("nothing is left"), summary_text="超长摘要片段" * 20_000)
+    model = SummarizingRecording(says("nothing is left"), summary_text=OVERSIZED_SUMMARY)
     run = ask(client, scope, session, "and what is left?")
     await drive(engine, model, None)
 
@@ -523,7 +528,7 @@ async def test_a_summary_too_large_to_fit_falls_back_to_the_structural_plan(
     # round's own re-plan had to fall back.
     stored = await _stored_summary_row(engine, session_id)
     assert stored is not None
-    assert stored["source"] == "model"
+    assert stored["summary"] == OVERSIZED_SUMMARY
 
 
 async def test_a_summary_that_cuts_deeper_than_it_covers_falls_back(

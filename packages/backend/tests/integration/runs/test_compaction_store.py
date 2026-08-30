@@ -59,7 +59,6 @@ async def test_a_summary_comes_back_as_it_went_in(
         first_sequence=1,
         last_sequence=40,
         text="用户在排查一条飞书图片管道的故障。",
-        source="model",
         endpoint_id=None,
         model="deepseek-v4-flash",
     )
@@ -75,7 +74,7 @@ async def test_a_second_summary_replaces_the_first(
     session_id, workspace_id = seeded_session
     for last, text_ in ((40, "第一份"), (72, "第二份")):
         await store.save_summary(
-            StoredSummary(session_id, 1, last, text_, "model", None, "m"),
+            StoredSummary(session_id, 1, last, text_, None, "m"),
             workspace_id=workspace_id,
         )
 

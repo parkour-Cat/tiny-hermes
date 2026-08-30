@@ -1066,7 +1066,6 @@ class SqlRunStore:
             first_sequence=row.first_sequence,
             last_sequence=row.last_sequence,
             text=row.summary,
-            source=row.source,
             endpoint_id=row.endpoint_id,
             model=row.model,
         )
@@ -1087,7 +1086,6 @@ class SqlRunStore:
                 first_sequence=summary.first_sequence,
                 last_sequence=summary.last_sequence,
                 summary=summary.text,
-                source=summary.source,
                 endpoint_id=summary.endpoint_id,
                 model=summary.model,
             )
@@ -1097,7 +1095,6 @@ class SqlRunStore:
                     "first_sequence": summary.first_sequence,
                     "last_sequence": summary.last_sequence,
                     "summary": summary.text,
-                    "source": summary.source,
                     "endpoint_id": summary.endpoint_id,
                     "model": summary.model,
                 },
