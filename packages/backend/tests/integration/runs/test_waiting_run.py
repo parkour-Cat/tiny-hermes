@@ -9,7 +9,7 @@ Worker 认领这个 Run 之前就已经排好队，用 `session_sequence` 一样
 
 from collections.abc import AsyncIterator
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -157,7 +157,7 @@ async def test_a_run_alone_in_its_session_has_nobody_waiting(
 ) -> None:
     session_id, run = session_with_one_running_run
 
-    assert await store.has_waiting_run(session_id, run.started_at) is False
+    assert await store.has_waiting_run(session_id, run.id, run.started_at) is False
 
 
 async def test_a_message_queued_before_the_run_started_is_not_waiting(
@@ -170,7 +170,7 @@ async def test_a_message_queued_before_the_run_started_is_not_waiting(
     """
     session_id, head, _queued = session_with_a_message_queued_before_the_run_started
 
-    assert await store.has_waiting_run(session_id, head.started_at) is False
+    assert await store.has_waiting_run(session_id, head.id, head.started_at) is False
 
 
 async def test_a_message_queued_after_the_run_started_is_waiting(
@@ -179,7 +179,7 @@ async def test_a_message_queued_after_the_run_started_is_waiting(
 ) -> None:
     session_id, head, _queued = session_with_a_message_queued_after_the_run_started
 
-    assert await store.has_waiting_run(session_id, head.started_at) is True
+    assert await store.has_waiting_run(session_id, head.id, head.started_at) is True
 
 
 async def test_a_terminal_run_behind_it_is_not_waiting(
@@ -188,7 +188,7 @@ async def test_a_terminal_run_behind_it_is_not_waiting(
 ) -> None:
     session_id, head, _finished = session_with_a_finished_run_behind
 
-    assert await store.has_waiting_run(session_id, head.started_at) is False
+    assert await store.has_waiting_run(session_id, head.id, head.started_at) is False
 
 
 async def test_a_paused_sibling_queued_after_start_does_not_preempt(
@@ -202,7 +202,7 @@ async def test_a_paused_sibling_queued_after_start_does_not_preempt(
     """
     session_id, head, _paused = session_with_a_paused_sibling_queued_after_start
 
-    assert await store.has_waiting_run(session_id, head.started_at) is False
+    assert await store.has_waiting_run(session_id, head.id, head.started_at) is False
 
 
 async def test_a_run_ahead_of_it_does_not_count(
@@ -214,7 +214,7 @@ async def test_a_run_ahead_of_it_does_not_count(
     # 从排队那条自己的角度看，它自己还没被 Worker 认领，`started_at` 是 NULL——
     # 没有「我开始之后」这个参照系，也就谈不上有谁排在它后面。
     assert queued.started_at is None
-    assert await store.has_waiting_run(session_id, queued.started_at) is False
+    assert await store.has_waiting_run(session_id, queued.id, queued.started_at) is False
 
 
 async def test_a_run_with_no_started_at_has_no_frame_of_reference(
@@ -226,4 +226,52 @@ async def test_a_run_with_no_started_at_has_no_frame_of_reference(
     "no basis to say anyone arrived after me" rather than an error — treating
     it as `True` would prefer a guess over an honest unknown.
     """
-    assert await store.has_waiting_run(UUID(session_id), None) is False
+    assert await store.has_waiting_run(UUID(session_id), uuid4(), None) is False
+
+
+@pytest.fixture
+async def session_with_a_paused_run_ahead_of_a_later_queued_one(
+    client: TestClient, scope: dict[str, str], session_id: str, engine: AsyncEngine
+) -> tuple[UUID, Row[Any], Row[Any], Row[Any]]:
+    """A running; B queued right behind it and then paused (`(QUEUED,
+    PAUSE_REQUESTED) → PAUSED` is reachable from the public API); C queued
+    after A started.
+
+    `_terminalize` hands the Session head to the *earliest* `session_sequence`
+    non-terminal Run when A ends — that is B, not C, regardless of which of
+    the two is `queued`. `has_waiting_run` must therefore answer about
+    whichever Run would actually become head, not about whether some queued
+    Run exists anywhere behind A: B is that Run here, and B is paused, so
+    preempting A would hand the head to something `claim_head` never picks
+    up. C, further back, stays blocked behind B either way.
+    """
+    a = _submit(client, scope, session_id, "a")
+    await _mark_started(engine, UUID(str(a["id"])))
+    b = _submit(client, scope, session_id, "b")
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE runs SET status = 'paused', pause_reason = 'manual' WHERE id = :id"),
+            {"id": UUID(str(b["id"]))},
+        )
+    c = _submit(client, scope, session_id, "c")
+    a_row = await _run_row(engine, UUID(str(a["id"])))
+    b_row = await _run_row(engine, UUID(str(b["id"])))
+    c_row = await _run_row(engine, UUID(str(c["id"])))
+    return UUID(session_id), a_row, b_row, c_row
+
+
+async def test_a_further_back_queued_run_does_not_preempt_when_the_true_successor_is_paused(
+    store: SqlRunStore,
+    session_with_a_paused_run_ahead_of_a_later_queued_one: tuple[
+        UUID, Row[Any], Row[Any], Row[Any]
+    ],
+) -> None:
+    """MAJOR 2: "a queued sibling exists somewhere behind me" is not the same
+    fact as "the sibling that will actually become head is claimable" — the
+    first is true here (C), the second is false (B is next in line, and B is
+    `paused`). Preempting on the first fact alone would truncate A's goal for
+    nothing and hand the Session to a Run nobody will claim.
+    """
+    session_id, a, _b, _c = session_with_a_paused_run_ahead_of_a_later_queued_one
+
+    assert await store.has_waiting_run(session_id, a.id, a.started_at) is False
