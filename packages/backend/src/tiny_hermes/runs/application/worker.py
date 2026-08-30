@@ -2120,12 +2120,22 @@ class WorkerRuntime:
         prices: TokenPrices | None = None,
         preempted_decision: SliceDecision | None = None,
     ) -> RecordSliceCommand:
+        # `preempted_decision` defaults to `decision` because in every
+        # ordinary call the two questions — "what transition does this write
+        # record?" and "was this round's own verdict overridden by
+        # preemption?" — have one answer between them. `_checkpoint_round` is
+        # the one caller where they differ: its interim commit passes a
+        # neutralized `decision` (`signal=None`, so the transition is
+        # deferred until the sandbox's fate is confirmed) alongside the real
+        # one here, so `goal_preempted` and the timeline still describe what
+        # this round's disposition actually was.
+        goal_decision = decision if preempted_decision is None else preempted_decision
         if judged is not None:
             # Every write of a judged round carries the verdict, whichever path
             # got here: the commit that lands a write round, and the plain
             # record that lands every other. A round whose write was rolled
             # back carries none, which is the truth — the verdict did not take.
-            events = (*events, _verdict_event(judged))
+            events = (*events, _verdict_event(judged, _is_preempted(goal_decision, judged)))
         return RecordSliceCommand(
             workspace_id=claimed.run.workspace_id,
             run_id=claimed.run.id,
@@ -2137,18 +2147,7 @@ class WorkerRuntime:
             wait_kind=decision.wait_kind,
             wait_seconds=decision.wait_seconds,
             wait_policy=decision.wait_policy,
-            # `preempted_decision` defaults to `decision` because in every
-            # ordinary call the two questions — "what transition does this
-            # write record?" and "was this round's own verdict overridden by
-            # preemption?" — have one answer between them. `_checkpoint_round`
-            # is the one caller where they differ: its interim commit passes
-            # a neutralized `decision` (`signal=None`, so the transition is
-            # deferred until the sandbox's fate is confirmed) alongside the
-            # real one here, so `goal_preempted` still describes what this
-            # round's disposition actually was.
-            checkpoint=_checkpoint(
-                response, judged, decision if preempted_decision is None else preempted_decision
-            ),
+            checkpoint=_checkpoint(response, judged, goal_decision),
             checkpoint_replay_safe=response.replay_safe,
             checkpoint_effect_status=(
                 CheckpointEffectStatus.UNKNOWN
@@ -2711,6 +2710,29 @@ def _budget_after(
     return projected.allows_execution(datetime.now(UTC))
 
 
+def _is_preempted(decision: SliceDecision | None, judged: "_Judged") -> bool:
+    """§12.1: this round's own verdict said `continue`, and the platform
+    ended the Run anyway.
+
+    Neither fact alone tells a preempted round from an ordinary one. The
+    signal alone cannot distinguish "done" from "cut off early" — both end
+    the Run the same way — and the verdict alone cannot distinguish
+    "continue, preempted" from "continue, going on to the next round" — both
+    are `GoalOutcome.CONTINUE`. Only the conjunction says the head was given
+    up rather than earned.
+
+    Shared by `_checkpoint`'s `goal_preempted` and `_verdict_event`'s
+    `preempted` so the checkpoint and the timeline cannot say two different
+    things about the same round — a fact recorded in one place and silently
+    absent from the other is the bug this repo keeps having.
+    """
+    return (
+        decision is not None
+        and decision.signal is RunSignal.COMPLETED
+        and judged.verdict.outcome is GoalOutcome.CONTINUE
+    )
+
+
 def _checkpoint(
     response: ModelResponse,
     judged: "_Judged | None" = None,
@@ -2738,26 +2760,22 @@ def _checkpoint(
         checkpoint["round"] = judged.round
         checkpoint["goal_outcome"] = judged.verdict.outcome.value
         checkpoint["goal_unmet"] = list(judged.verdict.unmet)
-        # §12.1: neither fact alone tells a preempted round from an ordinary
-        # one. The signal alone cannot distinguish "done" from "cut off
-        # early" — both end the Run the same way — and the verdict alone
-        # cannot distinguish "continue, preempted" from "continue, going on
-        # to the next round" — both are `GoalOutcome.CONTINUE`. Only the
-        # conjunction — this round's own verdict said continue, and it ended
-        # the Run anyway — says the head was given up rather than earned.
-        checkpoint["goal_preempted"] = (
-            decision is not None
-            and decision.signal is RunSignal.COMPLETED
-            and judged.verdict.outcome is GoalOutcome.CONTINUE
-        )
+        checkpoint["goal_preempted"] = _is_preempted(decision, judged)
     return checkpoint
 
 
-def _verdict_event(judged: "_Judged") -> ReservedEvent:
+def _verdict_event(judged: "_Judged", preempted: bool) -> ReservedEvent:
     """The judge's answer, on the timeline where a person is watching.
 
     The instruction is left out: it is derived from ``unmet`` and is already in
     the transcript, where the model that has to act on it will read it.
+
+    ``preempted`` rides here too (§12.1): the timeline is a read path of its
+    own — SSE subscribers and anyone replaying `run_events` see it without
+    ever polling `document()` — and until now it carried `{round, outcome,
+    unmet}` for every round including the one that ended the Run, so a
+    reader watching only the stream had no way to tell a preempted round
+    from an ordinary `continue` that was about to get another one.
     """
     return ReservedEvent(
         event_type=RunEventType.GOAL_VERDICT,
@@ -2765,5 +2783,6 @@ def _verdict_event(judged: "_Judged") -> ReservedEvent:
             "round": judged.round,
             "outcome": judged.verdict.outcome.value,
             "unmet": list(judged.verdict.unmet),
+            "preempted": preempted,
         },
     )
