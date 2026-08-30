@@ -221,6 +221,24 @@ test("a billed summary call with no reported usage still names the call itself",
   expect(sentence).not.toContain("{");
 });
 
+test("a billed summary call names how many calls it counted as, from the payload", () => {
+  // The number has to come from `model_calls`, not a hardcoded "one" in the
+  // message string — the same gap `model_calls` was added to this payload
+  // to close (see `_summary_billed_payload`'s docstring).
+  const said = eventNote(frame("context_summary_billed", { ...SUMMARY_BILLED, model_calls: 1 }));
+  const sentence = fill(enUS[said?.key ?? "appName"], said?.values ?? {});
+  expect(sentence).toContain("1 model call");
+});
+
+test("a summary-billed payload written before model_calls existed still gets a sentence", () => {
+  // `SUMMARY_BILLED` carries no `model_calls` — the honest shape of an event
+  // written before this field existed — and the sentence must say so with a
+  // dash, not a guessed number.
+  const said = eventNote(frame("context_summary_billed", SUMMARY_BILLED));
+  const sentence = fill(enUS[said?.key ?? "appName"], said?.values ?? {});
+  expect(sentence).toContain("—");
+});
+
 test("a summary-billed payload this console does not fully understand gets no sentence", () => {
   expect(eventNote(frame("context_summary_billed", { model: "x" }))).toBeNull();
 });
