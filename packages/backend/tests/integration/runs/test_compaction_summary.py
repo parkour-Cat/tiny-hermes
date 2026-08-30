@@ -13,6 +13,7 @@
 """
 
 import json
+from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -21,12 +22,14 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 from tiny_hermes.agents.domain.models import EndpointModelPolicy
+from tiny_hermes.model_catalog.domain.pricing import TokenPrices, cost_of
+from tiny_hermes.runs.domain.models import ToolCallBlock
 from tiny_hermes.runs.domain.summary_prompt import summary_prompt
 from tiny_hermes.runs.ports.model import ModelRequest, ModelResponse, StopReason
 
 from ..conftest import VALID_SPEC
 from .test_context_budget import SMALL_ENDPOINT, ask, payloads, says, start_session, status
-from .test_worker_tools import drive
+from .test_worker_tools import StandInSandbox, drive
 
 #: A fixture imported and also used as a parameter name shadows itself for
 #: ruff's F811 — `test_context_budget.py`'s own fixtures are only ever
@@ -154,12 +157,24 @@ class SummarizingRecording:
     """
 
     def __init__(
-        self, *answers: ModelResponse, summary_text: str = "早前的对话已归纳完毕。"
+        self,
+        *answers: ModelResponse,
+        summary_text: str = "早前的对话已归纳完毕。",
+        # `None` by default rather than some fixed number: the billing tests
+        # are the only ones that need the summarizer to have reported usage
+        # at all, and every other test in this file relies on the old,
+        # usage-less shape to keep its own assertions (about `source`,
+        # about which text a later round was shown) unaffected by a second
+        # concern this class did not use to have.
+        summary_input_tokens: int | None = None,
+        summary_output_tokens: int | None = None,
     ) -> None:
         self._answers = list(answers)
         self.requests: list[ModelRequest] = []
         self.summary_requests: list[ModelRequest] = []
         self._summary_text = summary_text
+        self._summary_input_tokens = summary_input_tokens
+        self._summary_output_tokens = summary_output_tokens
 
     @property
     def calls(self) -> int:
@@ -173,7 +188,12 @@ class SummarizingRecording:
         self.requests.append(request)
         if _is_summary_request(request):
             self.summary_requests.append(request)
-            return ModelResponse(stop_reason=StopReason.COMPLETED, text=self._summary_text)
+            return ModelResponse(
+                stop_reason=StopReason.COMPLETED,
+                text=self._summary_text,
+                input_tokens=self._summary_input_tokens,
+                output_tokens=self._summary_output_tokens,
+            )
         return self._answers.pop(0) if self._answers else says("done")
 
 
@@ -286,6 +306,31 @@ async def _stored_summary_row(engine: AsyncEngine, session_id: UUID) -> dict[str
         return dict(row) if row is not None else None
 
 
+async def _budget_row(engine: AsyncEngine, root_run_id: UUID) -> dict[str, Any] | None:
+    """`run_budget_scopes`, read raw — the same reason `_stored_summary_row`
+    is: `SqlRunStore` reading its own write back would only prove the two
+    agree with each other, not that a summarization call's usage and cost
+    actually landed on the row `_cost_precheck` reads from next round.
+
+    Keyed on `root_run_id`, not `run_id`: for a Head Run created directly
+    (every Run in this file) the two are the same value, but the column that
+    actually carries the shared total is `root_run_id` (see the comment near
+    `RunBudgetScopeRow` in `sql_store.py`), and reading by the wrong column
+    would silently pass even if a future change billed the wrong scope.
+    """
+    async with engine.connect() as connection:
+        row = (
+            await connection.execute(
+                text(
+                    "SELECT consumed_cost, consumed_tokens, cost_currency, "
+                    "cost_quality FROM run_budget_scopes WHERE root_run_id = :id"
+                ),
+                {"id": root_run_id},
+            )
+        ).mappings().first()
+        return dict(row) if row is not None else None
+
+
 async def _plant_summary_row(
     engine: AsyncEngine,
     session_id: UUID,
@@ -347,15 +392,26 @@ class RefusingSummarizer:
     the logs the same way, not silently swallowed.
     """
 
-    def __init__(self, *answers: ModelResponse) -> None:
+    def __init__(
+        self,
+        *answers: ModelResponse,
+        summary_input_tokens: int | None = None,
+        summary_output_tokens: int | None = None,
+    ) -> None:
         self._answers = list(answers)
         self.requests: list[ModelRequest] = []
+        self._summary_input_tokens = summary_input_tokens
+        self._summary_output_tokens = summary_output_tokens
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         self.requests.append(request)
         if _is_summary_request(request):
             return ModelResponse(
-                stop_reason=StopReason.FAILED, text="", failure="endpoint_refused"
+                stop_reason=StopReason.FAILED,
+                text="",
+                failure="endpoint_refused",
+                input_tokens=self._summary_input_tokens,
+                output_tokens=self._summary_output_tokens,
             )
         return self._answers.pop(0) if self._answers else says("done")
 
@@ -854,4 +910,268 @@ async def test_no_summary_endpoint_means_the_summary_call_uses_the_agent_s_own(
     assert status(client, scope, run)["status"] == "completed"
     assert model.calls == 1
     assert _endpoint_of(model.summary_requests[0]) == UUID(small_endpoint)
+
+
+# -- Task 5: a summarization call spends real money and must be accounted for
+
+
+def _price(
+    client: TestClient,
+    scope: dict[str, str],
+    endpoint_id: str,
+    *,
+    input_price: str,
+    output_price: str,
+) -> None:
+    priced = client.post(
+        f"/api/v1/model-endpoints/{endpoint_id}/pricing",
+        headers=scope,
+        json={
+            "currency": "USD",
+            "input_per_million": input_price,
+            "output_per_million": output_price,
+        },
+    )
+    assert priced.status_code == 201, priced.text
+
+
+async def test_a_successful_summary_call_is_billed_to_the_runs_shared_budget(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    agent_on_the_small_endpoint: Any,
+    small_endpoint: str,
+) -> None:
+    """§12.4's gap this closes: a summarization call is a real call on a real
+    endpoint, and its usage and cost have to land on the same
+    `run_budget_scopes` row every other model call accrues to — not nowhere.
+
+    Both the ordinary round and the summary call are given explicit token
+    counts here (`cost_of` would otherwise call either one "unknown", and one
+    unknown round poisons the Run's whole total to unknown per §12.4 — see
+    `pricing.py`'s `_accumulate_cost`), so the persisted total can be checked
+    against a real number instead of merely "not zero".
+    """
+    _price(client, scope, small_endpoint, input_price="3", output_price="15")
+    agent = agent_on_the_small_endpoint()
+    session = start_session(client, scope, agent)
+    session_id = UUID(session)
+    workspace_id = UUID(scope["X-Workspace-Id"])
+    await _seed_old_turns(engine, session_id, workspace_id)
+
+    ordinary_answer = ModelResponse(
+        stop_reason=StopReason.COMPLETED,
+        text="nothing is left",
+        input_tokens=100,
+        output_tokens=20,
+    )
+    model = SummarizingRecording(
+        ordinary_answer, summary_input_tokens=500, summary_output_tokens=50
+    )
+    run = ask(client, scope, session, "and what is left?")
+    await drive(engine, model, None)
+
+    assert status(client, scope, run)["status"] == "completed"
+    assert model.calls == 1
+
+    prices = TokenPrices(
+        currency="USD", input_per_million=Decimal("3"), output_per_million=Decimal("15")
+    )
+    expected = cost_of(prices, input_tokens=100, output_tokens=20).plus(
+        cost_of(prices, input_tokens=500, output_tokens=50)
+    )
+    row = await _budget_row(engine, UUID(run))
+    assert row is not None
+    assert Decimal(row["consumed_cost"]) == expected.amount
+    assert row["consumed_tokens"] == (100 + 20) + (500 + 50)
+    assert row["cost_quality"] == "provider"
+
+
+async def test_a_refused_summary_that_reported_usage_is_still_billed(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    agent_on_the_small_endpoint: Any,
+    small_endpoint: str,
+) -> None:
+    """Decision 2: accrue whenever the provider reported usage, whatever the
+    `stop_reason` — a call that produced tokens and then failed was still
+    paid for on the real endpoint. `RefusingSummarizer`'s answer here is
+    exactly `test_a_refused_summary_is_logged_same_as_a_timeout`'s (a
+    non-`completed` stop reason, degrading to the structural summary), the
+    only difference is that this one carries usage — proving the billing
+    path does not depend on the call having succeeded.
+    """
+    _price(client, scope, small_endpoint, input_price="3", output_price="15")
+    agent = agent_on_the_small_endpoint()
+    session = start_session(client, scope, agent)
+    session_id = UUID(session)
+    workspace_id = UUID(scope["X-Workspace-Id"])
+    await _seed_old_turns(engine, session_id, workspace_id)
+
+    model = RefusingSummarizer(
+        says("nothing is left"), summary_input_tokens=500, summary_output_tokens=50
+    )
+    run = ask(client, scope, session, "and what is left?")
+    await drive(engine, model, None)
+
+    assert status(client, scope, run)["status"] == "completed"
+    compacted = await payloads(engine, run, "context_compacted")
+    assert compacted[0]["source"] == "structural"
+
+    billed = await payloads(engine, run, "context_summary_billed")
+    assert len(billed) == 1
+    assert billed[0]["input_tokens"] == 500
+    assert billed[0]["output_tokens"] == 50
+
+    prices = TokenPrices(
+        currency="USD", input_per_million=Decimal("3"), output_per_million=Decimal("15")
+    )
+    expected = cost_of(prices, input_tokens=500, output_tokens=50)
+    assert Decimal(billed[0]["cost"]) == expected.amount
+
+    row = await _budget_row(engine, UUID(run))
+    assert row is not None
+    assert row["consumed_tokens"] >= 550
+
+
+async def test_a_summary_call_that_never_reached_the_provider_bills_nothing(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    agent_on_the_small_endpoint: Any,
+    small_endpoint: str,
+) -> None:
+    """The other half of decision 2: only a call that never reached the
+    provider costs nothing. `FailingSummarizer` raises before any
+    `ModelResponse` exists at all, so there is no usage to have reported —
+    unlike `RefusingSummarizer` above, which answers with a `failed`
+    `stop_reason` but still carries token counts.
+    """
+    _price(client, scope, small_endpoint, input_price="3", output_price="15")
+    agent = agent_on_the_small_endpoint()
+    session = start_session(client, scope, agent)
+    session_id = UUID(session)
+    workspace_id = UUID(scope["X-Workspace-Id"])
+    await _seed_old_turns(engine, session_id, workspace_id)
+
+    model = FailingSummarizer(says("nothing is left"))
+    run = ask(client, scope, session, "and what is left?")
+    await drive(engine, model, None)
+
+    assert status(client, scope, run)["status"] == "completed"
+    assert await payloads(engine, run, "context_summary_billed") == []
+
+    row = await _budget_row(engine, UUID(run))
+    assert row is not None
+    # Not `consumed_cost`: the ordinary round's own answer (`says(...)`) also
+    # reports no usage, which already makes the Run's total "unknown" on its
+    # own (§12.4) — a fact this test does not care about and must not let
+    # mask the one it does. `consumed_tokens` only ever moves on a real
+    # billable count, so it is the one field a no-op summary call cannot
+    # touch by accident.
+    assert row["consumed_tokens"] == 0
+
+
+async def test_the_summary_call_is_billed_at_the_summary_endpoints_own_price(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    agent_on_the_small_endpoint: Any,
+    small_endpoint: str,
+    summary_endpoint: str,
+) -> None:
+    """Decision 1: price it with the summary endpoint's own prices, not the
+    main endpoint's. Priced wildly apart (the main endpoint here would bill
+    500x what the summary endpoint would for the same tokens) so a bug that
+    billed the summary call at the main endpoint's rate could not pass by
+    coincidence.
+    """
+    _price(client, scope, small_endpoint, input_price="1500", output_price="1500")
+    _price(client, scope, summary_endpoint, input_price="3", output_price="15")
+    agent = agent_on_the_small_endpoint(summary_endpoint_id=summary_endpoint)
+    session = start_session(client, scope, agent)
+    session_id = UUID(session)
+    workspace_id = UUID(scope["X-Workspace-Id"])
+    await _seed_old_turns(engine, session_id, workspace_id)
+
+    ordinary_answer = ModelResponse(
+        stop_reason=StopReason.COMPLETED, text="nothing is left", input_tokens=1, output_tokens=1
+    )
+    model = SummarizingRecording(
+        ordinary_answer, summary_input_tokens=500, summary_output_tokens=50
+    )
+    run = ask(client, scope, session, "and what is left?")
+    await drive(engine, model, None)
+
+    assert status(client, scope, run)["status"] == "completed"
+    billed = await payloads(engine, run, "context_summary_billed")
+    assert len(billed) == 1
+    assert billed[0]["endpoint_id"] == summary_endpoint
+
+    summary_prices = TokenPrices(
+        currency="USD", input_per_million=Decimal("3"), output_per_million=Decimal("15")
+    )
+    expected = cost_of(summary_prices, input_tokens=500, output_tokens=50)
+    assert Decimal(billed[0]["cost"]) == expected.amount
+    assert billed[0]["cost_currency"] == "USD"
+
+
+async def test_a_summary_calls_cost_can_push_a_later_round_past_the_ceiling(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    agent_on_the_small_endpoint: Any,
+    small_endpoint: str,
+) -> None:
+    """Decision 4, end to end: once accrued, the summary's cost has to be
+    what `_cost_precheck` sees on the *next* round — the whole reason this
+    task exists ("it can never itself push a Run to its §12.4 ceiling").
+
+    One Run, two rounds, driven by one `drive()` call: round one triggers
+    compaction and pays for a (deliberately huge) summary; round one's own
+    tool-call answer and round two's precheck are both tiny and both known,
+    so nothing but the summary's own cost can be what pushes the ceiling.
+    Two separate Runs would not prove this — each `ask()` opens its own
+    fresh `run_budget_scopes` row (`accept_run`'s `budget_root_run_id=run_id`),
+    so only rounds *inside* one Run's slice share a budget to push.
+    """
+    _price(client, scope, small_endpoint, input_price="3", output_price="15")
+    agent = agent_on_the_small_endpoint(["shell.exec"])
+    session = start_session(client, scope, agent)
+    session_id = UUID(session)
+    workspace_id = UUID(scope["X-Workspace-Id"])
+    await _seed_old_turns(engine, session_id, workspace_id)
+    await _set_ceiling(engine, workspace_id, "5")
+
+    tool_round = ModelResponse(
+        stop_reason=StopReason.TOOL_CALL,
+        text="",
+        tool_calls=(
+            ToolCallBlock(call_id="c1", name="shell.exec", arguments={"command": "./suite"}),
+        ),
+        input_tokens=1,
+        output_tokens=1,
+    )
+    final_round = ModelResponse(
+        stop_reason=StopReason.COMPLETED, text="done", input_tokens=1, output_tokens=1
+    )
+    model = SummarizingRecording(
+        tool_round,
+        final_round,
+        summary_input_tokens=2_000_000,
+        summary_output_tokens=200_000,
+    )
+    run = ask(client, scope, session, "run the suite")
+    await drive(engine, model, StandInSandbox())
+
+    reloaded = status(client, scope, run)
+    # The summarizer was asked exactly once — round two never regenerates a
+    # summary it can reuse (or, failing that, its own §12.4 gate in
+    # `_plan_context` refuses a second one before it is ever asked, the same
+    # gate `test_the_summarizer_is_never_asked_once_the_cost_ceiling_is_reached`
+    # covers) — so nothing here can be explained by a second huge charge.
+    assert model.calls == 1
+    assert reloaded["status"] == "paused"
+    assert reloaded["pause_reason"] == "limit"
 
