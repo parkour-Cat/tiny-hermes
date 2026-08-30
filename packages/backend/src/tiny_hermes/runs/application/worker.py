@@ -102,6 +102,7 @@ from tiny_hermes.runs.ports.store import (
     ClaimRunCommand,
     ExecutionContext,
     RecordSliceCommand,
+    RecordSummaryUsageCommand,
     RenewLeaseCommand,
     ReservedEvent,
     StoredSummary,
@@ -1793,6 +1794,15 @@ class WorkerRuntime:
                 "summary generation failed", extra={"run_id": str(claimed.run.id)}
             )
             return None
+        if response.input_tokens is not None or response.output_tokens is not None:
+            # §12.4 applies to this call the same as to any other: it was
+            # paid for on the real endpoint whether or not it produced an
+            # answer this round can use. Billed before the `stop_reason`
+            # check below, deliberately — a refusal or a too-small window
+            # still spent whatever the provider reports here, and only an
+            # exception above (never reaching the provider at all) costs
+            # nothing.
+            await self._bill_summary_call(claimed, context, response)
         if response.stop_reason is not StopReason.COMPLETED:
             # As visible as the exception above: a refusal or a window truly
             # too small for the prompt reaches here as an ordinary answer,
@@ -1812,6 +1822,54 @@ class WorkerRuntime:
             )
             return None
         return text
+
+    async def _bill_summary_call(
+        self, claimed: ClaimedRun, context: ExecutionContext, response: ModelResponse
+    ) -> None:
+        """Bill one summarization call to the Run-tree's shared budget, and
+        record it as its own `CONTEXT_SUMMARY_BILLED` event, in one write.
+
+        Priced at the summary endpoint's own rate — `_summary_policy(context)`,
+        not `context.prices` (the *main* policy's pinned version, read for a
+        possibly different endpoint) — because Task 4 lets an Agent name a
+        separate, cheaper summarizer, and billing that call at the main
+        model's rate would charge for an endpoint it never touched. Looked up
+        fresh rather than pinned: `runs.model_pricing_version_id` pins one
+        price, for the main endpoint, at Run creation; a declared summary
+        endpoint has no equivalent pin to read back, so the price in force
+        right now is the only one there is to bill at (`current_prices_for`).
+        """
+        policy = _summary_policy(context)
+        endpoint_id = (
+            policy.endpoint_id if isinstance(policy, EndpointModelPolicy) else None
+        )
+        async with self._sessions.begin() as session:
+            model: str | None = None
+            prices: TokenPrices | None = None
+            if endpoint_id is not None:
+                endpoint = await SqlModelEndpointStore(session).read(endpoint_id)
+                if endpoint is not None:
+                    model = endpoint.spec.model
+                prices = await SqlRunStore(session).current_prices_for(endpoint_id)
+            cost = cost_of(
+                prices,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                usage_quality=response.usage_quality,
+            )
+            await SqlRunStore(session).record_summary_usage(
+                RecordSummaryUsageCommand(
+                    workspace_id=claimed.run.workspace_id,
+                    run_id=claimed.run.id,
+                    root_run_id=claimed.run.budget_root_run_id,
+                    tokens=response.billable_tokens,
+                    cost=cost,
+                    event=ReservedEvent(
+                        event_type=RunEventType.CONTEXT_SUMMARY_BILLED,
+                        payload=_summary_billed_payload(endpoint_id, model, response, cost),
+                    ),
+                )
+            )
 
     async def _save_summary(
         self,
@@ -2328,6 +2386,31 @@ def _cost_from(response: ModelResponse, prices: TokenPrices | None = None) -> Co
         output_tokens=response.output_tokens,
         usage_quality=response.usage_quality,
     )
+
+
+def _summary_billed_payload(
+    endpoint_id: UUID | None, model: str | None, response: ModelResponse, cost: Cost
+) -> dict[str, Any]:
+    """What `CONTEXT_SUMMARY_BILLED` says: who answered, what it reported,
+    and what this platform believes that cost — the three facts an operator
+    watching `consumed_cost` move needs to explain a movement nothing else on
+    the Run's timeline accounts for.
+
+    `cost.amount` is written as a string, not the `Decimal` itself: the JSON
+    column `RunEventRow.payload` lands on has no encoder for `Decimal`
+    (`shared/database.py` sets none), and the API's own convention for a
+    cost figure is already a decimal string (`UsageByQualityResponse`).
+    """
+    return {
+        "endpoint_id": str(endpoint_id) if endpoint_id is not None else None,
+        "model": model,
+        "input_tokens": response.input_tokens,
+        "output_tokens": response.output_tokens,
+        "tokens": response.billable_tokens,
+        "cost": str(cost.amount) if cost.known else None,
+        "cost_currency": cost.currency,
+        "cost_quality": cost.quality.value,
+    }
 
 
 def _claim_of(claimed: ClaimedRun) -> EgressClaim:

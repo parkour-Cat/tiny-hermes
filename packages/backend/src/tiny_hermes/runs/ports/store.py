@@ -216,6 +216,38 @@ class RecordSliceCommand:
 
 
 @dataclass(frozen=True)
+class RecordSummaryUsageCommand:
+    """One summarization call's usage and cost, billed to its Run-tree's
+    shared budget, with the `CONTEXT_SUMMARY_BILLED` event that explains it.
+
+    Deliberately not `RecordSliceCommand`: a summarization call produces no
+    `SliceDecision`, appends no transcript turn, and happens inside
+    `_plan_context` — before the round it is planning for has even built its
+    own request. Bundled with its event in one transaction (like
+    `RecordSliceCommand` bundles the checkpoint with its accounting) so a
+    crash cannot leave a moved counter with nothing on the timeline saying
+    why, or an event on the timeline the counter never actually reflects.
+    """
+
+    workspace_id: UUID
+    run_id: UUID
+    #: `RunRow.budget_root_run_id` — the shared scope, not necessarily this
+    #: Run's own id (§13's delegation tree shares one).
+    root_run_id: UUID
+    #: What may be added to the shared budget. `ModelResponse.billable_tokens`
+    #: — zero when the endpoint's `usage_quality` is `unavailable`, never
+    #: `None`, for the same reason `RecordSliceCommand.tokens` is an `int`.
+    tokens: int
+    #: What this platform believes the call cost, always a `Cost` rather than
+    #: `Cost | None`: unlike `RecordSliceCommand.cost`, a summary call is
+    #: never billed at all when nothing was reported (the caller's own gate),
+    #: so by the time this command exists there is always something to say —
+    #: even if that something is `unknown()`.
+    cost: Cost
+    event: ReservedEvent
+
+
+@dataclass(frozen=True)
 class ExecutionContext:
     """What a Worker needs to run one round, read through the store.
 
@@ -651,5 +683,11 @@ class RunStore(Protocol):
         Upserts on `session_id`, per §7.4.2: a second compaction updates the
         first rather than adding beside it, so there is never more than one
         row per Session to read back.
+        """
+        ...
+
+    async def record_summary_usage(self, command: RecordSummaryUsageCommand) -> None:
+        """Bill one summarization call, and say so on the Run's timeline, in
+        one transaction. See `RecordSummaryUsageCommand`.
         """
         ...

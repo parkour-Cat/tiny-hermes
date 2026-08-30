@@ -141,6 +141,17 @@ class RunEventType(StrEnum):
     CONTEXT_TRIMMED = "context_trimmed"
     CONTEXT_COMPACTED = "context_compacted"
 
+    # Also not derived from a signal, and for the same reason: a
+    # summarization call is a real call on a real endpoint (§7.4.2), and
+    # §12.4 requires every model call's usage and cost land somewhere an
+    # operator watching a Run's spend can read — a counter that moves with
+    # nothing explaining why is the failure this platform keeps hitting.
+    # `CONTEXT_COMPACTED` says a compaction happened; this says what the
+    # call behind it cost, the two written by different code (the compacted
+    # plan versus the summarizer's own answer) so one can exist without the
+    # other — a reused summary compacts with no new call to bill.
+    CONTEXT_SUMMARY_BILLED = "context_summary_billed"
+
     # Also not derived from a signal, and for the same reason those two are
     # not: §10.1 makes the model decide which skill text enters the
     # conversation, and a Run that pulled in four documents behaves unlike the

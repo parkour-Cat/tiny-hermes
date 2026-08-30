@@ -130,6 +130,7 @@ from tiny_hermes.runs.ports.store import (
     CreateSessionCommand,
     ExecutionContext,
     RecordSliceCommand,
+    RecordSummaryUsageCommand,
     RenewedLease,
     RenewLeaseCommand,
     RepairResult,
@@ -1101,6 +1102,80 @@ class SqlRunStore:
             )
         )
         await self._session.flush()
+
+    async def record_summary_usage(self, command: RecordSummaryUsageCommand) -> None:
+        """Bill a summarization call, and append its event, in one
+        transaction — see `RecordSummaryUsageCommand`.
+
+        Not `_consume_budget`: that also moves `consumed_execution_ms` and
+        `consumed_model_calls`, which a summarization call must never touch —
+        `test_the_summarizer_is_never_asked_once_the_cost_ceiling_is_reached`
+        already documents that a summary call costs money on the real
+        endpoint even though nothing counts it against `consumed_model_calls`.
+        Only the two fields `_cost_precheck` actually reads back — tokens and
+        cost — move here.
+        """
+        consumed = await self._session.scalar(
+            update(RunBudgetScopeRow)
+            .where(RunBudgetScopeRow.root_run_id == command.root_run_id)
+            .values(
+                consumed_tokens=RunBudgetScopeRow.consumed_tokens + command.tokens,
+                version=RunBudgetScopeRow.version + 1,
+            )
+            .returning(RunBudgetScopeRow.version)
+            .execution_options(synchronize_session=False)
+        )
+        if consumed is None:
+            raise UnknownRun
+        budget = await self._session.get(RunBudgetScopeRow, command.root_run_id)
+        if budget is not None:
+            _accumulate_cost(budget, command.cost)
+            # Written before the refresh below for the same reason
+            # `_consume_budget` orders its own two calls this way: the refresh
+            # re-reads the row, and without a flush first it would discard
+            # what `_accumulate_cost` just set in memory.
+            await self._session.flush()
+            await self._session.refresh(budget)
+        await self.append_events(
+            AppendEventsCommand(
+                workspace_id=command.workspace_id,
+                run_id=command.run_id,
+                events=(command.event,),
+            )
+        )
+
+    async def current_prices_for(self, endpoint_id: UUID) -> TokenPrices | None:
+        """The price in force for this endpoint right now.
+
+        Not `_pinned_prices`: that reads the `ModelPricingVersion` a Run
+        fixed at creation, and only for the one endpoint `model_policy`
+        names. A declared summary endpoint (§7.4.2 Task 4) pins nothing —
+        `runs.model_pricing_version_id` is a single column, and it names the
+        main endpoint's price — so there is no earlier pin for the summary
+        endpoint to read back. The price in force at call time is the only
+        one there is, the same query `_current_pricing` runs, just keyed
+        directly on an endpoint rather than resolved through a Version's spec.
+        """
+        row = await self._session.scalar(
+            select(ModelPricingVersionRow)
+            .where(
+                ModelPricingVersionRow.endpoint_id == endpoint_id,
+                ModelPricingVersionRow.effective_at <= datetime.now(UTC),
+            )
+            .order_by(
+                ModelPricingVersionRow.effective_at.desc(),
+                ModelPricingVersionRow.version_number.desc(),
+            )
+            .limit(1)
+        )
+        if row is None:
+            return None
+        return TokenPrices(
+            currency=row.currency,
+            input_per_million=row.input_per_million,
+            output_per_million=row.output_per_million,
+            cached_input_per_million=row.cached_input_per_million,
+        )
 
     async def _bound_skills(self, spec: AgentSpec) -> tuple[BoundSkill, ...]:
         """What the Version bound, in the order the author bound it.
