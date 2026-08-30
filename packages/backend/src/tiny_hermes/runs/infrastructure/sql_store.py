@@ -1108,9 +1108,8 @@ class SqlRunStore:
         transaction — see `RecordSummaryUsageCommand`.
 
         Not `_consume_budget`: that also moves `consumed_execution_ms`, which
-        a summarization call must never touch — it is not a round the Run
-        spent wall-clock time waiting on the way a slice is, `executed_ms` is
-        never even measured for it. `consumed_model_calls` moves here
+        a summarization call must never touch — `executed_ms` is never even
+        measured for it. `consumed_model_calls` moves here
         instead, deliberately (§12.4, product decision): the call counter,
         the token counter and the cost counter are one valve honoured
         together, not two of three, and the call counter is the one that

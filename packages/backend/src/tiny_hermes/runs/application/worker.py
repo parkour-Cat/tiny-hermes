@@ -2472,11 +2472,15 @@ def _summary_billed_payload(
     """What `CONTEXT_SUMMARY_BILLED` says: who answered, what it reported,
     and what this platform believes that cost — the facts an operator
     watching `consumed_model_calls` or `consumed_cost` move needs to explain
-    a movement nothing else on the Run's timeline accounts for. Written even
-    when `response` reported nothing (`cost` is `unknown()`, the token fields
-    are `None`/`0`): the call still moved `consumed_model_calls`, and a
-    reader has to be able to tell that apart from a call that moved nothing
-    at all, not just from one that also moved money.
+    a movement nothing else on the Run's timeline accounts for. That includes
+    `model_calls` itself, not just the counters it moves: a payload that
+    named the tokens and the cost but left the call count to be inferred
+    from a hardcoded "one call" in the UI copy would be the counter's own
+    movement asserted nowhere the reader watching it could check. Written
+    even when `response` reported nothing (`cost` is `unknown()`, the token
+    fields are `None`/`0`): the call still moved `consumed_model_calls`, and
+    a reader has to be able to tell that apart from a call that moved
+    nothing at all, not just from one that also moved money.
 
     `cost.amount` is written as a string, not the `Decimal` itself: the JSON
     column `RunEventRow.payload` lands on has no encoder for `Decimal`
@@ -2486,6 +2490,7 @@ def _summary_billed_payload(
     return {
         "endpoint_id": str(endpoint_id) if endpoint_id is not None else None,
         "model": model,
+        "model_calls": response.model_calls,
         "input_tokens": response.input_tokens,
         "output_tokens": response.output_tokens,
         "tokens": response.billable_tokens,
