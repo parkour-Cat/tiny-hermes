@@ -234,15 +234,23 @@ class RecordSummaryUsageCommand:
     #: `RunRow.budget_root_run_id` — the shared scope, not necessarily this
     #: Run's own id (§13's delegation tree shares one).
     root_run_id: UUID
+    #: `ModelResponse.model_calls` — moved for every summarization call that
+    #: got a response back, whatever it reported. §12.4, product decision:
+    #: the call counter, the token counter and the cost counter are one
+    #: valve honoured together, not two of three, and the call counter is
+    #: the one that still works on a deployment with no price, or no
+    #: `max_cost`, configured — the default shape.
+    model_calls: int
     #: What may be added to the shared budget. `ModelResponse.billable_tokens`
-    #: — zero when the endpoint's `usage_quality` is `unavailable`, never
-    #: `None`, for the same reason `RecordSliceCommand.tokens` is an `int`.
+    #: — zero when the endpoint's `usage_quality` is `unavailable` or nothing
+    #: was reported, never `None`, for the same reason
+    #: `RecordSliceCommand.tokens` is an `int`.
     tokens: int
     #: What this platform believes the call cost, always a `Cost` rather than
-    #: `Cost | None`: unlike `RecordSliceCommand.cost`, a summary call is
-    #: never billed at all when nothing was reported (the caller's own gate),
-    #: so by the time this command exists there is always something to say —
-    #: even if that something is `unknown()`.
+    #: `Cost | None`: this command is built for every response the caller got
+    #: back, not only ones that reported usage, so there is always something
+    #: to say — `unknown()` when nothing was reported, same as `cost_of`
+    #: already answers on its own.
     cost: Cost
     event: ReservedEvent
 

@@ -1107,18 +1107,24 @@ class SqlRunStore:
         """Bill a summarization call, and append its event, in one
         transaction — see `RecordSummaryUsageCommand`.
 
-        Not `_consume_budget`: that also moves `consumed_execution_ms` and
-        `consumed_model_calls`, which a summarization call must never touch —
-        `test_the_summarizer_is_never_asked_once_the_cost_ceiling_is_reached`
-        already documents that a summary call costs money on the real
-        endpoint even though nothing counts it against `consumed_model_calls`.
-        Only the two fields `_cost_precheck` actually reads back — tokens and
-        cost — move here.
+        Not `_consume_budget`: that also moves `consumed_execution_ms`, which
+        a summarization call must never touch — it is not a round the Run
+        spent wall-clock time waiting on the way a slice is, `executed_ms` is
+        never even measured for it. `consumed_model_calls` moves here
+        instead, deliberately (§12.4, product decision): the call counter,
+        the token counter and the cost counter are one valve honoured
+        together, not two of three, and the call counter is the one that
+        still functions on a deployment with no price, or no `max_cost`,
+        configured — the default shape, where the other two can say nothing
+        at all.
         """
         consumed = await self._session.scalar(
             update(RunBudgetScopeRow)
             .where(RunBudgetScopeRow.root_run_id == command.root_run_id)
             .values(
+                consumed_model_calls=(
+                    RunBudgetScopeRow.consumed_model_calls + command.model_calls
+                ),
                 consumed_tokens=RunBudgetScopeRow.consumed_tokens + command.tokens,
                 version=RunBudgetScopeRow.version + 1,
             )
@@ -1147,14 +1153,21 @@ class SqlRunStore:
     async def current_prices_for(self, endpoint_id: UUID) -> TokenPrices | None:
         """The price in force for this endpoint right now.
 
-        Not `_pinned_prices`: that reads the `ModelPricingVersion` a Run
-        fixed at creation, and only for the one endpoint `model_policy`
-        names. A declared summary endpoint (§7.4.2 Task 4) pins nothing —
-        `runs.model_pricing_version_id` is a single column, and it names the
-        main endpoint's price — so there is no earlier pin for the summary
-        endpoint to read back. The price in force at call time is the only
-        one there is, the same query `_current_pricing` runs, just keyed
-        directly on an endpoint rather than resolved through a Version's spec.
+        For a genuinely different, declared summary endpoint only
+        (§7.4.2 Task 4's `summary_endpoint_id`) — **never** for a Run's own
+        main endpoint. That price is pinned at Run creation
+        (`runs.model_pricing_version_id`, read back as `context.prices`) so a
+        later repricing cannot change what an already-running Run is charged;
+        calling this instead for the main endpoint would read today's price
+        and quietly break that pin. A declared summary endpoint has no
+        equivalent pin — `model_pricing_version_id` is a single column, and it
+        already names the main endpoint's version — so the price in force at
+        call time is the only one there is for it. Same query
+        `_current_pricing` runs, just keyed directly on an endpoint rather
+        than resolved through a Version's spec. `Worker._bill_summary_call` is
+        the caller that actually holds the "which endpoint is this" decision
+        and chooses between this and `context.prices`; this method has no way
+        to enforce that choice itself.
         """
         row = await self._session.scalar(
             select(ModelPricingVersionRow)

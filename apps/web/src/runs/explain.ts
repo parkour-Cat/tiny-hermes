@@ -232,6 +232,41 @@ export function eventNote(frame: Pick<RunEventFrame, "event_type" | "payload">):
     // stop being assumed.
     return { key: "contextCompactedNote", values };
   }
+  if (frame.event_type === "context_summary_billed") {
+    // The one event whose whole reason to exist is explaining a movement in
+    // `consumed_model_calls`/`consumed_cost` nothing else on the timeline
+    // accounts for (v2.8) — a reader watching either counter climb needs to
+    // land here, not on a raw payload.
+    const tokens = frame.payload.tokens;
+    if (typeof tokens !== "number") {
+      return null;
+    }
+    const names = text(frame.payload, { model: "model", endpoint: "endpoint_id" });
+    const inputTokens = frame.payload.input_tokens;
+    const outputTokens = frame.payload.output_tokens;
+    const counts = {
+      tokens: String(tokens),
+      // Individually, not through `filled`: unlike `context_trimmed`'s
+      // numbers, a missing one of these is not a malformed payload — it is
+      // the ordinary case for a call whose provider reported nothing, and
+      // that is still worth a sentence (see the unknown-cost branch below),
+      // not silence.
+      inputTokens: typeof inputTokens === "number" ? String(inputTokens) : "—",
+      outputTokens: typeof outputTokens === "number" ? String(outputTokens) : "—",
+    };
+    const cost = frame.payload.cost;
+    const currency = frame.payload.cost_currency;
+    if (typeof cost === "string" && typeof currency === "string") {
+      return {
+        key: "contextSummaryBilledNote",
+        values: { ...names, ...counts, cost, currency },
+      };
+    }
+    // `cost` is `null` whenever the answering endpoint has no configured
+    // price (§12.4) — never rendered as a `0`, the one number a spending
+    // figure must never silently become.
+    return { key: "contextSummaryBilledUnknownCostNote", values: { ...names, ...counts } };
+  }
   return null;
 }
 

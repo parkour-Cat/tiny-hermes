@@ -1794,15 +1794,20 @@ class WorkerRuntime:
                 "summary generation failed", extra={"run_id": str(claimed.run.id)}
             )
             return None
-        if response.input_tokens is not None or response.output_tokens is not None:
-            # §12.4 applies to this call the same as to any other: it was
-            # paid for on the real endpoint whether or not it produced an
-            # answer this round can use. Billed before the `stop_reason`
-            # check below, deliberately — a refusal or a too-small window
-            # still spent whatever the provider reports here, and only an
-            # exception above (never reaching the provider at all) costs
-            # nothing.
-            await self._bill_summary_call(claimed, context, response)
+        # §12.4 applies to this call the same as to any other, whatever it
+        # answered — billed before the `stop_reason` check below, since a
+        # refusal or a too-small window still spent whatever the provider
+        # reports here. Only the exception above skips this, and not because
+        # it proves the request "never reached the provider": a timed-out
+        # call may well have reached it and been billed by it — this code
+        # cannot tell the two apart, and `FailingSummarizer`'s own docstring
+        # already calls a timeout "the honest shape" of that exception. What
+        # actually gates billing is narrower and true: there is no
+        # `ModelResponse` to read usage from. A timed-out call the provider
+        # billed and this platform never hears back from is a gap, the same
+        # kind `_cost_precheck` already names for streaming — not a
+        # guarantee this code makes.
+        await self._bill_summary_call(claimed, context, response)
         if response.stop_reason is not StopReason.COMPLETED:
             # As visible as the exception above: a refusal or a window truly
             # too small for the prompt reaches here as an ordinary answer,
@@ -1829,16 +1834,51 @@ class WorkerRuntime:
         """Bill one summarization call to the Run-tree's shared budget, and
         record it as its own `CONTEXT_SUMMARY_BILLED` event, in one write.
 
-        Priced at the summary endpoint's own rate — `_summary_policy(context)`,
-        not `context.prices` (the *main* policy's pinned version, read for a
-        possibly different endpoint) — because Task 4 lets an Agent name a
-        separate, cheaper summarizer, and billing that call at the main
-        model's rate would charge for an endpoint it never touched. Looked up
-        fresh rather than pinned: `runs.model_pricing_version_id` pins one
-        price, for the main endpoint, at Run creation; a declared summary
-        endpoint has no equivalent pin to read back, so the price in force
-        right now is the only one there is to bill at (`current_prices_for`).
+        Called for every response the caller got back, whatever it reported —
+        including one with no usage at all. §12.4 treats the call counter
+        beside the token and cost counters as one valve, honoured together,
+        not two of three: the call counter is the one that still works on a
+        deployment with no price, or no `max_cost`, configured — the default
+        shape — and gating it behind "usage was reported" would leave exactly
+        that deployment unprotected against a summarizer that never stops
+        being asked. `tokens` and `cost` do not need a separate case for "no
+        usage" here: `response.billable_tokens` is already `0` and `cost_of`
+        already answers `unknown()` when nothing was reported, so passing
+        `response`'s raw fields through keeps both honest either way.
+
+        Priced at the summary endpoint's own rate, pinned when — the default,
+        no `summary_endpoint_id` declared — that endpoint is this Run's own
+        main one: `_summary_policy` then resolves to the main policy
+        unchanged, and its price is already fixed in `context.prices`
+        (`runs.model_pricing_version_id`, read once at Run creation so a
+        later repricing cannot change what an already-running Run is
+        charged). Reading a live price for that same endpoint instead would
+        let it answer at two different prices within one Run depending only
+        on which call asked — the bug this branch exists to not have. Only a
+        genuinely different, declared summary endpoint has no such pin to
+        read back (`model_pricing_version_id` names one endpoint, the main
+        one), so `current_prices_for` — the price in force right now — is
+        the only one there is to bill *that* endpoint at.
+
+        A declared summary endpoint with no price configured is accepted at
+        publish (`_check_summary_endpoint` checks its window, never its
+        price — the same choice this platform already makes for the *main*
+        endpoint, which publishes unpriced today too) and bills `unknown()`
+        here forever after: §12.4's `_accumulate_cost` turns the whole
+        Run-tree's `consumed_cost` permanently unknown the first time any
+        round cannot be priced, summary or ordinary, and nothing turns it
+        back. A workspace with a cost ceiling then has its very next round
+        refused (`within_ceiling` refuses a ceiling that meets an unknown
+        cost outright) — visibly, via `RUN_LIMIT_REACHED`, not silently. This
+        is the existing rule working as designed on a new source, not a
+        special case invented for it.
         """
+        main_policy = context.spec.model_policy
+        main_endpoint_id = (
+            main_policy.endpoint_id
+            if isinstance(main_policy, EndpointModelPolicy)
+            else None
+        )
         policy = _summary_policy(context)
         endpoint_id = (
             policy.endpoint_id if isinstance(policy, EndpointModelPolicy) else None
@@ -1850,7 +1890,11 @@ class WorkerRuntime:
                 endpoint = await SqlModelEndpointStore(session).read(endpoint_id)
                 if endpoint is not None:
                     model = endpoint.spec.model
-                prices = await SqlRunStore(session).current_prices_for(endpoint_id)
+                prices = (
+                    context.prices
+                    if endpoint_id == main_endpoint_id
+                    else await SqlRunStore(session).current_prices_for(endpoint_id)
+                )
             cost = cost_of(
                 prices,
                 input_tokens=response.input_tokens,
@@ -1862,6 +1906,7 @@ class WorkerRuntime:
                     workspace_id=claimed.run.workspace_id,
                     run_id=claimed.run.id,
                     root_run_id=claimed.run.budget_root_run_id,
+                    model_calls=response.model_calls,
                     tokens=response.billable_tokens,
                     cost=cost,
                     event=ReservedEvent(
@@ -2392,9 +2437,13 @@ def _summary_billed_payload(
     endpoint_id: UUID | None, model: str | None, response: ModelResponse, cost: Cost
 ) -> dict[str, Any]:
     """What `CONTEXT_SUMMARY_BILLED` says: who answered, what it reported,
-    and what this platform believes that cost — the three facts an operator
-    watching `consumed_cost` move needs to explain a movement nothing else on
-    the Run's timeline accounts for.
+    and what this platform believes that cost — the facts an operator
+    watching `consumed_model_calls` or `consumed_cost` move needs to explain
+    a movement nothing else on the Run's timeline accounts for. Written even
+    when `response` reported nothing (`cost` is `unknown()`, the token fields
+    are `None`/`0`): the call still moved `consumed_model_calls`, and a
+    reader has to be able to tell that apart from a call that moved nothing
+    at all, not just from one that also moved money.
 
     `cost.amount` is written as a string, not the `Decimal` itself: the JSON
     column `RunEventRow.payload` lands on has no encoder for `Decimal`
