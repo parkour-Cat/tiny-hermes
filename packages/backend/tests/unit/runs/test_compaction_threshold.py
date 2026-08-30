@@ -117,3 +117,42 @@ def test_nothing_to_compact_survives_an_aggressive_threshold(
 
     assert plan.fits
     assert plan.compacted is None
+
+
+@pytest.fixture
+def costly_to_compact() -> tuple[StoredMessage, ...]:
+    """Originals that fit `WINDOW` outright, and whose only compactable
+    boundary makes the round *bigger*.
+
+    Two tiny turns, then one long one, then the request. `compactable` is 2,
+    so step four's search has exactly one `through` to try — and standing a
+    structural summary in for two turns worth 13 tokens costs 88, which pushes
+    the round past `allowance`. Before the ratio trigger this shape was
+    unreachable: the cascade was only ever entered by a round that already did
+    not fit, and one that did not fit had nothing to lose by the search
+    failing."""
+    return _stored(
+        _says("ok"),
+        _says("sure", role="assistant"),
+        _says("here is the log: " + "h" * 2_440),
+        _says("what now?"),
+    )
+
+
+def test_originals_that_fit_are_sent_when_the_search_finds_nothing(
+    costly_to_compact: tuple[StoredMessage, ...],
+) -> None:
+    """`paused(context_overflow)` is for a round that genuinely cannot be
+    sent. This one can: the same history at a 0.99 ratio goes out untouched,
+    and crossing a 0.50 ratio is not a reason to refuse to send it."""
+    unforced = _plan_with(costly_to_compact, threshold=0.99)
+    assert unforced.fits
+    assert unforced.compacted is None
+    assert unforced.input_estimate <= unforced.allowance
+
+    plan = _plan_with(costly_to_compact, threshold=0.50)
+
+    assert plan.compacted is None
+    assert plan.fits
+    assert plan.input_estimate == unforced.input_estimate
+    assert plan.messages == tuple(stored.message for stored in costly_to_compact)
