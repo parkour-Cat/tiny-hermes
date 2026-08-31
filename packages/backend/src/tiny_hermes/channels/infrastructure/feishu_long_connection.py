@@ -44,15 +44,42 @@ logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
+#: How long `_drain_recordings` waits for the recordings still in flight
+#: before giving up on them and saying so. Read off the module at call time
+#: so a test can shorten it.
+#:
+#: There has to be a bound. Nothing joins the SDK's threads — see
+#: `_drain_recordings` — so a socket that keeps signalling can keep queueing
+#: recordings for as long as it likes, and an unbounded wait would park
+#: `run()`, and with it the scheduler's whole shutdown, with no log line
+#: naming where it stopped. 30s is the same order as `run()`'s connect
+#: timeout: long enough that a healthy write (one INSERT and a COMMIT) is
+#: never cut off, short enough that a process being restarted is not held
+#: past what an orchestrator will wait before it sends SIGKILL.
+DRAIN_TIMEOUT_SECONDS = 30.0
+
 
 @dataclass(frozen=True)
 class LongConnectionBinding:
     """The one binding a `FeishuLongConnection` speaks for.
 
-    A single `run()` covers one tenant's app credentials; a deployment with
-    several long-connection bindings runs one of these per binding rather
-    than teaching this adapter to multiplex, which keeps a crash in one
-    tenant's socket from taking another tenant's connection down with it.
+    A single `run()` covers one tenant's app credentials. This adapter does
+    not multiplex, and **one process can only carry one of these**, so there
+    is no per-binding isolation here to claim: `lark_oapi/ws/client.py`
+    builds its event loop at import time as a module-level global (lines
+    31-35) and `Client.start()` drives it with `run_until_complete`, so a
+    second binding's `start()` has no loop of its own to run on. Teardown is
+    shared the same way — `FeishuChannel.stop()` reaches
+    `_stop_private_ws_client` (`lark_oapi/channel/channel.py:853-876`),
+    whose last act is `ws_loop.call_soon_threadsafe(ws_loop.stop)` on that
+    same module-level loop, so one binding's `disconnect()` stops the loop
+    another binding's live socket is running on.
+
+    `api/cli.py`'s `_long_connections` is where that limit is enforced and,
+    more importantly, made visible: it starts one binding and writes an
+    audit row for every other, rather than letting a tenant switch a second
+    binding to `long_connection`, see it succeed, and never receive a
+    message.
     """
 
     binding_id: UUID
@@ -79,7 +106,7 @@ class RecordConnectionEvent(Protocol):
     a connection's own lifecycle — deliberately the same narrowing as
     `DeliverFrame`.
 
-    Three kinds, and they are not interchangeable:
+    Four kinds, and they are not interchangeable:
 
     - `"connect_failed"` — this process could not get the socket up at all.
       Written once for a *run* of failed attempts, not once per attempt:
@@ -89,9 +116,20 @@ class RecordConnectionEvent(Protocol):
       recorded after `run()` saw the connect succeed, because §19.2's
       redelivery check reads the pair of rows as an outage window and a
       window whose left edge is "we were never up" measures nothing.
-    - `"reconnected"` — an outage ended. Closes either of the two kinds
-      above: a socket that dropped and came back, or a run of failed
-      connects that finally succeeded.
+    - `"reconnected"` — an outage ended. It is meant as the right edge of
+      one of the two kinds above, and the callers here only write it when
+      they have a left edge to close: `record_recovered` is called only
+      after a `connect_failed` row actually landed, and `_record_reconnected`
+      only for an instance whose connect succeeded. The one case that still
+      gets through is the SDK signalling `RECONNECTED` on a watch that never
+      saw a `RECONNECTING` — nothing in its source rules that out — and that
+      row is the one carrying `down_seconds=None` (see below).
+    - `"not_started"` — a binding configured for the long connection that
+      this process is deliberately not connecting, because another binding
+      already holds the one socket a process can carry (see
+      `LongConnectionBinding`). Written by `api/cli.py` at startup, one row
+      per skipped binding, so the limit is something a reader can find
+      rather than a connection that silently never happens.
 
     `down_seconds` carries a real, non-negative number only on
     `"reconnected"`. It is `None` on the other two kinds, and also on a
@@ -336,8 +374,16 @@ class FeishuLongConnection:
                 "failed to record reconnect binding=%s", self._binding.binding_id
             )
 
-    async def record_connect_failed(self) -> None:
+    async def record_connect_failed(self) -> bool:
         """The one trace a connection that never came up leaves behind.
+
+        **Returns whether the row actually landed**, which is not the same
+        question as whether this was called. Every failure here is
+        swallowed — an audit table that is briefly unreachable must not take
+        the socket down with it — so a caller that treats "I called it" as
+        "the row exists" will later close an outage that has no left edge,
+        and §19.2 would read a `reconnected` opening onto nothing. The
+        boolean is what lets `_supervised_connection` tell the two apart.
 
         Without it the most common production outage — the app is not
         enabled for long connection, the secret is wrong, Feishu is
@@ -353,23 +399,31 @@ class FeishuLongConnection:
         behind ~262 rows a day of a socket that was never coming up.
         """
         if self._record is None:
-            return
+            return False
         try:
             await self._record(self._binding.binding_id, "connect_failed", None)
         except Exception:
             logger.exception(
                 "failed to record connect failure binding=%s", self._binding.binding_id
             )
+            return False
+        return True
 
     async def record_recovered(self, down_seconds: float) -> None:
-        """Closes the outage `record_connect_failed` opened, with its length.
+        """Closes an outage whose `connect_failed` row is really in the
+        table, with its length.
 
-        The pair to it, public for the same reason: the retry loop owns the
-        outage, so it is the only place that knows when a run of failures
-        ended. Not optional either — §19.2 reads the two rows as a window,
-        and a window with only a left edge measures nothing, so a capped
-        `connect_failed` without this would trade a flooded audit page for
-        an unmeasurable one.
+        The pair to `record_connect_failed`, public for the same reason: the
+        retry loop owns the outage, so it is the only place that knows when
+        a run of failures ended. Not optional either — §19.2 reads the two
+        rows as a window, and a window with only a left edge measures
+        nothing, so a capped `connect_failed` without this would trade a
+        flooded audit page for an unmeasurable one.
+
+        Which left edge exists is the caller's to know, and this method
+        cannot check it: `_supervised_connection` calls this only when
+        `record_connect_failed` returned `True`. A window with only a
+        *right* edge is the failure mode that guard exists for.
 
         `max(0.0, ...)` for the same reason as `_record_reconnected`: a
         negative duration would be a worse answer than a slightly-off
@@ -451,20 +505,60 @@ class FeishuLongConnection:
 
         The empty check and `_closing` are set in one critical section, so
         there is no instant at which a recording is neither waited for nor
-        refused. The loop terminates because `disconnect()` has already run
-        by the time this is called: the only source of new recordings is a
-        socket that is being torn down.
+        refused.
+
+        **`disconnect()` having run is not what makes this terminate.** That
+        it does not stop the callbacks is the whole premise above — it only
+        *asks* the module-level ws loop to stop. What actually ends the
+        supply of new recordings is that loop finally stopping, which is on
+        the SDK's clock, not this one's; a socket that keeps signalling
+        while it is torn down can keep this waiting. So the loop is bounded
+        by `DRAIN_TIMEOUT_SECONDS`. When it runs out the recordings still in
+        flight are *cancelled* — `asyncio.wait_for` cancels the gather, which
+        cancels each wrapper, which cancels the task
+        `run_coroutine_threadsafe` chained to it — and the count is logged.
+        That is a real loss, the same rows a reader will later not find, but
+        cancelling and saying so beats both an unbounded wait that parks the
+        scheduler's shutdown with no line saying where, and a silent return
+        that leaves the loop teardown to destroy the tasks.
+
+        The count is read *before* the wait, not after: cancellation runs
+        `_forget` for each of them, so a count taken afterwards races with
+        the callbacks and would report zero abandoned recordings on a
+        shutdown that abandoned several.
         """
+        deadline = time.monotonic() + DRAIN_TIMEOUT_SECONDS
         while True:
             with self._background_lock:
                 pending = tuple(self._background)
                 if not pending:
                     self._closing = True
                     return
-            await asyncio.gather(
-                *(asyncio.wrap_future(future) for future in pending),
-                return_exceptions=True,
-            )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    break
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        *(asyncio.wrap_future(future) for future in pending),
+                        return_exceptions=True,
+                    ),
+                    timeout=remaining,
+                )
+            except TimeoutError:
+                break
+        with self._background_lock:
+            # Having stopped waiting, this must also stop accepting, or
+            # `_fire` would keep handing new work to a loop that is about to
+            # be torn down.
+            self._closing = True
+        logger.error(
+            "long connection gave up waiting for %d recording(s) after %.0fs and"
+            " cancelled them binding=%s; whatever they were writing is lost",
+            len(pending),
+            DRAIN_TIMEOUT_SECONDS,
+            self._binding.binding_id,
+        )
 
     def _on_reconnecting(self) -> None:
         """`FeishuChannel`'s `_notify_reconnecting` (see
@@ -579,5 +673,16 @@ class FeishuLongConnection:
                 await on_connected()
             await stop.wait()
         finally:
-            await channel.disconnect()
-            await self._drain_recordings()
+            # Nested, not two statements in a row: `disconnect()` raises in
+            # production (`FeishuChannel.stop` reaches into the SDK's private
+            # ws client and a teardown that goes wrong comes back out here),
+            # and as a bare first statement it took the drain with it — every
+            # recording still in flight abandoned mid-write, `_closing` left
+            # `False`, and the loop teardown destroying the task with only
+            # asyncio's "Task was destroyed but it is pending" to show for
+            # it. The drain is the part that has to happen on every path;
+            # the teardown error is still the exception that propagates.
+            try:
+                await channel.disconnect()
+            finally:
+                await self._drain_recordings()

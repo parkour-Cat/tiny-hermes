@@ -6,7 +6,7 @@ import socket
 import time
 import uuid
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 import uvicorn
@@ -24,7 +24,6 @@ from tiny_hermes.channels.infrastructure.feishu_long_connection import (
     DeliverFrame,
     FeishuLongConnection,
     LongConnectionBinding,
-    RecordConnectionEvent,
 )
 from tiny_hermes.channels.infrastructure.feishu_sender import FeishuSender
 from tiny_hermes.channels.infrastructure.run_images import ChannelImageSource
@@ -324,9 +323,10 @@ async def _scheduler() -> None:
     # docstring for why that race is not worth solving.
     connections = await _long_connections(settings, sessions)
     logger.info(
-        "scheduler started: long_connection bindings=%d (a binding created or"
-        " switched to long_connection after startup needs a scheduler restart"
-        " to take effect)",
+        "scheduler started: long_connection bindings=%d of at most one per"
+        " process (a binding created or switched to long_connection after"
+        " startup needs a scheduler restart to take effect; a second one is"
+        " refused with a channel.long_connection.not_started audit row)",
         len(connections),
     )
     try:
@@ -382,17 +382,35 @@ async def _supervised_connection(
     whole process down over it would be strictly worse than logging and
     trying again.
 
-    **Two audit rows per outage, however long it lasts**, which is why the
-    outage lives here as a local rather than inside `run()`: one attempt
-    cannot tell whether it is the first failure or the two-hundredth. The
-    first failure writes `connect_failed`; every retry after it only logs,
-    carrying the attempt count; the connect that finally succeeds writes
-    `reconnected` with how long the whole run of failures lasted. Per
-    attempt this was ~262 rows a day forever for one wrong app secret,
-    against an `audit_events` table nothing prunes — the workspace's audit
-    page (`created_at desc`, no filter by default) would show nothing else,
-    and §19.2 needs the closing row anyway: an outage window with only a
-    left edge measures nothing.
+    **At most two audit rows per outage per process, however long the
+    outage lasts**, which is why the outage lives here as a local rather
+    than inside `run()`: one attempt cannot tell whether it is the first
+    failure or the two-hundredth. The first failure writes `connect_failed`;
+    every retry after it only logs, carrying the attempt count; the connect
+    that finally succeeds writes `reconnected` with how long the whole run
+    of failures lasted. Per attempt this was ~262 rows a day forever for one
+    wrong app secret, against an `audit_events` table nothing prunes — the
+    workspace's audit page (`created_at desc`, no filter by default) would
+    show nothing else, and §19.2 needs the closing row anyway: an outage
+    window with only a left edge measures nothing.
+
+    **Per process is the honest scope, and the gap is real.** `outage_since`
+    and `audited` are locals: a scheduler restarted in the middle of an
+    outage begins a *new* one and writes a second `connect_failed`, and the
+    first one's window is never closed by anybody. §19.2's reader sees two
+    consecutive left edges and one window that stays half-open forever.
+    Nothing here can fix that — closing it would mean reading the previous
+    process's rows back out of `audit_events` at startup, which is a
+    different design from "the retry loop owns the outage" — so it is
+    written down rather than papered over.
+
+    The pair is only ever written as a pair: `record_connect_failed` reports
+    whether its row actually reached the table (every failure inside it is
+    swallowed, deliberately, so an audit hiccup cannot take the socket
+    down), and only a `True` from it lets the recovery row be written. "We
+    called it" is not "the row is there", and treating them as the same
+    produced a `reconnected` with nothing on its left — a green
+    "succeeded" in the audit page for an outage no reader can measure.
 
     The two delays are a judgment call, not a requirement — the plan gives
     no numbers. 5s so a Feishu blip or a scheduler that started before the
@@ -404,8 +422,10 @@ async def _supervised_connection(
     buys nothing once the failure is already recorded.
     """
     delay = first_delay
-    #: When the current run of failures began, and whether it already has its
-    #: `connect_failed` row. `None`/`False` means there is no outage open.
+    #: When the current run of failures began, and whether its
+    #: `connect_failed` row is really in the table — not whether writing it
+    #: was attempted. `None`/`False` means there is no outage open that this
+    #: loop is able to close.
     outage_since: float | None = None
     audited = False
     failures = 0
@@ -415,8 +435,23 @@ async def _supervised_connection(
         """Called from inside `run()` the moment the socket is up."""
         nonlocal outage_since, audited, failures, delay, came_up
         came_up = True
-        delay = first_delay
         if outage_since is None:
+            return
+        if not audited:
+            # An outage this loop never managed to open. Either it was a
+            # round that came up and then died (no `connect_failed` belongs
+            # to it — `_on_reconnecting` owns that row and writes it only if
+            # the SDK signalled), or the left-edge write itself failed. A
+            # `reconnected` here would be a right edge closing onto nothing,
+            # which reads on the audit page as an outage that ended well and
+            # measures, for §19.2, exactly nothing.
+            logger.info(
+                "long connection binding=%s is up again after %d failure(s), with"
+                " no recorded outage to close",
+                connection.binding_id,
+                failures,
+            )
+            outage_since, failures = None, 0
             return
         logger.info(
             "long connection binding=%s is up after %d failed attempt(s)",
@@ -425,6 +460,13 @@ async def _supervised_connection(
         )
         await connection.record_recovered(time.monotonic() - outage_since)
         outage_since, audited, failures = None, False, 0
+        # Reset here and nowhere else. The backoff is what keeps a wedged
+        # binding from hammering, and the only thing that has earned its
+        # release is a run of failures that demonstrably ended. Resetting on
+        # every successful connect instead — including one that comes up and
+        # dies again — is what would turn this loop into a retry every
+        # `first_delay` seconds for as long as the process lives.
+        delay = first_delay
 
     while not stop.is_set():
         came_up = False
@@ -449,8 +491,7 @@ async def _supervised_connection(
                 "" if worth_a_row else " (logged only; the outage is already recorded)",
             )
             if worth_a_row:
-                await connection.record_connect_failed()
-                audited = True
+                audited = await connection.record_connect_failed()
         if stop.is_set():
             return
         with contextlib.suppress(TimeoutError):
@@ -478,9 +519,35 @@ def _deliver_via(sessions: async_sessionmaker[AsyncSession]) -> DeliverFrame:
     return deliver
 
 
+class _RecordLongConnectionEvent(Protocol):
+    """What this process writes with, which is wider than what the adapter
+    asks for.
+
+    `RecordConnectionEvent` (the adapter's own port) covers the three kinds
+    a live socket produces. This process writes a fourth — `not_started`,
+    for a binding it refuses to connect — whose entire value is the
+    explanation, so it needs `context`. Kept as a separate protocol rather
+    than widening the adapter's: a port exists to bound what its holder can
+    ask for, and the adapter has no business writing free-form context.
+
+    That this is still usable *as* a `RecordConnectionEvent` is not a
+    promise made here — it is checked where it is passed, at the
+    `FeishuLongConnection(..., record=...)` call in `_long_connections`.
+    """
+
+    async def __call__(
+        self,
+        binding_id: UUID,
+        kind: str,
+        down_seconds: float | None,
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> None: ...
+
+
 def _connection_event_recorder(
     sessions: async_sessionmaker[AsyncSession], workspace_id: UUID
-) -> RecordConnectionEvent:
+) -> _RecordLongConnectionEvent:
     """Writes disconnect/reconnect events into the same `audit_events` table
     the console's audit page already reads and renders — not a new table
     with no reader. §19.2's later redelivery check needs `down_seconds` to
@@ -496,9 +563,21 @@ def _connection_event_recorder(
     when there is no number made "the outage's length is not known" and
     "this row carries no context at all" the same row to whoever reads
     `/api/v1/audit-events` — and the second is what a reader assumes.
+
+    `context` widens that same column for a kind whose whole point is the
+    explanation (`not_started`: which other binding took the socket, and
+    why there is only one). Keyword-only with a default, so this still
+    satisfies `RecordConnectionEvent` — the adapter calls it with three
+    positional arguments and knows nothing about the extra.
     """
 
-    async def record(binding_id: UUID, kind: str, down_seconds: float | None) -> None:
+    async def record(
+        binding_id: UUID,
+        kind: str,
+        down_seconds: float | None,
+        *,
+        context: dict[str, Any] | None = None,
+    ) -> None:
         async with sessions() as session:
             session.add(
                 AuditEventRow(
@@ -510,11 +589,12 @@ def _connection_event_recorder(
                     resource_id=binding_id,
                     # The audit page renders `result` next to the action. A
                     # connection that came back up is the only one of these
-                    # three kinds that ended well; calling the other two
-                    # "succeeded" would put a green word next to an outage.
+                    # kinds that ended well; calling any of the others
+                    # "succeeded" would put a green word next to an outage,
+                    # or next to a binding this process refused to connect.
                     result="succeeded" if kind == "reconnected" else "failed",
                     request_id=f"long-connection-{binding_id}-{kind}-{uuid.uuid4().hex[:8]}",
-                    context={"down_seconds": down_seconds},
+                    context={"down_seconds": down_seconds, **(context or {})},
                 )
             )
             await session.commit()
@@ -525,8 +605,29 @@ def _connection_event_recorder(
 async def _long_connections(
     settings: Settings, sessions: async_sessionmaker[AsyncSession]
 ) -> tuple[FeishuLongConnection, ...]:
-    """The long-connection bindings this scheduler process holds a socket
+    """The long-connection binding this scheduler process holds a socket
     for — read once, at process start, never polled again.
+
+    **At most one, and the ones left out say so out loud.** The SDK's
+    WebSocket loop is a module-level global built at import time
+    (`lark_oapi/ws/client.py:31-35`) that `Client.start()` drives with
+    `run_until_complete`, and `FeishuChannel.stop()` ends by stopping *that*
+    loop (`_stop_private_ws_client`, `lark_oapi/channel/channel.py:853-876`)
+    — so a second binding in this process has no loop to start on, and the
+    first binding's teardown would stop the loop the second one's live
+    socket is running on. Returning both and letting them fight is the shape
+    of bug this repository keeps producing: the console would show the
+    second binding on `long_connection`, the administrator would restart the
+    scheduler as told, and no message would ever arrive, with a green
+    backend test suite the whole time. So the extras are refused *visibly* —
+    an error log and one `channel.long_connection.not_started` audit row
+    each, naming the binding that took the socket — and the refusal is
+    written where the console already reads.
+
+    Which binding wins is by `id`, only because the choice has to be stable
+    across restarts: an arbitrary one would make "why is it this binding
+    today" unanswerable. It is not a priority — a deployment that wants a
+    different binding connected has to stop giving this process two.
 
     `run_forever` already owns the process's one recurring loop, and
     teaching this to notice a binding created (or switched to
@@ -545,14 +646,22 @@ async def _long_connections(
     """
     kek = optional_kek(settings.tiny_hermes_kek)
     deliver = _deliver_via(sessions)
-    connections: list[FeishuLongConnection] = []
+    #: Bindings whose credentials actually resolve, in `id` order. Ordered by
+    #: the database rather than sorted here so the query does the tie-break
+    #: too, and filtered *before* the one-per-process cut: a binding skipped
+    #: for missing credentials must not be the one that "took" the socket,
+    #: or a usable binding would be refused on behalf of one that was never
+    #: going to connect either.
+    usable: list[tuple[ChannelBindingRow, LongConnectionBinding]] = []
     async with sessions() as session:
         rows = (
             await session.scalars(
-                select(ChannelBindingRow).where(
+                select(ChannelBindingRow)
+                .where(
                     ChannelBindingRow.transport == "long_connection",
                     ChannelBindingRow.status == "active",
                 )
+                .order_by(ChannelBindingRow.id)
             )
         ).all()
         credentials = CredentialResolver(SqlSecretStore(session), kek)
@@ -573,16 +682,45 @@ async def _long_connections(
                     row.id,
                 )
                 continue
-            connections.append(
-                FeishuLongConnection(
+            usable.append(
+                (
+                    row,
                     LongConnectionBinding(
                         binding_id=row.id, app_id=row.app_id, app_secret=secret
                     ),
-                    deliver,
-                    record=_connection_event_recorder(sessions, row.workspace_id),
                 )
             )
-    return tuple(connections)
+    if not usable:
+        return ()
+    (held, credential), crowded_out = usable[0], usable[1:]
+    for row, _ in crowded_out:
+        logger.error(
+            "long connection binding %s is configured for the long connection but"
+            " will not be connected: binding %s already holds this process's only"
+            " SDK WebSocket loop. Run it in a scheduler process of its own, or"
+            " switch it back to the webhook transport.",
+            row.id,
+            held.id,
+        )
+        await _connection_event_recorder(sessions, row.workspace_id)(
+            row.id,
+            "not_started",
+            None,
+            context={
+                "reason": (
+                    "another long_connection binding already holds this scheduler"
+                    " process's only SDK WebSocket loop"
+                ),
+                "holding_binding_id": str(held.id),
+            },
+        )
+    return (
+        FeishuLongConnection(
+            credential,
+            deliver,
+            record=_connection_event_recorder(sessions, held.workspace_id),
+        ),
+    )
 
 
 class _FeishuSenders:
