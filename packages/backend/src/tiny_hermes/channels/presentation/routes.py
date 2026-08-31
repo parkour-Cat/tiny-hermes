@@ -26,6 +26,7 @@ from tiny_hermes.channels.application.binding_service import (
     ChannelBindingView,
     ChannelKeyRequired,
     ChannelKeyUnknown,
+    ChannelTransportUnusable,
     ForbiddenChannelAction,
     UnknownChannel,
 )
@@ -221,25 +222,36 @@ class CreateChannelBindingRequest(BaseModel):
 class UpdateChannelBindingRequest(BaseModel):
     """Credentials, `app_id`, and `transport` — nothing else.
 
-    A field left out is unchanged; a field sent as `null` is cleared. The
-    route reads `model_fields_set` to tell them apart, which is the whole
-    reason this model exists rather than reusing the create request.
+    A field left out is unchanged. For the three nullable ones — `app_id`,
+    `encrypt_key_ref`, `app_secret_ref` — a field sent as `null` is
+    *cleared*; the route reads `model_fields_set` to tell an absent field
+    from an explicit null, which is the whole reason this model exists
+    rather than reusing the create request. `transport` is the exception:
+    its column is `NOT NULL` (migration 0052) and there is no cleared state
+    for it to mean, so `null` is refused as bad input rather than accepted
+    into an UPDATE that would fail as an unhandled `IntegrityError`.
 
     `agent_id` and `channel` are absent on purpose: moving a binding to
     another Agent would silently redirect every conversation already mapped
     in `channel_conversations`, and that is not a credential fix.
 
-    `transport` is here rather than behind a dedicated route because
-    `ChannelBindingStore.set_transport` is a thin name for
-    `update_binding({"transport": ...})`, not a second code path — the CHECK
-    constraint on the column is what refuses an invented value, and this
-    keeps that the only place that decides.
+    `transport` is here rather than behind a dedicated route because it goes
+    through `update_binding` like every other column, not a second code
+    path. The column's CHECK constraint remains what the schema will not
+    bend on; the `Literal` in front of it is about what a *caller* gets back
+    — the CHECK reached from here raises `IntegrityError`, which nothing in
+    this application handles (`api/app.py` registers `AppError` and
+    `AuditedDenial` only), so a misspelled transport would answer 500 while
+    an over-long one already answered 422.
     """
 
     app_id: str | None = Field(default=None, max_length=120)
     encrypt_key_ref: str | None = Field(default=None, max_length=200)
     app_secret_ref: str | None = Field(default=None, max_length=200)
-    transport: str | None = Field(default=None, max_length=32)
+    #: The default is inert: the route builds `changes` from
+    #: `model_fields_set`, so an omitted `transport` never reaches an UPDATE
+    #: and this value is never the one written.
+    transport: Literal["webhook", "long_connection"] = "webhook"
 
 
 class ChannelBindingResponse(BaseModel):
@@ -296,6 +308,18 @@ def _binding_error(error: Exception) -> AppError:
                 "No active workspace secret has that name. A binding pointing "
                 "at a secret that does not exist accepts deliveries it can "
                 "never decrypt."
+            ),
+        )
+    if isinstance(error, ChannelTransportUnusable):
+        return AppError(
+            code="channel_transport_unusable",
+            title="This binding cannot hold a long connection",
+            status=400,
+            detail=(
+                "A long connection is opened with the binding's app id and "
+                "app secret. Without both, the scheduler skips the binding "
+                "at startup: it would read as active and connected here "
+                "while receiving nothing."
             ),
         )
     if isinstance(error, ChannelAlreadyBound):
@@ -414,6 +438,7 @@ def channel_binding_router(resources: ApplicationResources) -> APIRouter:
             ForbiddenChannelAction,
             ChannelKeyRequired,
             ChannelKeyUnknown,
+            ChannelTransportUnusable,
             UnknownChannel,
         ) as error:
             raise _binding_error(error) from error

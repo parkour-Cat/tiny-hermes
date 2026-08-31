@@ -52,6 +52,23 @@ class ChannelKeyUnknown(Exception):
     """
 
 
+class ChannelTransportUnusable(Exception):
+    """A binding left on `long_connection` that the scheduler will skip.
+
+    Opening the long connection needs the app id and the app secret — they
+    are what the handshake exchanges for a tenant token. `_long_connections`
+    (`api/cli.py`) drops a binding missing either one with a single log line
+    and moves on, so the row survives as a binding that reads `active` and
+    `long_connection` everywhere a person can look, receives nothing, and
+    reports nothing. Refused here, where the person who chose it is still
+    looking, rather than in a log nobody is reading.
+
+    The console's "restart the scheduler" hint makes this strictly worse
+    without this refusal: it hands the administrator a plausible
+    explanation and an action that cannot help.
+    """
+
+
 class UnknownChannel(Exception):
     pass
 
@@ -119,15 +136,6 @@ class ChannelBindingStore(Protocol):
         binding_id: UUID,
         changes: dict[str, str | None],
     ) -> ChannelBindingView | None: ...
-
-    async def set_transport(
-        self, workspace_id: UUID, binding_id: UUID, transport: str
-    ) -> ChannelBindingView | None:
-        """Thin name for `update_binding({"transport": ...})`. Not a second
-        code path: the CHECK constraint is what refuses an invented value,
-        and routing this through `update_binding` is what keeps that the
-        only place that decides."""
-        ...
 
     async def disable_binding(
         self, workspace_id: UUID, binding_id: UUID
@@ -229,10 +237,11 @@ class ChannelBindingService:
         to acquire an app secret and no way to be replaced — permanently
         receive-only, with every reply settling `no_credential`.
 
-        Deliberately narrow: credentials and `app_id` only. Moving a binding
-        to a different Agent would silently redirect every existing
-        conversation in `channel_conversations`, which is a different
-        operation from fixing a credential and should look like one.
+        Deliberately narrow: credentials, `app_id`, and which transport the
+        binding receives on. Moving a binding to a different Agent would
+        silently redirect every existing conversation in
+        `channel_conversations`, which is a different operation from fixing
+        a credential and should look like one.
         """
         await self._require_role(
             actor, workspace_id, request_id, allowed=MANAGERS,
@@ -248,6 +257,18 @@ class ChannelBindingService:
         after_key = changes.get("encrypt_key_ref", existing.encrypt_key_ref)
         if existing.channel in ENCRYPTED_CHANNELS and not after_key:
             raise ChannelKeyRequired
+        # Same rule, applied to the transport: what matters is the binding
+        # this update leaves behind, so both directions are refused — a
+        # webhook binding with no app secret being switched over, and a
+        # binding already on the long connection having its app secret
+        # cleared out from under it.
+        after_transport = changes.get("transport", existing.transport)
+        after_app_id = changes.get("app_id", existing.app_id)
+        after_app_secret = changes.get("app_secret_ref", existing.app_secret_ref)
+        if after_transport == "long_connection" and not (
+            after_app_id and after_app_secret
+        ):
+            raise ChannelTransportUnusable
         for field in ("encrypt_key_ref", "app_secret_ref"):
             reference = changes.get(field)
             if reference and not await self.store.secret_exists(

@@ -227,6 +227,14 @@ export function ChannelsPage() {
   const usable = (secrets.data ?? []).filter(
     (secret) => secret.status === "active" && secret.scope === "workspace",
   );
+  // Read off the binding as **stored**, not off what is currently typed in
+  // the dialog: an administrator who adds an app secret and switches
+  // transport in one save still has to save twice, because this does not
+  // track the unsaved fields. The API validates the resulting binding
+  // either way — this control only keeps the common case from having to be
+  // refused to learn why.
+  const canHoldLongConnection =
+    editing !== null && editing.app_id !== null && editing.app_secret_ref !== null;
 
   return (
     <>
@@ -308,17 +316,33 @@ export function ChannelsPage() {
               {
                 // Until this route existed, the only way to see which
                 // transport a binding used was to read the row in Postgres.
-                // Switching it here is meaningless without also being able
-                // to see, before touching anything, which one is live.
+                // This shows the **stored** value, which between a switch
+                // and the next scheduler restart is deliberately not the
+                // one in use — migration 0052's own docstring is about that
+                // gap. Hence the standing note beside a long connection:
+                // the post-save Alert is one dismissible boolean in
+                // component state, and after a reload nothing else on this
+                // page would record that a restart is still owed.
                 title: t("channelTransport"),
                 dataIndex: "transport",
-                render: (value: string) => (
-                  <Tag>
-                    {value === "long_connection"
-                      ? t("channelTransportLongConnection")
-                      : t("channelTransportWebhook")}
-                  </Tag>
-                ),
+                render: (value: string | undefined) =>
+                  value === "long_connection" ? (
+                    <Space size="small">
+                      <Tag>{t("channelTransportLongConnection")}</Tag>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        {t("channelTransportRestartRequired")}
+                      </Typography.Text>
+                    </Space>
+                  ) : value === "webhook" ? (
+                    <Tag>{t("channelTransportWebhook")}</Tag>
+                  ) : (
+                    // Not folded into "Webhook". This column's whole job is
+                    // to say what the stored value is, and a value this
+                    // console has no wording for — a newer server, a
+                    // hand-edited row — is exactly the one a reader has to
+                    // be able to notice.
+                    <Tag color="warning">{value ?? "—"}</Tag>
+                  ),
               },
               { title: t("channelStatus"), dataIndex: "status", render: (v: string) => <Tag>{v}</Tag> },
               { title: t("channelBoundAt"), dataIndex: "created_at", render: (v: string) => moment(v) },
@@ -559,11 +583,28 @@ export function ChannelsPage() {
               see `transportRestartHint` above. Duplicating the text in both
               places would leave two matches for one string the moment this
               modal's close animation overlaps the Alert appearing. */}
-          <Form.Item name="transport" label={t("channelTransport")} rules={[{ required: true }]}>
+          <Form.Item
+            name="transport"
+            label={t("channelTransport")}
+            rules={[{ required: true }]}
+            // Said before the choice, not after the refusal: the API's 400
+            // says *that* it was refused, and this page is where the reason
+            // — a missing app id or app secret reference — can be pointed at.
+            extra={canHoldLongConnection ? null : t("channelTransportNeedsCredentials")}
+          >
             <Select
               options={[
                 { value: "webhook", label: t("channelTransportWebhook") },
-                { value: "long_connection", label: t("channelTransportLongConnection") },
+                {
+                  value: "long_connection",
+                  label: t("channelTransportLongConnection"),
+                  // The scheduler skips a `long_connection` binding with no
+                  // app credentials (`api/cli.py`'s `continue`), leaving a
+                  // binding that reads as switched on and receives nothing.
+                  // The API refuses this too — it is public — and this only
+                  // keeps somebody from having to be refused to find out.
+                  disabled: !canHoldLongConnection,
+                },
               ]}
             />
           </Form.Item>

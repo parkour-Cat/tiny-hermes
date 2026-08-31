@@ -150,17 +150,6 @@ class SqlChannelBindingStore:
         ).scalar_one_or_none()
         return None if updated is None else _view(updated)
 
-    async def set_transport(
-        self, workspace_id: UUID, binding_id: UUID, transport: str
-    ) -> ChannelBindingView | None:
-        """Named for callers, but not a second query path: `update_binding`
-        is already the general "change some columns" entry, and a
-        dedicated UPDATE here would only be a second place the CHECK
-        constraint's rule could quietly drift from."""
-        return await self.update_binding(
-            workspace_id, binding_id, {"transport": transport}
-        )
-
     async def disable_binding(
         self, workspace_id: UUID, binding_id: UUID
     ) -> ChannelBindingView | None:
