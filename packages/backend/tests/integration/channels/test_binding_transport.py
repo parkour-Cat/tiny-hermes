@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from tiny_hermes.channels.infrastructure.sql_binding_store import SqlChannelBindingStore
 
@@ -77,5 +78,5 @@ async def test_an_invented_transport_is_refused(
 ) -> None:
     binding_id, workspace_id = seeded_binding
 
-    with pytest.raises(Exception):
+    with pytest.raises(IntegrityError):
         await store.set_transport(workspace_id, binding_id, "carrier_pigeon")
