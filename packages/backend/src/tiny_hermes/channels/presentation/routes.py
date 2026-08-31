@@ -219,7 +219,7 @@ class CreateChannelBindingRequest(BaseModel):
 
 
 class UpdateChannelBindingRequest(BaseModel):
-    """Credentials and `app_id`, and deliberately nothing else.
+    """Credentials, `app_id`, and `transport` — nothing else.
 
     A field left out is unchanged; a field sent as `null` is cleared. The
     route reads `model_fields_set` to tell them apart, which is the whole
@@ -228,11 +228,18 @@ class UpdateChannelBindingRequest(BaseModel):
     `agent_id` and `channel` are absent on purpose: moving a binding to
     another Agent would silently redirect every conversation already mapped
     in `channel_conversations`, and that is not a credential fix.
+
+    `transport` is here rather than behind a dedicated route because
+    `ChannelBindingStore.set_transport` is a thin name for
+    `update_binding({"transport": ...})`, not a second code path — the CHECK
+    constraint on the column is what refuses an invented value, and this
+    keeps that the only place that decides.
     """
 
     app_id: str | None = Field(default=None, max_length=120)
     encrypt_key_ref: str | None = Field(default=None, max_length=200)
     app_secret_ref: str | None = Field(default=None, max_length=200)
+    transport: str | None = Field(default=None, max_length=32)
 
 
 class ChannelBindingResponse(BaseModel):
@@ -243,6 +250,11 @@ class ChannelBindingResponse(BaseModel):
     app_id: str | None
     encrypt_key_ref: str | None
     app_secret_ref: str | None
+    #: `webhook` or `long_connection`. Switching it does not take effect
+    #: until the scheduler restarts (no hot reload), which is why the
+    #: console has to show this rather than leave it something you set and
+    #: hope about.
+    transport: str
     created_by: UUID
     created_at: datetime
 
@@ -256,6 +268,7 @@ class ChannelBindingResponse(BaseModel):
             app_id=view.app_id,
             encrypt_key_ref=view.encrypt_key_ref,
             app_secret_ref=view.app_secret_ref,
+            transport=view.transport,
             created_by=view.created_by,
             created_at=view.created_at,
         )
