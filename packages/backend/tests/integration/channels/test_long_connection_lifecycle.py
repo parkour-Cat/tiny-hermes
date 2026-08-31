@@ -115,7 +115,7 @@ async def _connection_events(store: SqlChannelBindingStore) -> list[dict[str, An
     rows = (
         await store._session.execute(  # noqa: SLF001 # pyright: ignore[reportPrivateUsage]
             text(
-                "SELECT action, result, context FROM audit_events"
+                "SELECT action, result, context, resource_id FROM audit_events"
                 " WHERE resource_type = 'channel_binding'"
                 " AND action LIKE 'channel.long_connection.%'"
                 " ORDER BY created_at, id"
@@ -127,6 +127,11 @@ async def _connection_events(store: SqlChannelBindingStore) -> list[dict[str, An
             "kind": str(row.action).rsplit(".", 1)[-1],
             "result": row.result,
             "context": cast("dict[str, Any]", row.context or {}),
+            # Which binding the row is *about*. A row that lands on the wrong
+            # binding is invisible to an assertion that only reads `kind`,
+            # and one of the kinds below is written for a binding that is
+            # deliberately not the one holding the socket.
+            "binding": row.resource_id,
         }
         for row in rows
     ]
@@ -919,3 +924,247 @@ async def test_a_binding_whose_secret_cannot_be_resolved_is_skipped(
     started = await scheduler_connections()
 
     assert started == ()
+
+
+async def _never_delivers(binding_id: UUID, envelope: dict[str, Any]) -> Claimed | Unreadable:
+    """下面这几条测试一帧都不发——`deliver` 被叫到就是缺陷本身。"""
+    raise AssertionError(f"no frame should have reached deliver: {binding_id} {envelope}")
+
+
+@pytest.fixture
+async def two_long_connection_bindings(
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    client: TestClient,
+    scope: dict[str, str],
+) -> tuple[UUID, UUID]:
+    """两个都**能用**的长连接绑定：凭据齐全、secret 解得开。
+
+    两个都能用是关键。任何一个因为凭据问题被 `_long_connections` 的
+    `continue` 挡掉，「只起一个」这条断言就会因为错误的理由变绿。
+    """
+    first_secret = await _stored_secret(engine, workspace_id, "first-app-secret")
+    first = await _seed_binding(
+        engine,
+        workspace_id,
+        published_agent,
+        transport="long_connection",
+        app_id="cli_first",
+        app_secret_ref=str(first_secret),
+    )
+    second_agent = _second_agent(client, scope)
+    second_secret = await _stored_secret(engine, workspace_id, "second-app-secret")
+    second = await _seed_binding(
+        engine,
+        workspace_id,
+        second_agent,
+        transport="long_connection",
+        app_id="cli_second",
+        app_secret_ref=str(second_secret),
+    )
+    return first, second
+
+
+async def test_only_one_long_connection_binding_can_hold_the_processs_single_sdk_loop(
+    store: SqlChannelBindingStore,
+    scheduler_connections: Callable[[], Awaitable[tuple[FeishuLongConnection, ...]]],
+    two_long_connection_bindings: tuple[UUID, UUID],
+) -> None:
+    """一个进程里带不动两个长连接，所以第二个必须**被人看见**地不启动。
+
+    `lark_oapi/ws/client.py:31-35` 在 import 时建了一个**模块级** loop，
+    `Client.start()` 在它上面 `run_until_complete`，而 `FeishuChannel.stop()`
+    经 `_stop_private_ws_client`（`channel/channel.py:853-876`）
+    `call_soon_threadsafe(ws_loop.stop)` 停的也是那一个。两个绑定同进程：第二个
+    起不来，第一个的 `disconnect()` 又会把第二个活着的 socket 所在的 loop 停掉。
+
+    默默少起一个正是这个项目的签名缺陷——用户在控制台把第二个绑定切成长连接、
+    看见它显示「长连接」、消息永远不来，而后端测试全绿。所以判据不是「返回了
+    一个连接」，是「另一个绑定在审计页上留下了一行说明为什么没起」。
+    """
+    first, second = two_long_connection_bindings
+    held, crowded_out = sorted((first, second), key=str)
+
+    started = await scheduler_connections()
+
+    assert [connection.binding_id for connection in started] == [held]
+    events = await _connection_events(store)
+    refused = _only(events, "not_started")
+    assert refused["binding"] == crowded_out
+    assert refused["result"] == "failed"
+    # 这一行要能自己解释「为什么」，否则它和没写一样。
+    assert refused["context"]["holding_binding_id"] == str(held)
+    assert refused["context"]["reason"]
+
+
+async def test_an_outage_whose_left_edge_never_landed_is_not_closed_out(
+    store: SqlChannelBindingStore,
+    sdk_channels: Callable[..., _FakeChannels],
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+) -> None:
+    """`connect_failed` 写失败了，就没有故障段可关。
+
+    `record_connect_failed` 把每一个异常都吃掉（它必须吃——审计写不进去不该
+    再把 socket 带下去），所以「叫过它」和「那一行真的在表里」是两件事。
+    重试循环把前者当成后者，于是数据库里只剩一条没有左边界的 `reconnected`：
+    §19.2 的补投检查按一对行读停机窗口，只有右边界的窗口量不出任何东西，
+    而审计页上它还是一行绿色的「succeeded」。
+    """
+    binding_id = await _seed_binding(
+        engine,
+        workspace_id,
+        published_agent,
+        transport="long_connection",
+        app_id="cli_halfopen",
+    )
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    written = _connection_event_recorder(sessions, UUID(workspace_id))
+
+    async def audit_that_drops_the_left_edge(
+        binding_id: UUID, kind: str, down_seconds: float | None
+    ) -> None:
+        if kind == "connect_failed":
+            raise RuntimeError("audit insert failed")
+        await written(binding_id, kind, down_seconds)
+
+    connection = FeishuLongConnection(
+        LongConnectionBinding(binding_id=binding_id, app_id="cli_halfopen", app_secret="s"),
+        _never_delivers,
+        record=audit_that_drops_the_left_edge,
+    )
+    channels = sdk_channels(
+        connect_error=FeishuChannelError(
+            FeishuChannelErrorCode.NOT_CONNECTED, "WebSocket connect failed"
+        ),
+        failures_before_success=1,
+    )
+    stop = asyncio.Event()
+    supervised = asyncio.create_task(
+        _supervised_connection(
+            connection, stop, first_delay=BACKOFF_SECONDS, max_delay=BACKOFF_SECONDS
+        )
+    )
+
+    await channels.connected()
+    stop.set()
+    await supervised
+
+    events = await _connection_events(store)
+    assert events == [], "closed out an outage whose left edge was never written"
+
+
+async def test_a_disconnect_that_raises_still_waits_for_the_recordings_in_flight(
+    store: SqlChannelBindingStore,
+    sdk_channels: Callable[..., _FakeChannels],
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+) -> None:
+    """`disconnect()` 抛出来，不该把 drain 整段跳过。
+
+    `run()` 的 `finally` 是两句顺序语句，第一句抛就没有第二句。真实的最后一轮
+    （`stop` 已置）上这正是 `_drain_recordings` 存在的理由消失的地方：在飞的
+    审计写没人等，`asyncio.run` 拆 loop 时把它当 pending 销毁，事务回滚，
+    只留下一行谁也定位不到的 "Task was destroyed but it is pending"。
+
+    判据是**顺序**，不只是「行最后出现了」：测试自己的 loop 在 `run()` 抛完
+    之后还活着，那一行迟早会写进去——早返回的 `run()` 会因为断言语句本身花的
+    那点时间而蒙混过关。
+    """
+    binding_id = await _seed_binding(
+        engine,
+        workspace_id,
+        published_agent,
+        transport="long_connection",
+        app_id="cli_teardown",
+    )
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    written = _connection_event_recorder(sessions, UUID(workspace_id))
+    order: list[str] = []
+
+    async def slow_record(binding_id: UUID, kind: str, down_seconds: float | None) -> None:
+        await asyncio.sleep(SLOW_RECORD_SECONDS)
+        await written(binding_id, kind, down_seconds)
+        order.append(kind)
+
+    connection = FeishuLongConnection(
+        LongConnectionBinding(binding_id=binding_id, app_id="cli_teardown", app_secret="s"),
+        _never_delivers,
+        record=slow_record,
+    )
+    channels = sdk_channels(disconnect_error=RuntimeError("socket teardown failed"))
+    stop = asyncio.Event()
+    running = asyncio.create_task(connection.run(stop))
+
+    channel = await channels.connected()
+    await channel.signal_drop()
+    stop.set()
+    with pytest.raises(RuntimeError):
+        await running
+    order.append("raised")
+
+    try:
+        assert order == ["disconnected", "raised"]
+        assert _only(await _connection_events(store), "disconnected")["result"] == "failed"
+    finally:
+        channel.close_loops()
+
+
+async def test_a_drain_that_cannot_finish_gives_up_instead_of_hanging_the_shutdown(
+    store: SqlChannelBindingStore,
+    sdk_channels: Callable[..., _FakeChannels],
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """等不到就放弃，并且说清楚放弃了几条。
+
+    让 drain 停下来的不是 `disconnect()`（`_stop_private_ws_client` 只是
+    best-effort 停那个模块级 ws loop，从不 join 它），而是那个 loop 最终自己
+    停下来。一个抖动的 socket 在此期间可以一直往里塞回调，于是 `run()`、
+    进而整个 scheduler 的关闭被无限期吊住——没有任何日志说明它卡在哪。
+
+    截止时间换来的是一次**有界**的丢失，代价必须被说出来：这里断言那一行
+    审计**没有**写进去，而不是假装 drain 还是等到了。
+    """
+    monkeypatch.setattr(feishu_long_connection, "DRAIN_TIMEOUT_SECONDS", 0.05)
+    binding_id = await _seed_binding(
+        engine,
+        workspace_id,
+        published_agent,
+        transport="long_connection",
+        app_id="cli_wedged",
+    )
+    released = asyncio.Event()
+
+    async def never_finishes(
+        binding_id: UUID, kind: str, down_seconds: float | None
+    ) -> None:
+        del binding_id, kind, down_seconds
+        await released.wait()
+
+    connection = FeishuLongConnection(
+        LongConnectionBinding(binding_id=binding_id, app_id="cli_wedged", app_secret="s"),
+        _never_delivers,
+        record=never_finishes,
+    )
+    channels = sdk_channels()
+    stop = asyncio.Event()
+    running = asyncio.create_task(connection.run(stop))
+
+    channel = await channels.connected()
+    await channel.signal_drop()
+    stop.set()
+    try:
+        with caplog.at_level("ERROR"):
+            await asyncio.wait_for(running, timeout=5.0)
+        assert "gave up waiting" in caplog.text
+        assert await _connection_events(store) == []
+    finally:
+        released.set()
+        channel.close_loops()
