@@ -940,7 +940,7 @@ async def test_a_binding_whose_secret_cannot_be_resolved_is_skipped(
 #: 同一句话写在两条分支上也能让那种断言全绿——而是**读的人分得出是哪一种**。
 #: 所以每条测试都断言自己那个词在、另一个词不在。
 NO_CREDENTIALS_PHRASE = "app credentials"
-UNRESOLVABLE_SECRET_PHRASE = "app secret"
+UNRESOLVABLE_REF_PHRASE = "app secret"
 
 
 async def test_a_binding_with_no_app_credentials_says_so_where_the_console_reads(
@@ -968,7 +968,7 @@ async def test_a_binding_with_no_app_credentials_says_so_where_the_console_reads
     assert refused["result"] == "failed"
     reason = refused["context"]["reason"]
     assert NO_CREDENTIALS_PHRASE in reason
-    assert UNRESOLVABLE_SECRET_PHRASE not in reason
+    assert UNRESOLVABLE_REF_PHRASE not in reason
 
 
 async def test_a_binding_whose_secret_was_disabled_says_so_where_the_console_reads(
@@ -1004,7 +1004,7 @@ async def test_a_binding_whose_secret_was_disabled_says_so_where_the_console_rea
     assert refused["binding"] == binding_id
     assert refused["result"] == "failed"
     reason = refused["context"]["reason"]
-    assert UNRESOLVABLE_SECRET_PHRASE in reason
+    assert UNRESOLVABLE_REF_PHRASE in reason
     assert NO_CREDENTIALS_PHRASE not in reason
     # 光说「解析不出来」不够——要说是哪一个 Secret，读的人才知道去启用哪个。
     assert refused["context"]["app_secret_ref"] == str(secret_id)

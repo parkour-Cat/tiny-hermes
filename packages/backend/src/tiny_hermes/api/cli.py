@@ -572,8 +572,10 @@ def _connection_event_recorder(
     `/api/v1/audit-events` — and the second is what a reader assumes.
 
     `context` widens that same column for a kind whose whole point is the
-    explanation (`not_started`: which other binding took the socket, and
-    why there is only one). Keyword-only with a default, so this still
+    explanation (`not_started`: why this process refused to connect a
+    binding at all — another binding holds the process's one socket, or the
+    binding's own credentials are unset or unresolvable). Keyword-only with
+    a default, so this still
     satisfies `RecordConnectionEvent` — the adapter calls it with three
     positional arguments and knows nothing about the extra.
     """
@@ -650,6 +652,21 @@ async def _long_connections(
     later answers `CredentialMissing` for every id (the bug
     `fix(channels): resolve the image secret through a real session` fixed
     for the image-fetch path).
+
+    **A binding skipped over its credentials is refused just as visibly**,
+    and for the same reason as the crowded-out one: nothing here edits the
+    binding, so the console goes on showing it on `long_connection`. A
+    secret disabled on the secrets page days after the transport was
+    switched would otherwise show up only in this process's log — read by
+    whoever runs the container, not by whoever flipped the switch. The two
+    causes get two different wordings because they need two different
+    fixes: fill the credentials in, or re-enable that Secret.
+
+    These rows are bounded — one per unusable binding, and `_scheduler`
+    calls this once before `run_forever` rather than from any loop. That
+    bound is the whole reason they are affordable: `audit_events` has no
+    retention or cleanup anywhere in this repository, so nothing here may
+    move into a retry or polling path.
     """
     kek = optional_kek(settings.tiny_hermes_kek)
     deliver = _deliver_via(sessions)
@@ -679,6 +696,18 @@ async def _long_connections(
                     " configured, skipping",
                     row.id,
                 )
+                await _connection_event_recorder(sessions, row.workspace_id)(
+                    row.id,
+                    "not_started",
+                    None,
+                    context={
+                        "reason": (
+                            "no app credentials are configured on this binding"
+                            " (app_id or the secret reference is unset), so there"
+                            " is nothing to open a connection with"
+                        )
+                    },
+                )
                 continue
             try:
                 secret = await credentials.resolve(row.app_secret_ref)
@@ -687,6 +716,24 @@ async def _long_connections(
                     "long connection binding %s: app secret unavailable,"
                     " skipping",
                     row.id,
+                )
+                await _connection_event_recorder(sessions, row.workspace_id)(
+                    row.id,
+                    "not_started",
+                    None,
+                    context={
+                        # Naming the reference is the difference between "go
+                        # look at the secrets page" and "go look at *this*
+                        # secret". The two causes need different fixes, so
+                        # the wording has to separate them: this one is not
+                        # "unconfigured", it is configured and unusable.
+                        "reason": (
+                            "the app secret this binding references did not"
+                            " resolve: there is no Secret with that id, or its"
+                            " status is not active"
+                        ),
+                        "app_secret_ref": row.app_secret_ref,
+                    },
                 )
                 continue
             usable.append(
