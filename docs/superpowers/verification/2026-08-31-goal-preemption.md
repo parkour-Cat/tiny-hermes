@@ -25,8 +25,33 @@ compose 准备的 `.env`，其中的 `EGRESS_PROXY_URL` 让「没有出口边界
 
 ## 3. 这条路走得通
 
-**<FILL：部署后在飞书里让 Agent 开始一个会续跑的任务，在它跑的过程中发一句话，
-确认那句话立刻得到处理、上一个 Run 是 `completed`、且控制台上看得见「被打断」。>**
+真实飞书应用、部署的那套栈，2026-08-31 01:01。
+
+```
+01:01:05  seq 15 创建（「在 /workspace/data 下建三个文件…」）
+01:01:06  seq 15 开始
+01:01:09  seq 16 创建（用户发「等一下」）      ← 中途到达
+01:01:13  seq 15 第 1 轮判 continue → 让位，completed
+01:01:13  seq 16 立刻开始                     ← 同一秒，没有等
+01:01:17  seq 16 结束
+```
+
+| 要证的 | 观察到的 |
+|---|---|
+| 判 `continue` 时让位 | `{"round": 1, "outcome": "continue", "preempted": true}` |
+| Run 以 `completed` 结束 | seq 15 `completed` |
+| **排队那条立刻被处理** | seq 16 在 01:01:13 同一秒开始 |
+| 记录说明了原因 | `preempted: true` 在 `goal_verdict` 事件里 |
+| **不是任何 `continue` 都让位** | 01:01:15 另一条 round 1 `continue` 的 `preempted` 是 `false`——那时 seq 16 后面没人排着 |
+
+最后一行是这一遍最值钱的：**同一批数据里既有让位的也有不让位的**，说明判据真的在区分，
+不是无条件触发。聊天记录也对得上——seq 15 只说了 "I'll create the three files, then read
+each one back." 就被打断，seq 16 接着把三个文件建完读完。
+
+**走查前踩到的坑记在这里**：前两次走查失败，我以为是用户手速不够，真实原因是
+**跑着的 worker 根本不是这条分支的代码**——`has_waiting_run` 与 `user_waiting` 在镜像里
+都是 0。部署脚本 `deploy/compose/redeploy.sh` 存在的全部理由就是防这个，而我没用它。
+判据不是「我改了代码」，是「跑着的东西真的换了」。
 
 ## 4. 这一遍最值得留下的：三次「修一个洞开一个新洞」
 
