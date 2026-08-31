@@ -118,13 +118,17 @@ class FeishuWebhookService:
         nonce: str | None,
         signature: str | None,
     ) -> Challenge | Claimed | Unreadable:
-        """Verify, decrypt, normalize, claim — in that order, and no other.
+        """Verify, then decrypt — in that order, and no other.
 
         Verification comes first because everything after it treats the
         bytes as trustworthy: decrypting an unverified body would run this
-        platform's cipher over an attacker's input, and normalizing one
-        would let them choose an `event_id` and suppress a real delivery by
-        claiming it first.
+        platform's cipher over an attacker's input.
+
+        Normalize and claim are not here. They moved to `accept_verified`,
+        which this method calls once the body is plaintext, because a
+        long-connection frame arrives already verified and decrypted by
+        Feishu's SDK — it needs that half without ever going through this
+        one. Both transports converge there.
         """
         if timestamp is None or nonce is None or signature is None:
             # Feishu sends the *registration* handshake unsigned and in
@@ -157,6 +161,21 @@ class FeishuWebhookService:
                 raise WebhookRefused("url_verification carried no challenge")
             return Challenge(challenge=challenge)
 
+        return await self.accept_verified(
+            binding_id=secrets.binding_id, envelope=envelope
+        )
+
+    async def accept_verified(
+        self, *, binding_id: UUID, envelope: dict[str, Any]
+    ) -> Claimed | Unreadable:
+        """Normalize, then claim — the half both transports share.
+
+        No `encrypt_key` in the signature, and none should ever land here:
+        a long-connection frame arrives already decrypted by Feishu's SDK,
+        so this method never touches a ciphertext byte. Accepting a key it
+        does not use would tell the next reader decryption might happen
+        here.
+        """
         try:
             event = event_from_envelope(envelope)
         except UnsupportedMessageType as unreadable:
@@ -165,7 +184,7 @@ class FeishuWebhookService:
             # is exactly what `UnsupportedMessageType` carries and a plain
             # `MalformedChannelEvent` does not.
             claim_id = await self._store.claim_delivery(
-                secrets.binding_id, unreadable.channel_event_id, datetime.now(UTC)
+                binding_id, unreadable.channel_event_id, datetime.now(UTC)
             )
             return Unreadable(
                 kind=unreadable.kind,
@@ -181,6 +200,6 @@ class FeishuWebhookService:
             raise error
 
         claim_id = await self._store.claim_delivery(
-            secrets.binding_id, event.channel_event_id, datetime.now(UTC)
+            binding_id, event.channel_event_id, datetime.now(UTC)
         )
         return Claimed(event=event, claim_id=claim_id)
