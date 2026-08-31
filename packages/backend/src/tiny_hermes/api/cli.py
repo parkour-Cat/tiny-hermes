@@ -3,6 +3,7 @@ import contextlib
 import logging
 import signal
 import socket
+import time
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -356,14 +357,22 @@ async def _supervised_connection(
     lease/reply loop along with it.
 
     Establishing is all it covers, and the narrowness is not an oversight
-    worth papering over with a wider promise: once `connect_until_ready`
-    has returned, a drop is handled entirely inside the SDK's own thread
-    (`_receive_message_loop` → `_reconnect` in `lark_oapi/ws/client.py`),
-    and when the SDK finally gives up, the `ServerUnreachableException` it
-    raises dies in a task on the ws loop. Nothing surfaces from
-    `connection.run(stop)`, which stays parked on `stop.wait()` holding a
-    dead socket. **This function will not notice that and nothing else
-    currently does** — a liveness check is a real gap, not a covered case.
+    worth papering over with a wider promise. What is missing is *recovery*,
+    not a trace: once `connect_until_ready` has returned, a drop is handled
+    inside the SDK's own thread (`_receive_message_loop` → `_reconnect` in
+    `lark_oapi/ws/client.py`), and `_reconnect` calls `on_reconnecting()`
+    before it starts retrying, which reaches `_on_reconnecting` here and
+    writes a `disconnected` row — so a drop after a successful connect is
+    visible on the audit page. What nobody does is check that the socket
+    the SDK is nursing is still alive: `connection.run(stop)` stays parked
+    on `stop.wait()` either way, and if the SDK's own retrying never
+    succeeds this function never learns of it. **That liveness check is a
+    known gap on this branch, not a covered case.** (It does not usually
+    end in an exception either: the client's `_reconnect_count` defaults to
+    `-1`, whose branch retries forever and never raises. Only a server that
+    pushes a non-negative `ReconnectCount` makes it give up, and the
+    `ServerUnreachableException` it then raises dies inside a task on the
+    ws loop rather than surfacing here.)
 
     `FeishuLongConnection.run`'s own docstring leaves the retry-or-give-up
     call to whoever hosts it here; retrying with backoff, bounded by `stop`
@@ -371,10 +380,19 @@ async def _supervised_connection(
     binding (wrong credentials, app not enabled for long connection) still
     cannot send replies, cards, or receipts for anyone else — bringing the
     whole process down over it would be strictly worse than logging and
-    trying again. Each attempt writes its own `connect_failed` audit row
-    from inside `run()`, so a binding that never comes up is visible to
-    someone reading the console rather than only to whoever tails the
-    scheduler container's logs.
+    trying again.
+
+    **Two audit rows per outage, however long it lasts**, which is why the
+    outage lives here as a local rather than inside `run()`: one attempt
+    cannot tell whether it is the first failure or the two-hundredth. The
+    first failure writes `connect_failed`; every retry after it only logs,
+    carrying the attempt count; the connect that finally succeeds writes
+    `reconnected` with how long the whole run of failures lasted. Per
+    attempt this was ~262 rows a day forever for one wrong app secret,
+    against an `audit_events` table nothing prunes — the workspace's audit
+    page (`created_at desc`, no filter by default) would show nothing else,
+    and §19.2 needs the closing row anyway: an outage window with only a
+    left edge measures nothing.
 
     The two delays are a judgment call, not a requirement — the plan gives
     no numbers. 5s so a Feishu blip or a scheduler that started before the
@@ -383,19 +401,56 @@ async def _supervised_connection(
     several retries are configuration (secret wrong, app not enabled for
     long connection) and those are fixed by a human, at which point the
     scheduler is restarted anyway — polling faster than every five minutes
-    only fills the audit log while nobody is looking.
+    buys nothing once the failure is already recorded.
     """
     delay = first_delay
+    #: When the current run of failures began, and whether it already has its
+    #: `connect_failed` row. `None`/`False` means there is no outage open.
+    outage_since: float | None = None
+    audited = False
+    failures = 0
+    came_up = False
+
+    async def close_out_the_outage() -> None:
+        """Called from inside `run()` the moment the socket is up."""
+        nonlocal outage_since, audited, failures, delay, came_up
+        came_up = True
+        delay = first_delay
+        if outage_since is None:
+            return
+        logger.info(
+            "long connection binding=%s is up after %d failed attempt(s)",
+            connection.binding_id,
+            failures,
+        )
+        await connection.record_recovered(time.monotonic() - outage_since)
+        outage_since, audited, failures = None, False, 0
+
     while not stop.is_set():
+        came_up = False
         try:
-            await connection.run(stop)
+            await connection.run(stop, on_connected=close_out_the_outage)
             return
         except Exception:
+            failures += 1
+            if outage_since is None:
+                outage_since = time.monotonic()
+            # A round that came up and then failed is not a *connect*
+            # failure; `_on_reconnecting` already wrote its own row if the
+            # SDK signalled the drop, and calling this one "connect_failed"
+            # would name the wrong thing.
+            worth_a_row = not audited and not came_up
             logger.exception(
-                "long connection failed binding=%s, retrying in %.0fs",
+                "long connection failed binding=%s: failure %d of this outage,"
+                " retrying in %.0fs%s",
                 connection.binding_id,
+                failures,
                 delay,
+                "" if worth_a_row else " (logged only; the outage is already recorded)",
             )
+            if worth_a_row:
+                await connection.record_connect_failed()
+                audited = True
         if stop.is_set():
             return
         with contextlib.suppress(TimeoutError):

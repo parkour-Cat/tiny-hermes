@@ -26,7 +26,7 @@ import asyncio
 import logging
 import threading
 import time
-from collections.abc import Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar, cast
@@ -82,11 +82,16 @@ class RecordConnectionEvent(Protocol):
     Three kinds, and they are not interchangeable:
 
     - `"connect_failed"` — this process could not get the socket up at all.
+      Written once for a *run* of failed attempts, not once per attempt:
+      the retry loop that hosts this adapter decides when a new run of
+      failures has begun (see `record_connect_failed`).
     - `"disconnected"` — a socket that *was* up went down. Only ever
       recorded after `run()` saw the connect succeed, because §19.2's
       redelivery check reads the pair of rows as an outage window and a
       window whose left edge is "we were never up" measures nothing.
-    - `"reconnected"` — that outage ended.
+    - `"reconnected"` — an outage ended. Closes either of the two kinds
+      above: a socket that dropped and came back, or a run of failed
+      connects that finally succeeded.
 
     `down_seconds` carries a real, non-negative number only on
     `"reconnected"`. It is `None` on the other two kinds, and also on a
@@ -168,9 +173,10 @@ class FeishuLongConnection:
         self._binding = binding
         self._deliver = deliver
         self._record = record
-        #: Set while the socket is down, cleared on reconnect — the only
-        #: thing this timestamp is for is computing `down_seconds` when the
-        #: matching `"reconnected"` event is recorded. `None` otherwise, so
+        #: Set while the socket is down, cleared on reconnect and at the top
+        #: of every `run()` (see `_reset_for_this_run`) — the only thing this
+        #: timestamp is for is computing `down_seconds` when the matching
+        #: `"reconnected"` event is recorded. `None` otherwise, so
         #: `_record_reconnected` can tell "was down" from "was already up"
         #: (the SDK could in principle fire `reconnected` without a prior
         #: `reconnecting` on this instance's watch — nothing in its source
@@ -193,15 +199,28 @@ class FeishuLongConnection:
         #: socket closes. `concurrent.futures.Future`, not `asyncio.Task`,
         #: because the thread that adds one is not the thread that runs it.
         self._background: set[Future[None]] = set()
-        #: `_background` is mutated from the SDK's threads (adding) and from
-        #: the scheduler loop (the done-callback discarding, and `run`'s
-        #: `finally` taking a snapshot).
+        #: `_background` and `_closing` are mutated from the SDK's threads
+        #: (`_fire` adding) and from the scheduler loop (the done-callback
+        #: discarding, and `_drain_recordings` snapshotting and closing).
+        #: One lock for both because it is the *pair* that has to move
+        #: together: `_drain_recordings` may only set `_closing` in the same
+        #: critical section that found `_background` empty, or a recording
+        #: fired in between is neither waited for nor refused.
         self._background_lock = threading.Lock()
+        #: Set by `_drain_recordings` once nothing is left in flight, so a
+        #: recording fired after that point is refused loudly instead of
+        #: becoming a task the loop teardown destroys silently. Cleared at
+        #: the top of every `run()`, because the same instance is run again
+        #: by `_supervised_connection` after a failure.
+        self._closing = False
         #: Set once `connect_until_ready` has returned, so the recording
         #: paths can tell "a live socket dropped" from "this never came up".
-        #: Never cleared: the SDK reconnects underneath us, and `run()`'s
-        #: only exit is `stop` or an exception, both of which end this
-        #: instance's watch entirely.
+        #: Not cleared on the SDK's own reconnects — it reconnects underneath
+        #: us and the socket stays this instance's — but cleared at the top
+        #: of every `run()`: `_supervised_connection` calls `run()` again on
+        #: *this same object* after a failure, so a flag left set by the
+        #: previous round would make the next round's failed connect look
+        #: like a live socket dropping.
         self._connected = False
         #: `on_frame` never clears this on a delivery failure — that is the
         #: one guarantee this attribute carries right now. Nothing else in
@@ -317,15 +336,21 @@ class FeishuLongConnection:
                 "failed to record reconnect binding=%s", self._binding.binding_id
             )
 
-    async def _record_connect_failed(self) -> None:
+    async def record_connect_failed(self) -> None:
         """The one trace a connection that never came up leaves behind.
 
         Without it the most common production outage — the app is not
         enabled for long connection, the secret is wrong, Feishu is
         unreachable at startup — is invisible to §19.2's redelivery check
-        and to the console, because `_supervised_connection` retries
-        forever and every attempt would otherwise produce only a log line
-        inside the scheduler container.
+        and to the console, and shows up only as a log line inside the
+        scheduler container.
+
+        **Public, and `run()` does not call it.** `run()` is one attempt;
+        the run of attempts belongs to whoever retries (in this deployment,
+        `_supervised_connection`), and only that caller can tell the first
+        failure of an outage from the two-hundredth. Writing one of these
+        per attempt is what buried every other audit row for the workspace
+        behind ~262 rows a day of a socket that was never coming up.
         """
         if self._record is None:
             return
@@ -334,6 +359,31 @@ class FeishuLongConnection:
         except Exception:
             logger.exception(
                 "failed to record connect failure binding=%s", self._binding.binding_id
+            )
+
+    async def record_recovered(self, down_seconds: float) -> None:
+        """Closes the outage `record_connect_failed` opened, with its length.
+
+        The pair to it, public for the same reason: the retry loop owns the
+        outage, so it is the only place that knows when a run of failures
+        ended. Not optional either — §19.2 reads the two rows as a window,
+        and a window with only a left edge measures nothing, so a capped
+        `connect_failed` without this would trade a flooded audit page for
+        an unmeasurable one.
+
+        `max(0.0, ...)` for the same reason as `_record_reconnected`: a
+        negative duration would be a worse answer than a slightly-off
+        positive one.
+        """
+        if self._record is None:
+            return
+        try:
+            await self._record(
+                self._binding.binding_id, "reconnected", max(0.0, down_seconds)
+            )
+        except Exception:
+            logger.exception(
+                "failed to record recovery binding=%s", self._binding.binding_id
             )
 
     def _fire(self, coro: Coroutine[Any, Any, None]) -> None:
@@ -357,8 +407,30 @@ class FeishuLongConnection:
                 self._binding.binding_id,
             )
             return
-        future = asyncio.run_coroutine_threadsafe(coro, loop)
         with self._background_lock:
+            if self._closing:
+                # `_drain_recordings` has already found nothing left in
+                # flight and will not look again, so this recording would
+                # become a task nobody awaits: the loop teardown destroys it
+                # pending, the transaction rolls back, and asyncio's "Task
+                # was destroyed but it is pending" names neither the binding
+                # nor the row. Refusing it loses the same row and says so.
+                coro.close()
+                logger.error(
+                    "long connection dropped a %s recording that arrived after"
+                    " the connection closed binding=%s",
+                    getattr(coro, "__qualname__", "connection"),
+                    self._binding.binding_id,
+                )
+                return
+            # Submitting inside the lock is what makes the check above
+            # binding: a future created here is in `_background` before the
+            # lock is released, so `_drain_recordings` either waits for it or
+            # (having closed) never let it be created. `add_done_callback`
+            # stays outside — on an already-completed future it runs the
+            # callback in *this* thread, and `_forget` takes this same
+            # non-reentrant lock.
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
             self._background.add(future)
         future.add_done_callback(self._forget)
 
@@ -367,13 +439,32 @@ class FeishuLongConnection:
             self._background.discard(future)
 
     async def _drain_recordings(self) -> None:
-        with self._background_lock:
-            pending = tuple(self._background)
-        if not pending:
-            return
-        await asyncio.gather(
-            *(asyncio.wrap_future(future) for future in pending), return_exceptions=True
-        )
+        """Waits for every recording still in flight, then shuts the door.
+
+        Looping rather than taking one snapshot: `_fire` is called from the
+        SDK's threads, and `disconnect()` does not join them —
+        `_stop_private_ws_client` only asks the module-level ws loop to stop
+        — so a late `_on_reconnecting` can queue a recording *while this is
+        already waiting on the gather*. A single snapshot would return
+        without it, `run()` would return, and `asyncio.run` would destroy
+        that write mid-transaction.
+
+        The empty check and `_closing` are set in one critical section, so
+        there is no instant at which a recording is neither waited for nor
+        refused. The loop terminates because `disconnect()` has already run
+        by the time this is called: the only source of new recordings is a
+        socket that is being torn down.
+        """
+        while True:
+            with self._background_lock:
+                pending = tuple(self._background)
+                if not pending:
+                    self._closing = True
+                    return
+            await asyncio.gather(
+                *(asyncio.wrap_future(future) for future in pending),
+                return_exceptions=True,
+            )
 
     def _on_reconnecting(self) -> None:
         """`FeishuChannel`'s `_notify_reconnecting` (see
@@ -395,7 +486,8 @@ class FeishuLongConnection:
         if not self._connected:
             logger.info(
                 "long connection binding=%s signalled reconnecting before it ever"
-                " came up; recorded as a failed connect, not as a disconnect",
+                " came up; not recorded as a disconnect (whether a failed"
+                " connect is worth a row is the retry loop's call)",
                 self._binding.binding_id,
             )
             return
@@ -408,8 +500,39 @@ class FeishuLongConnection:
             return
         self._fire(self._record_reconnected())
 
-    async def run(self, stop: asyncio.Event) -> None:
+    def _reset_for_this_run(self) -> None:
+        """Clears everything the *previous* `run()` left behind.
+
+        `_supervised_connection` retries by calling `run()` again on this
+        same object, so none of this is per-instance state — it is per-call
+        state that happens to live on the instance because the SDK's
+        callbacks can only reach the instance. A `_connected` carried over
+        from a round that came up and then failed made the next round's
+        failed connect look like a live socket dropping: `_on_reconnecting`
+        would write a `"disconnected"` row for a socket that never came up
+        that round, and `_down_since` carried over with it would fold the
+        whole retry backoff into the next `down_seconds`.
+        """
+        self._connected = False
+        self._down_since = None
+        with self._background_lock:
+            self._closing = False
+
+    async def run(
+        self,
+        stop: asyncio.Event,
+        *,
+        on_connected: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         """Own one `FeishuChannel` for the lifetime of this call.
+
+        `on_connected` is awaited the instant the socket is up and before
+        this parks on `stop`, which is the only moment a caller can learn
+        that a run of failed attempts has ended — `run()` itself does not
+        return until shutdown. Awaited, not fired and forgotten, so a caller
+        that records something there has actually recorded it before the
+        socket starts delivering; anything it raises comes out of `run()`
+        like any other post-connect failure.
 
         The first thing it does is remember which loop it is on. That loop
         is the only one the rest of this class may touch a database from —
@@ -437,9 +560,11 @@ class FeishuLongConnection:
         `FeishuChannelError(NOT_CONNECTED, "Timed out waiting for channel
         transport readiness")`, which propagates out of this `run()` call
         uncaught. Whoever hosts this adapter in the scheduler process is the
-        one who decides whether that means retry or give up — this method
-        does not swallow it, it only records that it happened.
+        one who decides whether that means retry or give up, **and whether
+        this failure is worth an audit row** — see `record_connect_failed`.
+        This method neither swallows the exception nor audits it.
         """
+        self._reset_for_this_run()
         self._loop = asyncio.get_running_loop()
         channel = FeishuChannel(
             app_id=self._binding.app_id, app_secret=self._binding.app_secret
@@ -450,11 +575,9 @@ class FeishuLongConnection:
         try:
             await channel.connect_until_ready(timeout=30)
             self._connected = True
+            if on_connected is not None:
+                await on_connected()
             await stop.wait()
-        except Exception:
-            if not self._connected:
-                await self._record_connect_failed()
-            raise
         finally:
             await channel.disconnect()
             await self._drain_recordings()
