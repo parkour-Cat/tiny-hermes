@@ -386,9 +386,11 @@ async def _supervised_connection(
     outage lasts**, which is why the outage lives here as a local rather
     than inside `run()`: one attempt cannot tell whether it is the first
     failure or the two-hundredth. The first failure writes `connect_failed`;
-    every retry after it only logs, carrying the attempt count; the connect
-    that finally succeeds writes `reconnected` with how long the whole run
-    of failures lasted. Per attempt this was ~262 rows a day forever for one
+    every retry after it only logs, carrying the attempt count — unless that
+    write did not reach the table, in which case the next retry tries it
+    again, which is one INSERT per backoff and lands at most one row; the
+    connect that finally succeeds writes `reconnected` with how long the
+    whole run of failures lasted. Per attempt this was ~262 rows a day for one
     wrong app secret, against an `audit_events` table nothing prunes — the
     workspace's audit page (`created_at desc`, no filter by default) would
     show nothing else, and §19.2 needs the closing row anyway: an outage
@@ -462,10 +464,15 @@ async def _supervised_connection(
         outage_since, audited, failures = None, False, 0
         # Reset here and nowhere else. The backoff is what keeps a wedged
         # binding from hammering, and the only thing that has earned its
-        # release is a run of failures that demonstrably ended. Resetting on
-        # every successful connect instead — including one that comes up and
-        # dies again — is what would turn this loop into a retry every
-        # `first_delay` seconds for as long as the process lives.
+        # release is a run of failures that demonstrably ended.
+        #
+        # It used to be reset at the top of this function, on *any* connect.
+        # No round can reach it today — a round that comes up and then
+        # raises has to have had `stop` set for `run()`'s `finally` to run
+        # at all, and the loop below returns on `stop.is_set()` — so this is
+        # a correctness move, not a fix for a spin anyone has observed. What
+        # it removes is the shape: a round that came up and died would
+        # otherwise hand the next round `first_delay` again, forever.
         delay = first_delay
 
     while not stop.is_set():

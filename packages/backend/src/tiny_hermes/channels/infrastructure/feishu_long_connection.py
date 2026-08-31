@@ -534,16 +534,18 @@ class FeishuLongConnection:
                 if not pending:
                     self._closing = True
                     return
-                remaining = deadline - time.monotonic()
-                if remaining <= 0.0:
-                    break
             try:
+                # Every way out of this loop other than "nothing left" goes
+                # through here, which is what makes the cancellation the log
+                # line below claims universal: an already-spent deadline is
+                # `timeout=0.0`, and `wait_for` cancels before raising
+                # rather than returning the futures untouched.
                 await asyncio.wait_for(
                     asyncio.gather(
                         *(asyncio.wrap_future(future) for future in pending),
                         return_exceptions=True,
                     ),
-                    timeout=remaining,
+                    timeout=max(0.0, deadline - time.monotonic()),
                 )
             except TimeoutError:
                 break
