@@ -163,8 +163,17 @@ async def _claimed_event_count(
     return int(found.scalar_one())
 
 
-async def _stored_secret(engine: AsyncEngine, workspace_id: str, value: str) -> UUID:
-    """One active workspace Secret, sealed the way the service seals them.
+async def _stored_secret(
+    engine: AsyncEngine, workspace_id: str, value: str, *, status: str = "active"
+) -> UUID:
+    """One workspace Secret, sealed the way the service seals them.
+
+    `status` is a parameter because a Secret that exists but is *disabled*
+    is the failure this file's newest test is about — the console's secrets
+    page can flip that column long after a binding was switched to
+    `long_connection`, and `CredentialResolver.resolve` raises
+    `CredentialMissing` for it exactly as it does for an id nothing
+    inserted.
 
     Reuses `test_image_source.py`'s pattern: a real KEK and a real Secret
     row, because the point of `seeded_bindings_of_both_transports` is
@@ -179,10 +188,11 @@ async def _stored_secret(engine: AsyncEngine, workspace_id: str, value: str) -> 
                 "INSERT INTO secrets (id, name, scope, workspace_id, status, mask,"
                 " ciphertext, nonce, wrapped_dek, wrap_nonce, key_id, created_at,"
                 " updated_at) VALUES (:i, :name, 'workspace', :w,"
-                " 'active', '****', :c, :n, :d, :dn, 'test-key', now(), now())"
+                " :status, '****', :c, :n, :d, :dn, 'test-key', now(), now())"
             ),
             {
                 "i": secret_id,
+                "status": status,
                 # `secrets` enforces one name per workspace — a distinct
                 # name per call so a fixture that seeds two bindings in one
                 # workspace (webhook and long_connection) can give each its
@@ -924,6 +934,80 @@ async def test_a_binding_whose_secret_cannot_be_resolved_is_skipped(
     started = await scheduler_connections()
 
     assert started == ()
+
+
+#: 两条跳过原因各自的特征词。放在一起，是因为要求不是「每行都带了原因」——
+#: 同一句话写在两条分支上也能让那种断言全绿——而是**读的人分得出是哪一种**。
+#: 所以每条测试都断言自己那个词在、另一个词不在。
+NO_CREDENTIALS_PHRASE = "app credentials"
+UNRESOLVABLE_SECRET_PHRASE = "app secret"
+
+
+async def test_a_binding_with_no_app_credentials_says_so_where_the_console_reads(
+    store: SqlChannelBindingStore,
+    scheduler_connections: Callable[[], Awaitable[tuple[FeishuLongConnection, ...]]],
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+) -> None:
+    """`transport` 是长连接但 `app_secret_ref` 是空的，得有人看得见。
+
+    控制台上这个绑定照样显示「长连接」——这里不改它自己那一行——所以缺了
+    凭据这件事如果只落在容器日志里，切开关的那个人就永远不知道消息为什么
+    不来。判据是审计表里真有这一行，不是「日志打了」。
+    """
+    binding_id = await _seed_binding(
+        engine, workspace_id, published_agent, transport="long_connection"
+    )
+
+    started = await scheduler_connections()
+
+    assert started == ()
+    refused = _only(await _connection_events(store), "not_started")
+    assert refused["binding"] == binding_id
+    assert refused["result"] == "failed"
+    reason = refused["context"]["reason"]
+    assert NO_CREDENTIALS_PHRASE in reason
+    assert UNRESOLVABLE_SECRET_PHRASE not in reason
+
+
+async def test_a_binding_whose_secret_was_disabled_says_so_where_the_console_reads(
+    store: SqlChannelBindingStore,
+    scheduler_connections: Callable[[], Awaitable[tuple[FeishuLongConnection, ...]]],
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+) -> None:
+    """凭据齐备，但引用的 Secret 在密钥页被禁用了。
+
+    这是控制台上点得到的那条路：切成长连接时校验通过（200），过几天有人把
+    那个 secret 禁掉，下次重启 scheduler 这个绑定就静悄悄地不起了。原因必须
+    和「压根没配凭据」分得开——两者的修法不一样：一个是去填凭据，一个是去
+    把这个 Secret 重新启用。
+    """
+    secret_id = await _stored_secret(
+        engine, workspace_id, "disabled-app-secret", status="disabled"
+    )
+    binding_id = await _seed_binding(
+        engine,
+        workspace_id,
+        published_agent,
+        transport="long_connection",
+        app_id="cli_disabled",
+        app_secret_ref=str(secret_id),
+    )
+
+    started = await scheduler_connections()
+
+    assert started == ()
+    refused = _only(await _connection_events(store), "not_started")
+    assert refused["binding"] == binding_id
+    assert refused["result"] == "failed"
+    reason = refused["context"]["reason"]
+    assert UNRESOLVABLE_SECRET_PHRASE in reason
+    assert NO_CREDENTIALS_PHRASE not in reason
+    # 光说「解析不出来」不够——要说是哪一个 Secret，读的人才知道去启用哪个。
+    assert refused["context"]["app_secret_ref"] == str(secret_id)
 
 
 async def _never_delivers(binding_id: UUID, envelope: dict[str, Any]) -> Claimed | Unreadable:
