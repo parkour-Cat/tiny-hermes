@@ -23,6 +23,7 @@ from lark_oapi.channel import (  # pyright: ignore[reportMissingTypeStubs]
 )
 
 from tiny_hermes.channels.application.webhook_service import Claimed, Unreadable
+from tiny_hermes.channels.domain._json import object_at, string_at
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,28 @@ def _envelope_of(frame: Any) -> dict[str, Any]:
     return cast(dict[str, Any], frame.raw)
 
 
+def _event_id_of(envelope: dict[str, Any]) -> str:
+    """Best-effort id for the one log line `on_frame` writes on failure.
+
+    Mirrors `event_from_envelope`'s two schema versions (`header.event_id`
+    for v2, top-level `uuid` for v1) using the same `object_at`/`string_at`
+    readers that function uses, rather than a second hand-rolled pair of
+    `isinstance` checks — this is not a claim that the envelope is
+    well-formed, only an attempt to name it so a failure can be found later.
+    A malformed envelope that carries neither is exactly the case worth
+    being able to search for, so it gets a literal placeholder rather than a
+    log line built with no event id in it at all.
+    """
+    header = object_at(envelope, "header")
+    event_id = string_at(header, "event_id") if header else None
+    if event_id is not None:
+        return event_id
+    top_level = string_at(envelope, "uuid")
+    if top_level is not None:
+        return top_level
+    return "<no event id>"
+
+
 class FeishuLongConnection:
     def __init__(self, binding: LongConnectionBinding, deliver: DeliverFrame) -> None:
         self._binding = binding
@@ -83,14 +106,30 @@ class FeishuLongConnection:
 
         异常在这里被吃掉而不是冒泡：一条读不懂或处理失败的消息若把连接带下去，
         之后所有消息都收不到，代价远大于丢这一条。日志是这条路径上唯一的痕迹，
-        所以它必须带上 `binding_id` 和事件 id。
+        所以它必须带上 `binding_id` 和事件 id——事件 id 在 `try` 之外先取好，
+        这样即使 `deliver` 本身炸了，日志里仍然有它，而不是只有
+        `binding_id` 却认不出是哪条消息。
+
+        `_envelope_of(frame)` 本身也可能失败（`frame.raw` 缺失或不是
+        `dict`）；这种连事件 id 都读不出来的帧不该在日志里静悄悄地什么都不
+        写，所以那种情况写一个占位符而不是省略这一行。
         """
         try:
-            await self._deliver(self._binding.binding_id, _envelope_of(frame))
+            envelope = _envelope_of(frame)
         except Exception:
             logger.exception(
-                "long connection frame not handled binding=%s",
+                "long connection frame not handled binding=%s event=<unreadable frame>",
                 self._binding.binding_id,
+            )
+            return
+
+        try:
+            await self._deliver(self._binding.binding_id, envelope)
+        except Exception:
+            logger.exception(
+                "long connection frame not handled binding=%s event=%s",
+                self._binding.binding_id,
+                _event_id_of(envelope),
             )
 
     async def run(self, stop: asyncio.Event) -> None:
@@ -102,12 +141,22 @@ class FeishuLongConnection:
         handing the event loop to the SDK. `disconnect()` in `finally` so a
         cancelled `stop.wait()` still closes the socket rather than leaking
         it.
+
+        `timeout=30` is spelled out rather than left to the SDK's own
+        default (which happens to also be 30) because what happens when it
+        expires is worth being explicit about: `_wait_background_start_ready`
+        (`lark_oapi/channel/channel.py`) stops the transport and raises
+        `FeishuChannelError(NOT_CONNECTED, "Timed out waiting for channel
+        transport readiness")`, which propagates out of this `run()` call
+        uncaught. Whoever hosts this adapter in the scheduler process is the
+        one who decides whether that means retry or give up — this method
+        does not swallow it.
         """
         channel = FeishuChannel(
             app_id=self._binding.app_id, app_secret=self._binding.app_secret
         )
         channel.on(Events.MESSAGE, self.on_frame)
-        await channel.connect_until_ready()
+        await channel.connect_until_ready(timeout=30)
         try:
             await stop.wait()
         finally:
