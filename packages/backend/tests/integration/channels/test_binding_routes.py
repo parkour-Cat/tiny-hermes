@@ -560,8 +560,8 @@ def test_a_transport_this_platform_has_no_code_for_is_refused_as_bad_input(
     CHECK 约束仍然是合法性的真相所在，但它是**兜底**：让请求一路走到
     `UPDATE` 再炸 `IntegrityError`，而全项目没有任何 `IntegrityError`
     处理器（`api/app.py` 只注册了 `AppError` 和 `AuditedDenial`），调用方
-    看到的就是 500。同一个模型上的 `max_length=32` 早就让 40 个字符干净地
-    回 422 了——`carrier_pigeon` 没有理由走另一条路。
+    看到的就是 500。挡在前面的是字段上的 `Literal`——这个字段没有长度限制，
+    422 全靠它。
     """
     created = _create(client, scope, published_agent, secret_ref)
     assert created.status_code == 201, created.text

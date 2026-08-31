@@ -232,7 +232,9 @@ export function ChannelsPage() {
   // transport in one save still has to save twice, because this does not
   // track the unsaved fields. The API validates the resulting binding
   // either way — this control only keeps the common case from having to be
-  // refused to learn why.
+  // refused to learn why. `channelTransportNeedsCredentials` is where that
+  // second save is spelled out, because a disabled option that does not
+  // un-disable when you fill the field it names looks broken otherwise.
   const canHoldLongConnection =
     editing !== null && editing.app_id !== null && editing.app_secret_ref !== null;
 
@@ -319,10 +321,19 @@ export function ChannelsPage() {
                 // This shows the **stored** value, which between a switch
                 // and the next scheduler restart is deliberately not the
                 // one in use — migration 0052's own docstring is about that
-                // gap. Hence the standing note beside a long connection:
-                // the post-save Alert is one dismissible boolean in
-                // component state, and after a reload nothing else on this
-                // page would record that a restart is still owed.
+                // gap.
+                //
+                // The note beside a long connection is unconditional, and
+                // it says what it can actually know: that this transport
+                // only comes into effect at a scheduler restart. It is
+                // **not** a record of a restart still being owed — a
+                // binding switched months ago and long since restarted
+                // shows the same line. Nothing on this page could tell the
+                // two apart: the response carries the stored transport and
+                // nothing about the running scheduler, and the post-save
+                // Alert above is a boolean in component state that a reload
+                // clears. Whoever wants the note to mean "still owed" has
+                // to give the API something to say it with.
                 title: t("channelTransport"),
                 dataIndex: "transport",
                 render: (value: string | undefined) =>

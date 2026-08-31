@@ -265,10 +265,31 @@ class ChannelBindingService:
         after_transport = changes.get("transport", existing.transport)
         after_app_id = changes.get("app_id", existing.app_id)
         after_app_secret = changes.get("app_secret_ref", existing.app_secret_ref)
-        if after_transport == "long_connection" and not (
-            after_app_id and after_app_secret
-        ):
-            raise ChannelTransportUnusable
+        if after_transport == "long_connection":
+            if not (after_app_id and after_app_secret):
+                raise ChannelTransportUnusable
+            # Non-empty is not the question the scheduler asks. It resolves
+            # the reference (`_long_connections` in `api/cli.py`), and
+            # `CredentialResolver.resolve` refuses a Secret that is missing
+            # *or* not `ACTIVE` — so a binding whose secret was disabled
+            # after it was named passes an is-it-set check and is then
+            # skipped at startup, which is the same dead configuration this
+            # branch exists to prevent. `secret_exists` asks by id and
+            # filters on `status = 'active'`, which is the same pair of
+            # conditions.
+            #
+            # Checked against the *result*, not against `changes`: the loop
+            # below only revalidates references this update mentions, so a
+            # reference that went stale while nobody was touching it is
+            # never looked at again. That reference is precisely the one a
+            # transport switch is about to depend on.
+            #
+            # `app_id` gets no equivalent check because there is nothing to
+            # check it against: it is the tenant's own identifier for the
+            # app, stored as metadata, and whether Feishu recognizes it is
+            # only answerable by the handshake itself.
+            if not await self.store.secret_exists(workspace_id, after_app_secret):
+                raise ChannelTransportUnusable
         for field in ("encrypt_key_ref", "app_secret_ref"):
             reference = changes.get(field)
             if reference and not await self.store.secret_exists(
