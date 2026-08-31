@@ -2,18 +2,42 @@
 
 两种 transport 共用同一个认领，所以第二条会被 `(binding_id, channel_event_id)`
 挡掉。若将来有人给长连接另写一份去重，这条测试会红——那正是它存在的理由。
+
+这条测试真的走两条 transport，不是调用两次 `accept_verified` 假装走了两条路：
+第一条通过 webhook 路径已经用的 `accept_verified`，第二条通过
+`FeishuLongConnection.on_frame`，`deliver` 接的是同一个真实 `service`。只断言
+`channel_events` 的行数不够——那个数字即使 `on_frame` 完全没调用 `deliver`
+（比如被另一份自己的去重直接吞掉）也照样是 1，因为第一条 webhook 投递已经写了
+那一行。所以还要断言 `on_frame` 那次投递本身确实抵达了共用的 `deliver`，并且
+它看到的是"这是重复"——见下面 `_events_for` 之前的两条断言。
 """
 
 import json
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
-from tiny_hermes.channels.application.webhook_service import Claimed, FeishuWebhookService
+from tiny_hermes.channels.application.webhook_service import (
+    Claimed,
+    FeishuWebhookService,
+    Unreadable,
+)
+from tiny_hermes.channels.infrastructure.feishu_long_connection import (
+    FeishuLongConnection,
+    LongConnectionBinding,
+)
 from tiny_hermes.channels.infrastructure.sql_channel_store import SqlChannelStore
+
+
+@dataclass
+class _Frame:
+    """`on_frame`只读`.raw` —— 见`feishu_long_connection._envelope_of`。"""
+
+    raw: dict[str, Any]
 
 
 def _text_message_envelope(text_body: str, *, event_id: str) -> dict[str, Any]:
@@ -30,8 +54,8 @@ async def _events_for(store: SqlChannelStore, binding_id: UUID, channel_event_id
     # A fresh connection would open its own transaction and, under READ
     # COMMITTED, might not see what `service` wrote through `store`'s session
     # if that session has not committed yet. Counting through the same
-    # session is what makes this see exactly what the two `accept_verified`
-    # calls above just did.
+    # session is what makes this see exactly what the two deliveries above
+    # just did.
     found = await store._session.execute(  # noqa: SLF001 # pyright: ignore[reportPrivateUsage]
         text(
             "SELECT count(*) FROM channel_events"
@@ -87,11 +111,33 @@ async def test_the_same_event_over_both_transports_makes_one_run(
     binding_id, _workspace_id = seeded_binding
     envelope = _text_message_envelope("hello", event_id="dup-1")
 
+    # 第一条：webhook 路径已经在用的那半——直接调用 `accept_verified`，就像
+    # `accept()` 验完签、解完密之后做的那样。
     first = await service.accept_verified(binding_id=binding_id, envelope=envelope)
-    second = await service.accept_verified(binding_id=binding_id, envelope=envelope)
+
+    # 第二条：真的经过适配器。`deliver` 就是这同一个 `service`，`results`
+    # 只是为了在断言里看见 `on_frame` 这次调用真正拿到的返回值——不是在
+    # 猜它会不会调用 `deliver`，是记录它调用之后发生了什么。
+    results: list[Claimed | Unreadable] = []
+
+    async def _deliver(binding_id: UUID, envelope: dict[str, Any]) -> Claimed | Unreadable:
+        result = await service.accept_verified(binding_id=binding_id, envelope=envelope)
+        results.append(result)
+        return result
+
+    binding = LongConnectionBinding(binding_id=binding_id, app_id="cli_x", app_secret="s")
+    adapter = FeishuLongConnection(binding, _deliver)
+    await adapter.on_frame(_Frame(raw=envelope))
 
     assert isinstance(first, Claimed)
-    assert isinstance(second, Claimed)
     assert first.claim_id is not None
+
+    # `on_frame` 必须真的抵达了共用的 `deliver`——如果它被自己的一份去重
+    # 拦在半路，`results` 会是空的，下面这行先红，而不是让人以为
+    # `_events_for` 那行的绿色就足够了。
+    assert len(results) == 1
+    second = results[0]
+    assert isinstance(second, Claimed)
     assert second.claim_id is None
+
     assert await _events_for(store, binding_id, "dup-1") == 1
