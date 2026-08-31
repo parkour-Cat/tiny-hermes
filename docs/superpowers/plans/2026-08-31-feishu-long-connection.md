@@ -677,6 +677,91 @@ git commit -m "feat(channels): 长连接和 webhook 共用认领之后的那一�
 
 ---
 
+### Task 6: 让 transport 这一列有人够得着
+
+**又一个计划缺陷补丁。** Task 2 加了 `channel_bindings.transport` 列、`ChannelBindingStore.set_transport`、
+和 `ChannelBindingView.transport`（它的 docstring 写着「What a console is shown」）。
+但是：
+
+- `ChannelBindingResponse`（`routes.py:238-262`）**把 `transport` 丢掉了**——控制台看不到
+  任何一个绑定当前用的是哪种 transport；
+- `UpdateChannelBindingRequest`（`routes.py:221-235`）不接受它，**没有任何 HTTP 路由**
+  调得到 `set_transport`（`grep set_transport` 只命中 store 实现、service 声明、和两条测试）。
+
+也就是说，今天要把一个绑定切成 `long_connection`，**只能直接改 SQL**。这条分支的整个
+意义是「不要公网入口也能收消息」，而开启它的开关没有装在任何人够得着的地方。这是这个
+项目最常见那个 bug 的第十二次。
+
+**Files:**
+- Modify: `packages/backend/src/tiny_hermes/channels/presentation/routes.py`
+- Test: `packages/backend/tests/integration/channels/test_binding_routes.py`
+- Modify: `apps/web/src/api/types.ts`、`apps/web/src/pages/ChannelsPage.tsx`
+- Test: `apps/web/src/pages/ChannelsPage.test.tsx`
+
+**走 PATCH，不新开路由。** `set_transport` 的 docstring 已经定了调子：它是
+`update_binding({"transport": ...})` 的一个薄名字，**不是第二条代码路径**，因为
+「CHECK 约束才是拒绝乱值的东西，走 `update_binding` 是让那一处保持唯一决定者」。
+所以在 `UpdateChannelBindingRequest` 上加一个 `transport: str | None`，其余不动。
+顺带更新那个 model 的 docstring——它现在写着「Credentials and `app_id`, and deliberately
+nothing else」，加完就是假话了；把「为什么 `agent_id`/`channel` 仍然不在」那段保留。
+
+**改 transport 要重启 scheduler，这句话必须出现在控制台里。** 平台不做热重载（Task 4
+的刻意决定）。用户在控制台把绑定切成 `long_connection`、以为立刻生效、然后消息不来
+——那是最坏的一种失败，因为它看起来像坏了而不是像没重启。scheduler 启动日志里已经有
+这句提示，但那是**运维看得到、点开关的人看不到**的地方。
+
+- [ ] **Step 1: 先写会红的后端测试**
+
+在 `test_binding_routes.py` 里加两条，都走**真实 HTTP 路由**（不要直接调 service——
+这条分支上已经有过一次「唯一断言措辞的测试绕开了路由」的教训）：
+
+```python
+async def test_a_binding_says_which_transport_it_receives_on() -> None:
+    """列表和详情都要带 transport：看不见当前值的开关，切换时等于蒙着眼睛点。"""
+
+async def test_switching_a_binding_to_the_long_connection_through_the_api() -> None:
+    """PATCH 一次，再 GET 一次——判据是读回来的值变了，不是 PATCH 返回了 200。"""
+```
+
+第二条**必须再 GET 一次**做断言，不能只信 PATCH 的响应体。
+
+- [ ] **Step 2: 跑它，确认它红**
+
+```bash
+uv run --no-sync pytest packages/backend/tests/integration/channels/test_binding_routes.py -q
+```
+Expected: 两条都 FAIL（响应体没有 `transport` 键；PATCH 被 Pydantic 拒绝或静默忽略）。
+
+- [ ] **Step 3: 提交红测试**
+
+```bash
+git add packages/backend/tests/integration/channels/test_binding_routes.py
+git commit -m "test(channels): transport 要能被看见、能被改"
+```
+
+- [ ] **Step 4: 后端实现，跑绿，提交**
+
+```bash
+git add packages/backend/src/tiny_hermes/channels/presentation/routes.py
+git commit -m "feat(channels): transport 进响应体，PATCH 改得动"
+```
+
+- [ ] **Step 5: 控制台：先写会红的测试**
+
+`ChannelsPage.test.tsx` 加两条：一条断言页面上**显示**了当前 transport；一条断言切换后
+**发出了带 `transport` 的 PATCH**，并且页面上**出现了「需要重启 scheduler 才生效」这句
+提示**。第三条断言不是装饰——它是这个改动唯一防止「切了没反应」的东西。
+
+- [ ] **Step 6: 跑它，确认它红**
+
+```bash
+pnpm --filter @tiny-hermes/web test
+```
+
+- [ ] **Step 7: 控制台实现，跑绿，分两次提交**（`test(web):` 在 `feat(web):` 之前）
+
+---
+
 ## 收尾
 
 - [ ] **本地全套**：`alembic check`、unit、integration、ruff、pyright、web、chat-web。
