@@ -566,6 +566,117 @@ git commit -m "feat(channels): 长连接住进 scheduler，断开与重连留下
 
 ---
 
+### Task 5: 让长连接收到的消息真的变成 Run
+
+**这个任务是计划的缺陷补丁，不是原计划的一部分。** Task 1 把 `accept()` 拆成
+「验签」+「归一化并认领」两段，并声称后一段是**两种 transport 共用的那一半**。
+它不是。Webhook 那条路在拿到 `Claimed` 之后还要做六件事，全在
+`FeishuChannelService.deliver`（`feishu_service.py:119-175`）里：
+
+- `Unreadable` → `record_unsupported`（否则发消息的人只等到静默）
+- `claim_id is None` → 去重命中，什么也不做
+- `ingestion.run_for(...)` → **这一步才产生 Run**
+- 命令而非 Run → `record_command_receipt`
+- `attach_run(claim_id, run_id)` → 出站队列的键，缺了就没人收到回复
+- `delivered.blocked` → `record_blocked_notice`
+
+长连接现在走到 `accept_verified` 就停了。结果是：消息落进 `channel_events`，
+**没有 Run，没有回复**。这正是这个项目最常见的那个 bug——写进去了不等于有人
+够得着，第十一次。分支唯一真正的验收（关掉隧道发一条消息、看它被回复）现在
+会在最后一步失败。
+
+**Files:**
+- Modify: `packages/backend/src/tiny_hermes/channels/application/feishu_service.py`
+- Modify: `packages/backend/src/tiny_hermes/api/cli.py`（`_deliver_via`，约 381-398 行）
+- Modify: `packages/backend/src/tiny_hermes/channels/infrastructure/feishu_long_connection.py`（`DeliverFrame` 的返回类型）
+- Test: `packages/backend/tests/integration/channels/test_long_connection_lifecycle.py`
+
+**Interfaces:**
+- Produces: `FeishuChannelService.deliver_verified(*, binding_id: UUID, envelope: dict[str, Any], request_id: str) -> Accepted`
+- Changes: `DeliverFrame.__call__` 的返回类型从 `Claimed | Unreadable` 改成 `Accepted`
+
+**接缝画在哪：** 把 `deliver()` 里 `outcome = await self._webhooks.accept(...)` **之后**
+的全部逻辑原样搬进 `_after_claim(binding, outcome, request_id) -> Accepted`，`deliver()`
+和新的 `deliver_verified()` 都调它。**搬，不要重写**——那一段里的每条注释都记着一次
+真实事故（`attach_run` 那条记的是「一次线上部署留下两个 `run_id` NULL 的认领，什么
+都没失败，因为没人读那一列」），重写会把它们弄丢。
+
+**`request_id` 用什么：** 长连接没有 HTTP 请求。用**飞书的事件 id**——它是这条路上
+唯一天然的关联键，而且 `_event_id_of` 已经能从信封里取出来。它只当字符串关联键用
+（进审计文本和 `/new` 的 escape hatch），不要求是 UUID。
+
+**同一个 session：** `_deliver_via` 里那个 per-frame session 现在要同时装下
+`SqlChannelStore`、`CredentialResolver`、`FeishuWebhookService`、`ChannelIngestion`
+——照 `resources.py:188` 的 `feishu_channel_service` 抄那张依赖图，它的 docstring 讲了
+为什么必须是一个 session：认领和它引出的 Run 必须一起提交或一起回滚。`cli.py` 已经
+import 了需要的每一样东西（`CredentialResolver`、`optional_kek`、`SqlSecretStore`、
+`SqlChannelStore`），只缺 `SqlEndUserStore`、`RunCoordination`、`SqlRunStore`、
+`ChannelIngestion`、`FeishuChannelService`。
+
+- [ ] **Step 1: 先写会红的测试**
+
+在 `test_long_connection_lifecycle.py` 里加一条。它必须断言**库里真的多了一个 Run，
+并且这个 Run 和那条认领连上了**——不要只断言 `deliver` 的返回值，那正是让前十次
+漏掉的写法：
+
+```python
+async def test_a_frame_over_the_long_connection_becomes_a_run(
+    engine: AsyncEngine, seeded_bindings_of_both_transports: ...
+) -> None:
+    """判据不是「deliver 返回了 Accepted」，是「有人够得着」：
+    `runs` 里多了一行，且 `channel_events.run_id` 指向它。少任何一半，
+    发消息的人都等不到回复。"""
+```
+
+用真实的飞书消息信封（文本消息）走 `_deliver_via(...)` 返回的那个 `deliver`。
+断言三件事，**按 id 找行，不要按下标**：
+1. `channel_events` 里那条认领的 `run_id` **不是 NULL**；
+2. `runs` 里存在该 id 的行；
+3. 它的 `session_id` 属于这个绑定对应的会话。
+
+- [ ] **Step 2: 跑它，确认它红**
+
+```bash
+uv run --no-sync pytest packages/backend/tests/integration/channels/test_long_connection_lifecycle.py::test_a_frame_over_the_long_connection_becomes_a_run -q
+```
+Expected: FAIL，`run_id` 是 `None`（不是报错，是断言失败）。**如果它直接绿了，
+说明你的信封没走到该走的地方，先查信封再往下。**
+
+- [ ] **Step 3: 提交这条红测试**
+
+```bash
+git add packages/backend/tests/integration/channels/test_long_connection_lifecycle.py
+git commit -m "test(channels): 长连接进来的一帧要变成 Run，不是只落一条认领"
+```
+
+- [ ] **Step 4: 抽出 `_after_claim`，加 `deliver_verified`**
+
+`feishu_service.py`：`deliver()` 保持行为不变（既有测试一条都不该改）。
+
+- [ ] **Step 5: `_deliver_via` 改成建整个 `FeishuChannelService` 并调 `deliver_verified`**
+
+顺带把它的 docstring 里那句「`accept_verified` only normalizes and claims (the half both
+transports share); it does not create a Run」改掉——**改完它就成假话了**，而这个项目有
+一条硬规矩：一条注释不得声称代码没有的保护，反过来也一样，注释不得描述代码已经不
+再做的事。
+
+- [ ] **Step 6: 跑测试，确认绿；再确认既有的 webhook 测试一条没坏**
+
+```bash
+uv run --no-sync pytest packages/backend/tests/integration/channels -q
+```
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add packages/backend/src/tiny_hermes/channels/application/feishu_service.py \
+        packages/backend/src/tiny_hermes/api/cli.py \
+        packages/backend/src/tiny_hermes/channels/infrastructure/feishu_long_connection.py
+git commit -m "feat(channels): 长连接和 webhook 共用认领之后的那一整段"
+```
+
+---
+
 ## 收尾
 
 - [ ] **本地全套**：`alembic check`、unit、integration、ruff、pyright、web、chat-web。
