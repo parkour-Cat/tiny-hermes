@@ -5,18 +5,36 @@ import signal
 import socket
 import uuid
 from collections.abc import Callable
+from typing import Any
 from uuid import UUID
 
 import uvicorn
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from tiny_hermes.audit.infrastructure.tables import AuditEventRow
 from tiny_hermes.channels.application.outbound import ChannelReplyDispatcher
+from tiny_hermes.channels.application.webhook_service import (
+    Claimed,
+    FeishuWebhookService,
+    Unreadable,
+)
+from tiny_hermes.channels.infrastructure.feishu_long_connection import (
+    DeliverFrame,
+    FeishuLongConnection,
+    LongConnectionBinding,
+    RecordConnectionEvent,
+)
 from tiny_hermes.channels.infrastructure.feishu_sender import FeishuSender
 from tiny_hermes.channels.infrastructure.run_images import ChannelImageSource
 from tiny_hermes.channels.infrastructure.sql_channel_store import SqlChannelStore
+from tiny_hermes.channels.infrastructure.tables import ChannelBindingRow
 from tiny_hermes.memory.infrastructure.run_searches import SqlRunSessionSearches
 from tiny_hermes.memory.infrastructure.sql_candidates import SqlMemoryCandidates
-from tiny_hermes.model_catalog.infrastructure.credentials import CredentialResolver
+from tiny_hermes.model_catalog.infrastructure.credentials import (
+    CredentialMissing,
+    CredentialResolver,
+)
 from tiny_hermes.outbound.client import EgressRoute, SafeOutboundClient
 from tiny_hermes.runs.application.model_router import ModelRouter
 from tiny_hermes.runs.application.scheduler import (
@@ -286,8 +304,9 @@ async def _scheduler() -> None:
     workspace = _workspace(settings)
     await _ensure_bucket(workspace)
     senders = _FeishuSenders(settings)
+    sessions = build_session_factory(settings)
     runtime = SchedulerRuntime(
-        session_factory=build_session_factory(settings),
+        session_factory=sessions,
         notifier=notifier,
         sandbox=_controller(settings),
         objects=None if workspace is None else workspace.objects,
@@ -298,13 +317,183 @@ async def _scheduler() -> None:
         ),
     )
     stop = _stop_on_termination()
-    logger.info("scheduler started")
+    # NOTE: read once, here, at process start. A binding created — or
+    # switched to `long_connection` — after this point gets no socket until
+    # the scheduler process is restarted; see `_long_connections`'s
+    # docstring for why that race is not worth solving.
+    connections = await _long_connections(settings, sessions)
+    logger.info(
+        "scheduler started: long_connection bindings=%d (a binding created or"
+        " switched to long_connection after startup needs a scheduler restart"
+        " to take effect)",
+        len(connections),
+    )
     try:
-        await runtime.run_forever(stop, settings.scheduler_interval_seconds)
+        await asyncio.gather(
+            runtime.run_forever(stop, settings.scheduler_interval_seconds),
+            # Shares `stop` with the main loop on purpose: a termination
+            # signal has to close both the lease/reply loop and every open
+            # socket together, rather than the main loop exiting first and
+            # leaving connections open until their own timeout.
+            *(_supervised_connection(connection, stop) for connection in connections),
+        )
     finally:
         await notifier.close()
         await senders.aclose()
     logger.info("scheduler stopped")
+
+
+async def _supervised_connection(
+    connection: FeishuLongConnection, stop: asyncio.Event
+) -> None:
+    """Retries a socket that fails to establish or drops out from under
+    `run()`, with backoff — instead of letting the exception propagate
+    into the `asyncio.gather` in `_scheduler`, which would cancel every
+    other connection and the lease/reply loop along with it.
+
+    `FeishuLongConnection.run`'s own docstring leaves the retry-or-give-up
+    call to whoever hosts it here; retrying with backoff, bounded by `stop`
+    so a shutdown mid-backoff exits promptly, is that decision. A bad
+    binding (wrong credentials, app not enabled for long connection) still
+    cannot send replies, cards, or receipts for anyone else — bringing the
+    whole process down over it would be strictly worse than logging and
+    trying again.
+    """
+    delay = 5.0
+    max_delay = 300.0
+    while not stop.is_set():
+        try:
+            await connection.run(stop)
+            return
+        except Exception:
+            logger.exception(
+                "long connection failed binding=%s, retrying in %.0fs",
+                connection.binding_id,
+                delay,
+            )
+        if stop.is_set():
+            return
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=delay)
+        delay = min(delay * 2, max_delay)
+
+
+def _deliver_via(sessions: async_sessionmaker[AsyncSession]) -> DeliverFrame:
+    """One `deliver`, shared by every long-connection binding.
+
+    A fresh session per frame — not the session `_long_connections` used to
+    read bindings and resolve credentials, which is long closed by the time
+    a real frame arrives. `accept_verified` only normalizes and claims (the
+    half both transports share); it does not create a Run.
+    """
+
+    async def deliver(binding_id: UUID, envelope: dict[str, Any]) -> Claimed | Unreadable:
+        async with sessions() as session:
+            outcome = await FeishuWebhookService(SqlChannelStore(session)).accept_verified(
+                binding_id=binding_id, envelope=envelope
+            )
+            await session.commit()
+            return outcome
+
+    return deliver
+
+
+def _connection_event_recorder(
+    sessions: async_sessionmaker[AsyncSession], workspace_id: UUID
+) -> RecordConnectionEvent:
+    """Writes disconnect/reconnect events into the same `audit_events` table
+    the console's audit page already reads and renders — not a new table
+    with no reader. §19.2's later redelivery check needs `down_seconds` to
+    be something a person can actually go look at, and `context` is already
+    served by `/api/v1/audit-events` and rendered as a column in
+    `AuditPage.tsx`, so a row landing here reaches someone the moment it is
+    written rather than only existing as an INSERT.
+
+    `actor_type="platform"`, following `sandbox/cli.py`'s `_AuditSink`:
+    no user asked for this reconnect, the socket did it on its own.
+    """
+
+    async def record(binding_id: UUID, kind: str, down_seconds: float | None) -> None:
+        async with sessions() as session:
+            session.add(
+                AuditEventRow(
+                    workspace_id=workspace_id,
+                    actor_type="platform",
+                    actor_id=None,
+                    action=f"channel.long_connection.{kind}",
+                    resource_type="channel_binding",
+                    resource_id=binding_id,
+                    result="succeeded",
+                    request_id=f"long-connection-{binding_id}-{kind}-{uuid.uuid4().hex[:8]}",
+                    context={} if down_seconds is None else {"down_seconds": down_seconds},
+                )
+            )
+            await session.commit()
+
+    return record
+
+
+async def _long_connections(
+    settings: Settings, sessions: async_sessionmaker[AsyncSession]
+) -> tuple[FeishuLongConnection, ...]:
+    """The long-connection bindings this scheduler process holds a socket
+    for — read once, at process start, never polled again.
+
+    `run_forever` already owns the process's one recurring loop, and
+    teaching this to notice a binding created (or switched to
+    `long_connection`) after startup would mean answering what happens to a
+    handshake in flight when its binding disappears mid-connect. That race
+    is not worth solving for an edit this infrequent, so it is not solved:
+    **a binding change needs a scheduler restart** — `_scheduler`'s startup
+    log line says so, because a user who edits a binding and sees nothing
+    happen needs to know this before assuming it is broken.
+
+    Credentials are resolved inside the same session that just read the
+    row, not a resolver built after that session closes — a resolver built
+    later answers `CredentialMissing` for every id (the bug
+    `fix(channels): resolve the image secret through a real session` fixed
+    for the image-fetch path).
+    """
+    kek = optional_kek(settings.tiny_hermes_kek)
+    deliver = _deliver_via(sessions)
+    connections: list[FeishuLongConnection] = []
+    async with sessions() as session:
+        rows = (
+            await session.scalars(
+                select(ChannelBindingRow).where(
+                    ChannelBindingRow.transport == "long_connection",
+                    ChannelBindingRow.status == "active",
+                )
+            )
+        ).all()
+        credentials = CredentialResolver(SqlSecretStore(session), kek)
+        for row in rows:
+            if row.app_id is None or row.app_secret_ref is None:
+                logger.warning(
+                    "long connection binding %s has no app credentials"
+                    " configured, skipping",
+                    row.id,
+                )
+                continue
+            try:
+                secret = await credentials.resolve(row.app_secret_ref)
+            except CredentialMissing:
+                logger.exception(
+                    "long connection binding %s: app secret unavailable,"
+                    " skipping",
+                    row.id,
+                )
+                continue
+            connections.append(
+                FeishuLongConnection(
+                    LongConnectionBinding(
+                        binding_id=row.id, app_id=row.app_id, app_secret=secret
+                    ),
+                    deliver,
+                    record=_connection_event_recorder(sessions, row.workspace_id),
+                )
+            )
+    return tuple(connections)
 
 
 class _FeishuSenders:

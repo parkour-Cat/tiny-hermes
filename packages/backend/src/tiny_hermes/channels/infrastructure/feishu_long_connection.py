@@ -13,6 +13,8 @@ without a database.
 
 import asyncio
 import logging
+import time
+from collections.abc import Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 from uuid import UUID
@@ -55,6 +57,21 @@ class DeliverFrame(Protocol):
     async def __call__(
         self, binding_id: UUID, envelope: dict[str, Any]
     ) -> Claimed | Unreadable: ...
+
+
+class RecordConnectionEvent(Protocol):
+    """Only the question this adapter is allowed to ask about persistence for
+    a connection's own lifecycle — deliberately the same narrowing as
+    `DeliverFrame`. `down_seconds` is `None` for the `"disconnected"` event
+    (the outage has not ended yet) and a real, non-negative number for the
+    matching `"reconnected"` event; §19.2's future redelivery check has
+    nothing to reason from without that number, so this is not an optional
+    extra field.
+    """
+
+    async def __call__(
+        self, binding_id: UUID, kind: str, down_seconds: float | None
+    ) -> None: ...
 
 
 def _envelope_of(frame: Any) -> dict[str, Any]:
@@ -114,9 +131,33 @@ def _event_id_of(envelope: Any) -> str:
 
 
 class FeishuLongConnection:
-    def __init__(self, binding: LongConnectionBinding, deliver: DeliverFrame) -> None:
+    def __init__(
+        self,
+        binding: LongConnectionBinding,
+        deliver: DeliverFrame,
+        *,
+        record: RecordConnectionEvent | None = None,
+    ) -> None:
         self._binding = binding
         self._deliver = deliver
+        self._record = record
+        #: Set while the socket is down, cleared on reconnect — the only
+        #: thing this timestamp is for is computing `down_seconds` when the
+        #: matching `"reconnected"` event is recorded. `None` otherwise, so
+        #: `_record_reconnected` can tell "was down" from "was already up"
+        #: (the SDK could in principle fire `reconnected` without a prior
+        #: `reconnecting` on this instance's watch — nothing in its source
+        #: rules that out — and manufacturing a duration for an outage this
+        #: adapter never saw the start of would be worse than recording
+        #: none).
+        self._down_since: float | None = None
+        #: Handlers registered on `Events.RECONNECTING`/`RECONNECTED` are
+        #: called synchronously with no arguments (see `run`'s docstring on
+        #: `_on_reconnecting`) — they cannot themselves be `async def` and
+        #: awaited, so the actual recording runs as a background task. Held
+        #: here so `run`'s `finally` can wait for whatever is still in
+        #: flight instead of abandoning it mid-write when the socket closes.
+        self._background: set[asyncio.Task[None]] = set()
         #: `on_frame` never clears this on a delivery failure — that is the
         #: one guarantee this attribute carries right now. Nothing else in
         #: this adapter writes to it either, so it does not yet reflect
@@ -124,6 +165,12 @@ class FeishuLongConnection:
         #: up to the SDK's own `reconnecting`/`error` events is for whoever
         #: hosts this in the scheduler process to decide, not this adapter.
         self.alive = True
+
+    @property
+    def binding_id(self) -> UUID:
+        """Exposed read-only so the process hosting this adapter can log and
+        retry per-binding without reaching into a private attribute."""
+        return self._binding.binding_id
 
     async def on_frame(self, frame: Any) -> None:
         """把一帧交给两种 transport 共用的那一半。
@@ -162,6 +209,65 @@ class FeishuLongConnection:
                 event_id,
             )
 
+    async def _record_disconnected(self) -> None:
+        """Marks the outage's start and writes the `"disconnected"` event.
+
+        Recorded with `down_seconds=None` rather than waiting to write a
+        single row once the duration is known: a socket that never
+        reconnects — the process is killed, the tenant revokes the app —
+        would otherwise leave no trace at all that anything went down.
+        """
+        self._down_since = time.monotonic()
+        if self._record is None:
+            return
+        try:
+            await self._record(self._binding.binding_id, "disconnected", None)
+        except Exception:
+            logger.exception(
+                "failed to record disconnect binding=%s", self._binding.binding_id
+            )
+
+    async def _record_reconnected(self) -> None:
+        """Closes out the outage `_record_disconnected` opened.
+
+        `down_seconds` is only meaningful when this instance actually saw
+        the outage start (`_down_since` set); `max(0.0, ...)` guards against
+        a negative reading from `time.monotonic()` behaving unexpectedly
+        across a suspend/resume, since a negative duration would be a worse
+        answer for §19.2's redelivery check than a slightly-off positive one.
+        """
+        down_since, self._down_since = self._down_since, None
+        down_seconds = None if down_since is None else max(0.0, time.monotonic() - down_since)
+        if self._record is None:
+            return
+        try:
+            await self._record(self._binding.binding_id, "reconnected", down_seconds)
+        except Exception:
+            logger.exception(
+                "failed to record reconnect binding=%s", self._binding.binding_id
+            )
+
+    def _fire(self, coro: Coroutine[Any, Any, None]) -> None:
+        task = asyncio.ensure_future(coro)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    def _on_reconnecting(self) -> None:
+        """`FeishuChannel`'s `_notify_reconnecting` (see
+        `lark_oapi/channel/channel.py`) calls a registered handler as `h()` —
+        synchronous, zero arguments, and never awaited even if `h` were a
+        coroutine function. An `async def` registered directly here would
+        build a coroutine object that nothing ever runs, so this stays a
+        plain function that schedules the real (async) recording work
+        instead of doing it inline.
+        """
+        self._fire(self._record_disconnected())
+
+    def _on_reconnected(self) -> None:
+        """Mirror of `_on_reconnecting` — see its docstring for why this
+        cannot itself be `async def`."""
+        self._fire(self._record_reconnected())
+
     async def run(self, stop: asyncio.Event) -> None:
         """Own one `FeishuChannel` for the lifetime of this call.
 
@@ -186,8 +292,12 @@ class FeishuLongConnection:
             app_id=self._binding.app_id, app_secret=self._binding.app_secret
         )
         channel.on(Events.MESSAGE, self.on_frame)
+        channel.on(Events.RECONNECTING, self._on_reconnecting)
+        channel.on(Events.RECONNECTED, self._on_reconnected)
         await channel.connect_until_ready(timeout=30)
         try:
             await stop.wait()
         finally:
             await channel.disconnect()
+            if self._background:
+                await asyncio.gather(*self._background, return_exceptions=True)
