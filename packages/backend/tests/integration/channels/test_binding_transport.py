@@ -2,6 +2,10 @@
 
 默认 `webhook`：既有绑定靠公网地址收消息，默认值若是长连接，它们会在升级的
 那一刻集体失聪。
+
+走 `update_binding`，因为那是 PATCH 路由真正走的那条路。这里曾经调一个专门的
+`set_transport`，而它在生产里一个调用方也没有——一条只被测试吊着命的路径，
+测的就不是任何人会走的东西。
 """
 
 from collections.abc import AsyncIterator
@@ -66,7 +70,7 @@ async def test_a_binding_can_declare_long_connection(
 ) -> None:
     binding_id, workspace_id = seeded_binding
 
-    await store.set_transport(workspace_id, binding_id, "long_connection")
+    await store.update_binding(workspace_id, binding_id, {"transport": "long_connection"})
 
     binding = await store.binding(workspace_id, binding_id)
     assert binding is not None
@@ -79,4 +83,6 @@ async def test_an_invented_transport_is_refused(
     binding_id, workspace_id = seeded_binding
 
     with pytest.raises(IntegrityError):
-        await store.set_transport(workspace_id, binding_id, "carrier_pigeon")
+        await store.update_binding(
+            workspace_id, binding_id, {"transport": "carrier_pigeon"}
+        )

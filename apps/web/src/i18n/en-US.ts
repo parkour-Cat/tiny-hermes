@@ -268,6 +268,8 @@ export const enUS: Record<MessageKey, string> = {
   channelTransportWebhook: "Webhook",
   channelTransportLongConnection: "Long connection",
   channelTransportRestartHint: "Switching transport does not take effect right away — the scheduler has to restart before it uses the new channel, and saving does not restart it for you.",
+  channelTransportRestartRequired: "Takes effect after the scheduler restarts",
+  channelTransportNeedsCredentials: "A long connection opens a WebSocket with this binding's app id and app secret reference. With either one missing the scheduler skips the binding: it looks switched on and no messages arrive. Add both before switching.",
   identityProviders: "Identity providers",
   identityProvidersIntro: "Which OIDC providers this deployment lets people sign in with.",
   identityProvidersEmpty: "No provider is registered — people sign in with a local password.",

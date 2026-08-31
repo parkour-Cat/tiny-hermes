@@ -449,7 +449,11 @@ def test_an_unknown_binding_cannot_be_updated(
 def test_a_binding_says_which_transport_it_receives_on(
     client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
 ) -> None:
-    """列表和详情都要带 transport：看不见当前值的开关，切换时等于蒙着眼睛点。"""
+    """创建响应体和列表都要带 transport：看不见当前值的开关，切换时等于蒙着眼睛点。
+
+    没有 `GET /{binding_id}` 详情路由（这个资源只有 POST、GET 列表、PATCH 和
+    POST disable），所以「详情」在这里就是 201 的响应体本身。
+    """
     created = _create(client, scope, published_agent, secret_ref)
     assert created.status_code == 201, created.text
     binding_id = created.json()["id"]
@@ -463,8 +467,16 @@ def test_a_binding_says_which_transport_it_receives_on(
 def test_switching_a_binding_to_the_long_connection_through_the_api(
     client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
 ) -> None:
-    """PATCH 一次，再 GET 一次——判据是读回来的值变了，不是 PATCH 返回了 200。"""
-    created = _create(client, scope, published_agent, secret_ref)
+    """PATCH 一次，再 GET 一次——判据是读回来的值变了，不是 PATCH 返回了 200。
+
+    绑定带着 `app_id` 和 `app_secret_ref` 建出来，因为长连接是**拿这两样去
+    握手**的：没有它们，scheduler 会跳过这个绑定（`api/cli.py` 的
+    `continue`），切过去只会得到一个看起来正常、实际收不到消息的配置。
+    """
+    created = _create(
+        client, scope, published_agent, secret_ref, app_secret_ref=secret_ref
+    )
+    assert created.status_code == 201, created.text
     binding_id = created.json()["id"]
 
     patched = client.patch(
@@ -477,3 +489,110 @@ def test_switching_a_binding_to_the_long_connection_through_the_api(
     listed = client.get("/api/v1/channel-bindings", headers=scope).json()
     row = next(item for item in listed if item["id"] == binding_id)
     assert row["transport"] == "long_connection"
+
+
+def test_the_long_connection_is_refused_without_app_credentials(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """收信专用绑定切长连接必须被拒。
+
+    长连接靠 `app_id` + app secret 换 token 建 WebSocket；没有它们，
+    `_long_connections`（`api/cli.py`）只会写一行 warning 然后 `continue`。
+    如果这里放行，控制台会显示「长连接」、提示去重启 scheduler、管理员照做，
+    然后消息永远不来——一个没有任何界面能解释的死配置。
+    """
+    created = _create(client, scope, published_agent, secret_ref)
+    assert created.status_code == 201, created.text
+    assert created.json()["app_secret_ref"] is None
+    binding_id = created.json()["id"]
+
+    refused = client.patch(
+        f"/api/v1/channel-bindings/{binding_id}",
+        headers=scope,
+        json={"transport": "long_connection"},
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["code"] == "channel_transport_unusable"
+    listed = client.get("/api/v1/channel-bindings", headers=scope).json()
+    row = next(item for item in listed if item["id"] == binding_id)
+    assert row["transport"] == "webhook"
+
+
+def test_a_long_connection_binding_cannot_have_its_app_secret_cleared(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """另一个方向的同一件事：判据是**改完之后**的状态。
+
+    绑定已经在长连接上跑着，这次 PATCH 只清 `app_secret_ref`——没提
+    `transport`，但结果一样是一个 scheduler 会跳过的绑定。
+    """
+    created = _create(
+        client, scope, published_agent, secret_ref, app_secret_ref=secret_ref
+    )
+    assert created.status_code == 201, created.text
+    binding_id = created.json()["id"]
+    switched = client.patch(
+        f"/api/v1/channel-bindings/{binding_id}",
+        headers=scope,
+        json={"transport": "long_connection"},
+    )
+    assert switched.status_code == 200, switched.text
+
+    refused = client.patch(
+        f"/api/v1/channel-bindings/{binding_id}",
+        headers=scope,
+        json={"app_secret_ref": None},
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["code"] == "channel_transport_unusable"
+    listed = client.get("/api/v1/channel-bindings", headers=scope).json()
+    row = next(item for item in listed if item["id"] == binding_id)
+    assert row["app_secret_ref"] == secret_ref
+
+
+def test_a_transport_this_platform_has_no_code_for_is_refused_as_bad_input(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """乱值是 422，不是 500。
+
+    CHECK 约束仍然是合法性的真相所在，但它是**兜底**：让请求一路走到
+    `UPDATE` 再炸 `IntegrityError`，而全项目没有任何 `IntegrityError`
+    处理器（`api/app.py` 只注册了 `AppError` 和 `AuditedDenial`），调用方
+    看到的就是 500。同一个模型上的 `max_length=32` 早就让 40 个字符干净地
+    回 422 了——`carrier_pigeon` 没有理由走另一条路。
+    """
+    created = _create(client, scope, published_agent, secret_ref)
+    assert created.status_code == 201, created.text
+    binding_id = created.json()["id"]
+
+    refused = client.patch(
+        f"/api/v1/channel-bindings/{binding_id}",
+        headers=scope,
+        json={"transport": "carrier_pigeon"},
+    )
+
+    assert refused.status_code == 422, refused.text
+
+
+def test_transport_cannot_be_cleared_because_there_is_no_such_state(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """`null` 对这个字段没有含义——列是 `NOT NULL`（migration 0052）。
+
+    模型的 docstring 说「a field sent as `null` is cleared」，对凭据字段成立，
+    对 `transport` 不成立：清空它没有任何对应的状态，而未捕获的
+    `IntegrityError` 会把它变成 500。
+    """
+    created = _create(client, scope, published_agent, secret_ref)
+    assert created.status_code == 201, created.text
+    binding_id = created.json()["id"]
+
+    refused = client.patch(
+        f"/api/v1/channel-bindings/{binding_id}",
+        headers=scope,
+        json={"transport": None},
+    )
+
+    assert refused.status_code == 422, refused.text
