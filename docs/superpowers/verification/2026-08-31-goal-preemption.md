@@ -14,7 +14,7 @@ integration       944 passed, 2 failed（见 §2）
 ruff / pyright   clean
 web              236 passed
 chat-web          53 passed
-compose-e2e      <FILL>
+compose-e2e       18 passed (2.7m)
 ```
 
 ## 2. 那 2 条失败是环境
@@ -51,7 +51,10 @@ compose 准备的 `.env`，其中的 `EGRESS_PROXY_URL` 让「没有出口边界
 
 ## 5. 这一遍没能证明什么
 
-- **`compose-e2e` <FILL>。**
+- **`compose-e2e` 绿了，但它一条让位都没测。** run `33343173587`（PR 触发那次），
+  `18 passed (2.7m)`，已用 `gh run view --log | grep "^compose-e2e"` 确认是真跑了测试
+  而不是只返回 success。但 `tests/e2e/` 里没有任何一条会让一个 Run 续跑到中途再收到
+  消息。**它证明的是这条分支没有弄坏别的东西，不是让位能用。**
 - **没有任何一个洞是测试发现的。** 三个都是有人逐行追代码追出来的。这个功能的正确性
   目前靠的是评审，不是测试套件。
 - **时间戳的竞态没有关闭。** `created_at` 与 `started_at` 都在处理器入口取值而非提交
