@@ -384,7 +384,10 @@ class _FakeChannel:
     def on(self, event: str, handler: Any) -> None:
         self._handlers.setdefault(event, []).append(handler)
 
-    async def connect_until_ready(self, *, timeout: float | None = None) -> None:
+    # ASYNC109: the parameter is not this fake's design, it is
+    # `FeishuChannel.connect_until_ready`'s signature, which `run()` calls
+    # with `timeout=30`. Renaming it would make the stand-in stop standing in.
+    async def connect_until_ready(self, *, timeout: float | None = None) -> None:  # noqa: ASYNC109
         del timeout
         self.connects += 1
         if self._connect_error is not None:

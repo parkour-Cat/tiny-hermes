@@ -344,12 +344,26 @@ async def _scheduler() -> None:
 
 
 async def _supervised_connection(
-    connection: FeishuLongConnection, stop: asyncio.Event
+    connection: FeishuLongConnection,
+    stop: asyncio.Event,
+    *,
+    first_delay: float = 5.0,
+    max_delay: float = 300.0,
 ) -> None:
-    """Retries a socket that fails to establish or drops out from under
-    `run()`, with backoff — instead of letting the exception propagate
-    into the `asyncio.gather` in `_scheduler`, which would cancel every
-    other connection and the lease/reply loop along with it.
+    """Retries a socket that **fails to establish**, with backoff — instead
+    of letting the exception propagate into the `asyncio.gather` in
+    `_scheduler`, which would cancel every other connection and the
+    lease/reply loop along with it.
+
+    Establishing is all it covers, and the narrowness is not an oversight
+    worth papering over with a wider promise: once `connect_until_ready`
+    has returned, a drop is handled entirely inside the SDK's own thread
+    (`_receive_message_loop` → `_reconnect` in `lark_oapi/ws/client.py`),
+    and when the SDK finally gives up, the `ServerUnreachableException` it
+    raises dies in a task on the ws loop. Nothing surfaces from
+    `connection.run(stop)`, which stays parked on `stop.wait()` holding a
+    dead socket. **This function will not notice that and nothing else
+    currently does** — a liveness check is a real gap, not a covered case.
 
     `FeishuLongConnection.run`'s own docstring leaves the retry-or-give-up
     call to whoever hosts it here; retrying with backoff, bounded by `stop`
@@ -357,10 +371,21 @@ async def _supervised_connection(
     binding (wrong credentials, app not enabled for long connection) still
     cannot send replies, cards, or receipts for anyone else — bringing the
     whole process down over it would be strictly worse than logging and
-    trying again.
+    trying again. Each attempt writes its own `connect_failed` audit row
+    from inside `run()`, so a binding that never comes up is visible to
+    someone reading the console rather than only to whoever tails the
+    scheduler container's logs.
+
+    The two delays are a judgment call, not a requirement — the plan gives
+    no numbers. 5s so a Feishu blip or a scheduler that started before the
+    network did recovers within one attempt instead of sitting out a long
+    first backoff; 300s as the ceiling because the failures that survive
+    several retries are configuration (secret wrong, app not enabled for
+    long connection) and those are fixed by a human, at which point the
+    scheduler is restarted anyway — polling faster than every five minutes
+    only fills the audit log while nobody is looking.
     """
-    delay = 5.0
-    max_delay = 300.0
+    delay = first_delay
     while not stop.is_set():
         try:
             await connection.run(stop)
@@ -411,6 +436,11 @@ def _connection_event_recorder(
 
     `actor_type="platform"`, following `sandbox/cli.py`'s `_AuditSink`:
     no user asked for this reconnect, the socket did it on its own.
+
+    `down_seconds` is always written, `None` included. Dropping the key
+    when there is no number made "the outage's length is not known" and
+    "this row carries no context at all" the same row to whoever reads
+    `/api/v1/audit-events` — and the second is what a reader assumes.
     """
 
     async def record(binding_id: UUID, kind: str, down_seconds: float | None) -> None:
@@ -423,9 +453,13 @@ def _connection_event_recorder(
                     action=f"channel.long_connection.{kind}",
                     resource_type="channel_binding",
                     resource_id=binding_id,
-                    result="succeeded",
+                    # The audit page renders `result` next to the action. A
+                    # connection that came back up is the only one of these
+                    # three kinds that ended well; calling the other two
+                    # "succeeded" would put a green word next to an outage.
+                    result="succeeded" if kind == "reconnected" else "failed",
                     request_id=f"long-connection-{binding_id}-{kind}-{uuid.uuid4().hex[:8]}",
-                    context={} if down_seconds is None else {"down_seconds": down_seconds},
+                    context={"down_seconds": down_seconds},
                 )
             )
             await session.commit()
