@@ -4,6 +4,7 @@
 测试不需要数据库，也不该需要。
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
@@ -28,9 +29,14 @@ class _Frame:
 
     真实的 `InboundMessage` 还有 `chat_id`、`content_text` 等字段，这里不需要：
     `on_frame` 从不读它们，加上反而会让这个测试看起来在断言 SDK 的整个形状。
+
+    `raw` 的类型是 `Any` 而不是 `dict[str, Any]`——`on_frame` 拿到的
+    `frame.raw` 也没有静态类型保证，SDK 交上来的东西不受这个模块控制，
+    下面 `test_a_non_dict_raw_still_leaves_one_log_line` 就是在验证「不是
+    `dict`」这个真实可能发生的情况。
     """
 
-    raw: dict[str, Any]
+    raw: Any
 
 
 def _frame(payload: dict[str, Any]) -> _Frame:
@@ -92,3 +98,27 @@ async def test_a_failing_frame_does_not_kill_the_connection(
     await adapter.on_frame(_frame({"header": {"event_id": "e2"}}))
 
     assert adapter.alive is True
+
+
+async def test_a_non_dict_raw_still_leaves_one_log_line(
+    deliver_boom: _DeliverBoom, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`frame.raw` not being a `dict` is exactly the "frame this build cannot
+    read" case `on_frame` exists to survive. A version that only `cast()`s
+    it without checking lets a non-dict through as if it were the envelope;
+    `deliver_boom` then fails on it, and the failure path itself reads the
+    envelope again to find an event id to log — on a non-dict, that second
+    read is what used to raise and skip the log line entirely, escaping
+    `on_frame` as an unhandled `AttributeError` instead of being caught by
+    its own `except Exception`. Both promises the docstring makes — nothing
+    escapes, and every failure gets exactly one log line — are pinned here
+    together, because the earlier bug broke both at once.
+    """
+    binding = LongConnectionBinding(binding_id=uuid4(), app_id="cli_x", app_secret="s")
+    adapter = FeishuLongConnection(binding, deliver_boom)
+
+    with caplog.at_level(logging.ERROR):
+        await adapter.on_frame(_Frame(raw="not a dict"))
+
+    assert adapter.alive is True
+    assert len(caplog.records) == 1
