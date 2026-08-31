@@ -444,3 +444,36 @@ def test_an_unknown_binding_cannot_be_updated(
     )
 
     assert missing.status_code == 404, missing.text
+
+
+def test_a_binding_says_which_transport_it_receives_on(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """列表和详情都要带 transport：看不见当前值的开关，切换时等于蒙着眼睛点。"""
+    created = _create(client, scope, published_agent, secret_ref)
+    assert created.status_code == 201, created.text
+    binding_id = created.json()["id"]
+
+    assert created.json()["transport"] == "webhook"
+    listed = client.get("/api/v1/channel-bindings", headers=scope).json()
+    row = next(item for item in listed if item["id"] == binding_id)
+    assert row["transport"] == "webhook"
+
+
+def test_switching_a_binding_to_the_long_connection_through_the_api(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """PATCH 一次，再 GET 一次——判据是读回来的值变了，不是 PATCH 返回了 200。"""
+    created = _create(client, scope, published_agent, secret_ref)
+    binding_id = created.json()["id"]
+
+    patched = client.patch(
+        f"/api/v1/channel-bindings/{binding_id}",
+        headers=scope,
+        json={"transport": "long_connection"},
+    )
+    assert patched.status_code == 200, patched.text
+
+    listed = client.get("/api/v1/channel-bindings", headers=scope).json()
+    row = next(item for item in listed if item["id"] == binding_id)
+    assert row["transport"] == "long_connection"
