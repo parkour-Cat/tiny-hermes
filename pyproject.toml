@@ -13,6 +13,11 @@ dependencies = [
     # A runtime dependency since phase 3A: `tiny_hermes.outbound` is the one
     # place allowed to build an HTTP client, and it is production code.
     "httpx>=0.28.1",
+    # Spec §19.2's default transport for a private deployment: a WebSocket
+    # long connection instead of a public webhook address. This SDK is what
+    # authenticates a long-connection frame before it ever reaches
+    # `accept_verified` — see channels/infrastructure/feishu_long_connection.py.
+    "lark-oapi>=1.7.2",
     "minio>=7.2.20",
     "pwdlib[argon2]>=0.3.0",
     "pydantic-settings>=2.15.0",
