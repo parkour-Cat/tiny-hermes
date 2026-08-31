@@ -596,3 +596,70 @@ def test_transport_cannot_be_cleared_because_there_is_no_such_state(
     )
 
     assert refused.status_code == 422, refused.text
+
+
+def test_the_long_connection_is_refused_when_the_named_secret_no_longer_resolves(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """引用非空不等于引用还解析得出来。
+
+    `_long_connections`（`api/cli.py`）有**两个** `continue`：一个是
+    `app_id`/`app_secret_ref` 为 null，另一个是 `credentials.resolve()` 抛
+    `CredentialMissing`——而 `status is not ACTIVE` 也算
+    （`model_catalog/infrastructure/credentials.py`）。只堵住第一个，同一个
+    死配置还是造得出来：把 secret disable 掉再切长连接，控制台显示「长连接」、
+    挂着重启提示、管理员照做，scheduler 在第二个 `continue` 上写一行
+    `logger.exception` 然后跳过，消息永远不来。
+
+    也不能只校验这次 PATCH 里出现的引用：`channel_key_unknown` 那个循环读的是
+    `changes`，一个这次没被碰到的失效引用永远不会被重新校验，而它正是这里
+    唯一的 app secret。
+    """
+    created = _create(
+        client, scope, published_agent, secret_ref, app_secret_ref=secret_ref
+    )
+    assert created.status_code == 201, created.text
+    binding_id = created.json()["id"]
+    disabled = client.post(f"/api/v1/secrets/{secret_ref}/disable", headers=scope)
+    assert disabled.status_code == 200, disabled.text
+    assert disabled.json()["status"] == "disabled"
+
+    refused = client.patch(
+        f"/api/v1/channel-bindings/{binding_id}",
+        headers=scope,
+        json={"transport": "long_connection"},
+    )
+
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["code"] == "channel_transport_unusable"
+    listed = client.get("/api/v1/channel-bindings", headers=scope).json()
+    row = next(item for item in listed if item["id"] == binding_id)
+    assert row["transport"] == "webhook"
+
+
+def test_creating_a_binding_refuses_a_field_it_would_otherwise_swallow(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    """请求被接受、字段被丢掉、状态码是成功——三件事不能同时发生。
+
+    `CreateChannelBindingRequest` 没有 `transport`，也没有 `extra="forbid"`
+    （这个 repo 别处用了，见 `agents/domain/models.py`），所以带上它会拿到
+    201 和一个 `transport: "webhook"` 的响应体。POST 上不接 `transport` 是
+    有意的——真要接，after-state 校验也得搬进 `create()`——但「不接」必须说
+    出来，而不是默默吃掉。
+    """
+    created = client.post(
+        "/api/v1/channel-bindings",
+        headers=scope,
+        json={
+            "channel": "feishu",
+            "agent_id": published_agent,
+            "app_id": "cli_a1b2c3",
+            "encrypt_key_ref": secret_ref,
+            "app_secret_ref": secret_ref,
+            "transport": "long_connection",
+        },
+    )
+
+    assert created.status_code == 422, created.text
+    assert client.get("/api/v1/channel-bindings", headers=scope).json() == []
