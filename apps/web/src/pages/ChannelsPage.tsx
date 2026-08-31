@@ -40,7 +40,17 @@ export function ChannelsPage() {
   // an edit form that started empty would look like it was about to clear
   // everything it did not mention.
   const [editing, setEditing] = useState<ChannelBindingResponse | null>(null);
-  const [editForm] = Form.useForm<{ appId: string; encryptKeyRef: string; appSecretRef?: string }>();
+  const [editForm] = Form.useForm<{
+    appId: string;
+    encryptKeyRef: string;
+    appSecretRef?: string;
+    transport: string;
+  }>();
+  // Set once a PATCH actually changed `transport`, and left up rather than a
+  // toast: the platform does not hot-reload transports (Task 4's deliberate
+  // choice), so a person who switched this and stopped looking at the screen
+  // a second later must still find the warning there.
+  const [transportRestartHint, setTransportRestartHint] = useState(false);
 
 
   const bindingsQuery = ["channel-bindings", workspaceId] as const;
@@ -154,7 +164,12 @@ export function ChannelsPage() {
   });
 
   const rewire = useMutation({
-    mutationFn: (values: { appId: string; encryptKeyRef: string; appSecretRef?: string }) => {
+    mutationFn: (values: {
+      appId: string;
+      encryptKeyRef: string;
+      appSecretRef?: string;
+      transport: string;
+    }) => {
       const current = editing;
       if (current === null) throw new Error("no binding is open");
       // Only what actually changed. Resubmitting the whole form would send
@@ -169,13 +184,22 @@ export function ChannelsPage() {
       if ((values.appSecretRef ?? null) !== current.app_secret_ref) {
         changes.app_secret_ref = values.appSecretRef ?? null;
       }
+      if (values.transport !== current.transport) {
+        changes.transport = values.transport;
+      }
       return api<ChannelBindingResponse>(`/api/v1/channel-bindings/${current.id}`, {
         ...scope,
         method: "PATCH",
         body: JSON.stringify(changes),
       });
     },
-    onSuccess: () => {
+    onSuccess: (updated) => {
+      // Compared against the binding the dialog was opened on, not against
+      // the form's own dirty-tracking: `editing` is still that pre-update
+      // row here, one line above where it gets replaced.
+      if (editing !== null && updated.transport !== editing.transport) {
+        setTransportRestartHint(true);
+      }
       setEditing(null);
       editForm.resetFields();
       void queryClient.invalidateQueries({ queryKey: bindingsQuery });
@@ -215,6 +239,20 @@ export function ChannelsPage() {
           {t("bindChannel")}
         </Button>
       </div>
+
+      {transportRestartHint ? (
+        // Left up until dismissed, not a toast: the scheduler does not
+        // hot-reload transports, so the moment this matters is after the
+        // dialog has already closed and the person has moved on.
+        <Alert
+          type="warning"
+          showIcon
+          closable
+          className="page-alert"
+          message={t("channelTransportRestartHint")}
+          onClose={() => setTransportRestartHint(false)}
+        />
+      ) : null}
 
       <Card loading={bindings.isPending} variant="borderless">
         {rows.length === 0 ? (
@@ -267,6 +305,21 @@ export function ChannelsPage() {
                     <Tag color="green">{t("channelCanReply")}</Tag>
                   ),
               },
+              {
+                // Until this route existed, the only way to see which
+                // transport a binding used was to read the row in Postgres.
+                // Switching it here is meaningless without also being able
+                // to see, before touching anything, which one is live.
+                title: t("channelTransport"),
+                dataIndex: "transport",
+                render: (value: string) => (
+                  <Tag>
+                    {value === "long_connection"
+                      ? t("channelTransportLongConnection")
+                      : t("channelTransportWebhook")}
+                  </Tag>
+                ),
+              },
               { title: t("channelStatus"), dataIndex: "status", render: (v: string) => <Tag>{v}</Tag> },
               { title: t("channelBoundAt"), dataIndex: "created_at", render: (v: string) => moment(v) },
               {
@@ -290,6 +343,7 @@ export function ChannelsPage() {
                             ...(row.app_secret_ref === null
                               ? {}
                               : { appSecretRef: row.app_secret_ref }),
+                            transport: row.transport,
                           });
                         }}
                       >
@@ -497,6 +551,20 @@ export function ChannelsPage() {
             <Select
               allowClear
               options={usable.map((secret) => ({ value: secret.id, label: secret.name }))}
+            />
+          </Form.Item>
+          {/* The restart warning is not here as `extra`: it needs to survive
+              this dialog closing (`onSuccess` closes it immediately), so it
+              is a page-level Alert set from `rewire`'s `onSuccess` instead —
+              see `transportRestartHint` above. Duplicating the text in both
+              places would leave two matches for one string the moment this
+              modal's close animation overlaps the Alert appearing. */}
+          <Form.Item name="transport" label={t("channelTransport")} rules={[{ required: true }]}>
+            <Select
+              options={[
+                { value: "webhook", label: t("channelTransportWebhook") },
+                { value: "long_connection", label: t("channelTransportLongConnection") },
+              ]}
             />
           </Form.Item>
         </Form>

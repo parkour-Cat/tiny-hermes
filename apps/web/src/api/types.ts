@@ -362,6 +362,12 @@ export type ChannelBindingResponse = {
   encrypt_key_ref: string | null;
   /** The app secret this binding replies with, by reference. Null = receive-only. */
   app_secret_ref: string | null;
+  /**
+   * `webhook` or `long_connection` — which inbound transport this binding
+   * receives events over. Switching it does not take effect until the
+   * scheduler restarts; the platform does not hot-reload transports.
+   */
+  transport: string;
   created_by: string;
   created_at: string;
 };
