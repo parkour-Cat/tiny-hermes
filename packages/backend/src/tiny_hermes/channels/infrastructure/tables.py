@@ -37,6 +37,10 @@ class ChannelBindingRow(IdMixin, CreatedAtMixin, Base):
             "channel <> 'feishu' OR encrypt_key_ref IS NOT NULL",
             name="ck_channel_bindings_feishu_is_encrypted",
         ),
+        CheckConstraint(
+            "transport IN ('webhook', 'long_connection')",
+            name="ck_channel_bindings_transport",
+        ),
         Index("ix_channel_bindings_workspace", "workspace_id", "channel"),
     )
 
@@ -57,6 +61,15 @@ class ChannelBindingRow(IdMixin, CreatedAtMixin, Base):
     #: state — §929's drill needs one — and the outbound sender refuses when
     #: this is absent rather than the schema forbidding the binding.
     app_secret_ref: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    #: Which inbound transport this binding receives events over — see
+    #: migration 0052. Default `webhook` is not a preference between the two
+    #: transports; it is upgrade safety. Every binding that exists before
+    #: this column does is receiving messages through a public webhook
+    #: address right now, and a default of `long_connection` would make this
+    #: column lie about that from the moment the migration ran.
+    transport: Mapped[str] = mapped_column(
+        String(32), default="webhook", server_default="webhook"
+    )
 
 
 class ChannelEventRow(IdMixin, Base):

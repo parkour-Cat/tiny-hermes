@@ -75,6 +75,11 @@ class ChannelBindingView:
     #: The app secret this binding replies with, by reference. Absent for a
     #: receive-only binding.
     app_secret_ref: str | None
+    #: `webhook` or `long_connection` — which inbound transport this binding
+    #: receives events over. See migration 0052 for why an existing row
+    #: reads back `webhook` rather than the design doc's recommended
+    #: default for new deployments.
+    transport: str
     created_by: UUID
     created_at: datetime
 
@@ -114,6 +119,15 @@ class ChannelBindingStore(Protocol):
         binding_id: UUID,
         changes: dict[str, str | None],
     ) -> ChannelBindingView | None: ...
+
+    async def set_transport(
+        self, workspace_id: UUID, binding_id: UUID, transport: str
+    ) -> ChannelBindingView | None:
+        """Thin name for `update_binding({"transport": ...})`. Not a second
+        code path: the CHECK constraint is what refuses an invented value,
+        and routing this through `update_binding` is what keeps that the
+        only place that decides."""
+        ...
 
     async def disable_binding(
         self, workspace_id: UUID, binding_id: UUID
