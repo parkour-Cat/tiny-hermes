@@ -67,6 +67,25 @@ KEK = b"\x00" * 32
 #: the assertion below, short enough not to slow the suite down.
 OUTAGE_SECONDS = 0.2
 
+#: The retry backoff the supervisor tests run with, in place of the real
+#: 5s/300s. Two of these have to elapse before the connect that succeeds, so
+#: it also doubles as the floor a measured outage has to clear.
+BACKOFF_SECONDS = 0.02
+
+#: How many failed connects a persistent outage is driven through before the
+#: audit rows are counted. More than two, because "one row per attempt" and
+#: "two rows per outage" are indistinguishable at two.
+ATTEMPTS = 4
+
+#: A recording slow enough that `run()`'s shutdown path is still waiting on
+#: it when the late callback below fires.
+SLOW_RECORD_SECONDS = 0.2
+
+#: When the fake fires its post-`disconnect()` callback. Comfortably inside
+#: the window above, so the race is exercised on every run rather than
+#: occasionally.
+LATE_SIGNAL_SECONDS = 0.05
+
 
 @dataclass
 class _Frame:
@@ -370,10 +389,14 @@ class _FakeChannel:
         *,
         connect_error: BaseException | None = None,
         reconnecting_before_error: bool = False,
+        disconnect_error: BaseException | None = None,
+        late_signal_delay: float | None = None,
     ) -> None:
         self._handlers: dict[str, list[Any]] = {}
         self._connect_error = connect_error
         self._reconnecting_before_error = reconnecting_before_error
+        self._disconnect_error = disconnect_error
+        self._late_signal_delay = late_signal_delay
         self._ws = _LoopThread("fake-lark-ws")
         self._bg = _LoopThread("fake-lark-channel-bg")
         self._closed = False
@@ -401,6 +424,23 @@ class _FakeChannel:
 
     async def disconnect(self) -> None:
         self.disconnects += 1
+        if self._late_signal_delay is not None:
+            # Deliberately leaves the ws loop running and queues one more
+            # callback on it without waiting: `_stop_private_ws_client`
+            # (`lark_oapi/channel/channel.py`) only *asks* the SDK's
+            # module-level ws loop to stop and never joins it, so a callback
+            # landing after `disconnect()` has returned is reachable. Whether
+            # that recording survives is the adapter's problem, not the
+            # caller's, which is exactly what the test using this asserts.
+            self._ws.submit(self._notify_after(self._late_signal_delay, Events.RECONNECTED))
+            return
+        self.close_loops()
+        if self._disconnect_error is not None:
+            raise self._disconnect_error
+
+    def close_loops(self) -> None:
+        """Idempotent, and separate from `disconnect()` so a test that made
+        `disconnect()` leave the loops running can still clean them up."""
         if self._closed:
             return
         self._closed = True
@@ -413,6 +453,14 @@ class _FakeChannel:
                 handler()
 
         await asyncio.wrap_future(self._ws.submit(_call()))
+
+    async def _notify_after(self, delay: float, event: str) -> None:
+        """Runs on the ws loop's own thread — the point being that the
+        adapter hears from a foreign thread after it has begun shutting
+        down."""
+        await asyncio.sleep(delay)
+        for handler in self._handlers.get(event, []):
+            handler()
 
     async def signal_drop(self) -> None:
         await self._notify(Events.RECONNECTING)
@@ -439,16 +487,35 @@ class _FakeChannels:
         *,
         connect_error: BaseException | None = None,
         reconnecting_before_error: bool = False,
+        disconnect_error: BaseException | None = None,
+        late_signal_delay: float | None = None,
+        failures_before_success: int | None = None,
     ) -> None:
         self._connect_error = connect_error
         self._reconnecting_before_error = reconnecting_before_error
+        self._disconnect_error = disconnect_error
+        self._late_signal_delay = late_signal_delay
+        #: `None` means the failure never ends. A number means the outage
+        #: recovers on the attempt after that many — `run()` builds exactly
+        #: one channel per attempt, so counting constructions counts attempts.
+        self._failures_before_success = failures_before_success
+        self._built = 0
         self.channels: list[_FakeChannel] = []
 
     def __call__(self, *, app_id: str, app_secret: str) -> _FakeChannel:
         del app_id, app_secret
+        self._built += 1
+        connect_error = self._connect_error
+        if (
+            self._failures_before_success is not None
+            and self._built > self._failures_before_success
+        ):
+            connect_error = None
         channel = _FakeChannel(
-            connect_error=self._connect_error,
+            connect_error=connect_error,
             reconnecting_before_error=self._reconnecting_before_error,
+            disconnect_error=self._disconnect_error,
+            late_signal_delay=self._late_signal_delay,
         )
         self.channels.append(channel)
         return channel
@@ -641,7 +708,7 @@ async def test_a_connection_that_cannot_connect_does_not_stop_the_scheduler(
     assert ticks >= 2, "the main loop stopped ticking while the connection failed"
 
 
-async def test_a_failed_connect_leaves_a_trace_and_no_leaked_channel(
+async def test_a_failed_connect_leaves_no_leaked_channel_and_no_disconnect_row(
     store: SqlChannelBindingStore,
     scheduler_connections: Callable[[], Awaitable[tuple[FeishuLongConnection, ...]]],
     seeded_bindings_of_both_transports: tuple[UUID, UUID],
@@ -663,13 +730,184 @@ async def test_a_failed_connect_leaves_a_trace_and_no_leaked_channel(
         await connection.run(asyncio.Event())
 
     assert channels.disconnects == 1
+    # One attempt writes nothing at all. A socket that never came up has not
+    # "disconnected" — the word implies an outage with a start instant to
+    # measure a later `down_seconds` from — and whether a *failed connect* is
+    # worth a row depends on whether it is the first of a run of them, which
+    # only the retry loop knows. The two tests below own that half.
+    assert await _connection_events(store) == []
+
+
+async def test_an_outage_that_keeps_failing_is_capped_at_one_audit_row(
+    store: SqlChannelBindingStore,
+    scheduler_connections: Callable[[], Awaitable[tuple[FeishuLongConnection, ...]]],
+    seeded_bindings_of_both_transports: tuple[UUID, UUID],
+    sdk_channels: Callable[..., _FakeChannels],
+) -> None:
+    """一行审计对应一段故障，不是对应一次重试。
+
+    退避封顶 300s、重试永不停止，所以「每轮写一行」在稳态是约 262 行/天/绑定，
+    而 `audit_events` 没有任何保留期或清理（`event_retention_hours` 管的是
+    `run_events`）。填错一次 app secret，四小时后这个 workspace 的审计页第一页
+    就全是 `connect_failed`——那正是 `_supervised_connection` 声称要照顾的那个
+    「读控制台的人」再也读不到别的东西的时候。
+    """
+    channels = sdk_channels(
+        connect_error=FeishuChannelError(
+            FeishuChannelErrorCode.NOT_CONNECTED, "WebSocket connect failed"
+        )
+    )
+    (connection,) = await scheduler_connections()
+    stop = asyncio.Event()
+
+    async def stop_once_it_has_tried_a_few_times() -> None:
+        await channels.attempted(ATTEMPTS)
+        stop.set()
+
+    await asyncio.gather(
+        _supervised_connection(
+            connection, stop, first_delay=BACKOFF_SECONDS, max_delay=BACKOFF_SECONDS
+        ),
+        stop_once_it_has_tried_a_few_times(),
+    )
+
+    assert channels.connects >= ATTEMPTS, "gave up instead of retrying"
     events = await _connection_events(store)
-    failed = _only(events, "connect_failed")
-    assert failed["result"] == "failed"
-    # A socket that never came up has not "disconnected", and the outage the
-    # word implies has no start instant to measure a later `down_seconds`
-    # from. §19.2's redelivery check reads these rows.
+    # Two rows cap an outage, and this one never ended — so only the left
+    # edge exists yet, however many attempts went into it.
     assert [event["kind"] for event in events] == ["connect_failed"]
+    assert _only(events, "connect_failed")["result"] == "failed"
+
+
+async def test_an_outage_that_ends_is_closed_out_with_how_long_it_lasted(
+    store: SqlChannelBindingStore,
+    scheduler_connections: Callable[[], Awaitable[tuple[FeishuLongConnection, ...]]],
+    seeded_bindings_of_both_transports: tuple[UUID, UUID],
+    sdk_channels: Callable[..., _FakeChannels],
+) -> None:
+    """封顶两行的第二行不是可选的。
+
+    §19.2 的补投检查要靠这一对行读出停机窗口。只写 `connect_failed` 就封顶，
+    等于把「淹掉的审计页」换成「量不出任何东西的审计页」——一个只有左边界的
+    窗口什么也说明不了。
+    """
+    channels = sdk_channels(
+        connect_error=FeishuChannelError(
+            FeishuChannelErrorCode.NOT_CONNECTED, "WebSocket connect failed"
+        ),
+        failures_before_success=2,
+    )
+    (connection,) = await scheduler_connections()
+    stop = asyncio.Event()
+    supervised = asyncio.create_task(
+        _supervised_connection(
+            connection, stop, first_delay=BACKOFF_SECONDS, max_delay=BACKOFF_SECONDS
+        )
+    )
+
+    await channels.connected()
+    stop.set()
+    await supervised
+
+    events = await _connection_events(store)
+    assert sorted(event["kind"] for event in events) == ["connect_failed", "reconnected"]
+    recovered = _only(events, "reconnected")
+    assert recovered["result"] == "succeeded"
+    # Measured across the whole run of failures, not from the attempt that
+    # finally worked: two backoffs had to elapse before it.
+    assert recovered["context"]["down_seconds"] >= BACKOFF_SECONDS
+
+
+async def test_a_retry_on_the_same_instance_does_not_inherit_the_last_rounds_state(
+    store: SqlChannelBindingStore,
+    scheduler_connections: Callable[[], Awaitable[tuple[FeishuLongConnection, ...]]],
+    seeded_bindings_of_both_transports: tuple[UUID, UUID],
+    sdk_channels: Callable[..., _FakeChannels],
+) -> None:
+    """`_supervised_connection` 在**同一个实例**上循环调 `run()`。
+
+    所以一次 `run()` 抛出并**不**结束这个实例的 watch，而「连上过」这个标志
+    如果跨轮存活，下一轮压根没起来的 socket 就会被 `_on_reconnecting` 当成
+    「掉线」记一行——一句关于一个从未存在过的连接的谎。现实中最可能触发它的
+    是 `finally` 里的 `channel.disconnect()` 自己抛，所以这里就这么造。
+    """
+    up_then_broken = sdk_channels(disconnect_error=RuntimeError("socket teardown failed"))
+    (connection,) = await scheduler_connections()
+    stop = asyncio.Event()
+    running = asyncio.create_task(connection.run(stop))
+
+    await up_then_broken.connected()
+    stop.set()
+    with pytest.raises(RuntimeError):
+        await running
+
+    sdk_channels(
+        connect_error=FeishuChannelError(
+            FeishuChannelErrorCode.NOT_CONNECTED, "WebSocket connect failed"
+        ),
+        reconnecting_before_error=True,
+    )
+    with pytest.raises(FeishuChannelError):
+        await connection.run(asyncio.Event())
+
+    assert await _connection_events(store) == []
+
+
+async def test_a_recording_that_starts_while_run_is_draining_is_still_written(
+    store: SqlChannelBindingStore,
+    sdk_channels: Callable[..., _FakeChannels],
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+) -> None:
+    """`run()` 的 `finally` 说它等「还在途中的任何一个」写完。
+
+    一次性快照等不到在 `gather` 期间才进来的那个：SDK 的 ws loop 是 import 期
+    建的模块级 loop，`_stop_private_ws_client` 只是 best-effort 停它、不 join，
+    所以 `disconnect()` 返回之后仍可能有一次回调落进来。它落进来时快照已经取
+    完了，于是 `run()` 带着一个在途的事务返回，`asyncio.run` 拆 loop 把那个
+    task 当 pending 销毁——事务回滚，审计行没了，只留下一行谁也定位不到的
+    "Task was destroyed but it is pending"。
+    """
+    binding_id = await _seed_binding(
+        engine, workspace_id, published_agent, transport="long_connection", app_id="cli_late"
+    )
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    written = _connection_event_recorder(sessions, UUID(workspace_id))
+    order: list[str] = []
+
+    async def slow_record(binding_id: UUID, kind: str, down_seconds: float | None) -> None:
+        await asyncio.sleep(SLOW_RECORD_SECONDS)
+        await written(binding_id, kind, down_seconds)
+        order.append(kind)
+
+    async def never_delivers(binding_id: UUID, envelope: dict[str, Any]) -> Claimed | Unreadable:
+        raise AssertionError("this test never sends a frame")
+
+    connection = FeishuLongConnection(
+        LongConnectionBinding(binding_id=binding_id, app_id="cli_late", app_secret="s"),
+        never_delivers,
+        record=slow_record,
+    )
+    channels = sdk_channels(late_signal_delay=LATE_SIGNAL_SECONDS)
+    stop = asyncio.Event()
+    running = asyncio.create_task(connection.run(stop))
+
+    channel = await channels.connected()
+    await channel.signal_drop()
+    stop.set()
+    await running
+    order.append("returned")
+
+    try:
+        # Ordering, not just presence: reading the rows takes a moment of its
+        # own, and a `run()` that returned early would sometimes find the row
+        # arriving during that moment and pass for the wrong reason.
+        assert order == ["disconnected", "reconnected", "returned"]
+        events = await _connection_events(store)
+        assert _only(events, "reconnected")["result"] == "succeeded"
+    finally:
+        channel.close_loops()
 
 
 async def test_a_binding_whose_secret_cannot_be_resolved_is_skipped(
