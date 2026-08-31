@@ -170,6 +170,15 @@ class FeishuWebhookService:
     ) -> Claimed | Unreadable:
         """Normalize, then claim — the half both transports share.
 
+        **The caller must already have established that the envelope is
+        authentic.** This method cannot: it has no key and no signature to
+        check one against. `accept()` verifies before calling; a
+        long-connection frame is verified by Feishu's SDK before the adapter
+        hands it over. A third caller that skipped that step would let an
+        attacker choose the `event_id` and, by claiming it first, suppress a
+        real delivery — which is why the combined method verified before
+        normalizing, and why the name alone is not the protection.
+
         No `encrypt_key` in the signature, and none should ever land here:
         a long-connection frame arrives already decrypted by Feishu's SDK,
         so this method never touches a ciphertext byte. Accepting a key it
