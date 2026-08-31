@@ -43,6 +43,7 @@ from tiny_hermes.api.cli import (
     _long_connections,  # noqa: SLF001 # pyright: ignore[reportPrivateUsage]
     _supervised_connection,  # noqa: SLF001 # pyright: ignore[reportPrivateUsage]
 )
+from tiny_hermes.channels.application.outbound import ChannelReplyDispatcher
 from tiny_hermes.channels.application.webhook_service import Claimed, Unreadable
 from tiny_hermes.channels.infrastructure import feishu_long_connection
 from tiny_hermes.channels.infrastructure.feishu_long_connection import (
@@ -50,7 +51,10 @@ from tiny_hermes.channels.infrastructure.feishu_long_connection import (
     LongConnectionBinding,
 )
 from tiny_hermes.channels.infrastructure.sql_binding_store import SqlChannelBindingStore
+from tiny_hermes.channels.infrastructure.sql_channel_store import SqlChannelStore
+from tiny_hermes.model_catalog.infrastructure.credentials import CredentialResolver
 from tiny_hermes.secrets.domain.envelope import seal
+from tiny_hermes.secrets.infrastructure.sql_store import SqlSecretStore
 from tiny_hermes.shared.config import Settings
 
 from ..conftest import VALID_SPEC
@@ -637,6 +641,239 @@ async def test_a_frame_arriving_on_the_sdk_loop_reaches_channel_events(
     # swallows every exception, so the only evidence that the claim actually
     # happened is the row.
     assert await _claimed_event_count(store, long_id, "lc-1") == 1
+
+
+async def _deliver_one_frame(
+    scheduler_connections: Callable[[], Awaitable[tuple[FeishuLongConnection, ...]]],
+    sdk_channels: Callable[..., _FakeChannels],
+    *,
+    body: str,
+    event_id: str,
+) -> None:
+    """One real frame, all the way through whatever `_scheduler` wired.
+
+    Through `_long_connections` rather than a hand-built adapter, for the
+    same reason `scheduler_connections` exists: the two tests below are
+    about what production hands the adapter as its `deliver`, so building
+    one here would make them pass regardless of that wiring.
+    """
+    channels = sdk_channels()
+    (connection,) = await scheduler_connections()
+    stop = asyncio.Event()
+    running = asyncio.create_task(connection.run(stop))
+    channel = await channels.connected()
+    await channel.deliver_frame(_Frame(raw=_text_message_envelope(body, event_id=event_id)))
+    stop.set()
+    await running
+
+
+async def _claim_and_run(
+    engine: AsyncEngine, binding_id: UUID, channel_event_id: str
+) -> tuple[UUID, UUID | None]:
+    """The claim this delivery took, and the Run attached to it.
+
+    Found by `(channel_binding_id, channel_event_id)` — the pair
+    `claim_delivery` is unique on — rather than by reading the newest row:
+    `channel_events` is ordered by `created_at` with no tiebreaker, so a
+    positional read names a different row on a different run.
+    """
+    async with engine.connect() as connection:
+        found = await connection.execute(
+            text(
+                "SELECT id, run_id FROM channel_events"
+                " WHERE channel_binding_id = :b AND channel_event_id = :e"
+            ),
+            {"b": binding_id, "e": channel_event_id},
+        )
+        claim_id, run_id = found.one()
+    return claim_id, run_id
+
+
+async def test_a_frame_over_the_long_connection_becomes_a_run(
+    engine: AsyncEngine,
+    seeded_bindings_of_both_transports: tuple[UUID, UUID],
+    scheduler_connections: Callable[[], Awaitable[tuple[FeishuLongConnection, ...]]],
+    sdk_channels: Callable[..., _FakeChannels],
+) -> None:
+    """判据不是「deliver 返回了 Accepted」，是「有人够得着」：`runs` 里多了
+    一行，且 `channel_events.run_id` 指向它。少任何一半，发消息的人都等不到
+    回复——出站扫描认的就是 `run_id` 那一列。
+
+    第三条断言（Run 的 Session 就是这个绑定给这位发件人记的那个）是防止
+    「有一个 Run」被一个属于别人的 Run 满足：`channel_conversations` 是
+    下一条消息续上同一段对话的依据，也是回复找得到收件人的依据。
+    """
+    _webhook_id, long_id = seeded_bindings_of_both_transports
+
+    await _deliver_one_frame(
+        scheduler_connections, sdk_channels, body="上周几单？", event_id="lc-run-1"
+    )
+
+    _claim_id, run_id = await _claim_and_run(engine, long_id, "lc-run-1")
+    assert run_id is not None
+    async with engine.connect() as connection:
+        found = await connection.execute(
+            text("SELECT session_id FROM runs WHERE id = :r"), {"r": run_id}
+        )
+        session_id = found.scalar_one()
+        conversation = await connection.execute(
+            text(
+                "SELECT session_id FROM channel_conversations"
+                " WHERE channel_binding_id = :b AND external_user_id = 'ou_zhang'"
+            ),
+            {"b": long_id},
+        )
+    assert conversation.scalar_one() == session_id
+
+
+class _RecordingSender:
+    """A `ChannelSenders`/`ChannelSender` that records instead of calling
+    Feishu — the same stand-in `test_reply_dispatch` uses, kept minimal
+    here because this file asserts only that something was sent, and to
+    whom, not what the cards look like.
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, str]] = []
+
+    def __call__(self, workspace_id: UUID, /) -> "_RecordingSender":
+        del workspace_id
+        return self
+
+    def after_opening(self) -> list[dict[str, str]]:
+        """Everything but the card every delivery opens with.
+
+        Identified by the `:c` delivery-key suffix, as `test_reply_dispatch`
+        does: without this, "something was sent" is satisfied by the opening
+        card alone and the answer itself could still be going nowhere.
+        """
+        return [entry for entry in self.sent if not entry["delivery_key"].endswith(":c")]
+
+    async def send_text(
+        self,
+        *,
+        app_id: str,
+        app_secret: str,
+        open_id: str,
+        text: str,
+        delivery_key: str | None = None,
+    ) -> None:
+        self.sent.append(
+            {
+                "app_id": app_id,
+                "app_secret": app_secret,
+                "open_id": open_id,
+                "text": text,
+                "delivery_key": delivery_key or "",
+            }
+        )
+
+    async def send_card(
+        self,
+        *,
+        app_id: str,
+        app_secret: str,
+        open_id: str,
+        card: dict[str, Any],
+        delivery_key: str | None = None,
+    ) -> str | None:
+        self.sent.append(
+            {
+                "app_id": app_id,
+                "app_secret": app_secret,
+                "open_id": open_id,
+                "text": json.dumps(card, ensure_ascii=False),
+                "delivery_key": delivery_key or "",
+            }
+        )
+        return "om_card"
+
+    async def update_card(
+        self, *, app_id: str, app_secret: str, message_id: str, card: dict[str, Any]
+    ) -> None:
+        self.sent.append(
+            {
+                "app_id": app_id,
+                "app_secret": app_secret,
+                "open_id": "",
+                "text": json.dumps(card, ensure_ascii=False),
+                "delivery_key": "",
+            }
+        )
+
+
+async def _finish(engine: AsyncEngine, run_id: UUID, *, said: str) -> None:
+    """What the Worker does at the end of a Run, in one statement — the same
+    stand-in `test_reply_dispatch._finish` uses. Driving a real model here
+    would test the Worker, which has its own suite."""
+    async with engine.begin() as connection:
+        row = await connection.execute(
+            text("SELECT session_id, workspace_id FROM runs WHERE id = :r"), {"r": run_id}
+        )
+        session_id, workspace_id = row.one()
+        await connection.execute(
+            text("UPDATE runs SET status = 'completed', finished_at = now() WHERE id = :r"),
+            {"r": run_id},
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO session_messages"
+                " (id, session_id, workspace_id, sequence, role, content,"
+                "  source_run_id, redacted, created_at)"
+                " VALUES (gen_random_uuid(), :s, :w,"
+                "  (SELECT coalesce(max(sequence), 0) + 1 FROM session_messages"
+                "   WHERE session_id = :s), 'assistant', :c, :r, false, now())"
+            ),
+            {
+                "s": session_id,
+                "w": workspace_id,
+                "c": json.dumps({"parts": [{"type": "text", "text": said}]}),
+                "r": run_id,
+            },
+        )
+
+
+async def test_the_answer_to_a_long_connection_message_reaches_its_sender(
+    engine: AsyncEngine,
+    seeded_bindings_of_both_transports: tuple[UUID, UUID],
+    scheduler_connections: Callable[[], Awaitable[tuple[FeishuLongConnection, ...]]],
+    sdk_channels: Callable[..., _FakeChannels],
+) -> None:
+    """分支唯一真正的验收，缩到一条测试里：隧道不在了，消息还是被回答。
+
+    出站扫描不认 transport，它认 `channel_events.run_id`——所以这条测试守的
+    是「认领和 Run 连上了」这件事对**发消息的人**意味着什么，而不只是那一列
+    非空。断言落在 sender 上，因为「平台记录了它回复过」正是这个仓库已经相信
+    过五次、而对面什么都没收到的那句话。
+    """
+    _webhook_id, long_id = seeded_bindings_of_both_transports
+
+    await _deliver_one_frame(
+        scheduler_connections, sdk_channels, body="上周几单？", event_id="lc-reply-1"
+    )
+    _claim_id, run_id = await _claim_and_run(engine, long_id, "lc-reply-1")
+    assert run_id is not None, "no Run to finish: the inbound half never got that far"
+    await _finish(engine, run_id, said="上周有 12 单。")
+
+    sender = _RecordingSender()
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as db:
+        dispatched = await ChannelReplyDispatcher(
+            store=SqlChannelStore(db),
+            resolve_secret=CredentialResolver(SqlSecretStore(db), KEK).resolve,
+            senders=sender,
+        ).dispatch_once()
+        await db.commit()
+
+    assert dispatched >= 1
+    answers = sender.after_opening()
+    assert len(answers) == 1, sender.sent
+    assert "上周有 12 单。" in answers[0]["text"]
+    # As the right app, to the right person: a reply that went out under the
+    # webhook binding's credentials would still satisfy the line above.
+    assert answers[0]["open_id"] == "ou_zhang"
+    assert answers[0]["app_id"] == "cli_long"
+    assert answers[0]["app_secret"] == "app-secret-value"  # noqa: S105
 
 
 async def test_run_does_not_return_before_a_recording_it_started_is_written(
