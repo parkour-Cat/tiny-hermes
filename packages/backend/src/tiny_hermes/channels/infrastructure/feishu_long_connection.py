@@ -63,12 +63,33 @@ def _envelope_of(frame: Any) -> dict[str, Any]:
     (see `doc/channel/reference.md`'s Message Model: "`raw` — Original event
     payload"). Both transports converge on one reader because there is one
     envelope shape to read, not two.
+
+    Validates rather than blindly `cast()`ing: `frame.raw` not being a
+    `dict` is exactly the "frame this build cannot read" case `on_frame`
+    exists to survive, and `cast()` never raises — it would let a non-dict
+    through unnoticed, and every reader downstream trusts the return type
+    here rather than checking it again. The failure has to happen in this
+    one place or it happens somewhere less obvious later.
     """
-    return cast(dict[str, Any], frame.raw)
+    raw = frame.raw
+    if not isinstance(raw, dict):
+        raise TypeError(f"frame.raw is {type(raw).__name__}, not a dict")
+    return cast(dict[str, Any], raw)
 
 
-def _event_id_of(envelope: dict[str, Any]) -> str:
+def _event_id_of(envelope: Any) -> str:
     """Best-effort id for the one log line `on_frame` writes on failure.
+
+    Takes `Any`, not `dict[str, Any]`: this function's entire job is to be
+    callable from a failure path without becoming a second way for that
+    path to fail, so it re-checks its input rather than trusting a caller
+    who is, by construction, already handling one exception. An earlier
+    version trusted the caller and typed this `dict[str, Any]`; called with
+    whatever `_envelope_of` had merely `cast()` a non-dict into, it raised
+    `AttributeError` out of `object_at`'s own `.get()` call — while it was
+    still an argument being evaluated for `logger.exception(...)`, so the
+    log call itself never ran and the `AttributeError` replaced the
+    original failure on its way out of `on_frame`.
 
     Mirrors `event_from_envelope`'s two schema versions (`header.event_id`
     for v2, top-level `uuid` for v1) using the same `object_at`/`string_at`
@@ -79,6 +100,9 @@ def _event_id_of(envelope: dict[str, Any]) -> str:
     being able to search for, so it gets a literal placeholder rather than a
     log line built with no event id in it at all.
     """
+    if not isinstance(envelope, dict):
+        return "<no event id>"
+    envelope = cast("dict[str, Any]", envelope)
     header = object_at(envelope, "header")
     event_id = string_at(header, "event_id") if header else None
     if event_id is not None:
@@ -106,13 +130,18 @@ class FeishuLongConnection:
 
         异常在这里被吃掉而不是冒泡：一条读不懂或处理失败的消息若把连接带下去，
         之后所有消息都收不到，代价远大于丢这一条。日志是这条路径上唯一的痕迹，
-        所以它必须带上 `binding_id` 和事件 id——事件 id 在 `try` 之外先取好，
-        这样即使 `deliver` 本身炸了，日志里仍然有它，而不是只有
-        `binding_id` 却认不出是哪条消息。
+        所以它必须带上 `binding_id` 和事件 id。
 
-        `_envelope_of(frame)` 本身也可能失败（`frame.raw` 缺失或不是
-        `dict`）；这种连事件 id 都读不出来的帧不该在日志里静悄悄地什么都不
-        写，所以那种情况写一个占位符而不是省略这一行。
+        `_envelope_of(frame)` 本身可能失败（`frame.raw` 缺失或不是
+        `dict`）——它会抛，不会悄悄放一个坏值过去，所以这种连信封都读不出来
+        的帧在这里就被挡住，日志写一个占位符，`deliver` 从不会被叫到。
+
+        信封一旦转换成功，事件 id 在调用 `deliver` **之前**就取好，而不是等
+        `deliver` 炸了之后在 `except` 里现取——`_event_id_of` 自己保证不会
+        抛（它对输入类型做了防御性检查，不假设调用者已经保证过什么），但
+        提前取还有一个理由：`except` 块里唯一要做的事就是把已经算好的
+        `binding_id` 和 `event_id` 写进日志，不再有第二个能失败的调用夹在
+        `logger.exception(...)` 的参数求值里，把原本要报的异常顶替掉。
         """
         try:
             envelope = _envelope_of(frame)
@@ -123,13 +152,14 @@ class FeishuLongConnection:
             )
             return
 
+        event_id = _event_id_of(envelope)
         try:
             await self._deliver(self._binding.binding_id, envelope)
         except Exception:
             logger.exception(
                 "long connection frame not handled binding=%s event=%s",
                 self._binding.binding_id,
-                _event_id_of(envelope),
+                event_id,
             )
 
     async def run(self, stop: asyncio.Event) -> None:
