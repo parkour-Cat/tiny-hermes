@@ -178,9 +178,12 @@ class RunResponse(BaseModel):
     checkpoint_effect_status: str
     checkpoint_usage_quality: str | None
     failure_reason: str | None
-    #: ``{"round", "outcome", "unmet"}`` — which round the Run is on and what
-    #: the platform decided about it. A status says a Run is still going; this
-    #: says why.
+    #: ``{"round", "outcome", "unmet", "preempted"}`` — which round the Run is
+    #: on and what the platform decided about it. A status says a Run is
+    #: still going; this says why. ``preempted`` (§12.1, v2.9.1) is true only
+    #: when the round's own verdict said `continue` and the platform ended
+    #: the Run anyway because a message arrived after it started — a
+    #: `completed` Run that did not actually finish its own goal.
     goal: dict[str, Any]
     created_at: datetime
     started_at: datetime | None

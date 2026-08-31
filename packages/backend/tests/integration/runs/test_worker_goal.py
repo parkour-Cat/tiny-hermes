@@ -326,7 +326,7 @@ async def test_a_completed_run_reports_the_verdict_that_let_it_finish(
     await drive(engine, Recording(claims_done("all done")), ScriptedSandbox())
 
     goal = status(client, scope, run)["goal"]
-    assert goal == {"round": 1, "outcome": "done", "unmet": []}
+    assert goal == {"round": 1, "outcome": "done", "unmet": [], "preempted": False}
 
 
 async def test_the_round_a_reader_sees_is_the_round_the_model_was_given(
@@ -385,7 +385,7 @@ async def test_a_task_that_takes_several_rounds_of_work_is_ended_by_the_judge(
 
     body = status(client, scope, run)
     assert body["status"] == "completed"
-    assert body["goal"] == {"round": 4, "outcome": "done", "unmet": []}
+    assert body["goal"] == {"round": 4, "outcome": "done", "unmet": [], "preempted": False}
     assert sandbox.commands[:3] == ["./step-one", "./step-two", "./step-three"]
     assert "pytest -q" in sandbox.commands
 
@@ -410,4 +410,5 @@ async def test_a_run_that_has_not_run_yet_has_no_verdict_to_report(
         "round": None,
         "outcome": None,
         "unmet": [],
+        "preempted": False,
     }

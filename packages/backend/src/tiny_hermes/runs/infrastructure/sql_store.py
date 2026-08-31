@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, exists, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -961,6 +961,87 @@ class SqlRunStore:
             ),
         )
 
+    @staticmethod
+    def _successor_candidates(session_id: UUID, run_id: UUID) -> Any:
+        """The `session_sequence` order `_terminalize` hands the head down
+        in: same Session, excluding `run_id`, non-terminal, earliest first.
+
+        Shared with `_terminalize` (below) rather than hand-copied a second
+        time: the unique constraint on `(session_id, session_sequence)`
+        makes `order_by(session_sequence).limit(1)` total — there is exactly
+        one answer — so both callers agreeing is not a coincidence to
+        maintain by hand, it is one query used twice. `_terminalize` adds its
+        own `.with_for_update()` on top, since it is the one that mutates;
+        `has_waiting_run` reads without locking.
+        """
+        return (
+            select(RunRow)
+            .where(
+                RunRow.session_id == session_id,
+                RunRow.id != run_id,
+                RunRow.status.not_in(tuple(s.value for s in TERMINAL_STATES)),
+            )
+            .order_by(RunRow.session_sequence)
+            .limit(1)
+        )
+
+    async def has_waiting_run(
+        self, session_id: UUID, run_id: UUID, run_started_at: datetime | None
+    ) -> bool:
+        """Would preempting actually get a message handled, and did one
+        genuinely arrive while I was working.
+
+        Two separate questions about two separate Runs, both must hold:
+
+        1. **Is the successor claimable?** `_terminalize` always hands the
+           head to the earliest `session_sequence` non-terminal Run,
+           whichever status it is in. If a `paused`/`interrupted`/
+           `waiting_*` sibling sits closer to the head than any `queued` one
+           — reachable from the public API, e.g. a user pauses a `queued`
+           Run and only then sends a new message — the head goes to that
+           sibling, which `claim_head` (`_select_claimable`,
+           `status == 'queued'`) will never pick up. Preempting would stall
+           the Session on a Run nobody claims.
+        2. **Did a message arrive after I started?** v2.9.1's §12.1 trigger
+           is an *existence* test over the whole Session — some `queued` Run
+           created after `run_started_at` — not a property of whichever Run
+           happens to be the successor. A burst of messages queues before
+           the first one is ever claimed (§566): the successor can be one of
+           those pre-existing, already-`queued` messages while a *later*
+           message — not the successor — is the one that actually arrived
+           mid-run. Requiring the arrival test on the successor specifically
+           would miss exactly that message and let this Run grind on past
+           the correction §12.1 exists for.
+
+        Collapsing the two onto one row — testing whether *the successor*
+        is both `queued` and arrived after `run_started_at` — under-delivers
+        §12.1: it silently drops the case above, a `queued` successor that
+        predates this Run's start with a genuine mid-run arrival sitting
+        behind it.
+
+        `run_started_at` 为 `None` 时直接判 `False`：一个从未发生过的时刻，不能
+        拿来说别的 Run「在它之后」到达。`_has_waiting_run` 只在认领之后才调用这
+        个方法，届时 `started_at` 必已写入，这一分支因此是防御性的，不是当前会
+        走到的路径。
+        """
+        if run_started_at is None:
+            return False
+        successor = await self._session.scalar(self._successor_candidates(session_id, run_id))
+        if successor is None or RunState(successor.status) is not RunState.QUEUED:
+            return False
+        return bool(
+            await self._session.scalar(
+                select(
+                    exists().where(
+                        RunRow.session_id == session_id,
+                        RunRow.id != run_id,
+                        RunRow.status == RunState.QUEUED.value,
+                        RunRow.created_at > run_started_at,
+                    )
+                )
+            )
+        )
+
     async def withdrawable(
         self, session_id: UUID, scope: WithdrawScope, turns: int
     ) -> tuple[list[UUID], int, str]:
@@ -1635,15 +1716,7 @@ class SqlRunStore:
         if session.head_run_id != run.id:
             return
         successor = await self._session.scalar(
-            select(RunRow)
-            .where(
-                RunRow.session_id == session.id,
-                RunRow.id != run.id,
-                RunRow.status.not_in([state.value for state in TERMINAL_STATES]),
-            )
-            .order_by(RunRow.session_sequence)
-            .limit(1)
-            .with_for_update()
+            self._successor_candidates(session.id, run.id).with_for_update()
         )
         session.head_run_id = None if successor is None else successor.id
         if successor is not None:
@@ -3265,6 +3338,7 @@ class SqlRunStore:
             current_round=_round(run.checkpoint),
             goal_outcome=_goal_outcome(run.checkpoint),
             goal_unmet=_goal_unmet(run.checkpoint),
+            goal_preempted=_goal_preempted(run.checkpoint),
             created_at=run.created_at,
             started_at=run.started_at,
             finished_at=run.finished_at,
@@ -3718,6 +3792,20 @@ def _goal_outcome(checkpoint: dict[str, Any] | None) -> str | None:
         return None
     value: Any = checkpoint.get("goal_outcome")
     return str(value) if isinstance(value, str) and value else None
+
+
+def _goal_preempted(checkpoint: dict[str, Any] | None) -> bool:
+    """§12.1: did the last judged round give up the Session head to a queued
+    message rather than end because its goal was met?
+
+    Out of the checkpoint rather than a column of its own, for the same
+    reason `_goal_outcome` is: it describes one round, and a column would
+    have to be kept in step with it. Absent (and so `False`) for every Run
+    recorded before the Worker started writing this key.
+    """
+    if not checkpoint:
+        return False
+    return checkpoint.get("goal_preempted") is True
 
 
 def _goal_unmet(checkpoint: dict[str, Any] | None) -> tuple[str, ...]:

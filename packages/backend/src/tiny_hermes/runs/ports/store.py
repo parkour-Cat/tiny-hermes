@@ -652,6 +652,55 @@ class RunStore(Protocol):
         """
         ...
 
+    async def has_waiting_run(
+        self, session_id: UUID, run_id: UUID, run_started_at: datetime | None
+    ) -> bool:
+        """Would preempting actually get a message handled, and did one
+        genuinely arrive while I was working.
+
+        Two separate questions about two separate Runs, both must hold:
+
+        1. **Is the successor claimable?** `_terminalize` always hands the
+           head to the earliest `session_sequence` non-terminal Run,
+           whichever status it is in. If a `paused`/`interrupted`/
+           `waiting_*` sibling sits closer to the head than any `queued` one
+           — reachable from the public API, e.g. a user pauses a `queued`
+           Run and only then sends a new message — the head goes to that
+           sibling, which `claim_head` (`_select_claimable`,
+           `status == 'queued'`) will never pick up. Preempting would stall
+           the Session on a Run nobody claims.
+        2. **Did a message arrive after I started?** v2.9.1's §12.1 trigger
+           is an *existence* test over the whole Session — some `queued` Run
+           created after `run_started_at` — not a property of whichever Run
+           happens to be the successor. A burst of messages queues before
+           the first one is ever claimed (§566): the successor can be one of
+           those pre-existing, already-`queued` messages while a *later*
+           message — not the successor — is the one that actually arrived
+           mid-run. Requiring the arrival test on the successor specifically
+           would miss exactly that message.
+
+        Collapsing the two onto one row — testing whether *the successor*
+        is both `queued` and arrived after `run_started_at` — under-delivers
+        §12.1: it silently drops the case above, a `queued` successor that
+        predates this Run's start with a genuine mid-run arrival sitting
+        behind it. That was this method's own bug for one review round.
+
+        `session_sequence` orders how the successor is *found* (the same
+        query `_terminalize` runs — see `SqlRunStore._successor_candidates`),
+        but neither question above is a queue-position question:
+        claimability is the successor's `status`, and arrival is a time
+        comparison — some Run's own `created_at` against `run_started_at` —
+        against the whole Session, not against the successor's position.
+
+        `None` in means this Run has no `started_at` to compare against — it
+        answers `False` rather than guessing, because nothing can honestly be
+        said to have arrived "after" a moment that never happened. In
+        practice `_has_waiting_run` only ever calls this once a claim has set
+        `started_at`, so the `None` branch is a defensive answer, not a path
+        the Worker exercises today.
+        """
+        ...
+
     async def withdrawable(
         self, session_id: UUID, scope: WithdrawScope, turns: int
     ) -> tuple[list[UUID], int, str]:

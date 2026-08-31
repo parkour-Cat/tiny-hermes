@@ -50,6 +50,7 @@ from tiny_hermes.runs.domain.context_budget import (
 from tiny_hermes.runs.domain.goal import (
     CompletionCheck,
     GoalEvidence,
+    GoalOutcome,
     GoalProposal,
     GoalVerdict,
     judge,
@@ -394,6 +395,33 @@ class WorkerRuntime:
                 )
             )
 
+    async def _has_waiting_run(self, claimed: ClaimedRun) -> bool:
+        """§12.1: would giving up the head right now actually get a message
+        handled, rather than just stop this Run?
+
+        Queried fresh every round, at the same cost `_cost_precheck` pays to
+        read the budget, rather than cached on the claim: caching would let
+        this round's preemption decision rest on last round's facts, and
+        "somebody arrived after I started" is exactly the kind of thing that
+        can become true partway through a Run that has been going for a
+        while.
+
+        `claimed.run.id` is passed because the store asks **two** questions
+        with it, about two different Runs: whether *the* successor — the same
+        Run `_terminalize` would hand the head to — is claimable, and whether
+        *some* `queued` sibling arrived after this Run started. §12.1's
+        trigger is the second; the first is what keeps preemption from
+        handing the Session to a Run nothing will pick up. Collapsing them
+        onto one row is a real bug this rule already had once: see
+        `SqlRunStore.has_waiting_run`, which spells out the case it drops.
+        `claimed.run.started_at`, not `session_sequence`, is the frame of
+        reference: v2.9.1's rule is about when *this* Run began executing.
+        """
+        async with self._sessions.begin() as session:
+            return await SqlRunStore(session).has_waiting_run(
+                claimed.run.session_id, claimed.run.id, claimed.run.started_at
+            )
+
     async def _execute_slice(self, claimed: ClaimedRun) -> None:
         workspace_id = claimed.run.workspace_id
         handle = _LeaseHandle(lease_id=claimed.lease_id, version=claimed.lease_version)
@@ -508,6 +536,55 @@ class WorkerRuntime:
                             author="platform",
                         ),
                     )
+                budget_allows = _budget_after(after, response, executed_ms)
+                slice_expired = (
+                    monotonic() - started
+                ) >= self._settings.max_slice_seconds
+                hold_slice = after.compat_deadline_at is not None and not compat_expired
+                # §12.1: `_has_waiting_run` opens its own transaction, worth
+                # paying only when the answer could change this round's
+                # outcome. Probing `decide_after_round` first, with
+                # `user_waiting` and `slice_expired` both forced off, answers
+                # that by reusing the real priority order rather than
+                # duplicating it by hand (a second, hand-copied ordering is
+                # exactly the kind of thing that quietly drifts from the
+                # first): a signal here means cancel, pause, budget, approval,
+                # delegation, the verdict itself or the compat window already
+                # decided this round, and the real query would only have been
+                # thrown away. `slice_expired` is forced off rather than
+                # passed through because it sits *below* `user_waiting` — a
+                # round that would otherwise merely end its slice still has
+                # to ask, because preemption outranks that too.
+                probed = decide_after_round(
+                    RoundOutcome(
+                        verdict=verdict,
+                        approval=work.approval,
+                        delegated=work.delegated,
+                        cancel_requested=after.cancel_requested,
+                        pause_requested=after.pause_requested,
+                        budget_allows=budget_allows,
+                        slice_expired=False,
+                        compat_window_expired=compat_expired,
+                        user_waiting=False,
+                    )
+                )
+                # `_has_waiting_run` reads in its own transaction, separate
+                # from the `after` read above and the record below — a
+                # sibling cancelled in that window is possible and unclosed:
+                # this round would still preempt for a message that no
+                # longer exists by the time `_terminalize` actually looks.
+                # Accepted rather than locked against. Not claiming a bound
+                # this doesn't have: whether that read is later a stall
+                # (`_terminalize` lands on a `paused` Run once the cancelled
+                # one is gone) or clean (the next `queued` Run in line) is
+                # `_terminalize`'s own successor-selection outcome, decided
+                # fresh at that moment — this race neither causes nor rules
+                # out either one. What the race itself is bounded to is
+                # narrower: this round's own goal being cut short on
+                # information that was already stale by the time it acted.
+                waiting = (
+                    False if probed.signal is not None else await self._has_waiting_run(claimed)
+                )
                 decision = decide_after_round(
                     RoundOutcome(
                         verdict=verdict,
@@ -515,13 +592,11 @@ class WorkerRuntime:
                         delegated=work.delegated,
                         cancel_requested=after.cancel_requested,
                         pause_requested=after.pause_requested,
-                        budget_allows=_budget_after(after, response, executed_ms),
-                        slice_expired=(monotonic() - started)
-                        >= self._settings.max_slice_seconds,
-                        hold_slice=(
-                            after.compat_deadline_at is not None and not compat_expired
-                        ),
+                        budget_allows=budget_allows,
+                        slice_expired=slice_expired,
+                        hold_slice=hold_slice,
                         compat_window_expired=compat_expired,
+                        user_waiting=waiting,
                     )
                 )
 
@@ -1174,6 +1249,15 @@ class WorkerRuntime:
         # The commit itself keeps the lease (`signal=None`); the round's real
         # signal is applied after the sandbox's fate is confirmed, because a
         # completed Run whose container may still run is not completed.
+        #
+        # `goal_preempted` must not be neutralized along with it: that flag
+        # describes what this round's own verdict and disposition were, not
+        # what state the Run transitions to right now, and the interim commit
+        # is the checkpoint the Run actually ends on if the sandbox close
+        # below never gets a second write. `preempted_decision=decision`
+        # keeps the real, un-neutralized disposition available to
+        # `_checkpoint` for that one fact, while `signal=None` still keeps
+        # the transition itself deferred.
         slice_command = self._slice_command(
             claimed,
             handle,
@@ -1185,6 +1269,7 @@ class WorkerRuntime:
             events=events,
             judged=judged,
             prices=after.prices,
+            preempted_decision=decision,
         )
         try:
             await sandbox.freeze(
@@ -2085,13 +2170,24 @@ class WorkerRuntime:
         cleanup_sandbox_id: UUID | None = None,
         judged: "_Judged | None" = None,
         prices: TokenPrices | None = None,
+        preempted_decision: SliceDecision | None = None,
     ) -> RecordSliceCommand:
+        # `preempted_decision` defaults to `decision` because in every
+        # ordinary call the two questions — "what transition does this write
+        # record?" and "was this round's own verdict overridden by
+        # preemption?" — have one answer between them. `_checkpoint_round` is
+        # the one caller where they differ: its interim commit passes a
+        # neutralized `decision` (`signal=None`, so the transition is
+        # deferred until the sandbox's fate is confirmed) alongside the real
+        # one here, so `goal_preempted` and the timeline still describe what
+        # this round's disposition actually was.
+        goal_decision = decision if preempted_decision is None else preempted_decision
         if judged is not None:
             # Every write of a judged round carries the verdict, whichever path
             # got here: the commit that lands a write round, and the plain
             # record that lands every other. A round whose write was rolled
             # back carries none, which is the truth — the verdict did not take.
-            events = (*events, _verdict_event(judged))
+            events = (*events, _verdict_event(judged, _is_preempted(goal_decision, judged)))
         return RecordSliceCommand(
             workspace_id=claimed.run.workspace_id,
             run_id=claimed.run.id,
@@ -2103,7 +2199,7 @@ class WorkerRuntime:
             wait_kind=decision.wait_kind,
             wait_seconds=decision.wait_seconds,
             wait_policy=decision.wait_policy,
-            checkpoint=_checkpoint(response, judged),
+            checkpoint=_checkpoint(response, judged, goal_decision),
             checkpoint_replay_safe=response.replay_safe,
             checkpoint_effect_status=(
                 CheckpointEffectStatus.UNKNOWN
@@ -2666,8 +2762,33 @@ def _budget_after(
     return projected.allows_execution(datetime.now(UTC))
 
 
+def _is_preempted(decision: SliceDecision | None, judged: "_Judged") -> bool:
+    """§12.1: this round's own verdict said `continue`, and the platform
+    ended the Run anyway.
+
+    Neither fact alone tells a preempted round from an ordinary one. The
+    signal alone cannot distinguish "done" from "cut off early" — both end
+    the Run the same way — and the verdict alone cannot distinguish
+    "continue, preempted" from "continue, going on to the next round" — both
+    are `GoalOutcome.CONTINUE`. Only the conjunction says the head was given
+    up rather than earned.
+
+    Shared by `_checkpoint`'s `goal_preempted` and `_verdict_event`'s
+    `preempted` so the checkpoint and the timeline cannot say two different
+    things about the same round — a fact recorded in one place and silently
+    absent from the other is the bug this repo keeps having.
+    """
+    return (
+        decision is not None
+        and decision.signal is RunSignal.COMPLETED
+        and judged.verdict.outcome is GoalOutcome.CONTINUE
+    )
+
+
 def _checkpoint(
-    response: ModelResponse, judged: "_Judged | None" = None
+    response: ModelResponse,
+    judged: "_Judged | None" = None,
+    decision: SliceDecision | None = None,
 ) -> dict[str, object]:
     """What the round was, in terms a reader of the Run can act on.
 
@@ -2691,14 +2812,22 @@ def _checkpoint(
         checkpoint["round"] = judged.round
         checkpoint["goal_outcome"] = judged.verdict.outcome.value
         checkpoint["goal_unmet"] = list(judged.verdict.unmet)
+        checkpoint["goal_preempted"] = _is_preempted(decision, judged)
     return checkpoint
 
 
-def _verdict_event(judged: "_Judged") -> ReservedEvent:
+def _verdict_event(judged: "_Judged", preempted: bool) -> ReservedEvent:
     """The judge's answer, on the timeline where a person is watching.
 
     The instruction is left out: it is derived from ``unmet`` and is already in
     the transcript, where the model that has to act on it will read it.
+
+    ``preempted`` rides here too (§12.1): the timeline is a read path of its
+    own — SSE subscribers and anyone replaying `run_events` see it without
+    ever polling `document()` — and until now it carried `{round, outcome,
+    unmet}` for every round including the one that ended the Run, so a
+    reader watching only the stream had no way to tell a preempted round
+    from an ordinary `continue` that was about to get another one.
     """
     return ReservedEvent(
         event_type=RunEventType.GOAL_VERDICT,
@@ -2706,5 +2835,6 @@ def _verdict_event(judged: "_Judged") -> ReservedEvent:
             "round": judged.round,
             "outcome": judged.verdict.outcome.value,
             "unmet": list(judged.verdict.unmet),
+            "preempted": preempted,
         },
     )
