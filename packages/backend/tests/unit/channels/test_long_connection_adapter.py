@@ -10,6 +10,11 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from lark_oapi.channel.types import (  # pyright: ignore[reportMissingTypeStubs]
+    Conversation,
+    Identity,
+    InboundMessage,
+)
 from tiny_hermes.channels.infrastructure.feishu_long_connection import (
     FeishuLongConnection,
     LongConnectionBinding,
@@ -65,13 +70,41 @@ def deliver_boom() -> _DeliverBoom:
 
 
 async def test_a_frame_is_handed_to_the_shared_half(deliver_spy: _DeliverSpy) -> None:
+    """递过去的必须是共用那一半读得懂的信封，不是 SDK 原样的帧。
+
+    这条测试原来把一个手搭的 webhook 信封塞进 `frame.raw` 再断言它原样传出去
+    ——两边都是同一个虚构，所以它绿得毫无意义。真机第一条消息证明 SDK 给的是
+    **消息对象**，事件 id 根本不在里面。现在喂 SDK 自己的 `InboundMessage`，
+    断言的是 `_envelope_of` 重建出来的形状。
+    """
     binding = LongConnectionBinding(binding_id=uuid4(), app_id="cli_x", app_secret="s")
     adapter = FeishuLongConnection(binding, deliver_spy)
 
-    await adapter.on_frame(_frame({"schema": "2.0", "header": {"event_id": "e1"}}))
+    await adapter.on_frame(
+        InboundMessage(
+            id="om_1",
+            create_time=0,
+            conversation=Conversation(chat_id="oc_1", chat_type="p2p"),
+            sender=Identity(open_id="ou_zhang"),
+            raw={"message_id": "om_1", "message_type": "text", "content": '{"text": "hi"}'},
+        )
+    )
 
     assert deliver_spy.calls == [
-        (binding.binding_id, {"schema": "2.0", "header": {"event_id": "e1"}})
+        (
+            binding.binding_id,
+            {
+                "header": {"event_id": "om_1"},
+                "event": {
+                    "sender": {"sender_id": {"open_id": "ou_zhang"}},
+                    "message": {
+                        "message_id": "om_1",
+                        "message_type": "text",
+                        "content": '{"text": "hi"}',
+                    },
+                },
+            },
+        )
     ]
 
 

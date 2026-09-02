@@ -20,7 +20,6 @@ import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from concurrent.futures import Future
-from dataclasses import dataclass
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -30,6 +29,11 @@ from lark_oapi.channel import (  # pyright: ignore[reportMissingTypeStubs]
     Events,
     FeishuChannelError,
     FeishuChannelErrorCode,
+)
+from lark_oapi.channel.types import (  # pyright: ignore[reportMissingTypeStubs]
+    Conversation,
+    Identity,
+    InboundMessage,
 )
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
@@ -90,21 +94,36 @@ SLOW_RECORD_SECONDS = 0.2
 LATE_SIGNAL_SECONDS = 0.05
 
 
-@dataclass
-class _Frame:
-    """`on_frame` 只读 `.raw` —— 见 `feishu_long_connection._envelope_of`。"""
+def _inbound(body: str, *, message_id: str, open_id: str = "ou_zhang") -> InboundMessage:
+    """What the SDK actually hands a `MESSAGE` handler.
 
-    raw: dict[str, Any]
+    Built as the SDK's own dataclass rather than a dict shaped the way this
+    repository wished the SDK worked. The hand-built dict above is the
+    *webhook* envelope, and every long-connection test used to pass one to
+    `deliver` directly — so nothing ever exercised `_envelope_of` against a
+    real frame, and production got `no event id in either schema version`
+    on the first real message.
 
-
-def _text_message_envelope(body: str, *, event_id: str) -> dict[str, Any]:
-    return {
-        "header": {"event_id": event_id},
-        "event": {
-            "sender": {"sender_id": {"open_id": "ou_zhang"}},
-            "message": {"content": json.dumps({"text": body})},
+    `raw` is the message object, not the event envelope: that is what
+    `normalize/pipeline.py` puts there (`raw=msg`), and the event id never
+    reaches it — `channel.py`'s `_handle_message_event` pulls it off
+    `data.header.event_id` and passes it to the pipeline as a separate
+    argument that `InboundMessage` does not keep.
+    """
+    return InboundMessage(
+        id=message_id,
+        create_time=0,
+        conversation=Conversation(chat_id="oc_test", chat_type="p2p"),
+        sender=Identity(open_id=open_id),
+        raw={
+            "message_id": message_id,
+            "chat_id": "oc_test",
+            "message_type": "text",
+            "content": json.dumps({"text": body}),
         },
-    }
+        content_text=body,
+        raw_content_type="text",
+    )
 
 
 @pytest.fixture
@@ -488,7 +507,7 @@ class _FakeChannel:
         await asyncio.sleep(outage)
         await self._notify(Events.RECONNECTED)
 
-    async def deliver_frame(self, frame: _Frame) -> None:
+    async def deliver_frame(self, frame: Any) -> None:
         async def _invoke() -> None:
             for handler in self._handlers.get(Events.MESSAGE, []):
                 await handler(frame)
@@ -631,7 +650,7 @@ async def test_a_frame_arriving_on_the_sdk_loop_reaches_channel_events(
 
     channel = await channels.connected()
     await channel.deliver_frame(
-        _Frame(raw=_text_message_envelope("hello", event_id="lc-1"))
+        _inbound("hello", message_id="om_lc_1")
     )
     stop.set()
     await running
@@ -639,7 +658,7 @@ async def test_a_frame_arriving_on_the_sdk_loop_reaches_channel_events(
     # Written-and-reachable, not "the adapter did not raise": `on_frame`
     # swallows every exception, so the only evidence that the claim actually
     # happened is the row.
-    assert await _claimed_event_count(store, long_id, "lc-1") == 1
+    assert await _claimed_event_count(store, long_id, "om_lc_1") == 1
 
 
 async def _deliver_one_frame(
@@ -661,7 +680,7 @@ async def _deliver_one_frame(
     stop = asyncio.Event()
     running = asyncio.create_task(connection.run(stop))
     channel = await channels.connected()
-    await channel.deliver_frame(_Frame(raw=_text_message_envelope(body, event_id=event_id)))
+    await channel.deliver_frame(_inbound(body, message_id=event_id))
     stop.set()
     await running
 
@@ -705,10 +724,10 @@ async def test_a_frame_over_the_long_connection_becomes_a_run(
     _webhook_id, long_id = seeded_bindings_of_both_transports
 
     await _deliver_one_frame(
-        scheduler_connections, sdk_channels, body="上周几单？", event_id="lc-run-1"
+        scheduler_connections, sdk_channels, body="上周几单？", event_id="om_lc_run_1"
     )
 
-    _claim_id, run_id = await _claim_and_run(engine, long_id, "lc-run-1")
+    _claim_id, run_id = await _claim_and_run(engine, long_id, "om_lc_run_1")
     assert run_id is not None
     async with engine.connect() as connection:
         found = await connection.execute(
@@ -858,9 +877,9 @@ async def test_the_answer_to_a_long_connection_message_reaches_its_sender(
     _webhook_id, long_id = seeded_bindings_of_both_transports
 
     await _deliver_one_frame(
-        scheduler_connections, sdk_channels, body="上周几单？", event_id="lc-reply-1"
+        scheduler_connections, sdk_channels, body="上周几单？", event_id="om_lc_reply_1"
     )
-    _claim_id, run_id = await _claim_and_run(engine, long_id, "lc-reply-1")
+    _claim_id, run_id = await _claim_and_run(engine, long_id, "om_lc_reply_1")
     assert run_id is not None, "no Run to finish: the inbound half never got that far"
     await _finish(engine, run_id, said="上周有 12 单。")
 
@@ -1503,3 +1522,34 @@ async def test_a_drain_that_cannot_finish_gives_up_instead_of_hanging_the_shutdo
     finally:
         released.set()
         channel.close_loops()
+
+
+async def test_a_real_sdk_frame_becomes_a_run(
+    engine: AsyncEngine,
+    seeded_bindings_of_both_transports: tuple[UUID, UUID],
+    scheduler_connections: Callable[[], Awaitable[tuple[FeishuLongConnection, ...]]],
+    sdk_channels: Callable[..., _FakeChannels],
+) -> None:
+    """真机走查抓到的那个缺陷，钉在这里。
+
+    上面每一条长连接测试递给 `deliver` 的都是**手搭的 webhook 信封**，
+    于是 `_envelope_of` 从来没有被真实帧走过一遍。生产上第一条真实消息
+    的结果是 `no event id in either schema version`：SDK 的
+    `InboundMessage.raw` 是**消息对象**，不是事件信封，事件 id 根本没进去。
+
+    这条测试递的是 SDK 自己的 `InboundMessage`，所以它证明的是「SDK 实际
+    给什么」，不是「我们以为 SDK 会给什么」。
+    """
+    _webhook_id, long_id = seeded_bindings_of_both_transports
+
+    channels = sdk_channels()
+    (connection,) = await scheduler_connections()
+    stop = asyncio.Event()
+    running = asyncio.create_task(connection.run(stop))
+    channel = await channels.connected()
+    await channel.deliver_frame(_inbound("上周几单？", message_id="om_real_1"))
+    stop.set()
+    await running
+
+    _claim_id, run_id = await _claim_and_run(engine, long_id, "om_real_1")
+    assert run_id is not None

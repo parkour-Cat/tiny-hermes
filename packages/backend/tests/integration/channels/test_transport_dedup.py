@@ -14,11 +14,15 @@
 
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from lark_oapi.channel.types import (  # pyright: ignore[reportMissingTypeStubs]
+    Conversation,
+    Identity,
+    InboundMessage,
+)
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from tiny_hermes.channels.application.webhook_service import (
@@ -31,13 +35,6 @@ from tiny_hermes.channels.infrastructure.feishu_long_connection import (
     LongConnectionBinding,
 )
 from tiny_hermes.channels.infrastructure.sql_channel_store import SqlChannelStore
-
-
-@dataclass
-class _Frame:
-    """`on_frame`只读`.raw` —— 见`feishu_long_connection._envelope_of`。"""
-
-    raw: dict[str, Any]
 
 
 def _text_message_envelope(text_body: str, *, event_id: str) -> dict[str, Any]:
@@ -103,22 +100,45 @@ def service(store: SqlChannelStore) -> FeishuWebhookService:
     return FeishuWebhookService(store)
 
 
-async def test_the_same_event_over_both_transports_makes_one_run(
+def _inbound(body: str, *, message_id: str) -> InboundMessage:
+    """What the SDK actually hands a `MESSAGE` handler — its own dataclass,
+    not a dict shaped the way this repository wished the SDK worked."""
+    return InboundMessage(
+        id=message_id,
+        create_time=0,
+        conversation=Conversation(chat_id="oc_test", chat_type="p2p"),
+        sender=Identity(open_id="ou_zhang"),
+        raw={
+            "message_id": message_id,
+            "chat_id": "oc_test",
+            "message_type": "text",
+            "content": json.dumps({"text": body}),
+        },
+        content_text=body,
+        raw_content_type="text",
+    )
+
+
+async def test_the_long_connection_carries_no_dedup_of_its_own(
     service: FeishuWebhookService,
     store: SqlChannelStore,
     seeded_binding: tuple[UUID, str],
 ) -> None:
+    """同一帧来两次，只产生一个认领——靠的是共用的那一份，不是适配器自己的。
+
+    这条测试原来断言的是「同一事件先后经两条 transport 只产生一个 Run」。
+    那个断言建立在一个**错误的前提**上：以为两条 transport 拿到同一个信封。
+    真机走查证明不是——SDK 的 `InboundMessage` 根本不带飞书的事件 id
+    （见 `_envelope_of` 的 docstring），所以长连接的认领键是 `message_id`，
+    与 webhook 的 `event_id` 不在同一个键空间。设计文档 §3 已按此修订，
+    理由写在那里。
+
+    修订之后**仍然成立、也仍然要守**的是这一条：适配器不许自带去重。
+    如果它自己拦掉了第二帧，`results` 会只有一条，下面那行先红——而不是让
+    「认领数是 1」这个绿色替一个错误的原因背书。
+    """
     binding_id, _workspace_id = seeded_binding
-    envelope = _text_message_envelope("hello", event_id="dup-1")
 
-    # 第一条：webhook 路径已经在用的那半——直接调用 `accept_verified`，就像
-    # `accept()` 验完签、解完密之后做的那样。
-    first = await service.accept_verified(binding_id=binding_id, envelope=envelope)
-
-    # 第二条：真的经过适配器。`deliver` 就是这同一个 `service`，`results`
-    # 记的是这次调用里 `accept_verified` 交出来的东西——适配器自己不读返回值
-    # （`DeliverFrame` 返回 `None`），所以这个列表是唯一能看见它确实调用过、
-    # 以及调用之后发生了什么的地方。
     results: list[Claimed | Unreadable] = []
 
     async def _deliver(binding_id: UUID, envelope: dict[str, Any]) -> None:
@@ -126,17 +146,60 @@ async def test_the_same_event_over_both_transports_makes_one_run(
 
     binding = LongConnectionBinding(binding_id=binding_id, app_id="cli_x", app_secret="s")
     adapter = FeishuLongConnection(binding, _deliver)
-    await adapter.on_frame(_Frame(raw=envelope))
 
+    frame = _inbound("hello", message_id="om_dup_1")
+    await adapter.on_frame(frame)
+    await adapter.on_frame(frame)
+
+    # 两帧都抵达了共用的 `deliver`：适配器没有在半路拦第二帧。
+    assert len(results) == 2
+    first, second = results
     assert isinstance(first, Claimed)
     assert first.claim_id is not None
-
-    # `on_frame` 必须真的抵达了共用的 `deliver`——如果它被自己的一份去重
-    # 拦在半路，`results` 会是空的，下面这行先红，而不是让人以为
-    # `_events_for` 那行的绿色就足够了。
-    assert len(results) == 1
-    second = results[0]
     assert isinstance(second, Claimed)
-    assert second.claim_id is None
+    assert second.claim_id is None, "第二帧应当认领落空，这正是共用去重在起作用"
 
+    assert await _events_for(store, binding_id, "om_dup_1") == 1
+
+
+async def test_the_two_transports_no_longer_share_a_dedup_key(
+    service: FeishuWebhookService,
+    store: SqlChannelStore,
+    seeded_binding: tuple[UUID, str],
+) -> None:
+    """这条钉的是**代价**，不是成绩。
+
+    设计文档原来要求两条 transport 共用一个键空间。SDK 不给事件 id，做不到，
+    于是产品决定接受：飞书的投递方式是二选一的（开发者后台单选），两路同时
+    收到同一条消息只可能发生在切换的那一瞬间。
+
+    把它写成测试而不是只写进文档，是因为这是一条**会被悄悄改回去**的语义：
+    将来谁若让两边的键重新对上，这条测试会红，那时该做的是回来改文档，
+    而不是删掉这条断言。
+    """
+    binding_id, _workspace_id = seeded_binding
+
+    webhook = await service.accept_verified(
+        binding_id=binding_id, envelope=_text_message_envelope("hello", event_id="dup-1")
+    )
+
+    results: list[Claimed | Unreadable] = []
+
+    async def _deliver(binding_id: UUID, envelope: dict[str, Any]) -> None:
+        results.append(await service.accept_verified(binding_id=binding_id, envelope=envelope))
+
+    adapter = FeishuLongConnection(
+        LongConnectionBinding(binding_id=binding_id, app_id="cli_x", app_secret="s"),
+        _deliver,
+    )
+    await adapter.on_frame(_inbound("hello", message_id="om_dup_2"))
+
+    assert isinstance(webhook, Claimed)
+    assert webhook.claim_id is not None
+    over_the_socket = results[0]
+    assert isinstance(over_the_socket, Claimed)
+    # 两个键空间，所以两个认领。这是修订后的语义，不是缺陷。
+    assert over_the_socket.claim_id is not None
+    assert over_the_socket.claim_id != webhook.claim_id
     assert await _events_for(store, binding_id, "dup-1") == 1
+    assert await _events_for(store, binding_id, "om_dup_2") == 1
