@@ -8,6 +8,11 @@
 #
 # 用法：deploy/compose/redeploy.sh [验证用的符号 ...]
 #   例：deploy/compose/redeploy.sh pending_command_receipts
+#
+# **只传后端符号。**下面那圈验证 grep 的是 `/app/packages/backend/src`，
+# 所以传一个前端的东西（i18n 的键、组件名）必然四个容器全报「跑的是旧代码」——
+# 一次假失败，而且看起来和真失败一模一样。前端改动这么验：
+#   docker compose exec web grep -rl '<新文案>' /usr/share/nginx/html
 set -euo pipefail
 cd "$(dirname "$0")"
 
