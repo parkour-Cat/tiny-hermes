@@ -123,6 +123,22 @@ class SessionMessageRow(IdMixin, CreatedAtMixin, Base):
         ),
     )
     source_run_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    #: §344 的擦除：等于不存在，转写记录里也看不到（产品设计 §884）。
+    #:
+    #: **本仓库从未把它写成 `True`，而这是有意的，不是遗漏。**今天的擦除
+    #: （`memory/infrastructure/sql_subject_store.py::_erase_end_user`）直接删行，
+    #: 那也满足 §344——删掉的行对转写记录当然不可见，而「可追踪」（§566）落在
+    #: `audit_events` 上，不落在行上。这一列是为「将来擦除若要改成标记式」预留的
+    #: 休眠列（`docs/superpowers/specs/2026-08-26-chat-commands-design.md` 写下了
+    #: 这个决定）。
+    #:
+    #: 这段话写在这里，是因为它此前只写在那份设计文档里，而读这张表的人不会去翻
+    #: 它：一个被五处读取、零处写入的字段，不说清楚为什么，下一个人只会得出
+    #: 「这是个 bug」——2026-09-02 就有人这么判过一次，然后才查出真相。
+    #:
+    #: 读它的五处都过滤 `is_(False)`，包括 `pending_replies`（那一处 2026-09-02
+    #: 才补上，此前是唯一的例外，而它恰好是唯一把内容发出平台的读取点）。谁给这
+    #: 一列加上第一个写入方，那五处就是它当天要检查的清单。
     redacted: Mapped[bool] = mapped_column(default=False)
     #: 用户收回了它。与 `redacted` 分开的原因写在 20260826_0047：擦除等于不存在，
     #: 收回仍然要出现在转写记录里。
