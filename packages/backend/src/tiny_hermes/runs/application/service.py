@@ -638,6 +638,19 @@ class RunCoordination:
             )
         return await self._store.list_session_messages(workspace_id, session_id)
 
+    async def request_compaction(self, session_id: UUID) -> bool:
+        """记下「下一轮先压缩」，返回这段会话是否真有可压缩的历史。
+
+        不在这里压：摘要是一次真实的模型调用，而这条路径是入站投递的一部分
+        ——一次模型超时会变成投递失败和飞书重投六小时。这一层只写标记，
+        `_plan_context` 在下一轮开始前消费它，那里本来就是花模型调用的地方。
+
+        返回值不是「标记写成功了没有」，是「有没有东西可压」：短对话里没有可压缩
+        的历史，那时该跟用户说的是「这段对话还不长」，而不是一句会落空的
+        「记下了」。判断归 store，因为只有它知道这段会话有多长。
+        """
+        return await self._store.request_compaction(session_id)
+
     async def withdraw_from_session(
         self,
         session_id: UUID,

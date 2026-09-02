@@ -113,3 +113,45 @@ def test_the_blocked_card_names_the_way_out() -> None:
     )
 
     assert "/new" in str(card)
+
+
+def test_a_compact_receipt_says_when_it_takes_effect_not_that_it_already_did() -> None:
+    """回执不能承诺一件还没发生的事。
+
+    压缩要一次模型调用，而入站路径不做外部调用（和「被挡通知在这里记下、不在这里
+    发」同一条理由：一次投递不该依赖模型端点可达）。所以命令做的是打标记，压缩在
+    下一轮真正开始前发生。
+
+    措辞必须让这件事看得出来。说「已压缩」是假话；说「下次会压缩」又是个不一定
+    兑现的承诺——历史不够长时没有可压缩的内容。所以说的是条件句。
+    """
+    said = command_receipt_text(
+        CommandReceipt(
+            command="compact",
+            outcome="done",
+            messages=0,
+            turns=0,
+            echoed_text="",
+            busy_reason=None,
+        )
+    )
+    assert "已压缩" not in said
+    assert "下" in said or "接下来" in said
+
+
+def test_a_compact_receipt_on_a_conversation_with_nothing_to_compact_says_so() -> None:
+    """和 `/new` 的 `nothing` 一样不能和 `/undo` 合并成一句。
+
+    对 `/compact`，「没什么可压」意味着这段对话还短——那是一句让人放心的话，
+    不是一句失败。"""
+    said = command_receipt_text(
+        CommandReceipt(
+            command="compact",
+            outcome="nothing",
+            messages=0,
+            turns=0,
+            echoed_text="",
+            busy_reason=None,
+        )
+    )
+    assert "没有可撤" not in said

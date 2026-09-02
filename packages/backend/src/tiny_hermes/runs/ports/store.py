@@ -638,6 +638,24 @@ class RunStore(Protocol):
         document: dict[str, Any],
     ) -> None: ...
 
+    async def request_compaction(self, session_id: UUID) -> bool:
+        """记下「下一轮先压缩」。返回这段会话是否真有可压缩的历史。
+
+        `False` 不表示写失败——标记照写不误，只是这段会话现在还没有值得压缩的
+        东西，调用方拿它决定回执说哪一句。判断留在这一层，因为只有它知道会话
+        有多长。
+        """
+        ...
+
+    async def take_compaction_request(self, session_id: UUID) -> bool:
+        """消费掉那个标记：返回它是否曾被置上，并清掉它。
+
+        读和清在一次调用里，所以一个请求不会因为两轮抢跑而压两次。
+        **无论这一轮实际压没压成都会清掉**：留着它会让一段短对话背着一个几周后
+        才突然生效的请求，而那时解释它的那条回执早就滚没了。
+        """
+        ...
+
     async def unfinished_work(self, session_id: UUID) -> UnfinishedWork | None:
         """Whether this Session has unfinished work right now, and which kind.
 
