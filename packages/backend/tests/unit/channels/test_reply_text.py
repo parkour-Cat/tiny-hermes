@@ -15,7 +15,7 @@ this repository's own recurring bug wearing a chat interface.
 
 import pytest
 from tiny_hermes.channels.domain.reply import MAX_REPLY_CHARS, reply_for
-from tiny_hermes.runs.domain.models import RunState
+from tiny_hermes.runs.domain.models import RunPurpose, RunState
 
 
 def test_a_completed_run_replies_with_what_the_agent_said() -> None:
@@ -101,3 +101,38 @@ def test_a_very_long_answer_is_cut_rather_than_refused() -> None:
     # Cut, and *said* to be cut. A truncation the reader cannot see is a
     # reply that looks like the Agent stopped mid-sentence.
     assert reply.rstrip()[-1] != "长"
+
+
+def test_a_finished_compaction_says_what_it_actually_did() -> None:
+    """`/compact` 的回执带真实数字，不是一句「记下了」。
+
+    这是这条命令存在的理由：用户要的是「压完了」，而不是「排上队了」。压缩 Run
+    结束时，压了几轮、省了多少都在压缩事件里，回执照实说。
+
+    断言里有「不含」的一条：不许出现「已记下」那种把动作说成计划的措辞——
+    压缩这时候已经做完了。
+    """
+    said = reply_for(
+        state=RunState.COMPLETED,
+        said="",
+        purpose=RunPurpose.COMPACTION,
+        compaction={"covered": 12, "freed_estimate": 8400, "source": "model"},
+    )
+    assert said is not None
+    assert "12" in said
+    assert "8400" in said or "8,400" in said
+    assert "记下" not in said
+
+
+def test_a_compaction_that_compacted_nothing_says_so_instead_of_a_number() -> None:
+    """压缩 Run 跑完却什么都没压——`compaction` 是 `None`。
+
+    `/compact` 在建 Run 之前就挡掉了「没什么可压」，所以走到这里意味着压缩本身
+    失败了（比如摘要模型不可用）。那时不能报「已压缩」，也不能报「省了 0」——
+    前者是假话，后者读起来像成功。
+    """
+    said = reply_for(
+        state=RunState.COMPLETED, said="", purpose=RunPurpose.COMPACTION, compaction=None
+    )
+    assert said is not None
+    assert "已压缩" not in said

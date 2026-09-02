@@ -90,8 +90,9 @@ class FakeRuns:
         idempotency_key: str | None,
         request_id: str,
         images: Sequence[Any] = (),
+        purpose: Any = None,
     ) -> Any:
-        del workspace_id, text, request_id
+        del workspace_id, text, request_id, purpose
         self.images = list(images)
         self.submitted.append((end_user_id, session_id, idempotency_key))
         return AcceptedRun(run_id=uuid4(), document=self.document, replayed=False)
@@ -99,7 +100,6 @@ class FakeRuns:
     async def request_compaction(self, session_id: UUID) -> bool:
         del session_id
         return True
-
     async def withdraw_from_session(
         self,
         session_id: UUID,

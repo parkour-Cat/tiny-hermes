@@ -15,6 +15,7 @@ from tiny_hermes.identity.ports.end_user_store import UpsertedIdentity
 from tiny_hermes.runs.application.service import SessionBusy
 from tiny_hermes.runs.domain.models import (
     EndUserEscape,
+    RunPurpose,
     SessionMode,
     Withdrawal,
     WithdrawScope,
@@ -77,6 +78,7 @@ class FakeRuns:
         self.submitted: list[tuple[UUID, UUID, str, str | None]] = []
         self.withdraw_calls: list[tuple[UUID, WithdrawScope, int]] = []
         self.compaction_requests: list[UUID] = []
+        self.purposes: list[Any] = []
         self.compactable = True
         #: 每次撤回带的逃生口（`/new` 有，`/undo` 必须没有）。
         self.escapes: list[EndUserEscape | None] = []
@@ -110,9 +112,11 @@ class FakeRuns:
         idempotency_key: str | None,
         request_id: str,
         images: Sequence[Any] = (),
+        purpose: Any = None,
     ) -> Any:
         del workspace_id, request_id
         self.images = list(images)
+        self.purposes.append(purpose)
         self.submitted.append((end_user_id, session_id, text, idempotency_key))
         return AcceptedRun(run_id=uuid4(), document=self.document, replayed=False)
 
@@ -419,18 +423,23 @@ def compact_event() -> ChannelEvent:
     )
 
 
-async def test_compact_marks_the_session_and_never_starts_a_run(
+async def test_compact_marks_the_session_and_starts_a_compaction_run(
     ingestion: ChannelIngestion,
     compact_event: ChannelEvent,
     binding: ChannelBindingRecord,
     runs: FakeRuns,
     conversations: FakeConversations,
 ) -> None:
-    """命令打标记，压缩发生在下一轮——入站路径不做模型调用。
+    """打标记，**并且**提交一个只做压缩的 Run。
 
-    断言「没有 Run」和「没有撤回」两件事，而不只是「打了标记」：一个既打标记又
-    顺手提交了 Run 的实现也会让「打了标记」为真，而那正是这条命令不该做的
-    ——`/compact` 不是一条要回答的消息。
+    `/compact` 是唯一一条会产生 Run 的命令，这推翻了 `Delivered` 原来那条
+    「`run` 是 `None` 恰好当 `receipt` 不是」。理由是记账：摘要要花钱，而这个
+    平台里的钱必须挂在一个 Run 上。当初立那条规矩的理由是「命令是纯数据操作、
+    不花钱」——对这一条本来就不成立。
+
+    断言三件事一起：标记打了、Run 是 `COMPACTION` 那种、**回执这一刻不发**。
+    最后一条是重点：压完之后才知道省了多少，那时才有话可说；现在就发一句话，
+    只能是句空话。
     """
     # 默认 fixture 故意没有会话（那条守的是「陌生人的第一条消息不建会话」）。
     # 不给一个，这条测试测到的是那条早退路径，压缩这段代码根本走不到。
@@ -441,12 +450,15 @@ async def test_compact_marks_the_session_and_never_starts_a_run(
     )
 
     assert runs.compaction_requests == [runs.session_id]
-    assert delivered.run is None
-    assert runs.submitted == []
+    # 提交了一个**只做压缩**的 Run。这是 `/compact` 与其它命令的唯一区别，
+    # 理由是记账：摘要是一次真实的模型调用，而这个平台里的钱必须挂在 Run 上。
+    assert len(runs.submitted) == 1
+    assert runs.purposes == [RunPurpose.COMPACTION]
+    assert delivered.run is not None
+    # 仍然不是撤回——压缩不动历史里的任何一条消息。
     assert runs.withdraw_calls == []
-    assert delivered.receipt is not None
-    assert delivered.receipt.command == "compact"
-    assert delivered.receipt.outcome == "done"
+    # 回执不在命令这一刻发：压完之后才知道省了多少，那时才有话可说。
+    assert delivered.receipt is None
 
 
 async def test_compact_on_a_conversation_with_nothing_to_compact_says_nothing(
