@@ -1553,3 +1553,37 @@ async def test_a_real_sdk_frame_becomes_a_run(
 
     _claim_id, run_id = await _claim_and_run(engine, long_id, "om_real_1")
     assert run_id is not None
+
+
+async def test_a_socket_that_never_comes_back_does_not_park_the_watch_forever(
+    scheduler_connections: Callable[[], Awaitable[tuple[FeishuLongConnection, ...]]],
+    sdk_channels: Callable[..., _FakeChannels],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """建连成功之后掉线、SDK 再也没连回来——这个 watch 必须自己放弃。
+
+    在此之前 `run()` 停在 `await stop.wait()` 上，而 `stop` 只有进程关闭才会置。
+    SDK 报了 `RECONNECTING` 却再没报 `RECONNECTED`，就没有任何东西会叫醒它：
+    进程抱着一根死 socket 一直等，消息不来，日志里也不会再有新行。
+    验收记录把这一条明写成缺口（`2026-08-31-feishu-long-connection.md`
+    「不声称建连成功之后掉线会被自动恢复」），这条测试是来把它补掉的。
+
+    判据是 `run()` **返回了**，不是 `alive` 变成了 False：一个把标志翻过来却
+    照样停在那儿等的实现也会让后者为真，而那正是这条测试要排除的东西。
+    """
+    monkeypatch.setattr(feishu_long_connection, "OUTAGE_GIVE_UP_SECONDS", 0.2)
+    monkeypatch.setattr(feishu_long_connection, "LIVENESS_POLL_SECONDS", 0.05)
+
+    channels = sdk_channels()
+    (connection,) = await scheduler_connections()
+    stop = asyncio.Event()
+    running = asyncio.create_task(connection.run(stop))
+    channel = await channels.connected()
+
+    # 连上了，然后掉线，然后再也没有 RECONNECTED。
+    await channel.signal_drop()
+
+    # `stop` 一次都没有被置——这一点是这条测试的全部意义。
+    await asyncio.wait_for(running, timeout=5)
+    assert not stop.is_set()
+    assert connection.alive is False

@@ -23,6 +23,7 @@ on and every database-touching coroutine is handed back to it.
 """
 
 import asyncio
+import contextlib
 import logging
 import threading
 import time
@@ -84,6 +85,23 @@ class LongConnectionBinding:
     binding_id: UUID
     app_id: str
     app_secret: str
+
+
+#: 掉线之后等 SDK 自己连回来的上限。超了就放弃这一轮 `run()`，让
+#: `_supervised_connection` 从头重建——包括重新解析凭据、重新握手。
+#:
+#: 为什么需要它：SDK 的重连次数默认是 `-1`（无限），所以它永远不会抛错说自己
+#: 放弃了；`ws/client.py` 的重试循环失败多少次都只是继续。于是「socket 死了而
+#: SDK 还在徒劳重试」和「一切正常、只是没人说话」在这个适配器看来一模一样，
+#: 唯一的区别就是前者的 `_down_since` 一直不清。
+#:
+#: 五分钟是个判断，不是测量结果：短到一个人不会一直等下去，长到一次真实的
+#: 网络抖动（SDK 的退避会在几十秒内重来几次）不会白白把连接推倒重建。
+OUTAGE_GIVE_UP_SECONDS = 300.0
+
+#: 多久看一眼。只是「多久发现」的粒度，不是判据本身——判据是 `_down_since`
+#: 有没有一直非空。
+LIVENESS_POLL_SECONDS = 5.0
 
 
 class DeliverFrame(Protocol):
@@ -633,6 +651,42 @@ class FeishuLongConnection:
             return
         self._fire(self._record_reconnected())
 
+    async def _wait_while_alive(self, stop: asyncio.Event) -> None:
+        """停在这里直到进程要关，**或者这条连接明显回不来了**。
+
+        在此之前这里是一句 `await stop.wait()`，而 `stop` 只有进程关闭才会置。
+        后果是：SDK 报了掉线却再没报重连成功时，这个 watch 会抱着一根死 socket
+        一直等下去——消息不来，日志里也不会再有新行，因为没有任何代码在跑。
+
+        判据是 `_down_since` 一直非空。它由 SDK 自己的 `RECONNECTING` 置上、
+        `RECONNECTED` 清掉，所以「一直非空」说的正是「SDK 知道自己掉了，而且
+        还没连回来」。用它而不是「多久没收到消息」：一个没人说话的群和一条死掉
+        的连接在后者看来一模一样，而这里要分的正是这两件事。
+
+        放弃的方式是**返回**，不是抛异常：`run()` 的 `finally` 照样跑
+        （断开、drain），`_supervised_connection` 看到这一轮结束就重建下一轮，
+        连退避带审计行都是它本来就有的。抛异常会多出一条「失败」的痕迹，而这
+        不是失败——是这个 watch 认出自己该让位了。
+        """
+        while not stop.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=LIVENESS_POLL_SECONDS)
+                return
+            down_since = self._down_since
+            if down_since is None:
+                continue
+            if time.monotonic() - down_since < OUTAGE_GIVE_UP_SECONDS:
+                continue
+            self.alive = False
+            logger.warning(
+                "long connection binding=%s has been down for over %.0fs and the"
+                " SDK has not reconnected; giving up this watch so it is rebuilt"
+                " from scratch",
+                self._binding.binding_id,
+                OUTAGE_GIVE_UP_SECONDS,
+            )
+            return
+
     def _reset_for_this_run(self) -> None:
         """Clears everything the *previous* `run()` left behind.
 
@@ -710,7 +764,7 @@ class FeishuLongConnection:
             self._connected = True
             if on_connected is not None:
                 await on_connected()
-            await stop.wait()
+            await self._wait_while_alive(stop)
         finally:
             # Nested, not two statements in a row: `disconnect()` raises in
             # production (`FeishuChannel.stop` reaches into the SDK's private
