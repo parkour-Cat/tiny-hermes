@@ -73,6 +73,15 @@ export type AgentSpecDocument = {
     sync_timeout_seconds: number;
   };
   /**
+   * The Agent author's half of the end-user gate (design §4.5.2). Absent
+   * means closed: an Agent that never opened this entry point carries no key
+   * for it, which is what keeps its published content hash where it was.
+   *
+   * The enterprise's signed `agents` claim is the other half, and both have
+   * to agree — opening this grants nothing on its own.
+   */
+  end_user_access?: { enabled: boolean };
+  /**
    * What this Agent may reach on the network, fixed at publish like `tools`.
    *
    * Absent means nothing: an Agent that never asked for the network does not

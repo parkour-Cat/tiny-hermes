@@ -524,6 +524,51 @@ test("enabling delivery puts the timeout on the draft", async () => {
   ]);
 });
 
+test("opening the end-user entry point writes the key the backend gates on", async () => {
+  // 真机走查撞上的那堵墙：这个字段后端一直支持（`AgentSpec.end_user_access`），
+  // 从聊天页发消息被 `end-user access is not enabled for {alias}` 挡住，而控制台
+  // 上没有任何地方能打开它——只能手改规格文档。`e2e/end-user.spec.ts` 的注释自己
+  // 就写着平台还没有这个界面。
+  loadedAgent(3);
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByRole("switch", { name: "允许终端用户访问" }));
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  expect(sent).toEqual([
+    { expected_revision: 3, spec: { ...SPEC, end_user_access: { enabled: true } } },
+  ]);
+});
+
+test("leaving it closed carries no key at all, so an old Agent's hash does not move", async () => {
+  // `models.py` 的规范化把 `end_user_access: None` 整个键弹掉，理由写在那里：
+  // 从没开过这个入口的 Agent 不该因为多了这个字段而改变内容哈希。写成
+  // `{enabled: false}` 会留下键，等于让每一个老 Agent 的哈希都动一次。
+  loadedAgent(3);
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  const [only] = sent as [{ spec: Record<string, unknown> }];
+  expect(only.spec).not.toHaveProperty("end_user_access");
+});
+
 test("saving a name sends a patch, not a new draft revision", async () => {
   loadedAgent();
   const sent: unknown[] = [];

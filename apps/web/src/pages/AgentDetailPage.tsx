@@ -51,6 +51,7 @@ type DraftValues = {
   max_derived_retries: number;
   tools: string[];
   delivery_enabled: boolean;
+  end_user_access_enabled: boolean;
   sync_timeout_seconds: number;
   /** Bound skill *version* ids. Never names — see `agentSkillsHint`. */
   skills: string[];
@@ -138,6 +139,7 @@ function valuesOf(draft: AgentDraftResponse): DraftValues {
     ...draft.spec.limits,
     tools: [...draft.spec.tools],
     delivery_enabled: delivery.enabled,
+    end_user_access_enabled: draft.spec.end_user_access?.enabled ?? false,
     sync_timeout_seconds: delivery.sync_timeout_seconds,
     skills: (draft.spec.skills ?? []).map((binding) => binding.skill_version_id),
     network: [...(draft.spec.network?.allow ?? [])],
@@ -200,6 +202,14 @@ function specOf(values: DraftValues): AgentSpecDocument {
       tools,
       write_policy: values.mcp_write_policy ?? null,
     }));
+  }
+  if (values.end_user_access_enabled) {
+    // Written only when open, and that asymmetry is the point: `models.py`'s
+    // normalization pops this key when it is `None`, so an Agent that never
+    // opened the end-user entry point publishes the document it published
+    // before this field existed. A `{ enabled: false }` would keep the key
+    // and move every one of those Agents' content hashes.
+    spec.end_user_access = { enabled: true };
   }
   const timeout = values.sync_timeout_seconds ?? DEFAULT_DELIVERY.sync_timeout_seconds;
   if (
@@ -810,6 +820,15 @@ export function AgentDetailPage() {
                 label: item.entry,
               }))}
             />
+          </Form.Item>
+          <Typography.Title level={5}>{t("endUserSection")}</Typography.Title>
+          <Typography.Paragraph type="secondary">{t("endUserAccessIntro")}</Typography.Paragraph>
+          <Form.Item
+            name="end_user_access_enabled"
+            label={t("endUserAccessEnabled")}
+            valuePropName="checked"
+          >
+            <Switch />
           </Form.Item>
           <Typography.Title level={5}>{t("deliverySection")}</Typography.Title>
           <Form.Item name="delivery_enabled" label={t("chatCompletionsEnabled")} valuePropName="checked">
