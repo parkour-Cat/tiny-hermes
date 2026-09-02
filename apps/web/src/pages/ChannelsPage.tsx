@@ -1,5 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Form, Input, Modal, Select, Space, Table, Tag, Typography } from "antd";
+import {
+  Alert,
+  Button,
+  Card,
+  Empty,
+  Form,
+  Input,
+  Modal,
+  Radio,
+  Select,
+  Space,
+  Table,
+  Tag,
+  Typography,
+} from "antd";
 import { useState } from "react";
 
 import { api } from "../api/client";
@@ -85,17 +99,34 @@ export function ChannelsPage() {
     enabled: workspaceId !== null,
   });
   const [registering, setRegistering] = useState(false);
-  const [issuerForm] = Form.useForm<{ issuer: string; jwksUrl: string; origins: string }>();
+  const [issuerForm] =
+    Form.useForm<{ issuer: string; keyMode: "jwks" | "publicKey"; jwksUrl?: string; publicKey?: string; origins: string }>();
+  //: Which half of the form is showing. The API takes one verification
+  //: material or the other, never both, so the choice has to be made here
+  //: rather than by leaving the unused field blank and sending it anyway.
+  const issuerKeyMode = Form.useWatch("keyMode", issuerForm) ?? "jwks";
 
   const registerIssuer = useMutation({
-    mutationFn: (values: { issuer: string; jwksUrl: string; origins: string }) =>
+    mutationFn: (values: {
+      issuer: string;
+      keyMode: "jwks" | "publicKey";
+      jwksUrl?: string;
+      publicKey?: string;
+      origins: string;
+    }) =>
       api<ChannelIssuerResponse>("/api/v1/channel-issuers", {
         ...scope,
         method: "POST",
         body: JSON.stringify({
           channel: "web",
           issuer: values.issuer,
-          jwks_url: values.jwksUrl,
+          // Only the chosen one. Sending the other as `""` would store a
+          // second verification material the platform then tries to use —
+          // a JWKS fetch against an empty URL, or a key that verifies
+          // nothing — instead of the one the author actually supplied.
+          ...(values.keyMode === "publicKey"
+            ? { public_key: values.publicKey }
+            : { jwks_url: values.jwksUrl }),
           // One per line. A comma-separated blob would split an origin that
           // legitimately contains one, and the API takes a list anyway.
           allowed_origins: values.origins
@@ -488,9 +519,21 @@ export function ChannelsPage() {
           <Form.Item name="issuer" label={t("issuerName")} rules={[{ required: true }]}>
             <Input placeholder="https://sso.example.com" />
           </Form.Item>
-          <Form.Item name="jwksUrl" label={t("issuerJwksUrl")} rules={[{ required: true }]}>
-            <Input placeholder="https://sso.example.com/.well-known/jwks.json" />
+          <Form.Item name="keyMode" label={t("issuerKeyMode")} initialValue="jwks">
+            <Radio.Group>
+              <Radio value="jwks">{t("issuerKeyModeJwks")}</Radio>
+              <Radio value="publicKey">{t("issuerKeyModePublicKey")}</Radio>
+            </Radio.Group>
           </Form.Item>
+          {issuerKeyMode === "publicKey" ? (
+            <Form.Item name="publicKey" label={t("issuerPublicKey")} rules={[{ required: true }]}>
+              <Input.TextArea rows={5} placeholder="-----BEGIN PUBLIC KEY-----" />
+            </Form.Item>
+          ) : (
+            <Form.Item name="jwksUrl" label={t("issuerJwksUrl")} rules={[{ required: true }]}>
+              <Input placeholder="https://sso.example.com/.well-known/jwks.json" />
+            </Form.Item>
+          )}
           <Form.Item name="origins" label={t("issuerOrigins")}>
             <Input.TextArea rows={3} placeholder="https://portal.example.com" />
           </Form.Item>
