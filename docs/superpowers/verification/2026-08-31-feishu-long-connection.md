@@ -99,3 +99,28 @@ pyright                                                   0 errors
 - **不声称库里已经存在的死配置行会被修好。**这一轮加的是校验，让这种行**建不出来**；
   没有迁移，没有回填。
 - **不声称多副本 scheduler 下只会有一条连接。**没处理，没测试。
+- **不声称两条 transport 共用一个去重键空间。**设计文档 §3 原来这么要求，真机走查
+  证明做不到：SDK 不把飞书的 `event_id` 交给 handler。webhook 按 `event_id` 认领，
+  长连接按 `message_id`。飞书的投递方式是单选的，所以两路同时到只可能在切换瞬间。
+  §3 已按此修订并写明理由。
+
+## 6. 真机走查：做了，而且它抓到了测试全绿的一个缺陷
+
+2026-09-02，在单机 compose 栈上走了一遍：控制台切 `long_connection` → 重启 scheduler
+→ **关掉 cloudflared 隧道** → 在飞书里发消息。
+
+这一遍抓到三件事，**没有一件是测试能抓到的**：
+
+1. **飞书开发者后台的「订阅方式」是另一个开关**，要从「发送至开发者服务器」改成
+   「使用长连接接收事件」，**而且改完要发布版本**。spec、实施计划、验收记录三份文档
+   一个字都没提过它。用户在我们自己的控制台里做完了全部步骤、看到了「已生效」的提示，
+   消息仍然不来。
+2. **`_envelope_of` 的 docstring 是假的**，而且是它把生产打挂的：`InboundMessage.raw`
+   是消息对象不是事件信封，第一条真实消息的结果是
+   `MalformedChannelEvent: no event id in either schema version`。
+   **测试之所以全绿，是因为每一条长连接测试递的都是手搭的 webhook 信封**——
+   验证的是「我们以为 SDK 会给什么」，不是「SDK 实际给什么」。现在所有长连接测试
+   都改用 SDK 自己的 `InboundMessage` 构造。
+3. 关闭过程中出现 lark SDK 自己的 `Task was destroyed but it is pending!`
+   （`_ping_loop` / `_receive_message_loop`）。**我们的 drain 管不到 SDK 的任务。**
+   目前只在关闭时出现，那两个任务不写库，没有观察到数据丢失。
