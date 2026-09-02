@@ -268,6 +268,27 @@ DEFAULT_COMPACTION_THRESHOLD = 0.50
 MIN_COMPACTION_THRESHOLD = 0.20
 MAX_COMPACTION_THRESHOLD = 0.90
 
+#: 主动裁剪的触发点（§7.4.2「主动裁剪」）。**绝对 Token 数，不是比例**：比例会随
+#: 窗口一起放大，而窗口越大、旧工具输出被白白重发的轮数就越多，正是要避开的那件事。
+#: 低于这个数就一个字不改——短对话里那点重复不值得为它改写历史。
+PROACTIVE_PRUNE_TOKENS = 8_000
+
+#: 尾部保护，**按消息条数**。按 Token 保护会从压缩阈值推导出一个巨大的尾部
+#: （1M 窗口上约 100K），把整个会话都算成「最近」，于是什么也裁不掉——参照实现的
+#: docstring 专门点了这个陷阱。这个数和 `PROTECTED_RECENT_MESSAGES` 是两件事：
+#: 那个护的是「模型正在回答的那一轮」，不许被摘要吞掉；这个护的是「刚看过的那一段」，
+#: 不许被打成存根。
+PRUNE_PROTECTED_RECENT_MESSAGES = 20
+
+#: 多大的工具结果才值得打存根。小结果打了存根也省不下什么，却照样改写历史、照样
+#: 让缓存失效。
+PRUNE_MIN_RESULT_CHARS = 8_000
+
+#: 缓存闸门：三遍合计回收不到这个数就整体放弃，原样返回。一次裁剪会让 provider 的
+#: 前缀缓存从最早被改写的那条起全部失效——和一次压缩边界一样——所以省下的 Token
+#: 必须多到抵得过那次失效，否则这笔买卖是亏的。
+PRUNE_MIN_RECLAIM_TOKENS = 4_096
+
 
 def estimate_tokens(text: str, tokenizer: str | None = None) -> int:
     """An upper bound on what this text will cost, in tokens.
@@ -494,6 +515,153 @@ def _trim_old_tool_results(
         dropped=len(references),
         freed_estimate=max(freed, 0),
         references=tuple(references),
+    )
+
+
+def _back_reference(block: ToolResultBlock, call_id: str) -> ToolResultBlock:
+    """完全相同的输出，改成指向仍然完整的那一份。
+
+    和 `_stub` 分开是因为两者说的不是一回事：存根说的是「这段内容被平台裁掉了，
+    完整的在转写记录里」，回指说的是「这段内容和另一次调用一字不差」。后者是无损的
+    ——模型仍然能从同一次请求里读到那些字节——所以它是三遍里唯一不受尾部保护限制的。
+    """
+    return replace(
+        block,
+        output=(
+            f"[identical to the output of call_id {call_id}, "
+            f"which is included in full in this request.]"
+        ),
+    )
+
+
+def _truncated_arguments(block: ToolCallBlock) -> ToolCallBlock | None:
+    """过大的工具调用参数，截断。返回 `None` 表示没有需要动的。
+
+    参数和结果一样是每轮重发的字节——一次贴进去的长脚本会在此后每一轮里再付一遍钱。
+    只截断字符串值：结构（哪些键、几个参数）是模型理解这次调用的依据，动它等于改写
+    调用本身。
+    """
+    changed: dict[str, Any] = {}
+    touched = False
+    for key, value in block.arguments.items():
+        if isinstance(value, str) and len(value) > PRUNE_MIN_RESULT_CHARS:
+            changed[key] = (
+                value[:PRUNE_MIN_RESULT_CHARS]
+                + f"[…truncated by the platform: {len(value)} characters in full, "
+                + f"kept in the session transcript under call_id {block.call_id}.]"
+            )
+            touched = True
+            continue
+        changed[key] = value
+    return replace(block, arguments=changed) if touched else None
+
+
+def _prune_proactively(
+    messages: list[CanonicalMessage], tokenizer: str | None
+) -> TrimRecord | None:
+    """§7.4.2 的「主动裁剪」：三遍确定性处理，都不调模型。
+
+    与 `_trim_old_tool_results` 的分工：那个是压缩级联的第一步，目标是把这一轮塞进
+    窗口，只在超线之后才跑、且够用就停。这个跟窗口无关——它针对的是「装得下，但每轮
+    都在为很久以前的字节付钱」，所以有自己的触发点，而且一次裁完所有够格的内容。
+
+    **不是每轮啃一点**：稳态下够格的内容早已裁完，新增的改写只落在刚离开尾部的那一条，
+    缓存失效范围因此有上界。每轮啃一点会把失效点一路往前推，那正是这套闸门要避免的。
+
+    调用者负责两道闸门（触发点与最低回收量）——它们决定「要不要采纳这次结果」，而这个
+    函数只负责「结果长什么样」。
+    """
+    references: list[str] = []
+    freed = 0
+    tail_start = max(len(messages) - PRUNE_PROTECTED_RECENT_MESSAGES, 0)
+
+    # 第一遍：去重。无损，因此**不受尾部保护限制**——被改写的那份能从同一次请求里
+    # 读到一字不差的原文。最新的那份留完整，所以从后往前扫。
+    seen: dict[str, str] = {}
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if message.role != "tool":
+            continue
+        blocks: list[Any] = []
+        touched = False
+        for block in message.blocks:
+            if isinstance(block, ToolResultBlock) and len(block.output) > 0:
+                first = seen.get(block.output)
+                if first is None:
+                    seen[block.output] = block.call_id
+                else:
+                    replacement = _back_reference(block, first)
+                    freed += estimate_tokens(block.output, tokenizer) - estimate_tokens(
+                        replacement.output, tokenizer
+                    )
+                    references.append(block.call_id)
+                    blocks.append(replacement)
+                    touched = True
+                    continue
+            blocks.append(block)
+        if touched:
+            messages[index] = replace(message, blocks=tuple(blocks))
+
+    # 第二遍：尾部之外的大结果打存根。有损，所以尾部一个字不动。
+    for index in range(tail_start):
+        message = messages[index]
+        if message.role != "tool":
+            continue
+        blocks = []
+        touched = False
+        for block in message.blocks:
+            if isinstance(block, ToolResultBlock) and len(block.output) > PRUNE_MIN_RESULT_CHARS:
+                stubbed = _stub(block)
+                if len(stubbed.output) < len(block.output):
+                    freed += estimate_tokens(block.output, tokenizer) - estimate_tokens(
+                        stubbed.output, tokenizer
+                    )
+                    references.append(block.call_id)
+                    blocks.append(stubbed)
+                    touched = True
+                    continue
+            blocks.append(block)
+        if touched:
+            messages[index] = replace(message, blocks=tuple(blocks))
+
+    # 第三遍：尾部之外过大的调用参数。同样有损，同样避开尾部。
+    for index in range(tail_start):
+        message = messages[index]
+        if message.role != "assistant":
+            continue
+        blocks = []
+        touched = False
+        for block in message.blocks:
+            if isinstance(block, ToolCallBlock):
+                shortened = _truncated_arguments(block)
+                if shortened is not None:
+                    freed += _arguments_estimate(block, tokenizer) - _arguments_estimate(
+                        shortened, tokenizer
+                    )
+                    references.append(block.call_id)
+                    blocks.append(shortened)
+                    touched = True
+                    continue
+            blocks.append(block)
+        if touched:
+            messages[index] = replace(message, blocks=tuple(blocks))
+
+    if not references:
+        return None
+    return TrimRecord(
+        SegmentName.OLD_TOOL_RESULTS,
+        dropped=len(references),
+        freed_estimate=max(freed, 0),
+        references=tuple(references),
+    )
+
+
+def _arguments_estimate(block: ToolCallBlock, tokenizer: str | None) -> int:
+    """一次调用的参数值有多少 Token。只数字符串值——第三遍也只动它们。"""
+    return sum(
+        estimate_tokens(value, tokenizer)
+        for value in block.arguments.values()
+        if isinstance(value, str)
     )
 
 
@@ -935,6 +1103,27 @@ def plan_context(
 
     working = list(originals)
     spent = fixed + sum(_message_estimate(message, tokenizer) for message in working)
+
+    # §7.4.2 的「主动裁剪」，在压缩级联**之前**、且与 `trigger` 无关：这一段针对的
+    # 不是「装不下」，是「装得下，但每一轮都在为很久以前的字节重新付钱」。大窗口上
+    # `trigger` 可能几个月都够不着，而重发的成本是每轮都在付的。
+    #
+    # 两道闸门都在这里，因为它们决定的是「采不采纳」，不是「结果长什么样」：
+    #   1. 历史小于 `PROACTIVE_PRUNE_TOKENS` 就不动——短对话里那点重复不值得为它
+    #      改写历史。
+    #   2. 三遍合计回收不到 `PRUNE_MIN_RECLAIM_TOKENS` 就整体丢弃，`working` 退回
+    #      原样。改写会让 provider 的前缀缓存从最早被改写处失效，省下的 Token 必须
+    #      多到抵得过那次失效。
+    history_tokens = sum(_message_estimate(message, tokenizer) for message in working)
+    if history_tokens >= PROACTIVE_PRUNE_TOKENS:
+        candidate = list(working)
+        pruned = _prune_proactively(candidate, tokenizer)
+        if pruned is not None and pruned.freed_estimate >= PRUNE_MIN_RECLAIM_TOKENS:
+            working = candidate
+            trimmed.append(pruned)
+            spent = fixed + sum(_message_estimate(message, tokenizer) for message in working)
+            originals = tuple(working)
+
     if spent <= trigger:
         return ContextPlan(
             messages=originals,
