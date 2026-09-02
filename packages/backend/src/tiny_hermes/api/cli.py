@@ -550,7 +550,13 @@ def _deliver_via(
                 await service.deliver_verified(
                     binding_id=binding_id,
                     envelope=envelope,
-                    request_id=f"lc-{uuid.uuid4()}",
+                    # Same shape as `request_context.request_id`, different
+                    # prefix: a frame off the socket has no HTTP request and
+                    # no `X-Request-Id` to inherit, and a trace that says
+                    # `lc_` tells whoever is reading it that no webhook was
+                    # involved — which is the first thing worth knowing when
+                    # a delivery over this transport goes wrong.
+                    request_id=f"lc_{uuid.uuid4().hex}",
                 )
             except AppError as error:
                 # An audited refusal has already written its row in this
