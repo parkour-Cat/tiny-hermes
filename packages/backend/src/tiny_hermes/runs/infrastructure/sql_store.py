@@ -77,6 +77,7 @@ from tiny_hermes.runs.domain.models import (
     RunCapabilities,
     RunEvent,
     RunEventType,
+    RunPurpose,
     RunSignal,
     RunSnapshot,
     RunState,
@@ -339,6 +340,7 @@ class SqlRunStore:
             checkpoint_effect_status=CheckpointEffectStatus.NONE.value,
             checkpoint_workspace_revision_id=session.workspace_revision_id,
             delivery_mode=command.delivery_mode,
+            purpose=command.purpose.value,
             # §16.3's `user_confirmation` may only be answered by the EndUser
             # who started the Run. Through M2 that was only ever the logged-in
             # caller; end-user entry design §5 adds the real subject a
@@ -3359,6 +3361,7 @@ class SqlRunStore:
         )
         return RunSnapshot(
             id=run.id,
+            purpose=RunPurpose(run.purpose),
             workspace_id=run.workspace_id,
             session_id=run.session_id,
             agent_version_id=run.agent_version_id,

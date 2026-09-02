@@ -28,10 +28,11 @@ from tiny_hermes.channels.infrastructure.tables import (
 )
 from tiny_hermes.runs.domain.models import (
     TERMINAL_STATES,
+    RunPurpose,
     RunState,
     message_from_document,
 )
-from tiny_hermes.runs.infrastructure.tables import RunRow, SessionMessageRow
+from tiny_hermes.runs.infrastructure.tables import RunEventRow, RunRow, SessionMessageRow
 
 #: The states in which "还在处理" is a true sentence. A whitelist rather than
 #: "not terminal", because the difference is not cosmetic: a `paused` or
@@ -114,6 +115,24 @@ class PendingReply:
     said: str
     failure_reason: str | None
     attempts: int
+    #: 这次 Run 是来干什么的。`COMPACTION` 的那一种没有「Agent 说的话」可发
+    #: ——它压完就结束，从不调模型回答问题。要发给人的是压缩的结果，
+    #: 由 `compaction` 带出来。
+    purpose: RunPurpose = RunPurpose.ANSWER
+    #: 那次压缩的载荷（`covered`、`freed_estimate`），只有 `COMPACTION` 有。
+    #: `None` 表示这个 Run 结束时什么都没压——`/compact` 在建 Run 之前就挡掉了
+    #: 「没什么可压」的情况，所以这在实践中意味着压缩失败了。
+    compaction: dict[str, Any] | None = None
+
+
+def _compaction_payload(payload: Any) -> "dict[str, Any] | None":
+    """那次压缩的载荷，或者 `None`。
+
+    单独一个函数而不是内联三元：`row.payload` 是 `JSON` 列，静态类型只知道它是
+    `Any`，内联写法会让整行的类型变成部分未知。这里一次收窄，读的人也少一处
+    条件表达式。
+    """
+    return cast("dict[str, Any]", payload) if isinstance(payload, dict) else None
 
 
 def _text_of(content: Any) -> str:
@@ -699,6 +718,20 @@ class SqlChannelStore:
             .limit(1)
             .lateral("said")
         )
+        #: 这个 Run 的压缩事件。只有 `purpose='compaction'` 的 Run 会用它——
+        #: 对普通 Run 它多半也命中（普通 Run 也会压缩），但那一支从不读它。
+        #: 和 `said` 一样用 lateral 而不是事后逐行再查一次：两次读会看到同一个
+        #: Run 的两个状态。
+        compacted = (
+            select(RunEventRow.payload.label("payload"))
+            .where(
+                RunEventRow.run_id == RunRow.id,
+                RunEventRow.event_type == "context_compacted",
+            )
+            .order_by(RunEventRow.sequence.desc())
+            .limit(1)
+            .lateral("compacted")
+        )
         rows = (
             await self._session.execute(
                 select(
@@ -708,10 +741,13 @@ class SqlChannelStore:
                     RunRow.session_id,
                     RunRow.status,
                     RunRow.checkpoint,
+                    RunRow.purpose,
                     said.c.content,
+                    compacted.c.payload,
                 )
                 .join(RunRow, RunRow.id == ChannelEventRow.run_id)
                 .outerjoin(said, true())
+                .outerjoin(compacted, true())
                 .where(
                     ChannelEventRow.run_id.is_not(None),
                     ChannelEventRow.replied_at.is_(None),
@@ -730,6 +766,8 @@ class SqlChannelStore:
                 said=_text_of(row.content),
                 failure_reason=_failure_in(row.checkpoint),
                 attempts=row.reply_attempts,
+                purpose=RunPurpose(row.purpose),
+                compaction=_compaction_payload(row.payload),
             )
             for row in rows
         ]

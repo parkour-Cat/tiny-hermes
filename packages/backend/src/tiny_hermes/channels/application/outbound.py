@@ -546,6 +546,8 @@ class ChannelReplyDispatcher:
             state=pending.state,
             said=pending.said,
             failure_reason=pending.failure_reason,
+            purpose=pending.purpose,
+            compaction=pending.compaction,
         )
         if text is None:
             # The scan only selects terminal Runs, so this is unreachable

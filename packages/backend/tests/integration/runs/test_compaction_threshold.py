@@ -227,3 +227,54 @@ async def test_a_requested_compaction_happens_even_far_below_the_threshold(
             )
         ).scalar_one()
     assert left is None
+
+
+async def test_a_compaction_run_compacts_and_stops_without_answering(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    small_endpoint: str,
+) -> None:
+    """`purpose='compaction'` 的 Run 压完就结束，**不回答任何问题**。
+
+    用户发的是 `/compact`，没有问题要答——多调一次模型是白花钱，而这个 Run
+    存在的全部理由恰恰就是给那次摘要调用一个付账的地方。
+
+    判据是两条一起：压了（`CONTEXT_COMPACTED` 事件在），**并且**模型脚本里那条
+    「回答」一次都没被取走。只断言第一条的话，一个压完又顺手答了一句的实现也会
+    通过——而那正是这条测试要排除的东西。
+    """
+    workspace_id = UUID(scope["X-Workspace-Id"])
+
+    agent = _publish(client, scope, small_endpoint, compaction_threshold=None)
+    session = start_session(client, scope, agent)
+    await _seed_old_turns(
+        engine, UUID(session), workspace_id, pairs=TURN_PAIRS, size=TURN_SIZE
+    )
+
+    # 经普通入口建 Run、再把 purpose 改掉，而不是直接 INSERT 一行：Run 的必填
+    # 列太多，手拼一行等于把「一个 Run 长什么样」这件事在测试里再实现一遍，而那
+    # 正是这个仓库反复吃亏的那种夹具。
+    run_id = ask(client, scope, session, "/compact")
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE runs SET purpose = 'compaction' WHERE id = :r"),
+            {"r": UUID(run_id)},
+        )
+        # `purpose` 只说「这个 Run 不回答」，不说「一定要压」。真正让压缩发生的
+        # 是那个标记——`/compact` 两样都会设，这里也两样都设，否则这条测试测到的
+        # 是「一个什么都不做的 Run」。
+        await connection.execute(
+            text("UPDATE sessions SET compaction_requested_at = now() WHERE id = :s"),
+            {"s": UUID(session)},
+        )
+
+    # 脚本里两条：第一条给摘要调用，第二条是「回答」。第二条必须一个字都没被用掉。
+    model = Recording(fails(), says("这句话不该被发出去"))
+    await drive(engine, model, None)
+
+    assert status(client, scope, run_id)["status"] == "completed"
+    compacted = await payloads(engine, run_id, "context_compacted")
+    assert len(compacted) == 1
+    # 只发生过一次模型调用——就是那次摘要。压缩 Run 不该再调模型回答问题。
+    assert len(model.requests) == 1, [r.messages for r in model.requests]
