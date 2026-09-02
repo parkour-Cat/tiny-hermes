@@ -258,6 +258,47 @@ test("registering an issuer sends the key reference shape the API takes", async 
   });
 });
 
+test("an issuer can be registered by pasting its public key instead of a JWKS url", async () => {
+  // 真机走查撞上的第一堵墙。后端一直接受两者之一（`end_user_routes.py` 的
+  // `public_key` / `jwks_url`），`channel_issuers` 两列并存，e2e 用的正是公钥那条；
+  // 而这个表单只给 JWKS 地址且必填。后果是自建 IdP、不对外发布 JWKS 端点的企业，
+  // 管理员在界面上无路可走——平台支持它，控制台不让他做。
+  const pem = "-----BEGIN PUBLIC KEY-----\nMIIBIjANBg\n-----END PUBLIC KEY-----";
+  let sent: Record<string, unknown> | null = null;
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json([])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/secrets", () => HttpResponse.json([])),
+    http.get("/api/v1/channel-issuers", () => HttpResponse.json([])),
+    http.post("/api/v1/channel-issuers", async ({ request }) => {
+      sent = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json(ISSUER, { status: 201 });
+    }),
+  );
+
+  renderChannels();
+  await userEvent.click(await screen.findByRole("button", { name: t("registerIssuer") }));
+  await userEvent.type(await screen.findByLabelText(t("issuerName")), "https://sso.example.com");
+  await userEvent.click(await screen.findByRole("radio", { name: t("issuerKeyModePublicKey") }));
+  await userEvent.type(await screen.findByLabelText(t("issuerPublicKey")), pem);
+  await userEvent.type(
+    await screen.findByLabelText(t("issuerOrigins")),
+    "https://portal.example.com",
+  );
+  await userEvent.click(screen.getByRole("button", { name: t("saveName") }));
+
+  await waitFor(() => expect(sent).not.toBeNull());
+  // `toEqual` rather than a per-key check: the point is that the unused half
+  // is *absent*, not present-and-empty. A `jwks_url: ""` would be stored as a
+  // second verification material the platform would then try to fetch.
+  expect(sent).toEqual({
+    channel: "web",
+    issuer: "https://sso.example.com",
+    public_key: pem,
+    allowed_origins: ["https://portal.example.com"],
+  });
+});
+
 test("a binding shows whether it can reply at all", async () => {
   // Without this column an operator cannot tell a receive-only binding from
   // one wired to reply, and "the Agent answered but Feishu showed nothing"
