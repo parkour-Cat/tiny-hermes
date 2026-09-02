@@ -98,7 +98,21 @@ def redis_url() -> str:
 
 @pytest.fixture
 def settings(database_url: str, redis_url: str) -> Settings:
+    """本机跑出来的必须和 CI 上跑出来的是同一份配置。
+
+    `_env_file=None` 是这里唯一不显然的一行。`Settings.model_config` 写着
+    `env_file=".env"`，所以任何这里没有显式赋值的字段都会落到仓库根那个 `.env`
+    上——而 CI 上没有那个文件。后果不是抽象的：`.env` 里的
+    `EGRESS_PROXY_URL` 曾经让 `model_catalog/test_endpoint_api.py` 的两条长期
+    是红的，红的原因和被测代码毫无关系，于是每次跑全量都要有人重新说一遍
+    「那两条是环境问题」——**而这句话恰恰无法从输出里验证**，它同样可以用来
+    掩盖一个真的回归。
+
+    显式赋值的那几个字段仍然读环境变量（`TEST_DATABASE_URL` 之类），那是
+    有意的：它们是跑测试的人必须提供的东西，不是碰巧躺在某个文件里的东西。
+    """
     return Settings(
+        _env_file=None,  # pyright: ignore[reportCallIssue]
         database_url=database_url,
         redis_url=redis_url,
         s3_endpoint=os.environ.get("S3_ENDPOINT", "http://localhost:9000"),
