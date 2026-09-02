@@ -144,3 +144,47 @@ pyright                                                   0 errors
 main，然后在第一条真实消息上挂掉。抓到它的不是任何一次评审，是把隧道关掉发一条消息。
 
 判据不是「测试过了」，是「这条路走得通」——这一次，这两句话之间隔着一个生产缺陷。
+
+### 6.3 顺带走了网页渠道，撞出两堵墙
+
+飞书那一遍做完之后又走了一遍网页渠道（`chat-web`）——它和飞书是同一件事的两个门
+（spec §4.5：终端用户通过 Web、飞书或企业自有应用调用 Agent），整栈刚重建过，
+值得看一眼。方式：临时登记一个签发方、签一张 10 分钟的票、从浏览器进。
+（走查用的签发方已禁用，私钥和票已销毁。）
+
+**通了的**：票验过、身份认出、对话界面开出、Agent 正确。这条渠道本身是好的。
+
+**没通的，而且卡住的位置就是结论**——两处「后端支持、控制台没有」：
+
+1. **登记签发方只能填 JWKS 地址。**后端 `end_user_routes.py:67-68` 接受
+   `public_key` 或 `jwks_url` 二选一，`channel_issuers` 表两列并存，e2e 用的正是
+   公钥那条；而 `ChannelsPage.tsx:491` 只给 JWKS 且必填。**自建 IdP、不发布 JWKS
+   端点的企业，管理员在界面上无路可走。**
+2. **Agent 的 `end_user_access` 没有任何界面。**发消息被
+   `end-user access is not enabled for notes-tidier` 挡住（`service.py:394`）。
+   `tests/e2e/end-user.spec.ts:16` 的注释自己写着「the platform has no UI for
+   `end_user_access` or `channel_issuers` yet」。
+
+合起来：**一个管理员只用控制台，没法把网页渠道从零开起来。**这与本分支刚补掉的
+第十二次（`transport` 开关不可达）是同一个形状，只是这次是两个开关。已开任务跟进。
+
+**后来走通了。**换用一个 e2e 早先在本机留下的、`end_user_access` 已开的 Agent
+（`concierge-*`，确定性模型），端到端跑完：
+
+| 环节 | 证据 |
+| --- | --- |
+| 企业票验签 → 建会话 | `POST /api/v1/end-user/sessions → 201` |
+| 选中 Agent → 开会话 | `POST /api/v1/end-user/agents/{alias}/sessions → 201` |
+| 发消息 → 建 Run | `POST /api/v1/end-user/sessions/{id}/runs → 201` |
+| Run 跑完 | 库里 `status = completed`，`session_messages` 有 assistant 那条 |
+| **回复显示在页面上** | 截图确认，用户那条在右、`The deterministic scenario finished.` 在左 |
+
+（走查用的临时签发方已禁用，私钥、票和脚本已销毁。）
+
+**过程中我误判过一次，记下来**：发完消息后主区不自动显示回复，要点一下侧栏的会话
+才出来。当时我几乎把它当成「写进去了没人够得着」报出去——实际拉取消息的那个请求
+**返回了两条**（用户 + 助手），前端也渲染得出。**是不自动切换视图，不是数据够不着。**
+差别在于我去读了那个请求的响应体，而不是停在「页面上没看到」。
+
+**这条渠道真正的缺口不在数据链路上，在开起来的路上**——见上面两条，管理员只用控制台
+开不起来它。
