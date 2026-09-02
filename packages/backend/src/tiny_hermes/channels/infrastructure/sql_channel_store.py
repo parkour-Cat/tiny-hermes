@@ -683,6 +683,17 @@ class SqlChannelStore:
                 # newest turn just falls back to the next assistant turn, or
                 # to that same empty-reply path if there isn't one.
                 SessionMessageRow.withdrawn_at.is_(None),
+                # §344's erasure means *as if it never existed*, and this is
+                # the one read point of the five that puts text outside the
+                # platform — into a chat client, where no later erasure can
+                # reach it. The other four (`sql_store`'s two, `sql_search`,
+                # `copy_checkpoint_messages`) filter it; this one did not.
+                #
+                # Nothing writes this column today — erasure deletes the rows
+                # instead — so this guards a hole rather than closes a leak.
+                # It is here because the first writer this column ever gets
+                # should not have to remember that this scan was the exception.
+                SessionMessageRow.redacted.is_(False),
             )
             .order_by(SessionMessageRow.sequence.desc())
             .limit(1)
