@@ -76,6 +76,8 @@ class FakeRuns:
         #: makes true or false.
         self.submitted: list[tuple[UUID, UUID, str, str | None]] = []
         self.withdraw_calls: list[tuple[UUID, WithdrawScope, int]] = []
+        self.compaction_requests: list[UUID] = []
+        self.compactable = True
         #: 每次撤回带的逃生口（`/new` 有，`/undo` 必须没有）。
         self.escapes: list[EndUserEscape | None] = []
         self.session_id = uuid4()
@@ -113,6 +115,10 @@ class FakeRuns:
         self.images = list(images)
         self.submitted.append((end_user_id, session_id, text, idempotency_key))
         return AcceptedRun(run_id=uuid4(), document=self.document, replayed=False)
+
+    async def request_compaction(self, session_id: UUID) -> bool:
+        self.compaction_requests.append(session_id)
+        return self.compactable
 
     async def withdraw_from_session(
         self,
@@ -401,3 +407,65 @@ async def test_only_new_carries_the_permission_to_end_a_parked_run(
         request_id="r-new",
     )
     assert for_undo is None
+
+
+@pytest.fixture
+def compact_event() -> ChannelEvent:
+    return ChannelEvent(
+        channel="feishu",
+        channel_event_id="om_compact",
+        external_user_id="ou_zhang",
+        text="/compact",
+    )
+
+
+async def test_compact_marks_the_session_and_never_starts_a_run(
+    ingestion: ChannelIngestion,
+    compact_event: ChannelEvent,
+    binding: ChannelBindingRecord,
+    runs: FakeRuns,
+    conversations: FakeConversations,
+) -> None:
+    """命令打标记，压缩发生在下一轮——入站路径不做模型调用。
+
+    断言「没有 Run」和「没有撤回」两件事，而不只是「打了标记」：一个既打标记又
+    顺手提交了 Run 的实现也会让「打了标记」为真，而那正是这条命令不该做的
+    ——`/compact` 不是一条要回答的消息。
+    """
+    # 默认 fixture 故意没有会话（那条守的是「陌生人的第一条消息不建会话」）。
+    # 不给一个，这条测试测到的是那条早退路径，压缩这段代码根本走不到。
+    conversations.known = runs.session_id
+
+    delivered = await ingestion.run_for(
+        binding=binding, event=compact_event, request_id="r1"
+    )
+
+    assert runs.compaction_requests == [runs.session_id]
+    assert delivered.run is None
+    assert runs.submitted == []
+    assert runs.withdraw_calls == []
+    assert delivered.receipt is not None
+    assert delivered.receipt.command == "compact"
+    assert delivered.receipt.outcome == "done"
+
+
+async def test_compact_on_a_conversation_with_nothing_to_compact_says_nothing(
+    ingestion: ChannelIngestion,
+    compact_event: ChannelEvent,
+    binding: ChannelBindingRecord,
+    runs: FakeRuns,
+    conversations: FakeConversations,
+) -> None:
+    """短对话里没有可压缩的历史，回执要说这件事，不能报「已记下」。
+
+    `outcome` 由 store 说了算（它才知道这段会话有多长），不是这一层猜的。
+    """
+    conversations.known = runs.session_id
+    runs.compactable = False
+
+    delivered = await ingestion.run_for(
+        binding=binding, event=compact_event, request_id="r1"
+    )
+
+    assert delivered.receipt is not None
+    assert delivered.receipt.outcome == "nothing"

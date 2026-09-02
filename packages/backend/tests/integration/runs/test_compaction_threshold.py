@@ -178,3 +178,52 @@ async def test_a_declared_threshold_moves_when_compaction_starts(
     compacted = await payloads(engine, aggressive_run, "context_compacted")
     assert len(compacted) == 1
     assert compacted[0]["source"] == "structural"
+
+
+async def test_a_requested_compaction_happens_even_far_below_the_threshold(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    small_endpoint: str,
+) -> None:
+    """`/compact` 让人自己决定什么时候压，不必等阈值。
+
+    判据和上面那条一样是 `CONTEXT_COMPACTED` 事件，不是标记有没有被写进去
+    ——标记写进去了而没人读，正是这个仓库最常见的那种 bug，而这条链路一共有
+    四层（命令、入站、store、Worker），任何一层断了都会让「写进去了」为真而
+    「压缩发生了」为假。
+
+    用默认阈值（0.50）的那个 Agent：上一条测试已经证明同样这段历史在它手里
+    **不会**触发压缩。所以这里如果压了，只可能是因为那个请求被读到了。
+    """
+    workspace_id = UUID(scope["X-Workspace-Id"])
+
+    agent = _publish(client, scope, small_endpoint, compaction_threshold=None)
+    session = start_session(client, scope, agent)
+    await _seed_old_turns(
+        engine, UUID(session), workspace_id, pairs=TURN_PAIRS, size=TURN_SIZE
+    )
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE sessions SET compaction_requested_at = now() WHERE id = :s"),
+            {"s": UUID(session)},
+        )
+
+    run = ask(client, scope, session, "and what is left?")
+    model = Recording(fails(), says("nothing is left"))
+    await drive(engine, model, None)
+
+    assert status(client, scope, run)["status"] == "completed"
+    compacted = await payloads(engine, run, "context_compacted")
+    assert len(compacted) == 1
+
+    # 标记被消费掉了：一次请求只压一次，不会在后面每一轮都重来。
+    async with engine.connect() as connection:
+        left = (
+            await connection.execute(
+                text("SELECT compaction_requested_at FROM sessions WHERE id = :s"),
+                {"s": UUID(session)},
+            )
+        ).scalar_one()
+    assert left is None
