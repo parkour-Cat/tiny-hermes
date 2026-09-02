@@ -10,17 +10,10 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from tiny_hermes.channels.application.webhook_service import Claimed, Unreadable
 from tiny_hermes.channels.infrastructure.feishu_long_connection import (
     FeishuLongConnection,
     LongConnectionBinding,
 )
-
-#: `DeliverFrame` returns whatever `accept_verified` returns. `on_frame`
-#: never reads it — see its docstring — but the fixtures below still have to
-#: hand back *something* of that type to satisfy the protocol, so this is a
-#: throwaway value, not a claim about what a real delivery produced.
-_DUMMY_RESULT = Unreadable(kind="unused", external_user_id="ou_unused", claim_id=None)
 
 
 @dataclass
@@ -47,11 +40,8 @@ class _DeliverSpy:
     def __init__(self) -> None:
         self.calls: list[tuple[UUID, dict[str, Any]]] = []
 
-    async def __call__(
-        self, binding_id: UUID, envelope: dict[str, Any]
-    ) -> Claimed | Unreadable:
+    async def __call__(self, binding_id: UUID, envelope: dict[str, Any]) -> None:
         self.calls.append((binding_id, envelope))
-        return _DUMMY_RESULT
 
 
 class _DeliverBoom:
@@ -59,9 +49,7 @@ class _DeliverBoom:
     不区分来源。`RuntimeError` 只是任选一个非 `BaseException` 的具体类型，不是在
     还原 `accept_verified` 真实会抛的那一种。"""
 
-    async def __call__(
-        self, binding_id: UUID, envelope: dict[str, Any]
-    ) -> Claimed | Unreadable:
+    async def __call__(self, binding_id: UUID, envelope: dict[str, Any]) -> None:
         del binding_id, envelope
         raise RuntimeError("frame not handled")
 

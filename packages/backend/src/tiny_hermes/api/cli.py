@@ -14,12 +14,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
+from tiny_hermes.channels.application.feishu_service import FeishuChannelService
+from tiny_hermes.channels.application.ingestion import ChannelIngestion
 from tiny_hermes.channels.application.outbound import ChannelReplyDispatcher
-from tiny_hermes.channels.application.webhook_service import (
-    Claimed,
-    FeishuWebhookService,
-    Unreadable,
-)
+from tiny_hermes.channels.application.webhook_service import FeishuWebhookService
 from tiny_hermes.channels.infrastructure.feishu_long_connection import (
     DeliverFrame,
     FeishuLongConnection,
@@ -29,6 +27,7 @@ from tiny_hermes.channels.infrastructure.feishu_sender import FeishuSender
 from tiny_hermes.channels.infrastructure.run_images import ChannelImageSource
 from tiny_hermes.channels.infrastructure.sql_channel_store import SqlChannelStore
 from tiny_hermes.channels.infrastructure.tables import ChannelBindingRow
+from tiny_hermes.identity.infrastructure.sql_end_user_store import SqlEndUserStore
 from tiny_hermes.memory.infrastructure.run_searches import SqlRunSessionSearches
 from tiny_hermes.memory.infrastructure.sql_candidates import SqlMemoryCandidates
 from tiny_hermes.model_catalog.infrastructure.credentials import (
@@ -41,6 +40,7 @@ from tiny_hermes.runs.application.scheduler import (
     SchedulerRuntime,
     SchedulerSettings,
 )
+from tiny_hermes.runs.application.service import RunCoordination
 from tiny_hermes.runs.application.worker import (
     WorkerRuntime,
     WorkerSettings,
@@ -59,6 +59,7 @@ from tiny_hermes.runs.infrastructure.skill_proposals import SqlSkillProposals
 from tiny_hermes.runs.infrastructure.sql_approvals import SqlApprovalGate
 from tiny_hermes.runs.infrastructure.sql_artifact_reads import SqlArtifactReads
 from tiny_hermes.runs.infrastructure.sql_children import SqlChildRuns
+from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.http_calls import EgressClaim
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
 from tiny_hermes.sandbox.transport.adapter import SandboxClient
@@ -69,6 +70,7 @@ from tiny_hermes.session_workspace.domain.models import WorkspaceQuota
 from tiny_hermes.session_workspace.infrastructure.minio_store import MinioObjectStore
 from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.database import build_session_factory
+from tiny_hermes.shared.errors import AppError
 from tiny_hermes.shared.logging import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -506,22 +508,65 @@ async def _supervised_connection(
         delay = min(delay * 2, max_delay)
 
 
-def _deliver_via(sessions: async_sessionmaker[AsyncSession]) -> DeliverFrame:
+def _deliver_via(
+    sessions: async_sessionmaker[AsyncSession], kek: bytes | None
+) -> DeliverFrame:
     """One `deliver`, shared by every long-connection binding.
 
     A fresh session per frame — not the session `_long_connections` used to
     read bindings and resolve credentials, which is long closed by the time
-    a real frame arrives. `accept_verified` only normalizes and claims (the
-    half both transports share); it does not create a Run.
+    a real frame arrives.
+
+    The whole `FeishuChannelService`, not `accept_verified` alone. Claiming
+    is only the half both transports share; the half after it — refusal
+    receipts, command receipts, the Run, and `attach_run` — is what the
+    outbound scan reads. For one task this function stopped at the claim,
+    and the result was the shape this repository keeps producing: rows in
+    `channel_events`, no Run, nobody answered. `deliver_verified` is the
+    same six steps the webhook route takes, called from here rather than
+    copied, because a second copy is a second place to forget one of them.
+
+    Assembled per frame the way `resources.feishu_channel_service`
+    assembles it per request, and for that docstring's reason: the claim
+    and the Run it leads to commit or roll back together. The claim is what
+    stops Feishu retrying, so a claim committed without its Run is a
+    message lost with nothing left to say so.
     """
 
-    async def deliver(binding_id: UUID, envelope: dict[str, Any]) -> Claimed | Unreadable:
+    async def deliver(binding_id: UUID, envelope: dict[str, Any]) -> None:
         async with sessions() as session:
-            outcome = await FeishuWebhookService(SqlChannelStore(session)).accept_verified(
-                binding_id=binding_id, envelope=envelope
+            store = SqlChannelStore(session)
+            service = FeishuChannelService(
+                bindings=store,
+                resolve_secret=CredentialResolver(SqlSecretStore(session), kek).resolve,
+                webhooks=FeishuWebhookService(store),
+                ingestion=ChannelIngestion(
+                    subjects=SqlEndUserStore(session),
+                    conversations=store,
+                    runs=RunCoordination(SqlRunStore(session)),
+                ),
             )
-            await session.commit()
-            return outcome
+            try:
+                await service.deliver_verified(
+                    binding_id=binding_id,
+                    envelope=envelope,
+                    request_id=f"lc-{uuid.uuid4()}",
+                )
+            except AppError as error:
+                # An audited refusal has already written its row in this
+                # session; rolling back would erase the only record that
+                # the delivery was refused and why. Same branch, same
+                # reason, as the request-scoped assembly.
+                if error.audited:
+                    await session.commit()
+                else:
+                    await session.rollback()
+                raise
+            except BaseException:
+                await session.rollback()
+                raise
+            else:
+                await session.commit()
 
     return deliver
 
@@ -669,7 +714,7 @@ async def _long_connections(
     move into a retry or polling path.
     """
     kek = optional_kek(settings.tiny_hermes_kek)
-    deliver = _deliver_via(sessions)
+    deliver = _deliver_via(sessions, kek)
     #: Bindings whose credentials actually resolve, in `id` order. Ordered by
     #: the database rather than sorted here so the query does the tie-break
     #: too, and filtered *before* the one-per-process cut: a binding skipped

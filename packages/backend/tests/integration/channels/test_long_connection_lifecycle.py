@@ -44,7 +44,6 @@ from tiny_hermes.api.cli import (
     _supervised_connection,  # noqa: SLF001 # pyright: ignore[reportPrivateUsage]
 )
 from tiny_hermes.channels.application.outbound import ChannelReplyDispatcher
-from tiny_hermes.channels.application.webhook_service import Claimed, Unreadable
 from tiny_hermes.channels.infrastructure import feishu_long_connection
 from tiny_hermes.channels.infrastructure.feishu_long_connection import (
     FeishuLongConnection,
@@ -749,6 +748,16 @@ class _RecordingSender:
         """
         return [entry for entry in self.sent if not entry["delivery_key"].endswith(":c")]
 
+    def opening(self) -> dict[str, str]:
+        """The card the delivery opened with — which is where the addressing
+        is. The answer arrives as an *update* to this card, and an update is
+        addressed by `message_id`, so `open_id` and the app credentials are
+        only checkable here. Same split `test_reply_dispatch` asserts across.
+        """
+        opened = [entry for entry in self.sent if entry["delivery_key"].endswith(":c")]
+        assert opened, "no opening card was sent"
+        return opened[0]
+
     async def send_text(
         self,
         *,
@@ -869,11 +878,16 @@ async def test_the_answer_to_a_long_connection_message_reaches_its_sender(
     answers = sender.after_opening()
     assert len(answers) == 1, sender.sent
     assert "上周有 12 单。" in answers[0]["text"]
-    # As the right app, to the right person: a reply that went out under the
-    # webhook binding's credentials would still satisfy the line above.
-    assert answers[0]["open_id"] == "ou_zhang"
-    assert answers[0]["app_id"] == "cli_long"
-    assert answers[0]["app_secret"] == "app-secret-value"  # noqa: S105
+    # As the right app, to the right person. Asserted on the opening card
+    # because that is where this platform addresses a delivery: the answer
+    # goes out as an update to that card, keyed by its `message_id`, so an
+    # answer carries no `open_id` of its own. Without these three lines the
+    # assertion above is satisfied by an answer sent under the webhook
+    # binding's credentials, or to somebody else entirely.
+    opening = sender.opening()
+    assert opening["open_id"] == "ou_zhang"
+    assert opening["app_id"] == "cli_long"
+    assert opening["app_secret"] == "app-secret-value"  # noqa: S105
 
 
 async def test_run_does_not_return_before_a_recording_it_started_is_written(
@@ -902,7 +916,7 @@ async def test_run_does_not_return_before_a_recording_it_started_is_written(
         await written(binding_id, kind, down_seconds)
         order.append("recorded")
 
-    async def never_delivers(binding_id: UUID, envelope: dict[str, Any]) -> Claimed | Unreadable:
+    async def never_delivers(binding_id: UUID, envelope: dict[str, Any]) -> None:
         raise AssertionError("this test never sends a frame")
 
     channels = sdk_channels()
@@ -1133,7 +1147,7 @@ async def test_a_recording_that_starts_while_run_is_draining_is_still_written(
         await written(binding_id, kind, down_seconds)
         order.append(kind)
 
-    async def never_delivers(binding_id: UUID, envelope: dict[str, Any]) -> Claimed | Unreadable:
+    async def never_delivers(binding_id: UUID, envelope: dict[str, Any]) -> None:
         raise AssertionError("this test never sends a frame")
 
     connection = FeishuLongConnection(
@@ -1247,7 +1261,7 @@ async def test_a_binding_whose_secret_was_disabled_says_so_where_the_console_rea
     assert refused["context"]["app_secret_ref"] == str(secret_id)
 
 
-async def _never_delivers(binding_id: UUID, envelope: dict[str, Any]) -> Claimed | Unreadable:
+async def _never_delivers(binding_id: UUID, envelope: dict[str, Any]) -> None:
     """下面这几条测试一帧都不发——`deliver` 被叫到就是缺陷本身。"""
     raise AssertionError(f"no frame should have reached deliver: {binding_id} {envelope}")
 

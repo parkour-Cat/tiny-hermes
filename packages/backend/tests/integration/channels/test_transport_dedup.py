@@ -116,14 +116,13 @@ async def test_the_same_event_over_both_transports_makes_one_run(
     first = await service.accept_verified(binding_id=binding_id, envelope=envelope)
 
     # 第二条：真的经过适配器。`deliver` 就是这同一个 `service`，`results`
-    # 只是为了在断言里看见 `on_frame` 这次调用真正拿到的返回值——不是在
-    # 猜它会不会调用 `deliver`，是记录它调用之后发生了什么。
+    # 记的是这次调用里 `accept_verified` 交出来的东西——适配器自己不读返回值
+    # （`DeliverFrame` 返回 `None`），所以这个列表是唯一能看见它确实调用过、
+    # 以及调用之后发生了什么的地方。
     results: list[Claimed | Unreadable] = []
 
-    async def _deliver(binding_id: UUID, envelope: dict[str, Any]) -> Claimed | Unreadable:
-        result = await service.accept_verified(binding_id=binding_id, envelope=envelope)
-        results.append(result)
-        return result
+    async def _deliver(binding_id: UUID, envelope: dict[str, Any]) -> None:
+        results.append(await service.accept_verified(binding_id=binding_id, envelope=envelope))
 
     binding = LongConnectionBinding(binding_id=binding_id, app_id="cli_x", app_secret="s")
     adapter = FeishuLongConnection(binding, _deliver)

@@ -37,7 +37,6 @@ from lark_oapi.channel import (  # pyright: ignore[reportMissingTypeStubs]
     FeishuChannel,
 )
 
-from tiny_hermes.channels.application.webhook_service import Claimed, Unreadable
 from tiny_hermes.channels.domain._json import object_at, string_at
 
 logger = logging.getLogger(__name__)
@@ -94,11 +93,15 @@ class DeliverFrame(Protocol):
     frame reach past this seam into whatever `FeishuWebhookService` needs,
     which is exactly the coupling both transports converging on
     `accept_verified` exists to avoid.
+
+    Returns nothing because this adapter reads nothing: what a delivery
+    became — claimed, deduplicated, refused, turned into a Run — is the
+    caller's business, and typing the outcome here would drag the
+    application's result model across this seam for a value `on_frame`
+    only discards.
     """
 
-    async def __call__(
-        self, binding_id: UUID, envelope: dict[str, Any]
-    ) -> Claimed | Unreadable: ...
+    async def __call__(self, binding_id: UUID, envelope: dict[str, Any]) -> None: ...
 
 
 class RecordConnectionEvent(Protocol):
@@ -164,7 +167,7 @@ def _envelope_of(frame: Any) -> dict[str, Any]:
     return cast(dict[str, Any], raw)
 
 
-def _event_id_of(envelope: Any) -> str:
+def event_id_of(envelope: Any) -> str:
     """Best-effort id for the one log line `on_frame` writes on failure.
 
     Takes `Any`, not `dict[str, Any]`: this function's entire job is to be
@@ -286,7 +289,7 @@ class FeishuLongConnection:
         的帧在这里就被挡住，日志写一个占位符，`deliver` 从不会被叫到。
 
         信封一旦转换成功，事件 id 在调用 `deliver` **之前**就取好，而不是等
-        `deliver` 炸了之后在 `except` 里现取——`_event_id_of` 自己保证不会
+        `deliver` 炸了之后在 `except` 里现取——`event_id_of` 自己保证不会
         抛（它对输入类型做了防御性检查，不假设调用者已经保证过什么），但
         提前取还有一个理由：`except` 块里唯一要做的事就是把已经算好的
         `binding_id` 和 `event_id` 写进日志，不再有第二个能失败的调用夹在
@@ -306,7 +309,7 @@ class FeishuLongConnection:
             )
             return
 
-        event_id = _event_id_of(envelope)
+        event_id = event_id_of(envelope)
         try:
             await self._on_scheduler_loop(
                 self._deliver(self._binding.binding_id, envelope)
