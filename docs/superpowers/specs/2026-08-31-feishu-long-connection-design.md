@@ -73,7 +73,8 @@ accept_verified(...)           ← 长连接从这里进（SDK 已验签、已�
   → 回复仍走 scheduler 现有的扫描与发送路径，不变
 ```
 
-出站完全不受影响：回复走的是 Feishu 的 HTTP API，与入站 transport 无关。
+回复不受影响：它走的是 Feishu 的 HTTP API，与入站 transport 无关，仍然经过
+egress 代理。**但长连接本身是一条出站连接**，见 §9.1。
 
 ## 5. 断线与重连
 
@@ -119,3 +120,27 @@ accept_verified(...)           ← 长连接从这里进（SDK 已验签、已�
   选主或分片机制，否则每个副本各建一条连接会重复收事件——**去重会挡住重复的 Run，
   但白白多收多解一遍**。本次不做，但记录在案。
 - **迁移既有绑定**：不自动把任何绑定切到长连接。切换是人工操作。
+
+### 9.1 已知限制：长连接不经过 egress 代理
+
+**长连接是 scheduler 主动打出去的一条 WSS**，它不经过 `outbound/client.py`，
+因此不经过 egress 代理。而且 `lark_oapi/ws/client.py:73-80` 在建连时把
+`proxy` 钉成 `None`，**主动关掉了对 `HTTP_PROXY`/`HTTPS_PROXY` 的识别**——
+所以这不是「配一下环境变量就能纳入边界」的事，SDK 层堵死了这条路。
+
+具体后果：**把 egress 代理关掉，消息照样进来、照样触发 Run，只有回复发不出去。**
+`outbound/client.py` 原来那句「关掉代理一切就停是代码的性质」因此对入站不再成立，
+那段 docstring 已经改成实话。
+
+为什么接受它：§19.2 已经把长连接定为私有部署的默认，也就是说「让进程主动连出去」
+这件事产品上早就同意了。要真堵住，得改 SDK 源码或在容器网络层做透明代理，成本
+远超这条特性本身。
+
+参照实现是同一种结构。`NousResearch/hermes-agent` @ `3f83297` 的
+`docs/security/network-egress-isolation.md` 把 gateway 设成双宿主（同时挂在
+`internal` 和 `egress` 两张网上），注释写着 `# needs outbound for Telegram, LLM APIs`，
+并在 **Limitations** 一节里明说「Platform adapters need egress」。区别只在于
+**它从没声称过「唯一的出口」**。
+
+**将来接别的长连接适配器的人要知道：一个自己持有 socket 的 SDK，在这份代码库的
+每一道出站检查之外。**这一节就是给那个人看的。

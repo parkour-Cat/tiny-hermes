@@ -1,149 +1,101 @@
-# 长连接住进 scheduler — 2026-08-31
+# 飞书 WebSocket 长连接接入 — 验收记录
 
 > 产品：spec §19.2（飞书私有部署默认用长连接，不要求公网入站地址）。
-> 范围：Task 4（4-task 实施计划的最后一块）——给 Task 3 已经写好的
-> `FeishuLongConnection` 找一个跑起来的地方，并让断线留下痕迹。
+> 分支：`feat/feishu-long-connection`，38 个提交，6 个任务 + 4 轮修复。
+> 促因：内网穿透隧道四天过期了四次，每次都要手工改飞书后台的 webhook 地址。
+
+**这份记录在 Task 5 落地后重写过一次。**上一版停在 Task 4，断言「消息能被认领但
+不会变成回复」——那句话现在是假的，留着会把读它的人引向一个已经不成立的结论。
 
 ## 1. 做了什么
 
-1. `feishu_long_connection.py` 新增 `RecordConnectionEvent` 协议、
-   `_on_reconnecting`/`_on_reconnected`/`_record_disconnected`/
-   `_record_reconnected`，把 SDK 的 `Events.RECONNECTING`/`RECONNECTED`
-   （同步、零参数回调，见下文）接到一对写事件的方法上；`run()` 注册这两个
-   handler，并在 `finally` 里 `await` 掉还没写完的后台任务，不让进程退出时
-   把还没提交的那一行事件丢在半空。
-2. `cli.py` 的 `_scheduler()` 把长连接接进主循环：`_long_connections` 在
-   进程启动时读一次 `transport = 'long_connection'` 的活跃绑定，凭据在
-   读出绑定的**同一个 session** 里用 `CredentialResolver` 解析；每条连接
-   包一层 `_supervised_connection`（指数退避重试，共用同一个 `stop`），
-   和 `runtime.run_forever` 一起进 `asyncio.gather`。
-3. 断线/重连事件写进已有的 `audit_events` 表——不是新表：
-   `/api/v1/audit-events` 已经在读它，`AuditPage.tsx` 第 163 行已经在把
-   `context` 列渲染出来。`down_seconds` 放在 `context` 里，`disconnected`
-   记 `None`（那次中断还没结束）。
-4. 新测试文件，逐字复用计划 Step 1 给的三个测试骨架（加了类型标注满足
-   pyright，没有改测试逻辑）。
+1. **适配器**（`channels/infrastructure/feishu_long_connection.py`）：把 lark SDK 的
+   WebSocket 客户端包成 `FeishuLongConnection`。SDK 的回调**不在 scheduler 的事件
+   循环上**（`lark_oapi/ws/client.py:31-34` 在 import 时就建了一个模块级 loop），
+   所以每个回调都经 `asyncio.run_coroutine_threadsafe` 送回 `run()` 捕获的那个 loop，
+   并等它完成——不等的话就既没有去重也没有背压。
+2. **transport 列**（migration 0052）：`channel_bindings.transport`，`webhook` 或
+   `long_connection`，NOT NULL，默认 `webhook`，合法值由 CHECK 约束决定。
+3. **scheduler 侧宿主**（`api/cli.py`）：`_long_connections` 在进程启动时读一次活跃的
+   长连接绑定，凭据在**读出绑定的同一个 session** 里解析；每条连接包一层
+   `_supervised_connection`（指数退避 5s→300s，共用同一个 `stop`），与
+   `runtime.run_forever` 一起进 `asyncio.gather`。
+4. **开关接到 API 和控制台**：PATCH 接受 `transport`，响应体带上它，控制台能看见能切换，
+   并且**没有 app 凭据的绑定切不过去**（服务端按改完之后的状态校验，前端禁用该选项）。
+5. **认领之后的那半程**（Task 5）：抽出 `FeishuChannelService._after_claim`，两种
+   transport 共用；长连接经 `deliver_verified` 进来。在此之前长连接走到认领就停——
+   消息落进 `channel_events`，没有 Run，没有回复。
+6. **连接生命周期留痕**：四种 `channel.long_connection.*` 审计行写进已有的
+   `audit_events` 表（`/api/v1/audit-events` 已经在读，`AuditPage.tsx` 已经在渲染）。
 
 ## 2. 测试过了
 
 ```
-unit          2288 passed
-integration    863 passed, 2 failed（见 §3，与本分支无关）
-ruff          All checks passed!
-pyright       0 errors, 0 warnings, 0 informations
-web            236 passed
-chat-web        53 passed
+pytest packages/backend/tests/integration（含 sandbox）   975 passed, 2 failed
+pytest packages/backend/tests/unit                        （含在上面的 channels+unit 2401 里）
+pnpm --filter @tiny-hermes/web test                       241 passed
+pnpm chat:test                                            53 passed
+ruff check packages/backend migrations                    All checks passed
+pyright                                                   0 errors
 ```
 
-`channels` 目录单独跑过多轮（Step 4、Step 5 前后各一次）：89 passed，
-每次都是干净的。
+那 2 条失败是 `model_catalog/test_endpoint_api.py` 的「no boundary」两条。**核实过不是
+托辞**：清掉环境里的 `EGRESS_PROXY_URL`（仓库根 `.env` 设了它）再跑，`2 passed in 1.02s`。
+与本分支无关，本分支一个字没碰 model_catalog 或 egress。
 
-## 3. 那 2 条失败是环境，不是这条分支
+## 3. 测试自己能不能红——验过
 
-`test_a_check_on_a_deployment_with_no_boundary_says_so` 和
-`test_a_check_reaches_nothing_when_there_is_no_boundary` 断言
-`refusal == "egress_not_configured"`，实际拿到 `egress_unavailable"`。
+这条分支的判据是「这条路走得通」，不是「测试过了」，所以关键断言都做过变异注入：
 
-原因和 `2026-08-26-feishu-images.md` §2 记录的完全一样：仓库根目录的
-`.env` 里有 `EGRESS_PROXY_URL=http://egress-proxy:3128`（这次核对过：
-`.env` 第 50 行）。这台机器上「没有出口边界」这个前提不成立——边界配置
-好了，只是连不上 `egress-proxy` 这个 Compose 服务名。这是本地部署环境
-的已知脆弱点，不是这次改动引入的，也不在这次改动触碰的任何文件附近。
+| 变异 | 结果 |
+| --- | --- |
+| `deliver_verified` 认领后直接返回（= Task 5 之前的行为） | 两条端到端测试 FAILED |
+| 删掉 `attach_run`（那次真实事故的形状：Run 建了但没挂上） | 两条端到端测试 FAILED |
+| `_on_scheduler_loop` 换成裸 `await`（跨 loop 缺陷） | 对应测试 FAILED |
+| 删掉 `finally` 里的 drain | 对应测试 FAILED |
+| 「一段故障只写一行」改成每次都写 | 对应测试 FAILED（3 行 vs 1 行）|
+| 校验读「这次传了什么」而不是「改完之后的状态」 | 对应测试 FAILED（200 vs 400）|
 
-## 4. Step 5 破坏性验证：夹具本身有两个洞，都补上了
+另有一次变异**抓到了实现自己的洞**：drain 超时那条路里，取消会触发 `_forget`，于是
+「超时后再数还剩几条」数出来是 0，那行日志压根不发。
 
-计划要求把 `_long_connections` 里「按 transport 过滤」那一行临时删掉，
-预期 `test_only_long_connection_bindings_get_a_connection` 变红。第一次
-去掉过滤后，这条测试**照样绿**——说明夹具没有验证到它自称验证的东西。
+## 4. 这一遍没能证明什么
 
-排查发现两处：
+- **没有在真实飞书 socket 上跑过。**测试里的 `_FakeChannel` 复制的是 lark SDK 源码里
+  回调的调用方式（哪个线程、哪个 loop、同步还是 await），**不是真实网络**。
+  `RECONNECTING`/`RECONNECTED` 在真实 SDK 上到底何时触发、以什么频率成簇出现，未验证。
+- **分支唯一真正的验收没做**：切到长连接、把隧道关掉、发一条消息、看它被回答。
+  在真机上跑通那一遍之前，这条分支只是「读起来自洽」。
+- **§19.2 要求的断线补投语义未验证。**`down_seconds` 现在写得进也读得出，但它存在的
+  理由——那次验证本身——没做。这在设计文档 §9 里本来就是明确不做项。
+- **Run 是被测试直接 `UPDATE` 成 completed 的**，没有真跑模型。出站那一半证明了，
+  Worker 那一半没有（它有自己的套件）。
+- **compose-e2e 没跑**，PR 没开。
+- 没有证明这些审计行**在浏览器里真的看得见**（没跑 UI）。
 
-1. `seeded_bindings_of_both_transports` 原来给 webhook 绑定的
-   `app_id`/`app_secret_ref` 都是 `None`。去掉 transport 过滤后，那条
-   webhook 绑定确实进了候选集合，但被**另一条**「凭据解析失败就跳过」
-   的逻辑挡住了——测试绿是因为凭据检查而不是 transport 过滤在起作用，
-   两个过滤条件在这个夹具下无法区分。修法：给 webhook 绑定也配一份真实、
-   可解析的密钥（`app_id="cli_webhook"`，一个真正 seal 过写进 `secrets`
-   表的值）。
-2. 两个绑定共用同一个密钥 `name` 时撞上 `secrets` 表的
-   `uq_secrets_workspace_name`（同一 workspace 下密钥名必须唯一）。修法：
-   `name` 按每次调用生成的 `secret_id` 拼后缀，保证工作区内唯一。
+## 5. 不声称什么
 
-修完夹具后重新执行破坏性验证：去掉 transport 过滤，
-`test_only_long_connection_bindings_get_a_connection` **真的红了**
-（`AssertionError`，候选集合里多出了那条 webhook 绑定的 id）；恢复过滤
-后重新绿。`channels` 全套 89 passed，确认这次修复没有连带弄坏别的测试。
-
-## 5. 一个关键的、这次任务范围之外的缺口
-
-**长连接收到的帧，认领之后不会变成 Run。**
-
-`deliver` 接的是 `FeishuWebhookService(store).accept_verified`——这是
-Task 3 自己钉死的设计（`accept_verified` 的去重测试
-`be4da75`），它的职责只是「验证 + 认领进 `channel_events`」，两种
-transport 共用这一半。真正把一条 `channel_event` 变成一次 Run 的是
-`FeishuChannelService.deliver()`，而这个方法**只能通过 webhook 的 HTTP
-路由触达**——scheduler 进程里没有任何代码轮询 `channel_events` 表找
-「已认领但还没转化成 Run」的行。
-
-也就是说：把一个绑定切到 `long_connection`、关掉 cloudflared、发一条
-真实消息——按照计划 收尾 一节的说法，这是「这条分支唯一真正的验收」——
-此刻会看到消息被 `FeishuChannel` 收到、被 `accept_verified` 认领进
-`channel_events`，然后**再也没有下文**。没有 Run，没有回复，用户会觉得
-机器人没反应。
-
-这不是这次任务实现错了——Task 4 的 Interfaces 一栏写的是「Consumes:
-Task 3 的 `FeishuLongConnection`」「Produces: 无新公开接口」，接线到
-Run 创建从未在这次任务的范围里。但它是这条**分支**能不能达成自己所写的
-验收标准的前提缺口，必须在这里点出来，而不是留到真机测试才发现。
-
-## 6. 这一遍没能证明什么
-
-- **§19.2 要求的断线补投语义完全没有验证。** 这次任务只证明了「断开、
-  重连这两个事件会被写下来、带着非负的 `down_seconds`」——`down_seconds`
-  本身存在的理由就是给将来那次验证当输入，但这次没有拔过网线、没有在
-  断线期间让对方发过消息、也没有检查过重连后那条消息是否补投。
-  §1473/§1515 要求的技术验证记录仍然是空的。
-- **没有做过真机部署验收。** 计划的收尾一节写明「唯一真正的验收」是
-  `deploy/compose/redeploy.sh` 部署、关掉 cloudflared、真实飞书应用发一条
-  消息确认能收到。这次任务在自动化 agent 环境里完成，没有真实的飞书
-  应用凭据、没有可关闭的 cloudflared 隧道、也没有触发过 `redeploy.sh`。
-  §5 记录的缺口意味着即便走了这一步，大概率也看不到回复。
-- **`RECONNECTING`/`RECONNECTED` 回调从未在真实 SDK 事件循环里触发过。**
-  单元/集成测试都是直接调用 `_record_disconnected`/`_record_reconnected`
-  （`_AdapterThatDrops` 绕开了真实 socket），不是通过一次真实的网络中断
-  触发 `FeishuChannel` 自己发出这两个事件。Task 3 的报告已经读过 SDK
-  源码确认了回调签名（同步、零参数），但这次任务没有用真实 socket 验证
-  过它们确实会被调用到。
-- **多副本 scheduler 下的重复建连没有处理，也没有测试覆盖。** 计划本身
-  点名了这一条：如果同一个 `long_connection` 绑定被两个 scheduler 副本
-  同时读到，会建两条 socket 抢同一个 app 的长连接，行为未知——这次没有
-  跑过多副本场景，代码里也没有任何互斥逻辑。
-- **`_supervised_connection` 的退避重试没有用真实的间歇性网络故障测过。**
-  测试只验证了「一开始就连不上的绑定不会拖垮主循环」（一次性失败），没有
-  验证过反复失败时退避是否真的在每次重试间隔变长，也没有验证过 `stop`
-  在退避等待期间被设置时是否真的提前退出——这段逻辑目前只被读代码复核过，
-  没有专门的测试。
-- **没有开 PR，没有拿到 compose-e2e 的绿色结果。** 计划要求的最后一步
-  （开 PR、用 `gh run view <id> --log | grep "^compose-e2e"` 确认真的
-  跑过测试）不在这次任务的执行范围内。
-
-## 7. 不声称什么
-
-- **不声称这条分支达成了它自己写的验收标准。** §5 的缺口意味着「没有
-  公网入口也能收到消息」这句话此刻是假的——消息能被长连接收到、能被
-  认领，但不会变成回复。这不是「基本能用，细节没打磨」，是端到端路径
-  在最后一步断掉。
-- **不声称 `alive` 反映真实连接状态。** 这次任务没有碰 `alive` 或它的
-  注释——它现在唯一的保证仍然是「一次投递失败不会把它清空」，不是连接
-  健康监控，Task 3 报告里已经写清楚，这次没有让它多做任何事，也没有
-  让任何调度逻辑依赖它。
-- **不声称断线记录本身是可运营的观测。** `audit_events` 里的一行
-  `channel.long_connection.disconnected/reconnected` 是原始数据，没有
-  告警、没有面板、没有针对「断线超过 N 分钟」的任何通知——有人要看，
-  仍然得去 `/api/v1/audit-events` 或 `AuditPage.tsx` 里手动找。
-- **不声称本机全绿等于可以合并。** 判据是 CI 的 compose-e2e 结果，这次
-  没有取得。
-- **不声称这次找到的两处夹具缺陷（webhook 绑定无凭据、密钥名冲突）是
-  这条分支引入的产品缺陷。** 它们只存在于这次新写的测试夹具里，不影响
-  任何已发布的行为。
+- **不声称「关掉 egress 代理，这个进程就发不出任何东西」对入站仍然成立。**
+  长连接是 scheduler **主动打出去**的一条 WSS，不经过 egress 代理；而且 lark SDK 在
+  `ws/client.py:73-80` 主动把 `proxy` 钉成 `None`，所以连环境变量式代理也拦不住它。
+  后果具体是：代理关掉之后，消息照样进来、照样触发 Run，只有回复发不出去。
+  参照实现 `NousResearch/hermes-agent` @ `3f83297` 把同一件事写在
+  `docs/security/network-egress-isolation.md` 的 **Limitations** 一节里
+  （「Platform adapters need egress」），它的 gateway 同样是双宿主直连消息平台——
+  结构上是同一种设计，区别只在于**它没有声称过「唯一的出口」**。
+- **不声称一个进程能带多于一个长连接绑定。**SDK 的 ws loop 是模块级单例，第二个绑定
+  的 `start()` 跑不起来，而且 A 的 `finally` 会停掉 B 的 socket 所在的 loop。
+  现在多出来的绑定会在启动时被拒绝并写一行 `not_started` 说明原因，**但这是拒绝，
+  不是支持。**
+- **不声称建连成功之后掉线会被自动恢复。**没有活性检查：socket 死在
+  `stop.wait()` 上时，这个进程不会知道。SDK 自己的无限重连是唯一的恢复机制。
+- **不声称控制台上「长连接」这一列说的是实话。**它渲染的是**存下来的值**，不是连接
+  状态。一个切了 transport 但没重启 scheduler 的绑定、一个凭据失效被跳过的绑定，
+  列上都写着「长连接」。原因现在能在审计页上查到，但渠道列表本身不会说。
+- **不声称所有角色都读得到这些审计行。**核实过：WORKSPACE_ADMIN 和平台管理员是
+  `FULL`，`context` 原样渲染；VIEWER 是 `REDACTED`，行看得见但 `context` 变成 `{}`，
+  页面显示「—」，读不到 `down_seconds` 和 `reason`；DEVELOPER 是 `OWN_RESOURCES`，
+  而这些行的 `actor_id` 是 `None`，**基本看不到**。做 §19.2 验证的人要用管理员登录。
+- **不声称库里已经存在的死配置行会被修好。**这一轮加的是校验，让这种行**建不出来**；
+  没有迁移，没有回填。
+- **不声称多副本 scheduler 下只会有一条连接。**没处理，没测试。
