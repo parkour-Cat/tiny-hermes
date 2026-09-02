@@ -11,7 +11,7 @@ times already and named in its own verification records.
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 from tiny_hermes.channels.application.ingestion import (
@@ -22,6 +22,7 @@ from tiny_hermes.channels.application.ingestion import (
 from tiny_hermes.channels.application.webhook_service import (
     BindingSecrets,
     Challenge,
+    Claimed,
     FeishuWebhookService,
     Unreadable,
 )
@@ -117,6 +118,50 @@ class FeishuChannelService:
         if isinstance(outcome, Challenge):
             return outcome
 
+        return await self._after_claim(binding, outcome, request_id)
+
+    async def deliver_verified(
+        self,
+        *,
+        binding_id: UUID,
+        envelope: dict[str, Any],
+        request_id: str,
+    ) -> Accepted:
+        """A delivery somebody else already authenticated, from claim to Run.
+
+        For the long connection, where Feishu's SDK has verified and
+        decrypted the frame before this platform sees it — so there is no
+        body, no signature and no `encrypt_key` here, and no `Challenge`
+        either: the handshake belongs to the HTTP endpoint a long-connection
+        binding does not have.
+
+        **The caller must have established that the envelope is authentic**,
+        the same requirement `accept_verified` carries and for the same
+        reason: nothing below this line can check one, and a caller that
+        skipped it would let an attacker choose the `event_id` and suppress
+        a real delivery by claiming it first.
+
+        The binding is still looked up, and still through `_binding`, so a
+        binding disabled while the socket stayed open is refused here rather
+        than starting a Run for a channel the workspace has switched off.
+        """
+        binding = await self._binding(binding_id)
+        outcome = await self._webhooks.accept_verified(
+            binding_id=binding_id, envelope=envelope
+        )
+        return await self._after_claim(binding, outcome, request_id)
+
+    async def _after_claim(
+        self, binding: ChannelBindingRecord, outcome: Claimed | Unreadable, request_id: str
+    ) -> Accepted:
+        """Everything a claimed delivery still owes, for either transport.
+
+        Here rather than duplicated per transport because every branch below
+        is a way this platform has already failed to answer somebody, and a
+        second copy would be a second place to forget one — the long
+        connection stopped at the claim for a whole task and produced
+        exactly that: rows written, nobody reached.
+        """
         if isinstance(outcome, Unreadable):
             # No Run — there is nothing this build could hand an Agent. But
             # there is a person waiting, so the delivery is marked for a

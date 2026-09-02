@@ -17,7 +17,7 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Cookie, Depends, Header, Request, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.channels.application.binding_service import (
@@ -26,6 +26,7 @@ from tiny_hermes.channels.application.binding_service import (
     ChannelBindingView,
     ChannelKeyRequired,
     ChannelKeyUnknown,
+    ChannelTransportUnusable,
     ForbiddenChannelAction,
     UnknownChannel,
 )
@@ -204,6 +205,24 @@ def feishu_webhook_router(resources: ApplicationResources) -> APIRouter:
 
 
 class CreateChannelBindingRequest(BaseModel):
+    """What a binding can be created with — and nothing else.
+
+    `extra="forbid"` (the same setting `agents/domain/models.py` uses)
+    because the alternative is not "harmless": `transport` is a field a
+    caller has every reason to send here, and without this it answered 201
+    with `transport: "webhook"` in the body — the request accepted, the
+    field dropped, the status code a success. Refusing it as 422 is the only
+    one of the three outcomes a caller can act on.
+
+    Not accepting `transport` here is deliberate. `update` validates the
+    binding a change *leaves behind* — app id present, app secret present
+    and still resolvable — and taking `transport` on create would mean
+    moving that check into `create` as well. Creating on `webhook` and
+    switching afterwards goes through the one place that already asks.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     channel: Literal["feishu"]
     agent_id: UUID
     #: The tenant's own identifier for the app. Metadata: it names which app
@@ -219,20 +238,51 @@ class CreateChannelBindingRequest(BaseModel):
 
 
 class UpdateChannelBindingRequest(BaseModel):
-    """Credentials and `app_id`, and deliberately nothing else.
+    """Credentials, `app_id`, and `transport` — nothing else.
 
-    A field left out is unchanged; a field sent as `null` is cleared. The
-    route reads `model_fields_set` to tell them apart, which is the whole
-    reason this model exists rather than reusing the create request.
+    A field left out is unchanged. Sending one as `null` *asks* for it to be
+    cleared; the route reads `model_fields_set` to tell an absent field from
+    an explicit null, which is the whole reason this model exists rather
+    than reusing the create request. What the model accepts is not what the
+    binding will allow, and three of the four fields have a case where the
+    clear is refused:
+
+    - `app_id` — cleared freely, except on a binding that is (or is being
+      switched to) `long_connection`, which cannot open a socket without it.
+    - `encrypt_key_ref` — never cleared on a Feishu binding at all
+      (`channel_key_required`, `binding_service`'s `ENCRYPTED_CHANNELS`
+      check): its deliveries are encrypted, so a binding without it stops
+      receiving.
+    - `app_secret_ref` — cleared to make a binding receive-only, except on a
+      `long_connection` binding, where it is what the handshake is made of
+      (`channel_transport_unusable`).
+    - `transport` — no cleared state exists to ask for. Its column is
+      `NOT NULL` (migration 0052), so `null` is refused as bad input rather
+      than accepted into an UPDATE that would fail as an unhandled
+      `IntegrityError`.
 
     `agent_id` and `channel` are absent on purpose: moving a binding to
     another Agent would silently redirect every conversation already mapped
     in `channel_conversations`, and that is not a credential fix.
+
+    `transport` is here rather than behind a dedicated route because it goes
+    through `update_binding` like every other column, not a second code
+    path. The column's CHECK constraint remains what the schema will not
+    bend on; the `Literal` in front of it is about what a *caller* gets back
+    — the CHECK reached from here raises `IntegrityError`, which nothing in
+    this application handles (`api/app.py` registers `AppError` and
+    `AuditedDenial` only), so a misspelled transport would answer 500. The
+    `Literal` is what makes it 422 instead; there is no length limit on this
+    field doing that job.
     """
 
     app_id: str | None = Field(default=None, max_length=120)
     encrypt_key_ref: str | None = Field(default=None, max_length=200)
     app_secret_ref: str | None = Field(default=None, max_length=200)
+    #: The default is inert: the route builds `changes` from
+    #: `model_fields_set`, so an omitted `transport` never reaches an UPDATE
+    #: and this value is never the one written.
+    transport: Literal["webhook", "long_connection"] = "webhook"
 
 
 class ChannelBindingResponse(BaseModel):
@@ -243,6 +293,11 @@ class ChannelBindingResponse(BaseModel):
     app_id: str | None
     encrypt_key_ref: str | None
     app_secret_ref: str | None
+    #: `webhook` or `long_connection`. Switching it does not take effect
+    #: until the scheduler restarts (no hot reload), which is why the
+    #: console has to show this rather than leave it something you set and
+    #: hope about.
+    transport: str
     created_by: UUID
     created_at: datetime
 
@@ -256,6 +311,7 @@ class ChannelBindingResponse(BaseModel):
             app_id=view.app_id,
             encrypt_key_ref=view.encrypt_key_ref,
             app_secret_ref=view.app_secret_ref,
+            transport=view.transport,
             created_by=view.created_by,
             created_at=view.created_at,
         )
@@ -283,6 +339,20 @@ def _binding_error(error: Exception) -> AppError:
                 "No active workspace secret has that name. A binding pointing "
                 "at a secret that does not exist accepts deliveries it can "
                 "never decrypt."
+            ),
+        )
+    if isinstance(error, ChannelTransportUnusable):
+        return AppError(
+            code="channel_transport_unusable",
+            title="This binding cannot hold a long connection",
+            status=400,
+            detail=(
+                "A long connection is opened with the binding's app id and "
+                "app secret. The binding needs both, and the app secret it "
+                "names has to still be an active workspace secret — the "
+                "scheduler resolves it at startup and skips the binding if "
+                "it cannot, which would read as active and connected here "
+                "while receiving nothing."
             ),
         )
     if isinstance(error, ChannelAlreadyBound):
@@ -401,6 +471,7 @@ def channel_binding_router(resources: ApplicationResources) -> APIRouter:
             ForbiddenChannelAction,
             ChannelKeyRequired,
             ChannelKeyUnknown,
+            ChannelTransportUnusable,
             UnknownChannel,
         ) as error:
             raise _binding_error(error) from error

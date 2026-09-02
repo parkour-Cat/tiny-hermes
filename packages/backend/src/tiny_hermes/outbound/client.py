@@ -1,4 +1,11 @@
-"""The only way out of this process — and it leaves through the egress proxy.
+"""Every HTTP call this platform makes leaves through the egress proxy.
+
+Not "the only way out of this process", which is what this line used to say.
+`FeishuLongConnection` opens a WebSocket to `open.feishu.cn` from the
+scheduler without coming through here, and `lark_oapi/ws/client.py:73-80`
+pins `proxy=None` on that connection, so even `HTTPS_PROXY` in the
+scheduler's environment does not redirect it. What that costs is written
+out at the bottom of this docstring, next to the guarantee it weakens.
 
 Why this is not `httpx` with careful arguments: a library's redirect follower
 re-sends on its own, without re-asking whether the new target is allowed and
@@ -17,9 +24,16 @@ anything connects to. What stays is what only a client can do — follow a
 redirect deliberately, drop a credential when the origin changes, cap a
 response, and tell the proxy which layers to measure this request against.
 
-Without an `EgressRoute` this client sends nothing. That is the stage's whole
-point: there is no fallback branch, so "turn the proxy off and everything
-stops" is a property of the code rather than a rule people remember.
+Without an `EgressRoute` this client sends nothing. There is no fallback
+branch, so for every caller of this client, "turn the proxy off and it sends
+nothing" is a property of the code rather than a rule people remember.
+
+**That is no longer true of the process as a whole, and the gap is on the
+inbound side.** With the proxy off, a Feishu long connection still carries
+messages in and still starts Runs; only the replies — which do come through
+here — fail. So the proxy is what stops this platform *answering*, not what
+stops it *acting*. Anyone adding another long-connection adapter inherits
+this: an SDK that owns its own socket is outside every check in this file.
 """
 
 from dataclasses import dataclass

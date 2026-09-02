@@ -21,6 +21,7 @@ function binding(overrides: object = {}) {
     status: "active",
     app_id: "cli_a1b2c3",
     encrypt_key_ref: "feishu-encrypt-key",
+    transport: "webhook",
     created_by: "u1",
     created_at: "2026-08-22T00:00:00Z",
     ...overrides,
@@ -306,4 +307,133 @@ test("an existing binding can be given the app secret it was made without", asyn
   // would resubmit `encrypt_key_ref` on every edit, and a stale value there
   // breaks inbound while fixing outbound.
   expect(patched).toEqual({ app_secret_ref: "s2" });
+});
+
+test("a binding shows which transport it receives on", async () => {
+  // The switch that turns this on lives here. A console that could not show
+  // the current value would make switching it a blind click.
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json([binding()])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+  );
+
+  renderChannels();
+
+  expect(await screen.findByText(t("channelTransportWebhook"))).toBeVisible();
+});
+
+test("switching a binding to the long connection warns that the scheduler needs restarting", async () => {
+  // The platform does not hot-reload transports (a deliberate choice, not a
+  // gap) — a person who switches this and does not see the warning will
+  // believe it took effect immediately, and messages will simply stop
+  // arriving with no visible cause. This assertion is the only thing that
+  // stands between switching and that failure.
+  let patched: Record<string, unknown> | null = null;
+  server.use(
+    // `app_secret_ref` explicit rather than left off the fixture: the real
+    // API always returns the field (null for receive-only), and leaving it
+    // `undefined` here would make the edit dialog's own diffing see a
+    // change that was never made. It is *set* rather than null because a
+    // long connection is opened with the app id and app secret — a
+    // receive-only binding cannot switch at all (the test below).
+    http.get("/api/v1/channel-bindings", () =>
+      HttpResponse.json([binding({ app_secret_ref: "s1" })]),
+    ),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/secrets", () =>
+      HttpResponse.json([
+        { id: "s1", name: "feishu-encrypt-key", scope: "workspace", status: "active" },
+      ]),
+    ),
+    http.patch("/api/v1/channel-bindings/b1", async ({ request }) => {
+      patched = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json(binding({ transport: "long_connection" }));
+    }),
+  );
+
+  renderChannels();
+  await userEvent.click(await screen.findByRole("button", { name: t("channelEdit") }));
+  await userEvent.click(await screen.findByLabelText(t("channelTransport")));
+  await userEvent.click(await screen.findByTitle(t("channelTransportLongConnection")));
+  await userEvent.click(screen.getByRole("button", { name: t("channelEditConfirm") }));
+
+  await waitFor(() => expect(patched).not.toBeNull());
+  expect(patched).toEqual({ transport: "long_connection" });
+  expect(await screen.findByText(t("channelTransportRestartHint"))).toBeVisible();
+});
+
+test("a binding already on the long connection says so, and keeps saying a restart is owed", async () => {
+  // Half of this task's premise is "you can see that it is on the long
+  // connection", and until this test nothing rendered that value: both other
+  // GETs answer `webhook`, so the long-connection branch of the column was
+  // never executed.
+  //
+  // The restart note is on the row rather than only in the post-save Alert
+  // because that Alert is one dismissible boolean in component state —
+  // close it, reload, or navigate away and the console no longer records
+  // anywhere that a restart is still owed. This one is derived from the
+  // data, so it is there for whoever looks, whenever they look.
+  server.use(
+    http.get("/api/v1/channel-bindings", () =>
+      HttpResponse.json([binding({ transport: "long_connection" })]),
+    ),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+  );
+
+  renderChannels();
+
+  expect(await screen.findByText(t("channelTransportLongConnection"))).toBeVisible();
+  expect(await screen.findByText(t("channelTransportRestartRequired"))).toBeVisible();
+});
+
+test("a transport this console has no wording for is shown as itself, not as Webhook", async () => {
+  // The column's entire job is to say what the stored value is. Rendering
+  // everything that is not `long_connection` as "Webhook" makes an unknown
+  // value — a newer server, a hand-edited row — indistinguishable from the
+  // one state a reader would never investigate.
+  server.use(
+    http.get("/api/v1/channel-bindings", () =>
+      HttpResponse.json([binding({ transport: "carrier_pigeon" })]),
+    ),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+  );
+
+  renderChannels();
+
+  expect(await screen.findByText("carrier_pigeon")).toBeVisible();
+  expect(screen.queryByText(t("channelTransportWebhook"))).toBeNull();
+});
+
+test("a receive-only binding cannot be switched to the long connection", async () => {
+  // The scheduler skips a `long_connection` binding with no app id or app
+  // secret reference — it needs both to open the WebSocket — and all it
+  // leaves behind is one log line. Saving the switch would give a console
+  // that reads "long connection", a hint telling the administrator to
+  // restart the scheduler, and then no messages, ever. The API refuses it
+  // too (it is public), but being refused after the fact does not tell
+  // anyone *why*: this says it where the choice is made.
+  server.use(
+    http.get("/api/v1/channel-bindings", () =>
+      HttpResponse.json([binding({ app_secret_ref: null })]),
+    ),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/secrets", () =>
+      HttpResponse.json([
+        { id: "s1", name: "feishu-encrypt-key", scope: "workspace", status: "active" },
+      ]),
+    ),
+  );
+
+  renderChannels();
+  await userEvent.click(await screen.findByRole("button", { name: t("channelEdit") }));
+  await userEvent.click(await screen.findByLabelText(t("channelTransport")));
+
+  expect(await screen.findByTitle(t("channelTransportLongConnection"))).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+  // Not vacuous: the test above opens the same select on a binding that
+  // *has* an app secret and clicks this very option through to a PATCH, so
+  // "disabled" here is about this row and not about the control.
+  expect(await screen.findByText(t("channelTransportNeedsCredentials"))).toBeVisible();
 });

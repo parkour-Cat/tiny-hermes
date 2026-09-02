@@ -52,6 +52,23 @@ class ChannelKeyUnknown(Exception):
     """
 
 
+class ChannelTransportUnusable(Exception):
+    """A binding left on `long_connection` that the scheduler will skip.
+
+    Opening the long connection needs the app id and the app secret — they
+    are what the handshake exchanges for a tenant token. `_long_connections`
+    (`api/cli.py`) drops a binding missing either one with a single log line
+    and moves on, so the row survives as a binding that reads `active` and
+    `long_connection` everywhere a person can look, receives nothing, and
+    reports nothing. Refused here, where the person who chose it is still
+    looking, rather than in a log nobody is reading.
+
+    The console's "restart the scheduler" hint makes this strictly worse
+    without this refusal: it hands the administrator a plausible
+    explanation and an action that cannot help.
+    """
+
+
 class UnknownChannel(Exception):
     pass
 
@@ -75,6 +92,11 @@ class ChannelBindingView:
     #: The app secret this binding replies with, by reference. Absent for a
     #: receive-only binding.
     app_secret_ref: str | None
+    #: `webhook` or `long_connection` — which inbound transport this binding
+    #: receives events over. See migration 0052 for why an existing row
+    #: reads back `webhook` rather than the design doc's recommended
+    #: default for new deployments.
+    transport: str
     created_by: UUID
     created_at: datetime
 
@@ -215,10 +237,11 @@ class ChannelBindingService:
         to acquire an app secret and no way to be replaced — permanently
         receive-only, with every reply settling `no_credential`.
 
-        Deliberately narrow: credentials and `app_id` only. Moving a binding
-        to a different Agent would silently redirect every existing
-        conversation in `channel_conversations`, which is a different
-        operation from fixing a credential and should look like one.
+        Deliberately narrow: credentials, `app_id`, and which transport the
+        binding receives on. Moving a binding to a different Agent would
+        silently redirect every existing conversation in
+        `channel_conversations`, which is a different operation from fixing
+        a credential and should look like one.
         """
         await self._require_role(
             actor, workspace_id, request_id, allowed=MANAGERS,
@@ -234,6 +257,39 @@ class ChannelBindingService:
         after_key = changes.get("encrypt_key_ref", existing.encrypt_key_ref)
         if existing.channel in ENCRYPTED_CHANNELS and not after_key:
             raise ChannelKeyRequired
+        # Same rule, applied to the transport: what matters is the binding
+        # this update leaves behind, so both directions are refused — a
+        # webhook binding with no app secret being switched over, and a
+        # binding already on the long connection having its app secret
+        # cleared out from under it.
+        after_transport = changes.get("transport", existing.transport)
+        after_app_id = changes.get("app_id", existing.app_id)
+        after_app_secret = changes.get("app_secret_ref", existing.app_secret_ref)
+        if after_transport == "long_connection":
+            if not (after_app_id and after_app_secret):
+                raise ChannelTransportUnusable
+            # Non-empty is not the question the scheduler asks. It resolves
+            # the reference (`_long_connections` in `api/cli.py`), and
+            # `CredentialResolver.resolve` refuses a Secret that is missing
+            # *or* not `ACTIVE` — so a binding whose secret was disabled
+            # after it was named passes an is-it-set check and is then
+            # skipped at startup, which is the same dead configuration this
+            # branch exists to prevent. `secret_exists` asks by id and
+            # filters on `status = 'active'`, which is the same pair of
+            # conditions.
+            #
+            # Checked against the *result*, not against `changes`: the loop
+            # below only revalidates references this update mentions, so a
+            # reference that went stale while nobody was touching it is
+            # never looked at again. That reference is precisely the one a
+            # transport switch is about to depend on.
+            #
+            # `app_id` gets no equivalent check because there is nothing to
+            # check it against: it is the tenant's own identifier for the
+            # app, stored as metadata, and whether Feishu recognizes it is
+            # only answerable by the handshake itself.
+            if not await self.store.secret_exists(workspace_id, after_app_secret):
+                raise ChannelTransportUnusable
         for field in ("encrypt_key_ref", "app_secret_ref"):
             reference = changes.get(field)
             if reference and not await self.store.secret_exists(
