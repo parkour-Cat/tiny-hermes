@@ -60,10 +60,17 @@ pnpm --filter @tiny-hermes/web test && pnpm chat:test
 ```
 
 `--ignore` 掉 sandbox 是为了快（那一档约 70 秒，而且要一个能连上的 Docker）。
-**它现在在 macOS 上跑得起来**——去掉 `--ignore` 是 790 条全绿。以前不行：那 17 条
+**它现在在 macOS 上跑得起来**——去掉 `--ignore` 是全绿（2026-09-02 实测 982 条）。以前不行：那 17 条
 的 socket 路径是用 `tmp_path` 拼的，pytest 拿测试名当目录名，在 macOS 上超过
 `sockaddr_un.sun_path` 的 104 字节，**在 setup 阶段就 ERROR**。这种失败最难看见——
 pytest 报的是 error 不是 failure，一整个目录就那么静悄悄地没跑。
+
+**测试不读仓库根的 `.env`**（`tests/integration/conftest.py` 的 `settings` 夹具传了
+`_env_file=None`）。这一条是 2026-09-02 补的：在此之前 `.env` 里的
+`EGRESS_PROXY_URL` 让 `model_catalog` 那两条长期红着，红的原因和被测代码无关，
+于是每次跑全量都要有人重新说一遍「那两条是环境问题」——**而这句话无法从输出里
+验证，它同样可以用来掩盖一个真的回归**。跑测试要的环境变量请显式 export，
+别指望 `.env`。
 
 **永远只跑一个 pytest。** 两个套件抢同一个数据库会互相拖垮，症状是长时间没输出。
 诊断 `select pid,state,now()-state_change from pg_stat_activity where state like '%idle in transaction%'`，
