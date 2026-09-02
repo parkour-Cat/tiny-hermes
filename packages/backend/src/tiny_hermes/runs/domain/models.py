@@ -66,6 +66,22 @@ class RunSignal(StrEnum):
     LIMIT_CLEANUP_CONFIRMED = "limit_cleanup_confirmed"
 
 
+class RunPurpose(StrEnum):
+    """这次 Run 是来干什么的。
+
+    `ANSWER` 是绝大多数：有人说了句话，Agent 要回它。`COMPACTION` 只做一件事
+    ——把旧历史压成摘要，然后结束，**不调模型回答任何问题**。
+
+    存在的理由是记账。摘要是一次真实的模型调用，而这个平台里的钱永远owed by
+    一个 Run（`record_summary_usage` 的 `run_id` 非空，§12.4 的额度顺着
+    `budget_root_run_id` 累加）。`/compact` 要立刻压缩就得有个 Run 付这笔钱，
+    而那个 Run 不该顺带回答什么——用户没问问题。
+    """
+
+    ANSWER = "answer"
+    COMPACTION = "compaction"
+
+
 class SessionMode(StrEnum):
     EPHEMERAL = "ephemeral"
     PERSISTENT = "persistent"
@@ -995,6 +1011,12 @@ class RunSnapshot:
     #: Head facts for a `session_blocked` pending Run. Omitted from the
     #: document when this Run is itself the head, an ordinary pending, or
     #: terminal — Playground only needs them to explain why it cannot start.
+    #: 这次 Run 是来干什么的。`COMPACTION` 的那一种压完就结束，不回答任何问题
+    #: ——用户没问问题，它存在只是为了给那次摘要调用一个付账的地方。
+    #:
+    #: 有默认值，所以放在这里而不是挨着 `status`：这个 dataclass 里带默认值的
+    #: 字段必须排在无默认值的后面。
+    purpose: RunPurpose = RunPurpose.ANSWER
     head_status: RunState | None = None
     head_pause_reason: PauseReason | None = None
     head_wait_kind: str | None = None

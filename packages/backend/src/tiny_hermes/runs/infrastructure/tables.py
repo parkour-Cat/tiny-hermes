@@ -31,6 +31,7 @@ from tiny_hermes.runs.domain.models import (
     DeliveryMode,
     PauseReason,
     RunEventType,
+    RunPurpose,
     RunState,
     SessionMode,
     WaitPolicy,
@@ -176,6 +177,7 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
         UniqueConstraint("id", "workspace_id", name="uq_runs_id_workspace"),
         UniqueConstraint("session_id", "session_sequence", name="uq_runs_session_sequence"),
         CheckConstraint(_in_enum("status", RunState), name="ck_runs_status"),
+        CheckConstraint(_in_enum("purpose", RunPurpose), name="ck_runs_purpose"),
         CheckConstraint(
             f"pause_reason IS NULL OR {_in_enum('pause_reason', PauseReason)}",
             name="ck_runs_pause_reason",
@@ -253,6 +255,9 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
     session_id: Mapped[UUID] = mapped_column(index=True)
     agent_version_id: Mapped[UUID] = mapped_column(index=True)
     status: Mapped[str] = mapped_column(String(32), default=RunState.QUEUED.value, index=True)
+    #: 这次 Run 是来干什么的（`RunPurpose`）。`compaction` 只压缩、不回答——
+    #: 见那个枚举的 docstring：它存在是因为摘要要花钱，而钱必须挂在 Run 上。
+    purpose: Mapped[str] = mapped_column(String(16), default=RunPurpose.ANSWER.value)
     state_version: Mapped[int] = mapped_column(Integer, default=1)
     next_event_sequence: Mapped[int] = mapped_column(Integer, default=1)
     session_sequence: Mapped[int] = mapped_column(Integer)

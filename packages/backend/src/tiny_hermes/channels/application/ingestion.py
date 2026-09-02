@@ -22,6 +22,7 @@ from tiny_hermes.runs.application.service import SessionBusy
 from tiny_hermes.runs.domain.models import (
     EndUserEscape,
     ImageBlock,
+    RunPurpose,
     SessionMode,
     SessionSnapshot,
     Withdrawal,
@@ -114,6 +115,7 @@ class RunEntry(Protocol):
         idempotency_key: str | None,
         request_id: str,
         images: Sequence[ImageBlock] = (),
+        purpose: RunPurpose = RunPurpose.ANSWER,
     ) -> AcceptedRun: ...
 
     async def request_compaction(self, session_id: UUID) -> bool:
@@ -281,14 +283,34 @@ class ChannelIngestion:
 
         if command.name is CommandName.COMPACT:
             # 在撤回那条路之前分流：压缩不是撤回，`_SCOPES` 里没有它的条目，
-            # 走下去会 KeyError。这里也没有 `SessionBusy` 的 try——打一个标记
-            # 不动任何 Run，队首在跑也照样记得下，下一轮自然会带上它。
+            # 走下去会 KeyError。
+            #
+            # **这是唯一一条会产生 Run 的命令**，而这推翻了 `Delivered` 原来那条
+            # 「`run` 是 `None` 恰好当 `receipt` 不是」。理由是记账：摘要是一次
+            # 真实的模型调用，要花钱，而这个平台里的钱永远挂在一个 Run 上
+            # （`record_summary_usage` 的 `run_id` 非空，§12.4 顺着
+            # `budget_root_run_id` 累加）。当初立那条规矩的理由是「命令是纯数据
+            # 操作、不花钱」——对 `/compact` 本来就不成立。
+            #
+            # 标记先打：Worker 在规划**之前**读走它，所以它必须在 Run 被捡起来
+            # 之前就在库里。
             asked = await self.runs.request_compaction(session_id)
-            return Delivered(
-                run=None,
-                blocked=None,
-                receipt=_receipt(command, "done" if asked else "nothing"),
+            if not asked:
+                # 没什么可压。不建 Run——建一个只会花钱压出一份空摘要。
+                return Delivered(
+                    run=None, blocked=None, receipt=_receipt(command, "nothing")
+                )
+            accepted = await self.runs.submit_end_user_run(
+                binding.workspace_id,
+                end_user_id,
+                session_id,
+                event.text,
+                None,
+                request_id,
+                purpose=RunPurpose.COMPACTION,
             )
+            # 回执不在这一刻发：压完之后才知道省了多少，那时才有话可说。
+            return Delivered(run=accepted, blocked=None, receipt=None)
 
         try:
             withdrawal = await self.runs.withdraw_from_session(

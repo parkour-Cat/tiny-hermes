@@ -13,6 +13,7 @@ from tiny_hermes.runs.domain.models import (
     EndUserEscape,
     ImageBlock,
     RunCapabilities,
+    RunPurpose,
     RunSignal,
     RunSnapshot,
     RunTree,
@@ -285,6 +286,7 @@ class RunCoordination:
         idempotency_key: str | None,
         request_id: str,
         images: Sequence[ImageBlock] = (),
+        purpose: RunPurpose = RunPurpose.ANSWER,
     ) -> AcceptedRun:
         """§5's Run half.
 
@@ -330,6 +332,7 @@ class RunCoordination:
                 message=message,
                 request_id=request_id,
                 delivery_mode=None,
+                purpose=purpose,
             )
         )
 

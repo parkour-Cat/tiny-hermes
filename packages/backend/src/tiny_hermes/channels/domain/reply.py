@@ -11,7 +11,10 @@ operator reads instead — `reply_note`, the logs — stays in English with the
 rest of the platform's machinery.
 """
 
-from tiny_hermes.runs.domain.models import TERMINAL_STATES, RunState
+from collections.abc import Mapping
+from typing import Any
+
+from tiny_hermes.runs.domain.models import TERMINAL_STATES, RunPurpose, RunState
 
 #: This platform's cap, not a measured vendor limit. Feishu documents a size
 #: limit on message content that this repository has not verified against
@@ -28,7 +31,12 @@ _FAILED = "这次运行失败了。"
 
 
 def reply_for(
-    *, state: RunState, said: str, failure_reason: str | None = None
+    *,
+    state: RunState,
+    said: str,
+    failure_reason: str | None = None,
+    purpose: RunPurpose = RunPurpose.ANSWER,
+    compaction: Mapping[str, Any] | None = None,
 ) -> str | None:
     """The reply, or `None` while there is nothing to say yet.
 
@@ -41,6 +49,23 @@ def reply_for(
         return None
     if state is RunState.CANCELLED:
         return _CANCELLED
+    if purpose is RunPurpose.COMPACTION and state is RunState.COMPLETED:
+        # `/compact` 的那种 Run：它从不回答问题，所以 `said` 永远是空。要发给
+        # 人的是压缩的结果本身，而这时候压缩已经做完了——措辞用完成时，不用
+        # 「记下了」那种把动作说成计划的话。
+        if compaction is None:
+            # `/compact` 在建 Run 之前就挡掉了「没什么可压」，所以走到这里意味着
+            # 压缩本身没成（比如摘要模型不可用）。不报「已压缩」（假话），也不报
+            # 「省了 0」（读起来像成功）。
+            return "这次没能压缩成功，历史原样保留。稍后再试一次。"
+        covered = compaction.get("covered")
+        freed = compaction.get("freed_estimate")
+        head = "已压缩。"
+        if isinstance(covered, int):
+            head += f"合并了 {covered} 条旧消息。"
+        if isinstance(freed, int) and freed > 0:
+            head += f"每一轮大约少发 {freed} 个 token。"
+        return head
     if state is RunState.FAILED:
         # §-level rule of this repository rather than of the spec:
         # `failure_reason` is on its own list of fields written and never

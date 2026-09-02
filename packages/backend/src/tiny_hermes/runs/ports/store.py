@@ -20,6 +20,7 @@ from tiny_hermes.runs.domain.models import (
     RunCapabilities,
     RunEvent,
     RunEventType,
+    RunPurpose,
     RunSignal,
     RunSnapshot,
     RunTree,
@@ -59,6 +60,9 @@ class AcceptRunCommand:
     message: CanonicalMessage
     request_id: str
     delivery_mode: str | None = None
+    #: 这次 Run 是来干什么的。`COMPACTION` 的那一种压完就结束、不回答问题
+    #: ——见 `RunPurpose`。默认是回答，因为绝大多数 Run 都是。
+    purpose: RunPurpose = RunPurpose.ANSWER
 
 
 @dataclass(frozen=True)

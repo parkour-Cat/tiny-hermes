@@ -66,6 +66,7 @@ from tiny_hermes.runs.domain.models import (
     ReasoningBlock,
     RunCapabilities,
     RunEventType,
+    RunPurpose,
     RunSignal,
     StoredMessage,
     TextBlock,
@@ -459,6 +460,16 @@ class WorkerRuntime:
                     return
                 if plan.changed:
                     await self._record_planning(claimed, plan)
+                if claimed.run.purpose is RunPurpose.COMPACTION:
+                    # `/compact` 建的那种 Run：压缩已经在 `_plan_context` 里做完
+                    # 并记进事件了，这里就该结束——用户没问问题，再调一次模型是
+                    # 白花钱。
+                    #
+                    # 位置在 `_record_planning` 之后、`_cost_precheck` 之前：
+                    # 压缩本身那次摘要调用的账已经由 `_bill_summary_call` 记过，
+                    # 而这个 Run 不会再产生任何调用，没有第二笔支出需要预检。
+                    await self._compaction_done(claimed, handle, box, context)
+                    return
                 spend = _cost_precheck(context, plan)
                 if not spend.allowed:
                     # §12.4: checked before the call, because a limit tested
@@ -2081,6 +2092,34 @@ class WorkerRuntime:
                 ),
                 workspace_id=claimed.run.workspace_id,
             )
+
+    async def _compaction_done(
+        self,
+        claimed: ClaimedRun,
+        handle: Any,
+        box: Any,
+        context: ExecutionContext,
+    ) -> None:
+        """把一个只做压缩的 Run 正常结束掉。
+
+        照 `_overflow` 的形状：拼一个 `SliceDecision` 交给 `_record`，让状态机
+        自己收尾——而不是在这里直接改状态。区别只在信号是 `COMPLETED` 而不是
+        暂停：这个 Run 做完了它被创建时要做的那件事。
+
+        `_no_round()`：这一轮没有模型往返可报。压缩那次调用的用量由
+        `_bill_summary_call` 单独记成 `CONTEXT_SUMMARY_BILLED`，不属于这里。
+        """
+        decision = SliceDecision(RunSignal.COMPLETED, None)
+        if box is not None:
+            decision = await self._close_sandbox(claimed, handle, box, decision)
+        await self._record(
+            claimed,
+            handle,
+            context.state_version,
+            decision,
+            _no_round(),
+            executed_ms=0,
+        )
 
     async def _overflow(
         self,
