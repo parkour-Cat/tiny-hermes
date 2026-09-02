@@ -398,6 +398,74 @@ async def _withdraw(engine: AsyncEngine, message_id: UUID) -> None:
         )
 
 
+async def _redact(engine: AsyncEngine, message_id: UUID) -> None:
+    """Sets the column §344's erasure is *named* after.
+
+    Deliberately raw SQL, and not because it is convenient: **nothing in this
+    repository writes this column.** `redacted` has been read-only since
+    `0002` — today's erasure (`sql_subject_store._erase_end_user`) deletes the
+    rows instead. So there is no production writer to route through, and this
+    helper stands in for the one a future erasure would need.
+    """
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE session_messages SET redacted = true WHERE id = :m"),
+            {"m": message_id},
+        )
+
+
+async def test_a_redacted_answer_is_not_sent_as_the_reply(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`pending_replies` was the one read point that did not filter this.
+
+    Four others do — `sql_store.py`'s two, `sql_search.py`'s, and
+    `copy_checkpoint_messages` — and `redacted` means §344's erasure, whose
+    whole meaning is *as if it never existed*. This scan is the only one of
+    the five that puts text **outside the platform**, into somebody's chat
+    client, where no later erasure can reach it.
+
+    **This is not a leak today**, and the test does not claim to fix one:
+    nothing sets the column, so nothing is currently marked erased. It is
+    that the one place where erasure would matter most is the one place that
+    did not check — so whoever gives this column its first writer inherits a
+    hole rather than a guard.
+
+    Two assistant turns, as in the withdrawal test above and for the same
+    reason: this has to prove the dispatcher *falls back* to the turn still
+    standing, not merely that the erased text is absent — which a dispatcher
+    that sent nothing at all would also satisfy.
+    """
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    run_id = _deliver(client, binding_id)
+    await _finish(engine, run_id, said="the answer that stands")
+    await _finish(engine, run_id, said="the answer about to be erased")
+
+    async with engine.connect() as connection:
+        erased_id = (
+            await connection.execute(
+                text(
+                    "SELECT id FROM session_messages WHERE source_run_id = :r "
+                    "ORDER BY sequence DESC LIMIT 1"
+                ),
+                {"r": run_id},
+            )
+        ).scalar_one()
+    await _redact(engine, erased_id)
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+
+    assert "the answer that stands" in sender.after_opening()[0]["text"]
+    assert "about to be erased" not in sender.after_opening()[0]["text"]
+
+
 async def test_a_withdrawn_answer_is_not_sent_as_the_reply(
     client: TestClient,
     engine: AsyncEngine,
