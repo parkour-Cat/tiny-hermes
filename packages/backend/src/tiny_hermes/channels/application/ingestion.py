@@ -116,6 +116,14 @@ class RunEntry(Protocol):
         images: Sequence[ImageBlock] = (),
     ) -> AcceptedRun: ...
 
+    async def request_compaction(self, session_id: UUID) -> bool:
+        """记下「下一轮先压缩」，返回这段会话是否真有可压缩的历史。
+
+        返回值由 store 给，不由调用方猜：只有它知道这段会话有多长。这一层拿它
+        决定回执说哪一句——「记下了」还是「这段对话还不长」。
+        """
+        ...
+
     async def withdraw_from_session(
         self,
         session_id: UUID,
@@ -269,6 +277,17 @@ class ChannelIngestion:
         if session_id is None:
             return Delivered(
                 run=None, blocked=None, receipt=_receipt(command, "nothing")
+            )
+
+        if command.name is CommandName.COMPACT:
+            # 在撤回那条路之前分流：压缩不是撤回，`_SCOPES` 里没有它的条目，
+            # 走下去会 KeyError。这里也没有 `SessionBusy` 的 try——打一个标记
+            # 不动任何 Run，队首在跑也照样记得下，下一轮自然会带上它。
+            asked = await self.runs.request_compaction(session_id)
+            return Delivered(
+                run=None,
+                blocked=None,
+                receipt=_receipt(command, "done" if asked else "nothing"),
             )
 
         try:

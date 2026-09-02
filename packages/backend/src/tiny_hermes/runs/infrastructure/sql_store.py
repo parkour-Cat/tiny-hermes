@@ -56,7 +56,11 @@ from tiny_hermes.runs.application.service import (
     UnknownSession,
 )
 from tiny_hermes.runs.domain.approval import ApprovalStatus
-from tiny_hermes.runs.domain.context_budget import Accounting, ContextWindow
+from tiny_hermes.runs.domain.context_budget import (
+    PROTECTED_RECENT_MESSAGES,
+    Accounting,
+    ContextWindow,
+)
 from tiny_hermes.runs.domain.models import (
     TERMINAL_STATES,
     USAGE_WINDOW,
@@ -886,6 +890,54 @@ class SqlRunStore:
             # apart).
             caller_type=None if owning is None else CallerType(owning.caller_type),
         )
+
+    async def request_compaction(self, session_id: UUID) -> bool:
+        """打上标记，并回答这段会话有没有可压缩的历史。
+
+        「有没有可压缩的」用的判据和规划器一样：留给压缩的必须至少有两条消息
+        （`PROTECTED_RECENT_MESSAGES` 之外还剩 ≥ 2），否则 `plan_context` 里的
+        `can_compact` 也是 False，压缩根本不会发生。判据写在这里而不是让调用方
+        猜，是为了让回执说的那句话和下一轮真正会发生的事对得上。
+
+        标记照写不误，哪怕现在没得压：会话在下一轮之前还会长，那时它就该生效。
+        """
+        row = await self._session.execute(
+            select(func.count())
+            .select_from(SessionMessageRow)
+            .where(
+                SessionMessageRow.session_id == session_id,
+                SessionMessageRow.redacted.is_(False),
+                SessionMessageRow.withdrawn_at.is_(None),
+            )
+        )
+        messages = int(row.scalar_one())
+        await self._session.execute(
+            update(SessionRow)
+            .where(SessionRow.id == session_id)
+            .values(compaction_requested_at=datetime.now(UTC))
+        )
+        await self._session.flush()
+        return messages - PROTECTED_RECENT_MESSAGES >= 2
+
+    async def take_compaction_request(self, session_id: UUID) -> bool:
+        """读走那个标记：返回它是否曾被置上，并清掉它。
+
+        一次语句读+清，所以两轮同时开跑也只有一轮拿得到 `True`——
+        `RETURNING` 让「读到的」和「清掉的」是同一行同一版本。
+        """
+        row = await self._session.execute(
+            update(SessionRow)
+            .where(
+                SessionRow.id == session_id,
+                SessionRow.compaction_requested_at.is_not(None),
+            )
+            .values(compaction_requested_at=None)
+            .returning(SessionRow.id)
+        )
+        taken = row.scalar_one_or_none() is not None
+        if taken:
+            await self._session.flush()
+        return taken
 
     async def unfinished_work(self, session_id: UUID) -> UnfinishedWork | None:
         """这个 Session 现在有没有未了结的工作，有的话是哪一种。

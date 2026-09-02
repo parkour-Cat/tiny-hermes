@@ -14,12 +14,13 @@ from enum import StrEnum
 class CommandName(StrEnum):
     UNDO = "undo"
     NEW = "new"
+    COMPACT = "compact"
 
 
 @dataclass(frozen=True)
 class ChatCommand:
     name: CommandName
-    #: 只对 `UNDO` 有意义；`NEW` 永远是 1，因为它不接受参数。
+    #: 只对 `UNDO` 有意义；`NEW` 和 `COMPACT` 永远是 1，因为它们不接受参数。
     turns: int = 1
 
 
@@ -27,6 +28,8 @@ _NAMES: dict[str, CommandName] = {
     "/undo": CommandName.UNDO,
     "/new": CommandName.NEW,
     "/reset": CommandName.NEW,
+    "/compact": CommandName.COMPACT,
+    "/compress": CommandName.COMPACT,
 }
 
 
@@ -44,7 +47,10 @@ def parse(text: str, *, has_images: bool = False) -> ChatCommand | None:
     name = _NAMES.get(words[0].lower())
     if name is None:
         return None
-    if name is CommandName.NEW:
+    if name in (CommandName.NEW, CommandName.COMPACT):
+        # 都不收参数。`/undo` 的参数是「撤几轮」，语义清楚；压缩没有对应的自然
+        # 参数——「压到多少」不是发消息的人能判断的东西。多带一个词就不认，
+        # 免得 `/compact 一下` 被当成命令、而用户以为自己给了个说明。
         return ChatCommand(name=name) if len(words) == 1 else None
     if len(words) == 1:
         return ChatCommand(name=name)

@@ -149,6 +149,18 @@ def command_receipt_text(receipt: CommandReceipt) -> str:
         if receipt.busy_reason == "cancel_failed":
             return "前面那一轮没能取消，所以这次什么都没撤。请到控制台处理后再试。"
         return "前面还有消息在排队。等队列走完再试一次。"
+    if receipt.command == "compact":
+        # 说条件句，不说承诺，也不说「已压缩」。压缩要一次模型调用，而入站路径
+        # 不做外部调用（和 `blocked_notice` 的「在这里记下、不在这里发」同一条
+        # 理由），所以这条命令做的是打标记，压缩发生在下一轮真正开始前。
+        #
+        # 「已压缩」是假话；「下次一定会压缩」是个不一定兑现的承诺——历史不够长
+        # 时没有可压缩的内容，那时什么也不会发生，而用户已经被告知它会。
+        if receipt.outcome == "nothing":
+            # 对 `/compact`，「没什么可压」是一句让人放心的话，不是失败。和
+            # `/undo` 的同名结果合并会让人以为命令没生效，于是再发一次。
+            return "这段对话还不长，暂时没有需要压缩的历史。"
+        return "记下了。下一条消息之前，会先把这段对话的旧历史压成摘要。"
     if receipt.command == "new":
         if receipt.outcome == "nothing":
             return "已经是一段新对话了，直接说就行。"

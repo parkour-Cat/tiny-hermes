@@ -82,6 +82,12 @@ class SessionRow(IdMixin, CreatedAtMixin, Base):
     next_run_sequence: Mapped[int] = mapped_column(Integer, default=1)
     next_message_sequence: Mapped[int] = mapped_column(Integer, default=1)
     workspace_revision_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    #: `/compact` 打的标记，下一轮消费掉。时间戳而不是布尔：`NULL` 说的是
+    #: 「没人要求过」，而一个时间说的是**什么时候**要求的——那正是后来的读者
+    #: 判断「一个没被消费的请求是几分钟前的还是上个月的」所需要的东西。
+    compaction_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class SessionMessageRow(IdMixin, CreatedAtMixin, Base):

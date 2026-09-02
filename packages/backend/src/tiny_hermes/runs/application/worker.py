@@ -1756,7 +1756,13 @@ class WorkerRuntime:
            fitting is a generation failure exactly like a timeout: step 1's
            plan goes out unchanged.
         """
-        baseline = _plan(context, mcp)
+        # 先消费 `/compact` 的标记，再规划。读和清在一次语句里（见
+        # `take_compaction_request`），所以一个请求只压一次；**压没压成都清掉**
+        # ——留着它会让一段短对话背着一个几周后突然生效的请求，而那时解释它的
+        # 那条回执早就滚没了。
+        forced = await self._take_compaction_request(claimed.run.session_id)
+
+        baseline = _plan(context, mcp, forced=forced)
         if baseline.compacted is None:
             return baseline
 
@@ -1767,6 +1773,7 @@ class WorkerRuntime:
                 context,
                 mcp,
                 stored_summary=CoveredSummary(stored.text, stored.last_sequence),
+                forced=forced,
             )
             if _honestly_widens(candidate, stored.last_sequence):
                 return candidate
@@ -1820,6 +1827,7 @@ class WorkerRuntime:
             context,
             mcp,
             stored_summary=CoveredSummary(generated, covered_last),
+            forced=forced,
         )
         if _honestly_widens(candidate, covered_last):
             return candidate
@@ -1832,6 +1840,20 @@ class WorkerRuntime:
             extra={"run_id": str(claimed.run.id)},
         )
         return baseline
+
+    async def _take_compaction_request(self, session_id: UUID) -> bool:
+        """`/compact` 的标记，读走并清掉。自己开一个 session，和
+        `_latest_summary` 同一个理由：这一步在规划**之前**，不属于任何一次
+        Run 的写事务。
+
+        清掉是在这里而不是等压缩成功之后：留着它会让一段短对话背着一个几周后
+        突然生效的请求，而那时解释它的那条回执早就滚没了。
+        """
+        async with self._sessions() as session:
+            taken = await SqlRunStore(session).take_compaction_request(session_id)
+            if taken:
+                await session.commit()
+            return taken
 
     async def _latest_summary(self, session_id: UUID) -> StoredSummary | None:
         async with self._sessions() as session:
@@ -2647,6 +2669,8 @@ def _plan(
     context: ExecutionContext,
     mcp: tuple[BoundMcpTool, ...] = (),
     stored_summary: CoveredSummary | None = None,
+    *,
+    forced: bool = False,
 ) -> ContextPlan:
     """Decide what this round may send, before it is sent.
 
@@ -2683,7 +2707,10 @@ def _plan(
         memories=[fact.body for fact in context.memories],
         segments=(context.spec.context_budget or ContextBudget()).resolve(),
         stored_summary=stored_summary,
-        threshold=_compaction_threshold(context),
+        # `forced` 是 `/compact`：有人明说了要压，那就不再问这一轮花掉了额度的
+        # 几成。传 0 而不是绕过 `plan_context`——级联、保护、失败降级全都还要照
+        # 原样走一遍，唯一不同的是「够不够线」这个问题不再被问。
+        threshold=0.0 if forced else _compaction_threshold(context),
     )
 
 
