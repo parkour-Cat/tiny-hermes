@@ -16,6 +16,8 @@ from uuid import uuid4
 
 from tiny_hermes.runs.domain.context_budget import (
     DEFAULT_SEGMENTS,
+    PRUNE_MIN_RESULT_CHARS,
+    PRUNE_PROTECTED_RECENT_MESSAGES,
     TRIMMING_ORDER,
     Accounting,
     ContextWindow,
@@ -385,3 +387,170 @@ def test_the_planner_never_reports_a_number_as_usage() -> None:
     assert not hasattr(result, "tokens")
     assert not hasattr(result, "usage")
     assert result.input_estimate > 0
+
+
+# ---------------------------------------------------------------------------
+# 主动裁剪（§7.4.2「主动裁剪：不花钱的那几级不等压缩线」）
+#
+# 这一组守的是同一件事的五个面：不花钱的裁剪有自己的触发点、按条数保护尾部、
+# 三遍确定性处理、以及两道缓存闸门。参照实现见 spec 里点名的
+# `hermes-agent @ 3f83297` 的 `prune_tool_results_only`。
+# ---------------------------------------------------------------------------
+
+
+def _wide() -> ContextWindow:
+    """一个大到压缩线永远够不着的窗口——这正是主动裁剪要解决的处境。
+
+    1M 窗口、阈值 0.50 意味着要攒到 500K 才触发压缩；下面每条测试的历史都远小于
+    那个数，所以任何在旧判据下发生的裁剪都只可能来自主动裁剪这条路径。
+    """
+    return ContextWindow(context_window=1_000_000, reserved_output_tokens=0)
+
+
+def _huge(marker: str) -> str:
+    """一段超过 `PRUNE_MIN_RESULT_CHARS` 的工具输出。
+
+    `marker` 让每段内容互不相同，免得「去重」那一遍替「打存根」那一遍把测试蒙混过关。
+    """
+    return f"{marker}:" + ("x" * PRUNE_MIN_RESULT_CHARS)
+
+
+def test_a_big_old_tool_result_is_pruned_long_before_the_compaction_line() -> None:
+    """这条是整组的由来。
+
+    旧实现里 `_trim_old_tool_results` 的目标是总额度，所以 1M 窗口下这段历史
+    （几十 KB）离触发线差着三个数量级，一次裁剪都不会发生，而那段早就没用的输出
+    每一轮都被逐字重发。
+    """
+    history = stored(
+        *[
+            message
+            for index in range(12)
+            for message in (
+                says(f"问题 {index}"),
+                called(f"cmd {index}", f"c{index}"),
+                answered(_huge(f"out{index}"), f"c{index}"),
+            )
+        ]
+    )
+    plan_result = plan(history, _wide())
+
+    assert plan_result.fits
+    trimmed_segments = [record.segment for record in plan_result.trimmed]
+    assert SegmentName.OLD_TOOL_RESULTS in trimmed_segments
+
+
+def test_the_newest_messages_are_protected_by_count_not_by_tokens() -> None:
+    """按 Token 保护尾部会在大窗口上护住整个会话，于是什么也裁不掉。
+
+    Hermes 的 docstring 专门点了这个陷阱：`tail_token_budget` 是从压缩阈值推导的
+    （1M 窗口上约 100K），用它做尾部保护等于把整段历史都算成「最近」。
+    """
+    history = stored(
+        *[
+            message
+            for index in range(12)
+            for message in (
+                says(f"问题 {index}"),
+                called(f"cmd {index}", f"c{index}"),
+                answered(_huge(f"out{index}"), f"c{index}"),
+            )
+        ]
+    )
+    plan_result = plan(history, _wide())
+
+    kept_whole = [
+        block.output
+        for message in plan_result.messages[-PRUNE_PROTECTED_RECENT_MESSAGES:]
+        for block in message.blocks
+        if isinstance(block, ToolResultBlock)
+    ]
+    # 尾部里的工具结果一个字都没动。
+    assert all(len(output) > PRUNE_MIN_RESULT_CHARS for output in kept_whole)
+
+
+def test_identical_tool_results_are_deduplicated_even_inside_the_protected_tail() -> None:
+    """第一遍是无损的，所以它不受尾部保护限制。
+
+    完全相同的输出重复出现时，最新的那份保留完整，更早的改成回指——模型能看到的
+    信息一个字没少，而重复的字节不再每轮重发。
+    """
+    # 这段输出要够大：两道闸门是真的，夹具小于它们时正确的行为就是什么都不做。
+    # 一段 8K 字符约 2K Token，回收量抵不过 `PRUNE_MIN_RECLAIM_TOKENS`，
+    # 所以这里用远大于阈值的那种「一次 ls 刷了满屏」的量级。
+    same = "identical:" + ("x" * (PRUNE_MIN_RESULT_CHARS * 6))
+    history = stored(
+        says("跑一遍"),
+        called("ls", "c1"),
+        answered(same, "c1"),
+        says("再跑一遍"),
+        called("ls", "c2"),
+        answered(same, "c2"),
+    )
+    plan_result = plan(history, _wide())
+
+    outputs = [
+        block.output
+        for message in plan_result.messages
+        for block in message.blocks
+        if isinstance(block, ToolResultBlock)
+    ]
+    assert len(outputs) == 2
+    # 最新的那份完整保留，更早的那份不再重复承载同样的字节。
+    assert outputs[-1] == same
+    assert outputs[0] != same
+    assert len(outputs[0]) < len(same)
+
+
+def test_an_oversized_tool_call_argument_outside_the_tail_is_truncated() -> None:
+    """第三遍：过大的工具调用参数也算重发的字节。
+
+    只裁尾部之外的——模型正在依据的那次调用，参数必须原样。
+    """
+    giant = "giant-argument:" + ("x" * (PRUNE_MIN_RESULT_CHARS * 6))
+    history = stored(
+        called(giant, "c1"),
+        answered("ok", "c1"),
+        # 尾部保护按条数，所以那次调用必须真的被推出尾部才轮得到第三遍。
+        *[
+            message
+            for index in range(PRUNE_PROTECTED_RECENT_MESSAGES + 2)
+            for message in (says(f"后续 {index}"),)
+        ],
+    )
+    plan_result = plan(history, _wide())
+
+    first = plan_result.messages[0]
+    argument = next(
+        block.arguments["command"]
+        for block in first.blocks
+        if isinstance(block, ToolCallBlock)
+    )
+    # 比原长短，不是比阈值短：截断后的内容是「阈值长度 + 一句说明去哪儿取全文」，
+    # 本来就会比阈值长一点。断言写成 `< PRUNE_MIN_RESULT_CHARS` 会把一个正确的
+    # 实现判成失败。
+    assert len(argument) < len(giant)
+    assert "truncated by the platform" in argument
+
+
+def test_a_prune_that_would_reclaim_almost_nothing_changes_nothing() -> None:
+    """缓存闸门：改写历史会让 provider 的前缀缓存从最早被改写处失效。
+
+    所以回收不够多就一个字不改——省下的那点 Token 抵不过一次缓存失效。
+    断言的是「历史逐条相同」，不是「没有 trimmed 记录」：后者一个改了内容却忘了
+    记录的实现也满足。
+    """
+    history = stored(
+        *[
+            message
+            for index in range(12)
+            for message in (
+                says(f"问题 {index}"),
+                called(f"cmd {index}", f"c{index}"),
+                answered(f"短输出 {index}", f"c{index}"),
+            )
+        ]
+    )
+    plan_result = plan(history, _wide())
+
+    assert plan_result.messages == tuple(item.message for item in history)
