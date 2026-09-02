@@ -148,23 +148,57 @@ class RecordConnectionEvent(Protocol):
 
 
 def _envelope_of(frame: Any) -> dict[str, Any]:
-    """The SDK's `InboundMessage.raw` is Feishu's own event JSON — the same
-    shape `event_from_envelope` already reads off the decrypted webhook body
-    (see `doc/channel/reference.md`'s Message Model: "`raw` — Original event
-    payload"). Both transports converge on one reader because there is one
-    envelope shape to read, not two.
+    """Rebuilds the webhook envelope `event_from_envelope` reads, from what
+    the SDK actually hands a `MESSAGE` handler.
 
-    Validates rather than blindly `cast()`ing: `frame.raw` not being a
-    `dict` is exactly the "frame this build cannot read" case `on_frame`
-    exists to survive, and `cast()` never raises — it would let a non-dict
-    through unnoticed, and every reader downstream trusts the return type
-    here rather than checking it again. The failure has to happen in this
-    one place or it happens somewhere less obvious later.
+    This function used to claim `InboundMessage.raw` *was* Feishu's event
+    JSON and pass it straight through. It is not, and the first real message
+    in production failed with `no event id in either schema version`:
+    `normalize/pipeline.py` sets `raw=msg`, the **message** object
+    (`message_id`, `chat_id`, `message_type`, `content`, `mentions`), while
+    the envelope around it stays in the SDK. `channel.py`'s
+    `_handle_message_event` reads `data.header.event_id` and passes it to
+    the pipeline as its own argument, which `InboundMessage` does not keep —
+    so the event id is not merely elsewhere in the frame, it is **gone** by
+    the time a handler runs.
+
+    **The dedup key is therefore the message id, not Feishu's event id.**
+    Dedup is `(binding_id, channel_event_id)`, and a message id is stable
+    across redeliveries of the same message, so it deduplicates what this
+    transport can actually be handed twice. What it does not share is a key
+    space with the webhook path: a workspace that switches transport
+    mid-conversation can have one message claimed once under each. That is
+    a transport switch, which already requires a scheduler restart, so it
+    is a seam a person crosses deliberately rather than a race.
+
+    Every field is checked here rather than downstream: a frame this build
+    cannot read is exactly what `on_frame` exists to survive, and the
+    envelope this returns is trusted by every reader after it.
     """
-    raw = frame.raw
+    raw = getattr(frame, "raw", None)
     if not isinstance(raw, dict):
         raise TypeError(f"frame.raw is {type(raw).__name__}, not a dict")
-    return cast(dict[str, Any], raw)
+    message = cast(dict[str, Any], raw)
+
+    open_id = getattr(getattr(frame, "sender", None), "open_id", None)
+    if not isinstance(open_id, str) or not open_id:
+        raise TypeError("frame carries no sender open_id")
+
+    # `frame.id` is `InboundMessage`'s own field; `raw["message_id"]` is the
+    # same value copied by the pipeline. Both are read because a frame that
+    # reached here with only one of them is still answerable, and refusing
+    # it would drop a real person's message over a redundancy.
+    message_id = getattr(frame, "id", None) or message.get("message_id")
+    if not isinstance(message_id, str) or not message_id:
+        raise TypeError("frame carries no message id")
+
+    return {
+        "header": {"event_id": message_id},
+        "event": {
+            "sender": {"sender_id": {"open_id": open_id}},
+            "message": message,
+        },
+    }
 
 
 def event_id_of(envelope: Any) -> str:
