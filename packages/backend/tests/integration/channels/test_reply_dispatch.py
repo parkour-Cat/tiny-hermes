@@ -1533,6 +1533,6 @@ async def test_a_compaction_that_had_nothing_to_gain_says_so_to_the_person(
 
     sent = sender.after_opening()
     assert len(sent) == 1, "压不动这件事没有任何东西发给发消息的人"
-    assert "压不动" in sent[0]["text"], sent[0]["text"]
+    assert "没有压缩" in sent[0]["text"], sent[0]["text"]
     # 「稍后再试一次」是给「压缩失败」那一种的：这一种再试同样不会成。
     assert "再试" not in sent[0]["text"], sent[0]["text"]

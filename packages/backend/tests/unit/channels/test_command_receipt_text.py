@@ -115,15 +115,17 @@ def test_the_blocked_card_names_the_way_out() -> None:
     assert "/new" in str(card)
 
 
-def test_a_compact_receipt_says_when_it_takes_effect_not_that_it_already_did() -> None:
-    """回执不能承诺一件还没发生的事。
+def test_a_compact_receipt_never_promises_a_compaction_that_has_not_happened() -> None:
+    """回执不能承诺一件还没发生的事，也不能声称它已经发生。
 
-    压缩要一次模型调用，而入站路径不做外部调用（和「被挡通知在这里记下、不在这里
-    发」同一条理由：一次投递不该依赖模型端点可达）。所以命令做的是打标记，压缩在
-    下一轮真正开始前发生。
+    这条测试原来的前提是「命令做的是打标记，压缩在下一轮真正开始前发生」，所以
+    它断言措辞是个条件句。**那个设计已经没有了**：`/compact` 现在建一个压缩
+    Run，压完之后由 `reply.py` 发结果，命令这一刻不发回执
+    （`ingestion.py` 返回 `receipt=None`）。留着旧断言等于用测试把一句已经删掉
+    的措辞钉回去。
 
-    措辞必须让这件事看得出来。说「已压缩」是假话；说「下次会压缩」又是个不一定
-    兑现的承诺——历史不够长时没有可压缩的内容。所以说的是条件句。
+    所以现在钉的是两头都不许：不许出现「已压缩」（那时还没压），也不许承诺
+    「下一条消息之前会压」（那是旧设计的说法，而且历史不够长时它不会兑现）。
     """
     said = command_receipt_text(
         CommandReceipt(
@@ -136,7 +138,7 @@ def test_a_compact_receipt_says_when_it_takes_effect_not_that_it_already_did() -
         )
     )
     assert "已压缩" not in said
-    assert "下" in said or "接下来" in said
+    assert "下一条消息之前" not in said, said
 
 
 def test_a_compact_receipt_on_a_conversation_with_nothing_to_compact_says_so() -> None:
