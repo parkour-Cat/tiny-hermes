@@ -24,5 +24,13 @@ data/
 *.log
 tests/e2e/.auth/
 
-# 本机代理的 fake-IP 绕过，只属于开发机
+# 本机代理的 fake-IP 绕过，只属于开发机。
+#
+# 这一行 2026-09-03 之前就在，却一直没生效：那个文件当时**已经被 git 跟踪**，
+# 而 `.gitignore` 只管未跟踪的文件。后果是它照样被 `git add -A` 一次次带走，
+# 一天之内误提交三次，每次都要再撤一遍。`git rm --cached` 之后这条才开始管事。
+#
+# CI 不受影响：它用的是 `docker compose -f deploy/compose/compose.yaml`，
+# 显式指定 `-f` 就不会自动加载 override，所以 CI 从来没读到过这个文件。
+# 本机的 `redeploy.sh` 用的是不带 `-f` 的 `docker compose`，会自动加载它。
 deploy/compose/compose.override.yaml
