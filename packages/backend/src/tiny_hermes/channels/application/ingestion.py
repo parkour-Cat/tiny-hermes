@@ -305,7 +305,12 @@ class ChannelIngestion:
                 end_user_id,
                 session_id,
                 event.text,
-                None,
+                # 和普通消息那条路同一个键：这条飞书消息的 id。
+                # `submit_end_user_run` 第一句就要求它非空，传 `None` 会抛
+                # `IdempotencyKeyRequired`——线上第一条 `/compact` 正是死在
+                # 这里。而它同时是对的语义：飞书会重投同一条消息（§19.2），
+                # 重投要换回同一个 Run，不是第二次花钱的压缩。
+                event.channel_event_id,
                 request_id,
                 purpose=RunPurpose.COMPACTION,
             )
