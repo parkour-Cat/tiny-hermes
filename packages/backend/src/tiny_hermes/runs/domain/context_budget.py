@@ -965,6 +965,7 @@ def plan_context(
     segments: Mapping[SegmentName, SegmentBudget] = DEFAULT_SEGMENTS,
     stored_summary: CoveredSummary | None = None,
     threshold: float = DEFAULT_COMPACTION_THRESHOLD,
+    take_all_it_may: bool = False,
 ) -> ContextPlan:
     """Decide what this round sends.
 
@@ -1259,6 +1260,23 @@ def plan_context(
         for through in range(2, max(compactable, 0) + 1)
         if not _splits_a_tool_pair(history, through)
     )
+    if take_all_it_may:
+        # 从大往小走。搜索本身「第一个装得下的就返回」，所以走的方向就是要
+        # 拿多少：升序取到的是**最小**那个装得下的边界，降序取到的是最大的。
+        #
+        # 升序是自动压缩要的：压缩是为了装下，压到够用就停能少改一段历史、
+        # 少作废一次前缀缓存。降序是 `/compact` 要的：有人明说了「现在压」，
+        # 而这一层唯一能给的答复就是「在诚实的前提下尽量多压」。
+        #
+        # 不写成「直接取 boundaries[-1]」：那要先相信 `spent` 随 `through`
+        # 单调下降（一份摘要替掉更多轮）。这在结构摘要上基本成立，但摘要
+        # 本身也会随内容变长，没人量过。倒着走一遍则不依赖那个假设——它
+        # 拿到的是**真的装得下**的那个最大边界。
+        #
+        # 起因：2026-09-03 线上那次 `/compact`，一段 17 条活历史的会话只压掉
+        # 最老的 2 条，因为 `threshold=0` 让 `through=2` 当场就装得下。当时
+        # 读成了「这段对话太短」。
+        boundaries = tuple(reversed(boundaries))
     if stored_summary is not None:
         # `+ 1` because `through` is a count of leading messages, not an index.
         # An unknown sequence, or one already inside the protected tail, leaves

@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
+from tiny_hermes.runs.domain.context_budget import PROTECTED_RECENT_MESSAGES
 
 from ..conftest import VALID_SPEC
 from .test_context_budget import SMALL_ENDPOINT, ask, fails, payloads, says, start_session, status
@@ -397,7 +398,9 @@ async def test_a_requested_compaction_takes_as_much_history_as_it_may(
     两条老消息，摘要多半比它们还长，于是 `freed_estimate` 是 0——上一轮改动让
     它不再被采用，但那只是不再做亏本买卖，`/compact` 还是什么都没压成。
 
-    判据是**压掉的条数超过最小那个边界**。种下 8 条历史，能压的远不止 2 条。
+    判据不是「比 2 多」——比 2 多可以是 3，那和什么都没压差不多。判据是**它把
+    允许它碰的全拿走了**：种下的 8 条 + 这一轮的提问 = 9 条历史，减掉
+    `PROTECTED_RECENT_MESSAGES`（2，§7.4.2 的「最近历史」永不压缩）＝ 7。
     """
     workspace_id = UUID(scope["X-Workspace-Id"])
 
@@ -419,6 +422,11 @@ async def test_a_requested_compaction_takes_as_much_history_as_it_may(
     assert status(client, scope, run)["status"] == "completed"
     compacted = await payloads(engine, run, "context_compacted")
     assert len(compacted) == 1, compacted
-    assert compacted[0]["covered"] > 2, (
-        "只压了最小那个边界——`/compact` 拿到的量和对话有多长无关：" f"{compacted[0]}"
+    expected = TURN_PAIRS * 2 + 1 - PROTECTED_RECENT_MESSAGES
+    assert compacted[0]["covered"] == expected, (
+        "没有把允许它碰的都拿走——升序搜索会停在最小那个装得下的边界，"
+        f"而 `/compact` 拿到的量因此和对话有多长无关：{compacted[0]}"
     )
+    # 拿得多才省得下。这条不是重复上一条：一个把 `covered` 报大、却没让上下文
+    # 变小的实现同样会让上一条为真。
+    assert compacted[0]["freed_estimate"] > 0, compacted[0]
