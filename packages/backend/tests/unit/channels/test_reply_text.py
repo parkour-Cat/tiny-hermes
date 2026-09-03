@@ -136,3 +136,25 @@ def test_a_compaction_that_compacted_nothing_says_so_instead_of_a_number() -> No
     )
     assert said is not None
     assert "已压缩" not in said
+
+
+def test_a_compaction_with_nothing_to_gain_does_not_invite_a_retry() -> None:
+    """压不出更小的上下文，和「压缩失败了」不是一回事，不能共用一句话。
+
+    上一条测试原来的前提是「走到 `compaction is None` 只可能是摘要生成失败」，
+    所以那句话以「稍后再试一次」收尾。现在多了第二种：能合并的历史比摘要本身
+    还短，压了反而更长——这时候平台**主动不压**，一次模型调用都不花。
+
+    对这一种说「稍后再试一次」是把一个确定的结论说成了偶然的故障：再试一次
+    同样不会成，而且每一次都白花一次摘要调用——正是这次改动要省掉的那一笔。
+    """
+    said = reply_for(
+        state=RunState.COMPLETED,
+        said="",
+        purpose=RunPurpose.COMPACTION,
+        compaction=None,
+        compaction_skipped={"reason": "no_gain", "covered": 2},
+    )
+    assert said is not None
+    assert "已压缩" not in said
+    assert "再试" not in said, said
