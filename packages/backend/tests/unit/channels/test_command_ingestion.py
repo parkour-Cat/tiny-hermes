@@ -12,7 +12,7 @@ from tiny_hermes.channels.application.ingestion import (
 )
 from tiny_hermes.channels.domain.events import ChannelEvent
 from tiny_hermes.identity.ports.end_user_store import UpsertedIdentity
-from tiny_hermes.runs.application.service import SessionBusy
+from tiny_hermes.runs.application.service import IdempotencyKeyRequired, SessionBusy
 from tiny_hermes.runs.domain.models import (
     EndUserEscape,
     RunPurpose,
@@ -115,6 +115,15 @@ class FakeRuns:
         purpose: Any = None,
     ) -> Any:
         del workspace_id, request_id
+        # 真的那一边会拒。`RunCoordination.submit_end_user_run` 第一句就是
+        # `_require_idempotency_key(idempotency_key)`，空的直接抛。这个假的
+        # 以前照单全收，于是 `/compact` 传了 `None` 也一路绿——线上第一条
+        # `/compact` 就在这里炸了 `IdempotencyKeyRequired`，而后端全绿。
+        #
+        # 这就是 CLAUDE.md 说的那件事：夹具比被集成的那一方宽松，证明的是
+        # 「我们以为对面收什么」，不是「对面实际收什么」。
+        if not (idempotency_key or "").strip():
+            raise IdempotencyKeyRequired
         self.images = list(images)
         self.purposes.append(purpose)
         self.submitted.append((end_user_id, session_id, text, idempotency_key))
@@ -454,6 +463,10 @@ async def test_compact_marks_the_session_and_starts_a_compaction_run(
     # 理由是记账：摘要是一次真实的模型调用，而这个平台里的钱必须挂在 Run 上。
     assert len(runs.submitted) == 1
     assert runs.purposes == [RunPurpose.COMPACTION]
+    # 幂等键是这条飞书消息的 id，和普通消息那条路一模一样。钉住具体的值而不是
+    # 「非空」：飞书会重投同一条消息（§19.2），而重投必须换回同一个 Run，
+    # 不是第二个花钱的压缩。
+    assert runs.submitted[0][-1] == compact_event.channel_event_id
     assert delivered.run is not None
     # 仍然不是撤回——压缩不动历史里的任何一条消息。
     assert runs.withdraw_calls == []
