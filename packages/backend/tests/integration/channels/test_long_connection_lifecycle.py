@@ -1587,3 +1587,45 @@ async def test_a_socket_that_never_comes_back_does_not_park_the_watch_forever(
     await asyncio.wait_for(running, timeout=5)
     assert not stop.is_set()
     assert connection.alive is False
+
+
+async def test_a_watch_that_gave_up_is_rebuilt_instead_of_ending_the_supervision(
+    scheduler_connections: Callable[[], Awaitable[tuple[FeishuLongConnection, ...]]],
+    seeded_bindings_of_both_transports: tuple[UUID, UUID],
+    sdk_channels: Callable[..., _FakeChannels],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """让位之后必须有人接。
+
+    上一条测试证明的是 `run()` 会返回；这一条证明的是**返回之后有人重建**——
+    两件事之间隔着一个生产缺陷，而且它真的发生过：2026-09-02 23:58 这条长连接
+    让了位，此后十小时一行日志都没有，因为 `_supervised_connection` 把 `run()`
+    的正常返回一律当成「进程要关了」，直接 `return`。
+
+    这正是 CLAUDE.md 钉死的那一类：`_wait_while_alive` 的注释写着
+    「`_supervised_connection` 看到这一轮结束就重建下一轮」，而没有任何代码
+    重建。注释、实现、测试三样里，只有注释说了这句话。
+
+    判据是**又建了一条连接**，不是 `run()` 被调了第二次：一个调了 `run()`
+    却拿不到 socket 的实现同样会让后者为真，而进程要的是那根 socket。
+    """
+    monkeypatch.setattr(feishu_long_connection, "OUTAGE_GIVE_UP_SECONDS", 0.2)
+    monkeypatch.setattr(feishu_long_connection, "LIVENESS_POLL_SECONDS", 0.05)
+
+    channels = sdk_channels()
+    (connection,) = await scheduler_connections()
+    stop = asyncio.Event()
+    supervised = asyncio.create_task(
+        _supervised_connection(
+            connection, stop, first_delay=BACKOFF_SECONDS, max_delay=BACKOFF_SECONDS
+        )
+    )
+
+    first = await channels.connected()
+    await first.signal_drop()
+
+    # 第二根 socket——第一根已经被这条 watch 主动放弃了。
+    await asyncio.wait_for(channels.attempted(2), timeout=5)
+
+    stop.set()
+    await asyncio.wait_for(supervised, timeout=5)
