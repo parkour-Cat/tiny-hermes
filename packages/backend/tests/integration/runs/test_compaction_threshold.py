@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
+from tiny_hermes.runs.domain.context_budget import PROTECTED_RECENT_MESSAGES
 
 from ..conftest import VALID_SPEC
 from .test_context_budget import SMALL_ENDPOINT, ask, fails, payloads, says, start_session, status
@@ -376,3 +377,56 @@ async def test_a_conversation_too_small_to_gain_anything_does_not_pay_for_a_summ
     skipped = await payloads(engine, run, "context_compaction_skipped")
     assert len(skipped) == 1, skipped
     assert skipped[0]["reason"] == "no_gain"
+
+
+async def test_a_requested_compaction_takes_as_much_history_as_it_may(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    small_endpoint: str,
+) -> None:
+    """`/compact` 要尽量多压，不是压到「刚好装得下」就停。
+
+    边界搜索是从小往大走、**第一个装得下的就返回**。自动那条路上这是对的：
+    压缩是为了装下，压到够用就停能少改一段历史、少作废一次前缀缓存。
+
+    但 `/compact` 把 `threshold` 置成 0，于是最小的那个边界（`through=2`）当场
+    就「装得下」——**不管这段对话有 17 条还是 170 条，永远只压最老的 2 条。**
+
+    这就是 2026-09-03 那次 `covered: 2` 的真正原因。当时读成了「这段对话太短」，
+    其实那段会话有 17 条活着的历史；短的不是对话，是这一步愿意拿的量。而只压
+    两条老消息，摘要多半比它们还长，于是 `freed_estimate` 是 0——上一轮改动让
+    它不再被采用，但那只是不再做亏本买卖，`/compact` 还是什么都没压成。
+
+    判据不是「比 2 多」——比 2 多可以是 3，那和什么都没压差不多。判据是**它把
+    允许它碰的全拿走了**：种下的 8 条 + 这一轮的提问 = 9 条历史，减掉
+    `PROTECTED_RECENT_MESSAGES`（2，§7.4.2 的「最近历史」永不压缩）＝ 7。
+    """
+    workspace_id = UUID(scope["X-Workspace-Id"])
+
+    agent = _publish(client, scope, small_endpoint, compaction_threshold=None)
+    session = start_session(client, scope, agent)
+    await _seed_old_turns(
+        engine, UUID(session), workspace_id, pairs=TURN_PAIRS, size=TURN_SIZE
+    )
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE sessions SET compaction_requested_at = now() WHERE id = :s"),
+            {"s": UUID(session)},
+        )
+
+    run = ask(client, scope, session, "and what is left?")
+    model = Recording(says("这段对话讲了八轮，用户问了库存和排班。"), says("nothing is left"))
+    await drive(engine, model, None)
+
+    assert status(client, scope, run)["status"] == "completed"
+    compacted = await payloads(engine, run, "context_compacted")
+    assert len(compacted) == 1, compacted
+    expected = TURN_PAIRS * 2 + 1 - PROTECTED_RECENT_MESSAGES
+    assert compacted[0]["covered"] == expected, (
+        "没有把允许它碰的都拿走——升序搜索会停在最小那个装得下的边界，"
+        f"而 `/compact` 拿到的量因此和对话有多长无关：{compacted[0]}"
+    )
+    # 拿得多才省得下。这条不是重复上一条：一个把 `covered` 报大、却没让上下文
+    # 变小的实现同样会让上一条为真。
+    assert compacted[0]["freed_estimate"] > 0, compacted[0]

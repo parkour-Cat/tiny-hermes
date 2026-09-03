@@ -2794,6 +2794,11 @@ def _plan(
         # 几成。传 0 而不是绕过 `plan_context`——级联、保护、失败降级全都还要照
         # 原样走一遍，唯一不同的是「够不够线」这个问题不再被问。
         threshold=0.0 if forced else _compaction_threshold(context),
+        # 同一个 `forced`，两件事：上一行说「别问够不够线」，这一行说「拿多少」。
+        # 分成两个参数而不是让 `plan_context` 从 `threshold == 0.0` 推断，是因为
+        # 那是个巧合式的判别——一个平台管理员把默认阈值配成 0 也会踩中它，而那
+        # 不是有人发了 `/compact`。
+        take_all_it_may=forced,
     )
 
 
