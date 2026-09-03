@@ -371,3 +371,8 @@ async def test_a_conversation_too_small_to_gain_anything_does_not_pay_for_a_summ
     assert await payloads(engine, run, "context_compacted") == []
     # 这一轮只该有它自己那一次调用——没有第二次是摘要的。
     assert len(model.requests) == 1, [r.messages for r in model.requests]
+    # 主动没压要留下痕迹：`/compact` 的回执靠它把「压不动」和「压缩失败」分开
+    # 说，而这两句话对人的意思完全不同（见 `channels/domain/reply.py`）。
+    skipped = await payloads(engine, run, "context_compaction_skipped")
+    assert len(skipped) == 1, skipped
+    assert skipped[0]["reason"] == "no_gain"

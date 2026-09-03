@@ -1777,6 +1777,36 @@ class WorkerRuntime:
         if baseline.compacted is None:
             return baseline
 
+        if forced and baseline.compacted.freed_estimate == 0:
+            # 免费那一遍已经省不出东西了，模型那一遍更不会：结构摘要
+            # （`_summarize`，无模型调用）只写覆盖范围、条数、角色分布和线索词，
+            # 永远比模型写的语义摘要短。所以「结构的都没让上下文变小」蕴含
+            # 「模型的更不会」——不必先花一次调用才知道。
+            #
+            # 只对 `forced` 生效。自动那条路上压缩是为了装得下，一次省不出东西
+            # 的压缩本来就过不了 `plan.fits`；`forced` 才会不问装不装得下就压，
+            # 也只有它会走到这里。
+            #
+            # 返回不带压缩的那一版，而不是 `baseline`：`baseline` 里那次压缩
+            # 自己就是「省下 0」的，采用它等于把上下文变大，并且会记下一条
+            # `freed_estimate = 0` 的 `CONTEXT_COMPACTED`——那正是
+            # `_honestly_widens` 现在拒绝的东西，两处不能只守一处。
+            #
+            # 记一条事件：`/compact` 的回执要靠它把「压不动」和「压缩失败」
+            # 分开说。不记的话两种都落到「压缩失败，稍后再试一次」——而对这
+            # 一种，再试同样不会成。
+            await self._append_event(
+                claimed,
+                RunEventType.CONTEXT_COMPACTION_SKIPPED,
+                {
+                    "reason": "no_gain",
+                    "covered": baseline.compacted.covered,
+                    "first_sequence": baseline.compacted.first_sequence,
+                    "last_sequence": baseline.compacted.last_sequence,
+                },
+            )
+            return _plan(context, mcp)
+
         covered_last = baseline.compacted.last_sequence
         stored = await self._latest_summary(claimed.run.session_id)
         if stored is not None and stored.last_sequence >= covered_last:
@@ -2482,7 +2512,7 @@ def _honestly_widens(plan: ContextPlan, covered_last: int) -> bool:
     """Whether a summary-widened re-plan may replace the structural
     baseline `_plan_context` built it to improve on.
 
-    Three ways it may not, and every one of them is a generation failure
+    Four ways it may not, and every one of them is a generation failure
     §7.4.2 already has an answer for — the structural summary the caller
     started with:
 
@@ -2515,11 +2545,25 @@ def _honestly_widens(plan: ContextPlan, covered_last: int) -> bool:
       comparison can fail is a plan that did not honour the pin. It is kept as
       the corroboration, not as the mechanism — the guarantee lives in the
       pin, and this says so out loud rather than trusting it silently.
+    - `plan.compacted.freed_estimate` is 0 — the summary is no shorter than
+      what it replaces, so applying it makes the context *bigger*. Fitting is
+      not the same question: a longer text can still fit, and the first three
+      checks all pass while the round comes out worse than if nothing had been
+      compacted at all.
+
+      This is not hypothetical. The first `/compact` this platform ever served
+      in production wrote `covered 2, source "model", freed_estimate 0` beside
+      a `context_summary_billed` of 355 + 1,372 tokens: a summary longer than
+      the two short messages it replaced, applied anyway, reported to the user
+      as 「已压缩」. `freed_estimate` is `max(saved, 0)`, so 0 is exactly
+      "saved nothing" — the check needs no threshold to compare against and no
+      constant anybody would have to justify.
     """
     return (
         plan.fits
         and plan.compacted is not None
         and plan.compacted.last_sequence == covered_last
+        and plan.compacted.freed_estimate > 0
     )
 
 

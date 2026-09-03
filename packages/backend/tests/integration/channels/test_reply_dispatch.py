@@ -1482,3 +1482,57 @@ async def test_a_failed_run_rewrites_the_card_with_the_reason(
 
     assert sender.sent[1]["kind"] == "patch"
     assert "model_endpoint_unreachable" in sender.sent[1]["text"]
+
+
+async def test_a_compaction_that_had_nothing_to_gain_says_so_to_the_person(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/compact` 压不动的时候，那句话要真的到达发消息的人。
+
+    Worker 那一侧已经有测试证明这条事件会被写出来
+    （`runs/test_compaction_threshold.py`），`reply_for` 也有单元测试证明措辞。
+    这条补的是中间那一段——`pending_replies` 去读它、dispatcher 把它传下去。
+    **这一段之前一条测试都没有**：`compaction` 那条链是靠一次真机走查才知道通
+    的，而这条新的连那个都没有。
+
+    判据是发出去的那句话，不是事件行在不在：这个仓库已经因为「写进去了没人
+    够得着」栽过至少五次，而每一次后端测试都是全绿的。
+    """
+    monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
+    monkeypatch.setenv(SECRET_ENV, "s3cret")
+    binding_id = await _binding(engine, workspace_id, published_agent)
+    run_id = _deliver(client, binding_id)
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE runs SET purpose = 'compaction' WHERE id = :r"),
+            {"r": run_id},
+        )
+        await connection.execute(
+            text(
+                # 序号接着已有事件往下取：`run_created` 已经占了 1，而
+                # `(run_id, sequence)` 是唯一的。
+                "INSERT INTO run_events"
+                " (id, run_id, workspace_id, sequence, event_type, payload, occurred_at)"
+                " SELECT gen_random_uuid(), :r, r.workspace_id,"
+                "  (SELECT coalesce(max(sequence), 0) + 1 FROM run_events"
+                "    WHERE run_id = :r),"
+                " 'context_compaction_skipped', :p, now() FROM runs r WHERE r.id = :r"
+            ),
+            {"r": run_id, "p": json.dumps({"reason": "no_gain", "covered": 2})},
+        )
+    # 压缩 Run 不回答问题，所以没有 assistant 那一条消息可引。
+    await _finish(engine, run_id, said="")
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+
+    sent = sender.after_opening()
+    assert len(sent) == 1, "压不动这件事没有任何东西发给发消息的人"
+    assert "压不动" in sent[0]["text"], sent[0]["text"]
+    # 「稍后再试一次」是给「压缩失败」那一种的：这一种再试同样不会成。
+    assert "再试" not in sent[0]["text"], sent[0]["text"]

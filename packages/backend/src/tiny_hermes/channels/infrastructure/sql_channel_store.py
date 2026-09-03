@@ -28,6 +28,7 @@ from tiny_hermes.channels.infrastructure.tables import (
 )
 from tiny_hermes.runs.domain.models import (
     TERMINAL_STATES,
+    RunEventType,
     RunPurpose,
     RunState,
     message_from_document,
@@ -120,9 +121,13 @@ class PendingReply:
     #: 由 `compaction` 带出来。
     purpose: RunPurpose = RunPurpose.ANSWER
     #: 那次压缩的载荷（`covered`、`freed_estimate`），只有 `COMPACTION` 有。
-    #: `None` 表示这个 Run 结束时什么都没压——`/compact` 在建 Run 之前就挡掉了
-    #: 「没什么可压」的情况，所以这在实践中意味着压缩失败了。
+    #: `None` 有两种可能，靠下面那个字段分开：压缩失败了（摘要模型不可用），
+    #: 或者平台主动没压。
     compaction: dict[str, Any] | None = None
+    #: 主动没压那一次的载荷。和 `compaction` 互斥：写了这一条就没有那一条。
+    #: 分成两个字段而不是一个带判别键的载荷，是为了让「说哪句话」在类型上就
+    #: 分得开——`reply_for` 不必去猜某个键在不在。
+    compaction_skipped: dict[str, Any] | None = None
 
 
 def _compaction_payload(payload: Any) -> "dict[str, Any] | None":
@@ -732,6 +737,20 @@ class SqlChannelStore:
             .limit(1)
             .lateral("compacted")
         )
+        #: 「看过之后主动没压」那一条。单独一个 lateral 而不是把两种事件并进
+        #: 上面那个 `IN`：并进去之后哪一种命中就要靠载荷里的键去猜，而这两种
+        #: 要对人说的话完全不同（见 `reply_for`）。
+        skipped = (
+            select(RunEventRow.payload.label("payload"))
+            .where(
+                RunEventRow.run_id == RunRow.id,
+                RunEventRow.event_type
+                == RunEventType.CONTEXT_COMPACTION_SKIPPED.value,
+            )
+            .order_by(RunEventRow.sequence.desc())
+            .limit(1)
+            .lateral("skipped")
+        )
         rows = (
             await self._session.execute(
                 select(
@@ -744,10 +763,12 @@ class SqlChannelStore:
                     RunRow.purpose,
                     said.c.content,
                     compacted.c.payload,
+                    skipped.c.payload.label("skipped_payload"),
                 )
                 .join(RunRow, RunRow.id == ChannelEventRow.run_id)
                 .outerjoin(said, true())
                 .outerjoin(compacted, true())
+                .outerjoin(skipped, true())
                 .where(
                     ChannelEventRow.run_id.is_not(None),
                     ChannelEventRow.replied_at.is_(None),
@@ -768,6 +789,7 @@ class SqlChannelStore:
                 attempts=row.reply_attempts,
                 purpose=RunPurpose(row.purpose),
                 compaction=_compaction_payload(row.payload),
+                compaction_skipped=_compaction_payload(row.skipped_payload),
             )
             for row in rows
         ]

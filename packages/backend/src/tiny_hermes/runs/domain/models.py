@@ -156,6 +156,10 @@ class RunEventType(StrEnum):
     # are written on rounds that change no state at all.
     CONTEXT_TRIMMED = "context_trimmed"
     CONTEXT_COMPACTED = "context_compacted"
+    #: 平台看过之后**主动没压**：能合并的历史比摘要本身还短，压了会让
+    #: 上下文变大。和「压缩失败」分开是因为要对人说的话不同——失败可以
+    #: 稍后再试，这一种再试同样不会成，只会再白花一次摘要调用。
+    CONTEXT_COMPACTION_SKIPPED = "context_compaction_skipped"
 
     # Also not derived from a signal, and for the same reason: a
     # summarization call is a real call on a real endpoint (§7.4.2), and
