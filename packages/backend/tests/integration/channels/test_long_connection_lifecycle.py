@@ -1587,3 +1587,147 @@ async def test_a_socket_that_never_comes_back_does_not_park_the_watch_forever(
     await asyncio.wait_for(running, timeout=5)
     assert not stop.is_set()
     assert connection.alive is False
+
+
+async def test_a_watch_that_gave_up_is_rebuilt_instead_of_ending_the_supervision(
+    scheduler_connections: Callable[[], Awaitable[tuple[FeishuLongConnection, ...]]],
+    seeded_bindings_of_both_transports: tuple[UUID, UUID],
+    sdk_channels: Callable[..., _FakeChannels],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """让位之后必须有人接。
+
+    上一条测试证明的是 `run()` 会返回；这一条证明的是**返回之后有人重建**——
+    两件事之间隔着一个生产缺陷，而且它真的发生过：2026-09-02 23:58 这条长连接
+    让了位，此后十小时一行日志都没有，因为 `_supervised_connection` 把 `run()`
+    的正常返回一律当成「进程要关了」，直接 `return`。
+
+    这正是 CLAUDE.md 钉死的那一类：`_wait_while_alive` 的注释写着
+    「`_supervised_connection` 看到这一轮结束就重建下一轮」，而没有任何代码
+    重建。注释、实现、测试三样里，只有注释说了这句话。
+
+    判据是**又建了一条连接**，不是 `run()` 被调了第二次：一个调了 `run()`
+    却拿不到 socket 的实现同样会让后者为真，而进程要的是那根 socket。
+    """
+    monkeypatch.setattr(feishu_long_connection, "OUTAGE_GIVE_UP_SECONDS", 0.2)
+    monkeypatch.setattr(feishu_long_connection, "LIVENESS_POLL_SECONDS", 0.05)
+
+    channels = sdk_channels()
+    (connection,) = await scheduler_connections()
+    stop = asyncio.Event()
+    supervised = asyncio.create_task(
+        _supervised_connection(
+            connection, stop, first_delay=BACKOFF_SECONDS, max_delay=BACKOFF_SECONDS
+        )
+    )
+
+    first = await channels.connected()
+    await first.signal_drop()
+
+    # 第二根 socket——第一根已经被这条 watch 主动放弃了。
+    await asyncio.wait_for(channels.attempted(2), timeout=5)
+
+    stop.set()
+    await asyncio.wait_for(supervised, timeout=5)
+
+
+async def test_a_compact_frame_over_the_long_connection_becomes_a_compaction_run(
+    engine: AsyncEngine,
+    seeded_bindings_of_both_transports: tuple[UUID, UUID],
+    scheduler_connections: Callable[[], Awaitable[tuple[FeishuLongConnection, ...]]],
+    sdk_channels: Callable[..., _FakeChannels],
+) -> None:
+    """`/compact` 从这根 socket 进来，要在 `runs` 里留下一个压缩 Run。
+
+    这条路此前**从来没有被真的 `RunCoordination` 走过一次**：单元测试里那个
+    假的 `RunEntry` 照单全收，而集成里 `/compact` 只走过网页那条入口（它自己
+    带幂等键）。于是 `ingestion` 给渠道这条路传了 `None`，一路全绿，线上第一条
+    `/compact` 在 `_require_idempotency_key` 上抛了 `IdempotencyKeyRequired`
+    ——投递整个回滚，`channel_events` 连行都没留下，用户看到的是「没反应」。
+
+    所以判据是**库里有那个 Run**，不是「deliver 没抛异常」：抛不抛异常是这次
+    的症状，而下一个缺陷不一定长这样。
+
+    先灌四条消息再发命令：`request_compaction` 的门槛是
+    `messages - PROTECTED_RECENT_MESSAGES >= 2`，不够就走「没什么可压」的
+    早退，压根到不了提交 Run 那一步——那样这条测试会因为没走到而变绿。
+    """
+    _webhook_id, long_id = seeded_bindings_of_both_transports
+
+    # 一条普通消息，只为把这位发件人的会话建出来。
+    await _deliver_one_frame(
+        scheduler_connections, sdk_channels, body="上周几单？", event_id="om_lc_c_0"
+    )
+    async with engine.connect() as connection:
+        found = await connection.execute(
+            text(
+                "SELECT session_id FROM channel_conversations"
+                " WHERE channel_binding_id = :b AND external_user_id = 'ou_zhang'"
+            ),
+            {"b": long_id},
+        )
+        session_id = found.scalar_one()
+        workspace_id = (
+            await connection.execute(
+                text("SELECT workspace_id FROM sessions WHERE id = :s"),
+                {"s": session_id},
+            )
+        ).scalar_one()
+
+    async with engine.begin() as connection:
+        # 从 `sessions.next_message_sequence` 取号并把它推上去，而不是自己
+        # 从 `max(sequence)+1` 猜：平台下一条消息用的是那一列，绕过它的话
+        # 下一次真正的写入会撞上 `uq_session_messages_sequence`——而那次撞车
+        # 发生在被测代码里，看起来会像被测代码有 bug。
+        first = (
+            await connection.execute(
+                text("SELECT next_message_sequence FROM sessions WHERE id = :s"),
+                {"s": session_id},
+            )
+        ).scalar_one()
+        await connection.execute(
+            text(
+                "UPDATE sessions SET next_message_sequence = :n WHERE id = :s"
+            ),
+            {"n": first + 4, "s": session_id},
+        )
+        for sequence in range(first, first + 4):
+            await connection.execute(
+                text(
+                    "INSERT INTO session_messages"
+                    " (id, created_at, session_id, workspace_id, sequence, role,"
+                    "  content, redacted)"
+                    " VALUES (:i, now(), :s, :w, :q, :r, :c, false)"
+                ),
+                {
+                    "i": uuid4(),
+                    "s": session_id,
+                    "w": workspace_id,
+                    "q": sequence,
+                    "r": "user" if sequence % 2 == 0 else "assistant",
+                    "c": json.dumps({"parts": [{"type": "text", "text": f"m{sequence}"}]}),
+                },
+            )
+
+    await _deliver_one_frame(
+        scheduler_connections, sdk_channels, body="/compact", event_id="om_lc_c_1"
+    )
+
+    claim_id, run_id = await _claim_and_run(engine, long_id, "om_lc_c_1")
+    assert run_id is not None, "命令进来了，但没有人建出压缩 Run"
+    async with engine.connect() as connection:
+        purpose = (
+            await connection.execute(
+                text("SELECT purpose FROM runs WHERE id = :r"), {"r": run_id}
+            )
+        ).scalar_one()
+        requested = (
+            await connection.execute(
+                text("SELECT compaction_requested_at FROM sessions WHERE id = :s"),
+                {"s": session_id},
+            )
+        ).scalar_one()
+    assert purpose == "compaction"
+    # 标记必须在 Run 被捡起来之前就在库里——Worker 在规划之前读走它。
+    assert requested is not None
+    del claim_id
