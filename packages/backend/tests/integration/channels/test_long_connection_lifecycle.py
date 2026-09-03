@@ -1730,4 +1730,21 @@ async def test_a_compact_frame_over_the_long_connection_becomes_a_compaction_run
     assert purpose == "compaction"
     # 标记必须在 Run 被捡起来之前就在库里——Worker 在规划之前读走它。
     assert requested is not None
+
+    # `/compact` 不许进对话历史。它是给平台的指令，不是对话的一部分，而压缩
+    # Run 从不回答它——写进去的后果是模型下一轮读到一条永远没人回答的
+    # `/compact`，然后试图解释它。2026-09-04 线上就是这样：用户发了一条 `hi`，
+    # 模型回的是「我这边确实没有『/compact』功能，无法执行它」。攒几条之后
+    # 压缩还会把它们蒸馏进摘要，从此永久留在上下文里。
+    async with engine.connect() as connection:
+        leaked = (
+            await connection.execute(
+                text(
+                    "SELECT count(*) FROM session_messages"
+                    " WHERE session_id = :s AND content::text LIKE '%/compact%'"
+                ),
+                {"s": session_id},
+            )
+        ).scalar_one()
+    assert leaked == 0, "`/compact` 作为一条用户消息留在了历史里，模型下一轮会读到它"
     del claim_id
