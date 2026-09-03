@@ -376,3 +376,49 @@ async def test_a_conversation_too_small_to_gain_anything_does_not_pay_for_a_summ
     skipped = await payloads(engine, run, "context_compaction_skipped")
     assert len(skipped) == 1, skipped
     assert skipped[0]["reason"] == "no_gain"
+
+
+async def test_a_requested_compaction_takes_as_much_history_as_it_may(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    small_endpoint: str,
+) -> None:
+    """`/compact` 要尽量多压，不是压到「刚好装得下」就停。
+
+    边界搜索是从小往大走、**第一个装得下的就返回**。自动那条路上这是对的：
+    压缩是为了装下，压到够用就停能少改一段历史、少作废一次前缀缓存。
+
+    但 `/compact` 把 `threshold` 置成 0，于是最小的那个边界（`through=2`）当场
+    就「装得下」——**不管这段对话有 17 条还是 170 条，永远只压最老的 2 条。**
+
+    这就是 2026-09-03 那次 `covered: 2` 的真正原因。当时读成了「这段对话太短」，
+    其实那段会话有 17 条活着的历史；短的不是对话，是这一步愿意拿的量。而只压
+    两条老消息，摘要多半比它们还长，于是 `freed_estimate` 是 0——上一轮改动让
+    它不再被采用，但那只是不再做亏本买卖，`/compact` 还是什么都没压成。
+
+    判据是**压掉的条数超过最小那个边界**。种下 8 条历史，能压的远不止 2 条。
+    """
+    workspace_id = UUID(scope["X-Workspace-Id"])
+
+    agent = _publish(client, scope, small_endpoint, compaction_threshold=None)
+    session = start_session(client, scope, agent)
+    await _seed_old_turns(
+        engine, UUID(session), workspace_id, pairs=TURN_PAIRS, size=TURN_SIZE
+    )
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE sessions SET compaction_requested_at = now() WHERE id = :s"),
+            {"s": UUID(session)},
+        )
+
+    run = ask(client, scope, session, "and what is left?")
+    model = Recording(says("这段对话讲了八轮，用户问了库存和排班。"), says("nothing is left"))
+    await drive(engine, model, None)
+
+    assert status(client, scope, run)["status"] == "completed"
+    compacted = await payloads(engine, run, "context_compacted")
+    assert len(compacted) == 1, compacted
+    assert compacted[0]["covered"] > 2, (
+        "只压了最小那个边界——`/compact` 拿到的量和对话有多长无关：" f"{compacted[0]}"
+    )
