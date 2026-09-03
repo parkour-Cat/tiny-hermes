@@ -104,13 +104,21 @@ def test_a_very_long_answer_is_cut_rather_than_refused() -> None:
 
 
 def test_a_finished_compaction_says_what_it_actually_did() -> None:
-    """`/compact` 的回执带真实数字，不是一句「记下了」。
+    """`/compact` 的回执说已经压完了，不是一句「记下了」。
 
-    这是这条命令存在的理由：用户要的是「压完了」，而不是「排上队了」。压缩 Run
-    结束时，压了几轮、省了多少都在压缩事件里，回执照实说。
+    这是这条命令存在的理由：用户要的是「压完了」，而不是「排上队了」。
 
-    断言里有「不含」的一条：不许出现「已记下」那种把动作说成计划的措辞——
-    压缩这时候已经做完了。
+    **报条数，不报省下多少 token。**`freed_estimate` 来自 `estimate_tokens`，
+    而那个函数的 docstring 第一句就是「An upper bound... A bound rather than a
+    count」——它是给规划用的上界，故意往高了算，免得算出来装得下、实际发过去
+    超窗。2026-09-03 拿真机数据对过一次：一次压缩报「少发 3089 个 token」，
+    provider 数同一批内容是 1605（这个数还含提示词），**回执上那个数是真实值
+    的两倍多**。把一个设计上就偏高的规划上界当成测量值报给人，比不报更糟。
+
+    条数不一样：`covered` 是数出来的，不是估的。
+
+    断言里两条「不含」：不许出现「已记下」那种把动作说成计划的措辞（压缩这时候
+    已经做完了），也不许出现 `freed_estimate` 那个数。
     """
     said = reply_for(
         state=RunState.COMPLETED,
@@ -120,8 +128,32 @@ def test_a_finished_compaction_says_what_it_actually_did() -> None:
     )
     assert said is not None
     assert "12" in said
-    assert "8400" in said or "8,400" in said
     assert "记下" not in said
+    assert "8400" not in said and "8,400" not in said, said
+
+
+def test_a_finished_compaction_is_readable_by_someone_who_never_heard_of_a_token() -> None:
+    """收到这句话的是飞书里的普通用户，不是读过 §7.4.2 的人。
+
+    原来那句是「已压缩。合并了 23 条旧消息。每一轮大约少发 3089 个 token。」
+    用户看完的原话：「我真没看懂」。「一轮」和「token」都是这套系统内部的词，
+    而这句话要解释的事其实很朴素——模型不记事，每次说话都要把整段历史重发一遍，
+    合并之后就不用重发那一段了。
+
+    所以断言的是**不出现内部词汇**，并且**说清楚了原文还在**：一句只说「已压缩」
+    的话，读起来像是把 23 条消息删掉了。
+    """
+    said = reply_for(
+        state=RunState.COMPLETED,
+        said="",
+        purpose=RunPurpose.COMPACTION,
+        compaction={"covered": 23, "freed_estimate": 3089, "source": "model"},
+    )
+    assert said is not None
+    for jargon in ("token", "一轮", "上下文", "摘要模型"):
+        assert jargon not in said, f"回执里出现了内部词汇「{jargon}」：{said}"
+    # 原文没被删掉，这句话必须说出来。
+    assert "删" in said, said
 
 
 def test_a_compaction_that_compacted_nothing_says_so_instead_of_a_number() -> None:

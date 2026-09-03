@@ -58,19 +58,35 @@ def reply_for(
             # 平台主动没压：能合并的历史比摘要本身还短，压了反而更长，所以
             # 一次模型调用都没花。和下面那句分开，是因为「稍后再试一次」对
             # 这一种是假话——再试同样不会成，只会再白花一次摘要调用。
-            return "这段对话压不动：能合并的历史比摘要本身还短，压了反而更长。历史原样保留。"
+            return "这次没有压缩：能合并的内容太少，合并成摘要反而会更长。消息都还在。"
         if compaction is None:
             # 剩下的一种：压缩本身没成（比如摘要模型不可用）。不报「已压缩」
             # （假话），也不报「省了 0」（读起来像成功）。
-            return "这次没能压缩成功，历史原样保留。稍后再试一次。"
+            return "这次没能压缩成功，消息都还在。稍后再试一次。"
         covered = compaction.get("covered")
-        freed = compaction.get("freed_estimate")
-        head = "已压缩。"
-        if isinstance(covered, int):
-            head += f"合并了 {covered} 条旧消息。"
-        if isinstance(freed, int) and freed > 0:
-            head += f"每一轮大约少发 {freed} 个 token。"
-        return head
+        # 报条数，不报省下多少。`freed_estimate` 来自 `estimate_tokens`，那个
+        # 函数第一句就写着「An upper bound... A bound rather than a count」——
+        # 它是给规划用的上界，故意往高了算，免得算出来装得下、实际发过去超窗。
+        # 用在「该不该压」上完全正确，报给人看就不是了：2026-09-03 对过一次真机
+        # 数据，回执说「少发 3089 个 token」，provider 数同一批内容是 1605（还
+        # 含提示词），报出去的是真实值的两倍多。把一个设计上就偏高的规划上界
+        # 当成测量值，比不报更糟。
+        #
+        # `covered` 照报：它是数出来的，不是估的。
+        #
+        # 措辞不用「一轮」「token」「上下文」。收到这句话的是飞书里的普通用户，
+        # 上一版原话是「已压缩。合并了 23 条旧消息。每一轮大约少发 3089 个
+        # token。」，用户的回应是「我真没看懂」。这句话要说的事其实很朴素：
+        # 模型不记事，每次说话都要把整段历史重发一遍，合并之后就不必重发那一段。
+        #
+        # 「原文没有删除」这半句不是客套：只说「已压缩」读起来像是把那些消息
+        # 删掉了，而它们都还在。
+        if not isinstance(covered, int):
+            return "已经压缩过了。之前的消息合并成了一份摘要，原文没有删除。"
+        return (
+            f"已经压缩过了。之前的 {covered} 条消息合并成了一份摘要，"
+            "以后每次回复都不用再把它们重发一遍，会更快也更省。原文没有删除。"
+        )
     if state is RunState.FAILED:
         # §-level rule of this repository rather than of the spec:
         # `failure_reason` is on its own list of fields written and never
