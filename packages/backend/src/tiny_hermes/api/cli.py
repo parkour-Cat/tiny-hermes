@@ -358,23 +358,23 @@ async def _supervised_connection(
     `_scheduler`, which would cancel every other connection and the
     lease/reply loop along with it.
 
-    Establishing is all it covers, and the narrowness is not an oversight
-    worth papering over with a wider promise. What is missing is *recovery*,
-    not a trace: once `connect_until_ready` has returned, a drop is handled
-    inside the SDK's own thread (`_receive_message_loop` → `_reconnect` in
+    It also rebuilds a socket that **came up and then died for good**, and
+    that half arrives through a return rather than an exception. Once
+    `connect_until_ready` has returned, a drop is handled inside the SDK's
+    own thread (`_receive_message_loop` → `_reconnect` in
     `lark_oapi/ws/client.py`), and `_reconnect` calls `on_reconnecting()`
-    before it starts retrying, which reaches `_on_reconnecting` here and
-    writes a `disconnected` row — so a drop after a successful connect is
-    visible on the audit page. What nobody does is check that the socket
-    the SDK is nursing is still alive: `connection.run(stop)` stays parked
-    on `stop.wait()` either way, and if the SDK's own retrying never
-    succeeds this function never learns of it. **That liveness check is a
-    known gap on this branch, not a covered case.** (It does not usually
-    end in an exception either: the client's `_reconnect_count` defaults to
-    `-1`, whose branch retries forever and never raises. Only a server that
-    pushes a non-negative `ReconnectCount` makes it give up, and the
-    `ServerUnreachableException` it then raises dies inside a task on the
-    ws loop rather than surfacing here.)
+    before it starts retrying, which reaches `_on_reconnecting` and writes a
+    `disconnected` row — so the drop itself is on the audit page. But the
+    SDK's retrying can go on forever without succeeding (`_reconnect_count`
+    defaults to `-1`, whose branch never raises; only a server that pushes a
+    non-negative `ReconnectCount` makes it give up, and the
+    `ServerUnreachableException` it then raises dies inside a task on the ws
+    loop rather than surfacing here). `_wait_while_alive` is what notices,
+    and it gives the watch up by **returning from `run()` with `stop`
+    unset** — which is the one thing this loop must not read as "the process
+    is shutting down". The branch below that tells those two apart is
+    load-bearing: without it a binding that gave itself up was never rebuilt
+    by anybody, which is a silent outage of unbounded length.
 
     `FeishuLongConnection.run`'s own docstring leaves the retry-or-give-up
     call to whoever hosts it here; retrying with backoff, bounded by `stop`
@@ -397,6 +397,16 @@ async def _supervised_connection(
     workspace's audit page (`created_at desc`, no filter by default) would
     show nothing else, and §19.2 needs the closing row anyway: an outage
     window with only a left edge measures nothing.
+
+    The cap counts *this loop's* rows, and rebuilding after a give-up puts a
+    second writer beside it: every rebuilt round that comes up and drops
+    again makes the SDK signal, and `_on_reconnecting` writes another
+    `disconnected`. A binding that flaps forever therefore writes about one
+    row per cycle rather than one per outage. That is deliberate — each of
+    those rows is a real drop of a real socket, which is what §19.2 reads —
+    and it is bounded by the cycle costing at least `OUTAGE_GIVE_UP_SECONDS`
+    plus a backoff that grows to `max_delay`, so on the order of a hundred
+    rows a day, not one per retry.
 
     **Per process is the honest scope, and the gap is real.** `outage_since`
     and `audited` are locals: a scheduler restarted in the middle of an
@@ -469,19 +479,44 @@ async def _supervised_connection(
         # release is a run of failures that demonstrably ended.
         #
         # It used to be reset at the top of this function, on *any* connect.
-        # No round can reach it today — a round that comes up and then
-        # raises has to have had `stop` set for `run()`'s `finally` to run
-        # at all, and the loop below returns on `stop.is_set()` — so this is
-        # a correctness move, not a fix for a spin anyone has observed. What
-        # it removes is the shape: a round that came up and died would
-        # otherwise hand the next round `first_delay` again, forever.
+        # A round that comes up and dies now reaches this function again —
+        # the give-up path below rebuilds, and the rebuild connects — so
+        # resetting on any connect would hand a flapping binding
+        # `first_delay` forever. It keeps its backoff instead: each of its
+        # cycles already costs `OUTAGE_GIVE_UP_SECONDS` of downtime, so the
+        # extra wait is small beside what it is damping, and it is bounded
+        # by `max_delay` either way.
         delay = first_delay
 
     while not stop.is_set():
         came_up = False
         try:
             await connection.run(stop, on_connected=close_out_the_outage)
-            return
+            if stop.is_set():
+                return
+            # `run()` returned without `stop` — the watch gave itself up
+            # (`_wait_while_alive`: the SDK said it was down and never said
+            # it was back). Not an exception, so not a failure: the socket
+            # did come up, and `_on_reconnecting` already wrote the
+            # `disconnected` row that opens this outage. What is left is to
+            # build a new one.
+            #
+            # This branch is why the whole loop exists in that case. It used
+            # to `return` unconditionally here, and on 2026-09-02 23:58 a
+            # binding gave up and nothing rebuilt it — ten hours of no
+            # messages and no log lines, because no code was running. The
+            # give-up path's own comment promised this rebuild before any
+            # code did it.
+            failures += 1
+            if outage_since is None:
+                outage_since = time.monotonic()
+            logger.warning(
+                "long connection binding=%s gave up its watch; rebuilding in"
+                " %.0fs (attempt %d of this outage)",
+                connection.binding_id,
+                delay,
+                failures,
+            )
         except Exception:
             failures += 1
             if outage_since is None:
