@@ -140,8 +140,11 @@ def test_a_finished_compaction_is_readable_by_someone_who_never_heard_of_a_token
     而这句话要解释的事其实很朴素——模型不记事，每次说话都要把整段历史重发一遍，
     合并之后就不用重发那一段了。
 
-    所以断言的是**不出现内部词汇**，并且**说清楚了原文还在**：一句只说「已压缩」
-    的话，读起来像是把 23 条消息删掉了。
+    所以断言的是**不出现内部词汇**。
+
+    这里曾经还断言过「原文没有删除」那半句在。用户看了改完的版本，说的是「太啰嗦
+    了」——一句回执要说的是发生了什么，不是把每一层顾虑都写进去；「合并成一份
+    摘要」本身已经不读作「删掉了」。措辞由产品定，这条断言随它一起去掉。
     """
     said = reply_for(
         state=RunState.COMPLETED,
@@ -152,8 +155,8 @@ def test_a_finished_compaction_is_readable_by_someone_who_never_heard_of_a_token
     assert said is not None
     for jargon in ("token", "一轮", "上下文", "摘要模型"):
         assert jargon not in said, f"回执里出现了内部词汇「{jargon}」：{said}"
-    # 原文没被删掉，这句话必须说出来。
-    assert "删" in said, said
+    # 短。一句回执在聊天窗口里是一行字，不是一段说明。
+    assert len(said) <= 30, said
 
 
 def test_a_compaction_that_compacted_nothing_says_so_instead_of_a_number() -> None:

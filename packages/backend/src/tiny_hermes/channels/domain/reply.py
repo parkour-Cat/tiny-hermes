@@ -58,11 +58,11 @@ def reply_for(
             # 平台主动没压：能合并的历史比摘要本身还短，压了反而更长，所以
             # 一次模型调用都没花。和下面那句分开，是因为「稍后再试一次」对
             # 这一种是假话——再试同样不会成，只会再白花一次摘要调用。
-            return "这次没有压缩：能合并的内容太少，合并成摘要反而会更长。消息都还在。"
+            return "没有压缩，能合并的内容太少，合并成摘要反而更长。"
         if compaction is None:
             # 剩下的一种：压缩本身没成（比如摘要模型不可用）。不报「已压缩」
             # （假话），也不报「省了 0」（读起来像成功）。
-            return "这次没能压缩成功，消息都还在。稍后再试一次。"
+            return "压缩失败，消息没有改动，稍后再试。"
         covered = compaction.get("covered")
         # 报条数，不报省下多少。`freed_estimate` 来自 `estimate_tokens`，那个
         # 函数第一句就写着「An upper bound... A bound rather than a count」——
@@ -82,11 +82,8 @@ def reply_for(
         # 「原文没有删除」这半句不是客套：只说「已压缩」读起来像是把那些消息
         # 删掉了，而它们都还在。
         if not isinstance(covered, int):
-            return "已经压缩过了。之前的消息合并成了一份摘要，原文没有删除。"
-        return (
-            f"已经压缩过了。之前的 {covered} 条消息合并成了一份摘要，"
-            "以后每次回复都不用再把它们重发一遍，会更快也更省。原文没有删除。"
-        )
+            return "压缩完成，前面的消息已合并成了一份摘要。"
+        return f"压缩完成，前面 {covered} 条消息已合并成了一份摘要。"
     if state is RunState.FAILED:
         # §-level rule of this repository rather than of the spec:
         # `failure_reason` is on its own list of fields written and never
