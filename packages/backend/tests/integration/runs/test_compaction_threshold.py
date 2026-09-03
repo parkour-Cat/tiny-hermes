@@ -278,3 +278,54 @@ async def test_a_compaction_run_compacts_and_stops_without_answering(
     assert len(compacted) == 1
     # 只发生过一次模型调用——就是那次摘要。压缩 Run 不该再调模型回答问题。
     assert len(model.requests) == 1, [r.messages for r in model.requests]
+
+
+async def test_a_summary_that_frees_nothing_is_not_applied(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    small_endpoint: str,
+) -> None:
+    """写不出更短东西的摘要不算压缩，不能被采用。
+
+    2026-09-03 线上第一条 `/compact` 的事件长这样：
+
+        context_summary_billed : input 355 + output 1372
+        context_compacted      : covered 2, source "model", freed_estimate 0
+
+    模型摘要比它替掉的两条消息还长，`_honestly_widens` 照样放行了——它查的是
+    「装得下吗、边界对吗」，从来没查过「这一下到底省没省」。于是那一轮花了
+    1727 个 token，把上下文变大了一点，回执上写的是「已压缩」。
+
+    判据是**事件里的 `freed_estimate` 必须为正**，不是「模型被调了几次」：
+    钱花没花是另一件事（这条测试里它必然花了），而这一条守的是「记下来的每一次
+    压缩都真的让上下文变小了」。
+
+    `freed_estimate` 是 `max(省下的, 0)`，所以「等于 0」正好就是「没省到」——
+    这条判据不需要任何新常量。
+    """
+    workspace_id = UUID(scope["X-Workspace-Id"])
+
+    agent = _publish(client, scope, small_endpoint, compaction_threshold=None)
+    session = start_session(client, scope, agent)
+    await _seed_old_turns(
+        engine, UUID(session), workspace_id, pairs=TURN_PAIRS, size=TURN_SIZE
+    )
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE sessions SET compaction_requested_at = now() WHERE id = :s"),
+            {"s": UUID(session)},
+        )
+
+    # 摘要模型写了一篇比原文还长的东西——这正是线上那一次的形状，只是更极端，
+    # 好让「没省到」不依赖于某个刚好的长度。
+    bloated = "这份摘要比它要替掉的历史还长。" * 400
+    model = Recording(says(bloated), says("nothing is left"))
+    run = ask(client, scope, session, "and what is left?")
+    await drive(engine, model, None)
+
+    assert status(client, scope, run)["status"] == "completed"
+    for event in await payloads(engine, run, "context_compacted"):
+        assert event["freed_estimate"] > 0, (
+            "记下了一次没让上下文变小的压缩：" f"{event}"
+        )
