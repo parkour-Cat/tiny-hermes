@@ -37,6 +37,7 @@ def reply_for(
     failure_reason: str | None = None,
     purpose: RunPurpose = RunPurpose.ANSWER,
     compaction: Mapping[str, Any] | None = None,
+    compaction_skipped: Mapping[str, Any] | None = None,
 ) -> str | None:
     """The reply, or `None` while there is nothing to say yet.
 
@@ -53,10 +54,14 @@ def reply_for(
         # `/compact` 的那种 Run：它从不回答问题，所以 `said` 永远是空。要发给
         # 人的是压缩的结果本身，而这时候压缩已经做完了——措辞用完成时，不用
         # 「记下了」那种把动作说成计划的话。
+        if compaction_skipped is not None:
+            # 平台主动没压：能合并的历史比摘要本身还短，压了反而更长，所以
+            # 一次模型调用都没花。和下面那句分开，是因为「稍后再试一次」对
+            # 这一种是假话——再试同样不会成，只会再白花一次摘要调用。
+            return "这段对话压不动：能合并的历史比摘要本身还短，压了反而更长。历史原样保留。"
         if compaction is None:
-            # `/compact` 在建 Run 之前就挡掉了「没什么可压」，所以走到这里意味着
-            # 压缩本身没成（比如摘要模型不可用）。不报「已压缩」（假话），也不报
-            # 「省了 0」（读起来像成功）。
+            # 剩下的一种：压缩本身没成（比如摘要模型不可用）。不报「已压缩」
+            # （假话），也不报「省了 0」（读起来像成功）。
             return "这次没能压缩成功，历史原样保留。稍后再试一次。"
         covered = compaction.get("covered")
         freed = compaction.get("freed_estimate")
