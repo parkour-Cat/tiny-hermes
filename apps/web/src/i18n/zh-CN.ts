@@ -264,6 +264,7 @@ export const zhCN = {
   channelReceiveOnly: "只接收",
   channelCanReply: "可回复",
   channelTransport: "接入方式",
+  channelConnection: "连接状态",
   channelSectionBinding: "绑定",
   issuerSectionBasics: "基本",
   issuerSectionKey: "密钥",

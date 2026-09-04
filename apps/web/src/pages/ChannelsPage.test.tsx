@@ -611,3 +611,42 @@ test("新建和编辑用的是同一套字段定义", async () => {
   expect(editing).toEqual(creating);
   expect(editLabels).toEqual(createLabels);
 });
+
+test("加密密钥这一列不整列显示 UUID", async () => {
+  // 一个完整 UUID 折成两行占掉整屏最宽的一格，而那个值几乎没有人会去读。
+  server.use(
+    http.get("/api/v1/channel-bindings", () =>
+      HttpResponse.json([binding({ encrypt_key_ref: "2361d9ea-6591-4960-8c67-07fd26c5c38e" })]),
+    ),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+  );
+  renderChannels();
+  const cell = await screen.findByTitle("2361d9ea-6591-4960-8c67-07fd26c5c38e");
+  expect(cell.textContent).not.toContain("07fd26c5c38e");
+});
+
+test("配置和状态各占一列", async () => {
+  // 「接入方式」原来一格里同时放着配置标签、状态标签和一句灰字提示。
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json([binding()])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+  );
+  renderChannels();
+  expect(await screen.findByRole("columnheader", { name: t("channelTransport") })).toBeVisible();
+  expect(await screen.findByRole("columnheader", { name: t("channelConnection") })).toBeVisible();
+});
+
+test("可回复是文字，不是彩色标签", async () => {
+  // 彩色标签只留给会变的状态；绿色在同一张表里还表示「连接中」。
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json([binding({ app_secret_ref: "s2" })])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+  );
+  renderChannels();
+  // The column header says the same word; the cell is the one inside a <td>.
+  const cell = (await screen.findAllByText(t("channelCanReply"))).find(
+    (node) => node.closest("td") !== null,
+  );
+  expect(cell).toBeDefined();
+  expect(cell!.className).not.toContain("ant-tag");
+});

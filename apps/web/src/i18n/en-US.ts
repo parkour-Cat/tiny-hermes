@@ -278,6 +278,7 @@ export const enUS: Record<MessageKey, string> = {
   channelReceiveOnly: "Receive only",
   channelCanReply: "Can reply",
   channelTransport: "Transport",
+  channelConnection: "Connection",
   channelSectionBinding: "Binding",
   issuerSectionBasics: "Basics",
   issuerSectionKey: "Key",

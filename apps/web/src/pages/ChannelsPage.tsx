@@ -27,6 +27,7 @@ import type {
 import { moment } from "../i18n/moment";
 import { FormSection } from "../forms/FormSection";
 import { useT } from "../i18n/locale";
+import { ShortId } from "../tables/ShortId";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 /**
@@ -331,9 +332,11 @@ export function ChannelsPage() {
               {
                 title: t("channelKeyRef"),
                 dataIndex: "encrypt_key_ref",
-                // The name of the secret. Never its value — there is no
-                // field on the response that could carry one.
-                render: (v: string | null) => (v === null ? "—" : <Typography.Text code>{v}</Typography.Text>),
+                // The secret's id. Never its value — there is no field on
+                // the response that could carry one. Truncated: a full uuid
+                // folded into two lines took the widest cell on the screen,
+                // for a value nobody reads.
+                render: (v: string | null) => (v === null ? "—" : <ShortId value={v} />),
               },
               {
                 // Whether this binding can answer at all. Without it a
@@ -345,12 +348,13 @@ export function ChannelsPage() {
                 // dialog for whoever is changing it.
                 title: t("channelReplies"),
                 dataIndex: "app_secret_ref",
-                render: (value: string | null) =>
-                  value === null ? (
-                    <Tag>{t("channelReceiveOnly")}</Tag>
-                  ) : (
-                    <Tag color="green">{t("channelCanReply")}</Tag>
-                  ),
+                // Words, not a coloured tag: colour is for states that change,
+                // and green already means 「连接中」 two columns over.
+                render: (value: string | null) => (
+                  <Typography.Text>
+                    {value === null ? t("channelReceiveOnly") : t("channelCanReply")}
+                  </Typography.Text>
+                ),
               },
               {
                 // Until this route existed, the only way to see which
@@ -386,27 +390,16 @@ export function ChannelsPage() {
                 // does nothing.
                 title: t("channelTransport"),
                 dataIndex: "transport",
+                // Configuration only. The connection state has its own column
+                // now: one cell used to hold the stored value, the live state
+                // and a grey hint, and read as one fact when it was three.
                 render: (value: string | undefined, row: ChannelBindingResponse) =>
                   value === "long_connection" ? (
                     <Space size="small">
                       <Tag>{t("channelTransportLongConnection")}</Tag>
-                      {/*
-                        配置旁边是**状态**。这一列原来只显示存的值，于是
-                        2026-09-03 一根死了十小时的连接整晚显示「长连接」，
-                        而发现它的方式是有人发消息发不出去。
-
-                        判断在后端（`long_connection_state`），这里只负责画：
-                        阈值和心跳周期的关系必须成立，而它们隔着 HTTP 就没有
-                        任何东西能保证一起改。
-                      */}
-                      {row.long_connection_state === "connected" ? (
-                        <Tag color="green">{t("channelConnectionConnected")}</Tag>
-                      ) : row.long_connection_state === "stale" ? (
-                        <Tag color="red">{t("channelConnectionStale")}</Tag>
-                      ) : (
-                        <Tag color="orange">{t("channelConnectionNever")}</Tag>
-                      )}
                       {row.long_connection_state === "never" ? (
+                        // Stays beside the configuration, not the state: it says
+                        // when the configuration takes effect.
                         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                           {t("channelTransportRestartRequired")}
                         </Typography.Text>
@@ -421,6 +414,26 @@ export function ChannelsPage() {
                     // hand-edited row — is exactly the one a reader has to
                     // be able to notice.
                     <Tag color="warning">{value ?? "—"}</Tag>
+                  ),
+              },
+              {
+                // 配置旁边是**状态**。原来只显示存的值，于是 2026-09-03 一根死了
+                // 十小时的连接整晚显示「长连接」，而发现它的方式是有人发消息发不
+                // 出去。
+                //
+                // 判断在后端（`long_connection_state`），这里只负责画：阈值和心跳
+                // 周期的关系必须成立，而它们隔着 HTTP 就没有任何东西能保证一起改。
+                title: t("channelConnection"),
+                dataIndex: "long_connection_state",
+                render: (state: string, row: ChannelBindingResponse) =>
+                  row.transport !== "long_connection" ? (
+                    "—"
+                  ) : state === "connected" ? (
+                    <Tag color="green">{t("channelConnectionConnected")}</Tag>
+                  ) : state === "stale" ? (
+                    <Tag color="red">{t("channelConnectionStale")}</Tag>
+                  ) : (
+                    <Tag color="orange">{t("channelConnectionNever")}</Tag>
                   ),
               },
               { title: t("channelStatus"), dataIndex: "status", render: (v: string) => <Tag>{v}</Tag> },
@@ -498,24 +511,7 @@ export function ChannelsPage() {
                   // working, and this is the only list of them.
                   render: (value: string[]) => (value.length === 0 ? "—" : value.join(" ")),
                 },
-                {
-                // Whether this binding can answer at all. Without it a
-                // receive-only binding and one wired to reply look
-                // identical, and "the Agent answered but Feishu showed
-                // nothing" has no visible cause on the page meant to
-                // explain it. The reference itself is not shown — the
-                // column is about capability, and the name is in the edit
-                // dialog for whoever is changing it.
-                title: t("channelReplies"),
-                dataIndex: "app_secret_ref",
-                render: (value: string | null) =>
-                  value === null ? (
-                    <Tag>{t("channelReceiveOnly")}</Tag>
-                  ) : (
-                    <Tag color="green">{t("channelCanReply")}</Tag>
-                  ),
-              },
-              { title: t("channelStatus"), dataIndex: "status", render: (v: string) => <Tag>{v}</Tag> },
+                { title: t("channelStatus"), dataIndex: "status", render: (v: string) => <Tag>{v}</Tag> },
                 {
                   title: "",
                   key: "actions",
