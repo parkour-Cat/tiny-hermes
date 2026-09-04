@@ -354,17 +354,30 @@ export function ChannelsPage() {
                 // one in use — migration 0052's own docstring is about that
                 // gap.
                 //
-                // The note beside a long connection is unconditional, and
-                // it says what it can actually know: that this transport
-                // only comes into effect at a scheduler restart. It is
-                // **not** a record of a restart still being owed — a
-                // binding switched months ago and long since restarted
-                // shows the same line. Nothing on this page could tell the
-                // two apart: the response carries the stored transport and
-                // nothing about the running scheduler, and the post-save
-                // Alert above is a boolean in component state that a reload
-                // clears. Whoever wants the note to mean "still owed" has
-                // to give the API something to say it with.
+                // The restart note used to be unconditional, because
+                // nothing here could tell "switched a minute ago, restart
+                // still owed" from "switched months ago and long since
+                // restarted". This comment used to end by saying whoever
+                // wanted it to mean "still owed" had to give the API
+                // something to say it with. `long_connection_state` is that
+                // something: a live heartbeat means the scheduler is
+                // already running this binding, so no restart is owed.
+                //
+                // So the note is shown for `never` only — the one state
+                // where "the scheduler has not picked this up" is still a
+                // live hypothesis. It is not the only one there (wrong
+                // credentials, or another binding holding the process's one
+                // socket, land there too), which is why it stays a note
+                // rather than becoming a diagnosis.
+                //
+                // Not shown for `stale`: a connection that was up and died
+                // says so in its own tag, and a restart is only one of the
+                // things that might explain it. On 2026-09-04 that pairing
+                // was seen for real — a red 已断开 with 「重启 scheduler
+                // 后生效」 beside it, which reads as "restart to fix this".
+                // That time it happened to be true. The next time the socket
+                // dies for a different reason, it points at an action that
+                // does nothing.
                 title: t("channelTransport"),
                 dataIndex: "transport",
                 render: (value: string | undefined, row: ChannelBindingResponse) =>
@@ -387,9 +400,11 @@ export function ChannelsPage() {
                       ) : (
                         <Tag color="orange">{t("channelConnectionNever")}</Tag>
                       )}
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        {t("channelTransportRestartRequired")}
-                      </Typography.Text>
+                      {row.long_connection_state === "never" ? (
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          {t("channelTransportRestartRequired")}
+                        </Typography.Text>
+                      ) : null}
                     </Space>
                   ) : value === "webhook" ? (
                     <Tag>{t("channelTransportWebhook")}</Tag>
