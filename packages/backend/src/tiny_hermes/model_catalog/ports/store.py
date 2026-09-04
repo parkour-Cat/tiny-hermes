@@ -34,6 +34,10 @@ class ModelEndpointStore(Protocol):
         self, endpoint_id: UUID, status: EndpointStatus
     ) -> ModelEndpoint | None: ...
 
+    async def set_window(
+        self, endpoint_id: UUID, context_window: int, max_output_tokens: int
+    ) -> ModelEndpoint | None: ...
+
     async def set_accepts_images(
         self, endpoint_id: UUID, accepts: bool
     ) -> ModelEndpoint | None: ...

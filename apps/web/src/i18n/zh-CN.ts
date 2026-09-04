@@ -390,6 +390,9 @@ export const zhCN = {
   endpointCredentialRef: "凭据",
   endpointCredentialRefHint: "从凭据保管箱里选一条。平台或工作空间范围都可以——解析时只按它的 ID 找。",
   setPricing: "设定价格",
+  adjustWindow: "调整窗口",
+  adjustWindowHint:
+    "改动从下一轮起对所有使用这个模型服务的任务生效。放宽窗口后，因窗口不够而暂停的任务可以直接恢复；收窄会让装不下的任务在下一轮同样暂停。最大输出不能超过窗口。",
   pricingHint: "每百万 token 的价格，按写的原样传——3.00 到平台就是 3.00。用量按运行发生时生效的那份价格计算。",
   pricingCurrency: "币种",
   pricingInput: "输入每百万",

@@ -2,7 +2,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Cookie, Depends, Header, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.identity.application.auth_service import AuthService
@@ -33,12 +33,21 @@ class UpdateEndpointRequest(BaseModel):
     either swaps the endpoint for a different one underneath every
     AgentVersion that named it, and that is a new registration.
 
-    Both are optional and absent means unchanged, so a request naming one
-    cannot silently reset the other.
+    `context_window` and `max_output_tokens` join for the same reason: how
+    much the endpoint holds is a fact about it, not a choice of it, and a
+    Run reads its endpoint's window at the start of every round — so a
+    window widened here reaches a Run paused at `context_overflow` the
+    moment it is resumed. Before this, the only way to recover such a Run
+    was a database session.
+
+    Every field is optional and absent means unchanged, so a request naming
+    one cannot silently reset another.
     """
 
     status: EndpointStatus | None = None
     accepts_images: bool | None = None
+    context_window: int | None = Field(default=None, ge=1, le=10_000_000)
+    max_output_tokens: int | None = Field(default=None, ge=1, le=10_000_000)
 
 
 class EndpointSummary(BaseModel):
@@ -180,6 +189,8 @@ def model_endpoint_router(resources: ApplicationResources) -> APIRouter:
             endpoint_id,
             status=payload.status,
             accepts_images=payload.accepts_images,
+            context_window=payload.context_window,
+            max_output_tokens=payload.max_output_tokens,
         )
         return EndpointDetail.detail_from(
             updated, await endpoints.credential_available(updated)

@@ -406,6 +406,9 @@ export const enUS: Record<MessageKey, string> = {
   endpointCredentialRef: "Credential",
   endpointCredentialRefHint: "Chosen from the credential vault. Either scope works — the resolver looks it up by id and never asks which scope it came from.",
   setPricing: "Set the price",
+  adjustWindow: "Adjust the window",
+  adjustWindowHint:
+    "Takes effect for every Run on this endpoint from its next round. Widening lets a Run paused for lack of window be resumed; narrowing pauses the ones that no longer fit the same way. The output reservation cannot exceed the window.",
   pricingHint: "Per million tokens, as written — 3.00 reaches the platform as 3.00. Usage is measured against the price in force when a Run ran.",
   pricingCurrency: "Currency",
   pricingInput: "Input per million",
