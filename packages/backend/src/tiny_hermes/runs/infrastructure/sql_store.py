@@ -362,22 +362,26 @@ class SqlRunStore:
         self._session.add(run)
         await self._session.flush()
 
-        self._session.add(
-            SessionMessageRow(
-                id=uuid4(),
-                session_id=session.id,
-                workspace_id=command.workspace_id,
-                sequence=session.next_message_sequence,
-                role=command.message.role,
-                content=command.message.document(),
-                source_run_id=run_id,
-                redacted=False,
-                created_at=now,
+        # 没有消息就不写，序号也不占：压缩 Run 不是一轮对话，它在历史里不该
+        # 留下任何模型读得到的东西（见 `AcceptRunCommand.message`）。占号会让
+        # `session_messages` 出现一个空洞，而那一列的连续性是别人读历史的依据。
+        if command.message is not None:
+            self._session.add(
+                SessionMessageRow(
+                    id=uuid4(),
+                    session_id=session.id,
+                    workspace_id=command.workspace_id,
+                    sequence=session.next_message_sequence,
+                    role=command.message.role,
+                    content=command.message.document(),
+                    source_run_id=run_id,
+                    redacted=False,
+                    created_at=now,
+                )
             )
-        )
+            session.next_message_sequence += 1
         self._session.add(_new_budget(run_id, limits, now, ceiling))
         session.next_run_sequence += 1
-        session.next_message_sequence += 1
         if session.head_run_id is None:
             session.head_run_id = run_id
         await self._session.flush()

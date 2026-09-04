@@ -329,7 +329,10 @@ class RunCoordination:
                 request_fingerprint=fingerprint_request(
                     "POST", END_USER_RUNS_ENDPOINT, workspace_id, session_id, message, None
                 ),
-                message=message,
+                # 指纹照旧用这条消息算（幂等判重用的，不进历史也不给人看），
+                # 但压缩 Run 不把它存下来：`/compact` 是给平台的指令，不是
+                # 对话的一部分。见 `AcceptRunCommand.message`。
+                message=None if purpose is RunPurpose.COMPACTION else message,
                 request_id=request_id,
                 delivery_mode=None,
                 purpose=purpose,

@@ -57,12 +57,25 @@ class AcceptRunCommand:
     endpoint: str
     idempotency_key: str
     request_fingerprint: str
-    message: CanonicalMessage
+    #: 这个 Run 要回答的那条用户消息，**压缩 Run 没有**。
+    #:
+    #: `None` 只允许 `COMPACTION`，`__post_init__` 会拦住别的。压缩 Run 不在
+    #: 回答谁：`/compact` 是给平台的指令，不是对话的一部分。它曾经被当成一条
+    #: 用户消息写进 `session_messages`，后果是模型下一轮读到一条永远没人回答的
+    #: `/compact` 并试图解释它——2026-09-04 线上真的发生了，用户发的是 `hi`，
+    #: 收到的回复是「我这边确实没有『/compact』功能，无法执行它」。
+    message: CanonicalMessage | None
     request_id: str
     delivery_mode: str | None = None
     #: 这次 Run 是来干什么的。`COMPACTION` 的那一种压完就结束、不回答问题
     #: ——见 `RunPurpose`。默认是回答，因为绝大多数 Run 都是。
     purpose: RunPurpose = RunPurpose.ANSWER
+
+    def __post_init__(self) -> None:
+        # 只有压缩 Run 可以没有消息。别的 Run 没有消息就是「没有东西要做」，
+        # 而它会一路跑到规划、发现历史里没有新的一轮，静默地什么也不答。
+        if self.message is None and self.purpose is not RunPurpose.COMPACTION:
+            raise ValueError("only a compaction Run may be accepted with no message")
 
 
 @dataclass(frozen=True)
