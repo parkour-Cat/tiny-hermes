@@ -39,6 +39,7 @@ from lark_oapi.channel import (  # pyright: ignore[reportMissingTypeStubs]
 )
 
 from tiny_hermes.channels.domain._json import object_at, string_at
+from tiny_hermes.channels.domain.liveness import HEARTBEAT_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +100,13 @@ class LongConnectionBinding:
 #: 网络抖动（SDK 的退避会在几十秒内重来几次）不会白白把连接推倒重建。
 OUTAGE_GIVE_UP_SECONDS = 300.0
 
+#: 心跳周期定义在 domain（`channels/domain/liveness.py`），因为判断「算不算
+#: 连着」的阈值要靠它，而那个判断在另一层。这里按名字引进来，`_beat` 读的
+#: 是模块全局，所以测试照样 monkeypatch 得到。
 #: 多久看一眼。只是「多久发现」的粒度，不是判据本身——判据是 `_down_since`
 #: 有没有一直非空。
 LIVENESS_POLL_SECONDS = 5.0
+
 
 
 class DeliverFrame(Protocol):
@@ -120,6 +125,18 @@ class DeliverFrame(Protocol):
     """
 
     async def __call__(self, binding_id: UUID, envelope: dict[str, Any]) -> None: ...
+
+
+class RecordAlive(Protocol):
+    """「这根 socket 此刻是通的」，写到控制台读得到的地方去。
+
+    和 `RecordConnectionEvent` 分开，因为它们说的不是一件事：那个记的是
+    **变化**（断了、连回来了、连不上），进审计流水；这个记的是**当下**，
+    是一个被反复覆盖的时间戳。把心跳塞进审计里会让审计页每分钟多一行，
+    而 `audit_events` 没有任何保留期。
+    """
+
+    async def __call__(self, binding_id: UUID) -> None: ...
 
 
 class RecordConnectionEvent(Protocol):
@@ -262,10 +279,16 @@ class FeishuLongConnection:
         deliver: DeliverFrame,
         *,
         record: RecordConnectionEvent | None = None,
+        record_alive: RecordAlive | None = None,
     ) -> None:
         self._binding = binding
         self._deliver = deliver
         self._record = record
+        self._record_alive = record_alive
+        #: 上一次心跳落库是什么时候（`monotonic`）。`None` 表示这一轮还没写过，
+        #: 于是连上之后第一次探活就会写一条——控制台不必等满一个心跳周期才
+        #: 看得到这根连接。
+        self._beat_at: float | None = None
         #: Set while the socket is down, cleared on reconnect and at the top
         #: of every `run()` (see `_reset_for_this_run`) — the only thing this
         #: timestamp is for is computing `down_seconds` when the matching
@@ -674,6 +697,7 @@ class FeishuLongConnection:
                 return
             down_since = self._down_since
             if down_since is None:
+                await self._beat()
                 continue
             if time.monotonic() - down_since < OUTAGE_GIVE_UP_SECONDS:
                 continue
@@ -686,6 +710,34 @@ class FeishuLongConnection:
                 OUTAGE_GIVE_UP_SECONDS,
             )
             return
+
+    async def _beat(self) -> None:
+        """写一次「我还连着」，最多每 `HEARTBEAT_SECONDS` 一次。
+
+        只在 `_down_since is None` 的那一刻被调用——也就是 SDK 没在报重连。
+        这是这个心跳唯一敢声称的东西：**这个进程认为 socket 是通的**。它不
+        等于对面收得到消息；能证明那件事的只有真的收到一条。写下来是因为
+        在此之前控制台连这一点都没有。
+
+        失败一律吞掉并继续。心跳是给人看的，一次写不进去不该把 socket 带下来
+        ——和 `record_connect_failed` 里那些 `except` 同一条理由。
+        """
+        if self._record_alive is None:
+            return
+        now = time.monotonic()
+        if self._beat_at is not None and now - self._beat_at < HEARTBEAT_SECONDS:
+            return
+        # 先记时间再写：写失败也不重试到下一个周期之前，否则一个连不上的库
+        # 会让这里每 `LIVENESS_POLL_SECONDS` 就重试一次。
+        self._beat_at = now
+        try:
+            await self._record_alive(self._binding.binding_id)
+        except Exception:
+            logger.warning(
+                "long connection binding=%s heartbeat not recorded",
+                self._binding.binding_id,
+                exc_info=True,
+            )
 
     def _reset_for_this_run(self) -> None:
         """Clears everything the *previous* `run()` left behind.
@@ -702,6 +754,9 @@ class FeishuLongConnection:
         """
         self._connected = False
         self._down_since = None
+        # 上一轮的心跳时刻不该压住这一轮的第一拍：重建之后控制台应该立刻
+        # 看到新的时间戳，而不是等满一个周期。
+        self._beat_at = None
         with self._background_lock:
             self._closing = False
 

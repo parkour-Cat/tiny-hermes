@@ -6,11 +6,12 @@ import socket
 import time
 import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import UUID
 
 import uvicorn
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
@@ -22,6 +23,7 @@ from tiny_hermes.channels.infrastructure.feishu_long_connection import (
     DeliverFrame,
     FeishuLongConnection,
     LongConnectionBinding,
+    RecordAlive,
 )
 from tiny_hermes.channels.infrastructure.feishu_sender import FeishuSender
 from tiny_hermes.channels.infrastructure.run_images import ChannelImageSource
@@ -697,6 +699,28 @@ def _connection_event_recorder(
     return record
 
 
+def _alive_recorder(sessions: async_sessionmaker[AsyncSession]) -> RecordAlive:
+    """「这根 socket 此刻是通的」，写在控制台读得到的那一列上。
+
+    一条 UPDATE，覆盖式的，不进审计流水——心跳记的是当下，不是变化，而
+    `audit_events` 没有任何保留期，每分钟一行会把审计页变成心跳日志。
+
+    不带 `workspace_id`：`channel_bindings.id` 是主键，按它更新一行不需要
+    第二个条件，而多加一个反而会在传错的时候静默地一行都不更新。
+    """
+
+    async def record_alive(binding_id: UUID) -> None:
+        async with sessions() as session:
+            await session.execute(
+                update(ChannelBindingRow)
+                .where(ChannelBindingRow.id == binding_id)
+                .values(long_connection_seen_at=datetime.now(UTC))
+            )
+            await session.commit()
+
+    return record_alive
+
+
 async def _long_connections(
     settings: Settings, sessions: async_sessionmaker[AsyncSession]
 ) -> tuple[FeishuLongConnection, ...]:
@@ -859,6 +883,7 @@ async def _long_connections(
             credential,
             deliver,
             record=_connection_event_recorder(sessions, held.workspace_id),
+            record_alive=_alive_recorder(sessions),
         ),
     )
 
