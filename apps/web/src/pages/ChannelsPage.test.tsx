@@ -582,3 +582,32 @@ test("a receive-only binding cannot be switched to the long connection", async (
   // "disabled" here is about this row and not about the control.
   expect(await screen.findByText(t("channelTransportNeedsCredentials"))).toBeVisible();
 });
+
+test("新建和编辑用的是同一套字段定义", async () => {
+  // 三个弹窗里抄三遍的后果是：改了其中一处，另外两处不知道。
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json([binding()])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/secrets", () =>
+      HttpResponse.json([
+        { id: "s1", name: "feishu-encrypt-key", scope: "workspace", status: "active" },
+      ]),
+    ),
+  );
+
+  renderChannels();
+  await userEvent.click(await screen.findByRole("button", { name: t("bindChannel") }));
+  const creating = screen.getAllByRole("textbox").map((input) => input.getAttribute("id"));
+  const createLabels = [t("channelKeyRef"), t("channelAppId"), t("channelAppSecretRef")].map(
+    (label) => screen.getByLabelText(label).getAttribute("id"),
+  );
+  await userEvent.click(screen.getByRole("button", { name: t("cancel") }));
+  await userEvent.click(await screen.findByRole("button", { name: t("channelEdit") }));
+  const editing = screen.getAllByRole("textbox").map((input) => input.getAttribute("id"));
+  const editLabels = [t("channelKeyRef"), t("channelAppId"), t("channelAppSecretRef")].map(
+    (label) => screen.getByLabelText(label).getAttribute("id"),
+  );
+
+  expect(editing).toEqual(creating);
+  expect(editLabels).toEqual(createLabels);
+});

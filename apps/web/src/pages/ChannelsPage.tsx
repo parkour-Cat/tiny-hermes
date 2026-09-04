@@ -25,6 +25,7 @@ import type {
   SecretResponse,
 } from "../api/types";
 import { moment } from "../i18n/moment";
+import { FormSection } from "../forms/FormSection";
 import { useT } from "../i18n/locale";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
@@ -105,6 +106,11 @@ export function ChannelsPage() {
   //: material or the other, never both, so the choice has to be made here
   //: rather than by leaving the unused field blank and sending it anyway.
   const issuerKeyMode = Form.useWatch("keyMode", issuerForm) ?? "jwks";
+  const issuerJwksUrl = Form.useWatch("jwksUrl", issuerForm) as string | undefined;
+  const issuerKeySummary =
+    issuerKeyMode === "publicKey"
+      ? t("issuerKeyModePublicKey")
+      : `${t("issuerKeyModeJwks")} ${issuerJwksUrl ?? ""}`.trim();
 
   const registerIssuer = useMutation({
     mutationFn: (values: {
@@ -547,27 +553,7 @@ export function ChannelsPage() {
           onFinish={(values) => registerIssuer.mutate(values)}
         >
           <Typography.Paragraph type="secondary">{t("registerIssuerHint")}</Typography.Paragraph>
-          <Form.Item name="issuer" label={t("issuerName")} rules={[{ required: true }]}>
-            <Input placeholder="https://sso.example.com" />
-          </Form.Item>
-          <Form.Item name="keyMode" label={t("issuerKeyMode")} initialValue="jwks">
-            <Radio.Group>
-              <Radio value="jwks">{t("issuerKeyModeJwks")}</Radio>
-              <Radio value="publicKey">{t("issuerKeyModePublicKey")}</Radio>
-            </Radio.Group>
-          </Form.Item>
-          {issuerKeyMode === "publicKey" ? (
-            <Form.Item name="publicKey" label={t("issuerPublicKey")} rules={[{ required: true }]}>
-              <Input.TextArea rows={5} placeholder="-----BEGIN PUBLIC KEY-----" />
-            </Form.Item>
-          ) : (
-            <Form.Item name="jwksUrl" label={t("issuerJwksUrl")} rules={[{ required: true }]}>
-              <Input placeholder="https://sso.example.com/.well-known/jwks.json" />
-            </Form.Item>
-          )}
-          <Form.Item name="origins" label={t("issuerOrigins")}>
-            <Input.TextArea rows={3} placeholder="https://portal.example.com" />
-          </Form.Item>
+          <IssuerFields keyMode={issuerKeyMode} keySummary={issuerKeySummary} />
         </Form>
       </Modal>
 
@@ -580,6 +566,7 @@ export function ChannelsPage() {
         onCancel={() => setOpen(false)}
         onOk={() => void form.submit()}
         okButtonProps={{ disabled: usable.length === 0 }}
+        destroyOnHidden
       >
         {usable.length === 0 && !secrets.isPending ? (
           // Said before the form rather than after the refusal: a Feishu
@@ -593,11 +580,73 @@ export function ChannelsPage() {
           requiredMark={false}
           onFinish={(values) => bind.mutate(values)}
         >
-          <Form.Item name="agentId" label={t("channelAgent")} rules={[{ required: true }]}>
-            <Select
-              options={(agents.data ?? []).map((agent) => ({ value: agent.id, label: agent.name }))}
-            />
-          </Form.Item>
+          <BindingFields mode="create" agents={agents.data ?? []} usable={usable} canHoldLongConnection={false} />
+        </Form>
+      </Modal>
+
+      <Modal
+        open={editing !== null}
+        title={t("channelEditTitle")}
+        okText={t("channelEditConfirm")}
+        confirmLoading={rewire.isPending}
+        onCancel={() => {
+          setEditing(null);
+          editForm.resetFields();
+        }}
+        onOk={() => void editForm.submit()}
+        destroyOnHidden
+      >
+        <Form form={editForm} layout="vertical" onFinish={(values) => rewire.mutate(values)}>
+          <BindingFields
+            mode="edit"
+            agents={agents.data ?? []}
+            usable={usable}
+            canHoldLongConnection={canHoldLongConnection}
+          />
+        </Form>
+      </Modal>
+    </>
+  );
+}
+
+/** 绑定的字段，新建与编辑共用一份定义。三个弹窗里抄三遍的后果是：改了其中
+ *  一处，另外两处不知道。新建多一个 Agent 字段，编辑多一个接入方式——两处差异
+ *  各有理由，写在各自的注释里。 */
+function BindingFields({
+  mode,
+  agents,
+  usable,
+  canHoldLongConnection,
+}: {
+  mode: "create" | "edit";
+  agents: AgentResponse[];
+  usable: SecretResponse[];
+  canHoldLongConnection: boolean;
+}) {
+  const t = useT();
+  return (
+    <FormSection
+      title={t("channelSectionBinding")}
+      summary=""
+      fields={mode === "create" ? ["agentId", "encryptKeyRef"] : ["encryptKeyRef", "transport"]}
+      collapsible={false}
+    >
+      {mode === "create" ? (
+        <>
+              <Form.Item name="agentId" label={t("channelAgent")} rules={[{ required: true }]}>
+                <Select
+                  options={agents.map((agent) => ({ value: agent.id, label: agent.name }))}
+                />
+              </Form.Item>
+        </>
+      ) : (
+        <>
+              {/* No Agent field. Moving a binding to another Agent would
+                  silently redirect every conversation already mapped to it,
+                  and the API refuses it for that reason — offering the control
+                  here would be a promise this platform does not keep. */}
+        </>
+      )}
           <Form.Item name="encryptKeyRef" label={t("channelKeyRef")} rules={[{ required: true }]}>
             {/* A choice among stored secrets, not a text field: a free-text
                 reference is how you end up with a binding pointing at a
@@ -626,75 +675,87 @@ export function ChannelsPage() {
               options={usable.map((secret) => ({ value: secret.id, label: secret.name }))}
             />
           </Form.Item>
-        </Form>
-      </Modal>
+      {mode === "edit" ? (
+        <>
+              {/* The restart warning is not here as `extra`: it needs to survive
+                  this dialog closing (`onSuccess` closes it immediately), so it
+                  is a page-level Alert set from `rewire`'s `onSuccess` instead —
+                  see `transportRestartHint` above. Duplicating the text in both
+                  places would leave two matches for one string the moment this
+                  modal's close animation overlaps the Alert appearing. */}
+              <Form.Item
+                name="transport"
+                label={t("channelTransport")}
+                rules={[{ required: true }]}
+                // Said before the choice, not after the refusal: the API's 400
+                // says *that* it was refused, and this page is where the reason
+                // — a missing app id or app secret reference — can be pointed at.
+                extra={canHoldLongConnection ? null : t("channelTransportNeedsCredentials")}
+              >
+                <Select
+                  options={[
+                    { value: "webhook", label: t("channelTransportWebhook") },
+                    {
+                      value: "long_connection",
+                      label: t("channelTransportLongConnection"),
+                      // The scheduler skips a `long_connection` binding with no
+                      // app credentials (`api/cli.py`'s `continue`), leaving a
+                      // binding that reads as switched on and receives nothing.
+                      // The API refuses this too — it is public — and this only
+                      // keeps somebody from having to be refused to find out.
+                      disabled: !canHoldLongConnection,
+                    },
+                  ]}
+                />
+              </Form.Item>
+        </>
+      ) : null}
+    </FormSection>
+  );
+}
 
-      <Modal
-        open={editing !== null}
-        title={t("channelEditTitle")}
-        okText={t("channelEditConfirm")}
-        confirmLoading={rewire.isPending}
-        onCancel={() => {
-          setEditing(null);
-          editForm.resetFields();
-        }}
-        onOk={() => void editForm.submit()}
-        destroyOnHidden
+/** 签发方的字段。「基本」从不折叠；「密钥」按 keyMode 决定是公钥还是 JWKS 地址，
+ *  填好之后可以折起来，折叠条上写的是选了哪种、指向哪里。 */
+function IssuerFields({ keyMode, keySummary }: { keyMode: "jwks" | "publicKey"; keySummary: string }) {
+  const t = useT();
+  const issuerKeyMode = keyMode;
+  return (
+    <>
+      <FormSection
+        title={t("issuerSectionBasics")}
+        summary=""
+        fields={["issuer"]}
+        collapsible={false}
       >
-        <Form form={editForm} layout="vertical" onFinish={(values) => rewire.mutate(values)}>
-          {/* No Agent field. Moving a binding to another Agent would
-              silently redirect every conversation already mapped to it,
-              and the API refuses it for that reason — offering the control
-              here would be a promise this platform does not keep. */}
-          <Form.Item name="encryptKeyRef" label={t("channelKeyRef")} rules={[{ required: true }]}>
-            <Select options={usable.map((secret) => ({ value: secret.id, label: secret.name }))} />
-          </Form.Item>
-          <Form.Item name="appId" label={t("channelAppId")}>
-            <Input />
-          </Form.Item>
-          <Form.Item
-            name="appSecretRef"
-            label={t("channelAppSecretRef")}
-            extra={t("channelAppSecretRefHint")}
-          >
-            <Select
-              allowClear
-              options={usable.map((secret) => ({ value: secret.id, label: secret.name }))}
-            />
-          </Form.Item>
-          {/* The restart warning is not here as `extra`: it needs to survive
-              this dialog closing (`onSuccess` closes it immediately), so it
-              is a page-level Alert set from `rewire`'s `onSuccess` instead —
-              see `transportRestartHint` above. Duplicating the text in both
-              places would leave two matches for one string the moment this
-              modal's close animation overlaps the Alert appearing. */}
-          <Form.Item
-            name="transport"
-            label={t("channelTransport")}
-            rules={[{ required: true }]}
-            // Said before the choice, not after the refusal: the API's 400
-            // says *that* it was refused, and this page is where the reason
-            // — a missing app id or app secret reference — can be pointed at.
-            extra={canHoldLongConnection ? null : t("channelTransportNeedsCredentials")}
-          >
-            <Select
-              options={[
-                { value: "webhook", label: t("channelTransportWebhook") },
-                {
-                  value: "long_connection",
-                  label: t("channelTransportLongConnection"),
-                  // The scheduler skips a `long_connection` binding with no
-                  // app credentials (`api/cli.py`'s `continue`), leaving a
-                  // binding that reads as switched on and receives nothing.
-                  // The API refuses this too — it is public — and this only
-                  // keeps somebody from having to be refused to find out.
-                  disabled: !canHoldLongConnection,
-                },
-              ]}
-            />
-          </Form.Item>
-        </Form>
-      </Modal>
+              <Form.Item name="issuer" label={t("issuerName")} rules={[{ required: true }]}>
+                <Input placeholder="https://sso.example.com" />
+              </Form.Item>
+              <Form.Item name="origins" label={t("issuerOrigins")}>
+                <Input.TextArea rows={3} placeholder="https://portal.example.com" />
+              </Form.Item>
+      </FormSection>
+      <FormSection
+        title={t("issuerSectionKey")}
+        summary={keySummary}
+        fields={[issuerKeyMode === "publicKey" ? "publicKey" : "jwksUrl"]}
+        collapsible
+      >
+              <Form.Item name="keyMode" label={t("issuerKeyMode")} initialValue="jwks">
+                <Radio.Group>
+                  <Radio value="jwks">{t("issuerKeyModeJwks")}</Radio>
+                  <Radio value="publicKey">{t("issuerKeyModePublicKey")}</Radio>
+                </Radio.Group>
+              </Form.Item>
+              {issuerKeyMode === "publicKey" ? (
+                <Form.Item name="publicKey" label={t("issuerPublicKey")} rules={[{ required: true }]}>
+                  <Input.TextArea rows={5} placeholder="-----BEGIN PUBLIC KEY-----" />
+                </Form.Item>
+              ) : (
+                <Form.Item name="jwksUrl" label={t("issuerJwksUrl")} rules={[{ required: true }]}>
+                  <Input placeholder="https://sso.example.com/.well-known/jwks.json" />
+                </Form.Item>
+              )}
+      </FormSection>
     </>
   );
 }
