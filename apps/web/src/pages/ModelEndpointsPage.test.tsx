@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -23,6 +23,7 @@ const SUMMARY = {
   usage_quality: "provider",
   context_accounting: "shared",
   tokenizer: null,
+  accepts_images: false,
   status: "active",
 };
 
@@ -151,8 +152,9 @@ test("the price in force is shown, because usage is money and nothing else showe
 
   renderEndpoints();
 
-  expect(await screen.findByText(/3\.00/)).toBeInTheDocument();
-  expect(screen.getByText(/15\.00/)).toBeInTheDocument();
+  // The whole rate, not just "3.00": the pricing hint on the form also
+  // says 3.00, and a looser match would pass before any price loaded.
+  expect(await screen.findByText(/USD 3\.00 \/ 15\.00/)).toBeInTheDocument();
 });
 
 test("an endpoint with no price says so, rather than showing zero", async () => {
@@ -204,7 +206,9 @@ test("setting a price sends decimal strings, never numbers", async () => {
   );
 
   renderEndpoints();
-  await userEvent.click(await screen.findByRole("button", { name: t("setPricing") }));
+  await userEvent.click(await screen.findByRole("button", { name: t("edit") }));
+  // 计价 is folded when nothing is priced; typing into it needs it open.
+  await userEvent.click(screen.getByRole("button", { name: new RegExp(t("endpointSectionPricing")) }));
   await userEvent.type(await screen.findByLabelText(t("pricingInput")), "3.00");
   await userEvent.type(await screen.findByLabelText(t("pricingOutput")), "15.00");
   await userEvent.click(screen.getByRole("button", { name: t("saveName") }));
@@ -389,13 +393,17 @@ test("an endpoint's image declaration can be corrected after the fact", async ()
 
   renderEndpoints();
 
-  await userEvent.click(await screen.findByRole("button", { name: t("endpointAcceptsImages") }));
+  await userEvent.click(await screen.findByRole("button", { name: t("edit") }));
+  await userEvent.click(screen.getByRole("button", { name: new RegExp(t("endpointSectionCapability")) }));
+  await userEvent.click(screen.getByLabelText(t("endpointAcceptsImages")));
+  await userEvent.click(screen.getByRole("button", { name: t("saveName") }));
 
   await waitFor(() => expect(sent).not.toBeNull());
   expect(sent!.accepts_images).toBe(true);
   // Only that field. A PATCH also naming `status` would disable the
-  // endpoint as a side effect of correcting a capability.
-  expect(sent).not.toHaveProperty("status");
+  // endpoint as a side effect of correcting a capability, and one naming
+  // the unchanged window would be a resize nobody asked for.
+  expect(sent).toEqual({ accepts_images: true });
 });
 
 test("an endpoint's window can be widened after the fact, and nothing else moves", async () => {
@@ -415,15 +423,78 @@ test("an endpoint's window can be widened after the fact, and nothing else moves
   );
 
   renderEndpoints();
-  await userEvent.click(await screen.findByRole("button", { name: t("adjustWindow") }));
+  await userEvent.click(await screen.findByRole("button", { name: t("edit") }));
 
-  const dialog = await screen.findByRole("dialog");
-  const windowField = within(dialog).getByLabelText(t("endpointContextWindow"));
+  const capability = screen.getByRole("button", { name: new RegExp(t("endpointSectionCapability")) });
+  // Folded, and its bar already says what is inside.
+  expect(capability).toHaveAttribute("aria-expanded", "false");
+  await waitFor(() =>
+    expect(capability).toHaveTextContent(`128000 ${t("endpointWindowUnit")}`),
+  );
+  await userEvent.click(capability);
+  const windowField = screen.getByLabelText(t("endpointContextWindow"));
   expect(windowField).toHaveValue("128000");
   await userEvent.clear(windowField);
   await userEvent.type(windowField, "512000");
-  await userEvent.click(within(dialog).getByRole("button", { name: t("saveName") }));
+  await userEvent.click(screen.getByRole("button", { name: t("saveName") }));
 
   await waitFor(() => expect(sent).not.toBeNull());
   expect(sent).toEqual({ context_window: 512000, max_output_tokens: 4096 });
+});
+
+test("新建时「连到哪」展开且不可折叠，另两段折着并说出当前值", async () => {
+  // 三段的划分按「填错的代价」：连接填错什么都跑不起来，所以它从不折叠；
+  // 能力有默认值，可以折叠但折叠条必须说出默认值是什么；计价可以留空，
+  // 但留空的后果要写在折叠条上——不是「未设置」三个字，而是它意味着什么。
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(user(true))),
+    http.get("/api/v1/model-endpoints", () => HttpResponse.json([])),
+    http.get("/api/v1/secrets", () => HttpResponse.json([])),
+  );
+
+  renderEndpoints();
+
+  const connection = await screen.findByRole("button", {
+    name: new RegExp(t("endpointSectionConnection")),
+  });
+  expect(connection).toHaveAttribute("aria-expanded", "true");
+  expect(connection).toHaveAttribute("aria-disabled", "true");
+  const capability = screen.getByRole("button", { name: new RegExp(t("endpointSectionCapability")) });
+  expect(capability).toHaveAttribute("aria-expanded", "false");
+  await waitFor(() =>
+    expect(capability).toHaveTextContent(`128000 ${t("endpointWindowUnit")}`),
+  );
+  expect(capability).toHaveTextContent(t("endpointNoImages"));
+  const pricing = screen.getByRole("button", { name: new RegExp(t("endpointSectionPricing")) });
+  expect(pricing).toHaveAttribute("aria-expanded", "false");
+  expect(pricing).toHaveTextContent(t("pricingUnsetSummary"));
+});
+
+test("编辑走的是同一张表单：连接段只读，其余两段带着现值", async () => {
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(user(true))),
+    http.get("/api/v1/model-endpoints", () => HttpResponse.json([SUMMARY])),
+    http.get(`/api/v1/model-endpoints/${ENDPOINT}`, () =>
+      HttpResponse.json({
+        ...SUMMARY,
+        kind: "openai_compatible",
+        base_url: "https://models.example.com/v1",
+        credential_available: true,
+      }),
+    ),
+    http.get(`/api/v1/model-endpoints/${ENDPOINT}/pricing`, () => HttpResponse.json(PRICE)),
+    http.get("/api/v1/secrets", () => HttpResponse.json([])),
+  );
+
+  renderEndpoints();
+  await screen.findByText(/USD 3\.00 \/ 15\.00/);
+  await userEvent.click(screen.getByRole("button", { name: t("edit") }));
+
+  expect(screen.getByLabelText(t("endpointModel"))).toBeDisabled();
+  expect(screen.getByLabelText(t("endpointModel"))).toHaveValue("acme-large");
+  expect(
+    screen.getByRole("button", { name: new RegExp(t("endpointSectionPricing")) }),
+  ).toHaveTextContent("USD 3.00 / 15.00");
+  // Nothing is 「注册」ed twice: the primary action is now a save.
+  expect(screen.getByRole("button", { name: t("saveName") })).toBeInTheDocument();
 });
