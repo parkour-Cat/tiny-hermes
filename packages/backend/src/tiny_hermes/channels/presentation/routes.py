@@ -37,6 +37,7 @@ from tiny_hermes.channels.application.feishu_service import (
 )
 from tiny_hermes.channels.application.ingestion import ErasedSubjectRefused
 from tiny_hermes.channels.domain.events import MalformedChannelEvent
+from tiny_hermes.channels.domain.liveness import long_connection_state
 from tiny_hermes.channels.domain.webhook import WebhookRefused
 from tiny_hermes.identity.application.auth_service import AuthService
 from tiny_hermes.identity.domain.models import AuthenticatedUser
@@ -298,6 +299,14 @@ class ChannelBindingResponse(BaseModel):
     #: console has to show this rather than leave it something you set and
     #: hope about.
     transport: str
+    #: 此刻真的连着吗。`transport` 说的是配置，这一个说的是状态。
+    #:
+    #: 判断在后端（`channels/domain/liveness.py`），不在控制台：它依赖
+    #: 「阈值必须大于心跳周期」这个关系，而那两个数一旦隔着 HTTP 边界就没有
+    #: 任何东西能保证它们一起改。前端只负责把四种状态画出来。
+    long_connection_state: str
+    #: 最后一次心跳，给人看「多久以前」用。`None` 表示从来没有过。
+    long_connection_seen_at: datetime | None
     created_by: UUID
     created_at: datetime
 
@@ -312,6 +321,10 @@ class ChannelBindingResponse(BaseModel):
             encrypt_key_ref=view.encrypt_key_ref,
             app_secret_ref=view.app_secret_ref,
             transport=view.transport,
+            long_connection_state=long_connection_state(
+                view.transport, view.long_connection_seen_at
+            ).value,
+            long_connection_seen_at=view.long_connection_seen_at,
             created_by=view.created_by,
             created_at=view.created_at,
         )

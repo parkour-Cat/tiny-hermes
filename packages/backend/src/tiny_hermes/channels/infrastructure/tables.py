@@ -70,6 +70,20 @@ class ChannelBindingRow(IdMixin, CreatedAtMixin, Base):
     transport: Mapped[str] = mapped_column(
         String(32), default="webhook", server_default="webhook"
     )
+    #: 这根长连接最后一次被证实还活着是什么时候。只有 `transport =
+    #: 'long_connection'` 的绑定会被写，webhook 的永远是 `NULL`——webhook 没有
+    #: 「连着」这个状态，它是别人打进来的。
+    #:
+    #: 存在的理由：`transport` 这一列说的是**存的值**，socket 死了它照样是
+    #: `long_connection`。2026-09-03 一根绑定死了十小时，控制台一直显示正常。
+    #: 这一列是唯一能把「配置成长连接」和「此刻真的连着」分开的东西。
+    #:
+    #: 由 scheduler 的探活循环写（`feishu_long_connection.HEARTBEAT_SECONDS`），
+    #: 只在 socket 确实是通的那一刻写。读的人靠它有多旧来判断——**不靠它存在
+    #: 与否**：一个停掉的 scheduler 留下的是一个不再变新的时间戳，不是 NULL。
+    long_connection_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class ChannelEventRow(IdMixin, Base):

@@ -99,6 +99,13 @@ class ChannelBindingView:
     transport: str
     created_by: UUID
     created_at: datetime
+    #: 这根长连接最后一次被证实还活着是什么时候，`None` 表示从来没有。
+    #: `transport` 说的是配置，这一个说的是状态——两件事，分成两个字段，
+    #: 因为合成一格的后果是一根死了十小时的连接照样显示「长连接」。
+    #:
+    #: 排在最后是 dataclass 的规矩（有默认值的字段必须跟在没有的后面），
+    #: 不是按重要性排的。
+    long_connection_seen_at: datetime | None = None
 
 
 class ChannelBindingStore(Protocol):

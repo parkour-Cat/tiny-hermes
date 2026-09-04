@@ -1748,3 +1748,57 @@ async def test_a_compact_frame_over_the_long_connection_becomes_a_compaction_run
         ).scalar_one()
     assert leaked == 0, "`/compact` 作为一条用户消息留在了历史里，模型下一轮会读到它"
     del claim_id
+
+
+async def test_a_live_socket_leaves_a_heartbeat_the_console_can_read(
+    engine: AsyncEngine,
+    seeded_bindings_of_both_transports: tuple[UUID, UUID],
+    scheduler_connections: Callable[[], Awaitable[tuple[FeishuLongConnection, ...]]],
+    sdk_channels: Callable[..., _FakeChannels],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """连着的时候要往库里留下痕迹，否则控制台没法说真话。
+
+    控制台的 transport 那一列现在显示的是**存的值**——`long_connection` 这四个
+    字，socket 死了也照样显示（那一列自己的注释写着「the response carries the
+    stored transport and nothing about the running scheduler」）。2026-09-03 那次
+    绑定死了十小时，页面上一直写着「长连接」，而用户是靠发消息发不出去才发现的。
+
+    为什么不从审计行推：审计行能覆盖那一次（有 `disconnected`），但 scheduler
+    被 `kill -9` 时一行都不写，最后一条会一直停在 `reconnected`——那正是
+    「显示连着、其实死了」。心跳盖得住这一种，审计行盖不住。
+
+    判据是**库里那一列被写了**，不是「心跳函数被调过」：一个调了函数却没落库的
+    实现同样会让后者为真，而控制台读的是库。
+    """
+    monkeypatch.setattr(feishu_long_connection, "HEARTBEAT_SECONDS", 0.0)
+    monkeypatch.setattr(feishu_long_connection, "LIVENESS_POLL_SECONDS", 0.05)
+
+    _webhook_id, long_id = seeded_bindings_of_both_transports
+    channels = sdk_channels()
+    (connection,) = await scheduler_connections()
+    stop = asyncio.Event()
+    running = asyncio.create_task(connection.run(stop))
+    await channels.connected()
+
+    async def beat_landed() -> None:
+        deadline = time.monotonic() + 5.0
+        while True:
+            async with engine.connect() as connection_:
+                seen = (
+                    await connection_.execute(
+                        text(
+                            "SELECT long_connection_seen_at FROM channel_bindings"
+                            " WHERE id = :b"
+                        ),
+                        {"b": long_id},
+                    )
+                ).scalar_one()
+            if seen is not None:
+                return
+            assert time.monotonic() < deadline, "socket 连着，但库里没有心跳"
+            await asyncio.sleep(0.05)
+
+    await beat_landed()
+    stop.set()
+    await running
