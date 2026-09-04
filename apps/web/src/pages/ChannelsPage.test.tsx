@@ -405,7 +405,7 @@ test("switching a binding to the long connection warns that the scheduler needs 
   expect(await screen.findByText(t("channelTransportRestartHint"))).toBeVisible();
 });
 
-test("a binding already on the long connection says so, and keeps saying a restart is owed", async () => {
+test("a long connection nobody has ever connected still says a restart is owed", async () => {
   // Half of this task's premise is "you can see that it is on the long
   // connection", and until this test nothing rendered that value: both other
   // GETs answer `webhook`, so the long-connection branch of the column was
@@ -418,7 +418,9 @@ test("a binding already on the long connection says so, and keeps saying a resta
   // data, so it is there for whoever looks, whenever they look.
   server.use(
     http.get("/api/v1/channel-bindings", () =>
-      HttpResponse.json([binding({ transport: "long_connection" })]),
+      HttpResponse.json([
+        binding({ transport: "long_connection", long_connection_state: "never" }),
+      ]),
     ),
     http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
   );
@@ -427,6 +429,58 @@ test("a binding already on the long connection says so, and keeps saying a resta
 
   expect(await screen.findByText(t("channelTransportLongConnection"))).toBeVisible();
   expect(await screen.findByText(t("channelTransportRestartRequired"))).toBeVisible();
+});
+
+test("a long connection that is up does not tell anyone to restart the scheduler", async () => {
+  // 这句提示原来是无条件显示的，因为当时页面没有任何办法分辨「刚切过来、
+  // 还欠一次重启」和「切过来几个月、早就重启过了」——那一列的注释当时写着
+  // 「Whoever wants the note to mean "still owed" has to give the API
+  // something to say it with」。心跳就是那个东西。
+  //
+  // 有一拍活着的心跳，意味着 scheduler 已经在跑这个绑定了，重启不欠着。
+  // 继续显示它是噪音；而 2026-09-04 走查里它更糟——它紧挨着红色的「已断开」，
+  // 读起来像在说「重启就能修好」。那一次碰巧是对的，下一次连接因为别的原因
+  // 断了，它就把人指向一个没用的操作。
+  server.use(
+    http.get("/api/v1/channel-bindings", () =>
+      HttpResponse.json([
+        binding({
+          transport: "long_connection",
+          long_connection_state: "connected",
+          long_connection_seen_at: "2026-09-04T05:29:08Z",
+        }),
+      ]),
+    ),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+  );
+
+  renderChannels();
+
+  expect(await screen.findByText(t("channelConnectionConnected"))).toBeVisible();
+  expect(screen.queryByText(t("channelTransportRestartRequired"))).toBeNull();
+});
+
+test("a long connection that went stale does not tell anyone to restart the scheduler either", async () => {
+  // 断开的原因不一定是「欠一次重启」——网络断了、凭据过期了都会走到这里。
+  // 那一格已经说了「已断开」，旁边再挂一句重启提示只会把人指向一个可能没用
+  // 的操作。
+  server.use(
+    http.get("/api/v1/channel-bindings", () =>
+      HttpResponse.json([
+        binding({
+          transport: "long_connection",
+          long_connection_state: "stale",
+          long_connection_seen_at: "2026-09-04T05:20:31Z",
+        }),
+      ]),
+    ),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+  );
+
+  renderChannels();
+
+  expect(await screen.findByText(t("channelConnectionStale"))).toBeVisible();
+  expect(screen.queryByText(t("channelTransportRestartRequired"))).toBeNull();
 });
 
 test("a long connection that stopped being seen is shown as disconnected, not just as its transport", async () => {
