@@ -289,3 +289,7 @@ html[data-theme="dark"] .workspace-row {
 .nav-badge {
   margin-left: 6px;
 }
+
+.form-section {
+  margin-bottom: 16px;
+}
