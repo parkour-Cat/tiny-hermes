@@ -206,6 +206,7 @@ def _view(row: ChannelBindingRow) -> ChannelBindingView:
         encrypt_key_ref=row.encrypt_key_ref,
         app_secret_ref=row.app_secret_ref,
         transport=row.transport,
+        long_connection_seen_at=row.long_connection_seen_at,
         created_by=row.created_by,
         created_at=row.created_at,
     )

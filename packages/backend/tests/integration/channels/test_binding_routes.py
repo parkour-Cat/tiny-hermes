@@ -663,3 +663,60 @@ def test_creating_a_binding_refuses_a_field_it_would_otherwise_swallow(
 
     assert created.status_code == 422, created.text
     assert client.get("/api/v1/channel-bindings", headers=scope).json() == []
+
+
+async def test_the_list_says_whether_a_long_connection_is_actually_connected(
+    client: TestClient,
+    scope: dict[str, str],
+    published_agent: str,
+    secret_ref: str,
+    engine: AsyncEngine,
+) -> None:
+    """心跳写进了库，还得有人够得着——这一条守的就是那半段。
+
+    `transport` 说的是**配置**：一根死了十小时的长连接照样读回
+    `long_connection`。2026-09-03 就是这样，控制台整晚显示正常，而发现它的
+    方式是有人发消息发不出去。
+
+    三态一起断言，因为分开哪一个都能被一个错的实现满足：
+    - webhook 绑定：`not_applicable`（它没有「连着」这回事）
+    - 切成长连接、还没有心跳：`never`（**不是** `not_applicable`——配成长连接
+      却从没连上过是个真问题，合并会让它看起来正常）
+    - 刚写过心跳：`connected`
+    """
+    created = _create(
+        client, scope, published_agent, secret_ref, app_secret_ref=secret_ref
+    )
+    assert created.status_code == 201, created.text
+    binding_id = created.json()["id"]
+
+    def state_now() -> str:
+        listed = client.get("/api/v1/channel-bindings", headers=scope).json()
+        return next(item for item in listed if item["id"] == binding_id)[
+            "long_connection_state"
+        ]
+
+    assert created.json()["long_connection_state"] == "not_applicable"
+    assert created.json()["long_connection_seen_at"] is None
+
+    patched = client.patch(
+        f"/api/v1/channel-bindings/{binding_id}",
+        headers=scope,
+        json={"transport": "long_connection"},
+    )
+    assert patched.status_code == 200, patched.text
+    assert state_now() == "never"
+
+    # 直接写那一列，而不是真的跑一根 socket：这条测试问的是「API 交不交得
+    # 出来」，socket 那半段由 `test_long_connection_lifecycle.py` 的心跳测试
+    # 守着。两条分开，坏的时候才知道坏在哪一半。
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "UPDATE channel_bindings SET long_connection_seen_at = now()"
+                " WHERE id = :b"
+            ),
+            {"b": UUID(binding_id)},
+        )
+
+    assert state_now() == "connected"
