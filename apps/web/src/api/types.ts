@@ -377,6 +377,17 @@ export type ChannelBindingResponse = {
    * scheduler restarts; the platform does not hot-reload transports.
    */
   transport: string;
+  /**
+   * `not_applicable` | `never` | `connected` | `stale` — whether the socket
+   * is up **right now**. `transport` says what the binding is configured to
+   * use and nothing else: a long connection that died an hour ago still
+   * reads `long_connection`. The judgement lives in the backend
+   * (`channels/domain/liveness.py`) because it depends on the heartbeat
+   * interval, and nothing would keep the two in step across this boundary.
+   */
+  long_connection_state: string;
+  /** Last heartbeat, for rendering "N minutes ago". `null` means never. */
+  long_connection_seen_at: string | null;
   created_by: string;
   created_at: string;
 };

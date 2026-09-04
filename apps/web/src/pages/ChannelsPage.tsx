@@ -367,10 +367,26 @@ export function ChannelsPage() {
                 // to give the API something to say it with.
                 title: t("channelTransport"),
                 dataIndex: "transport",
-                render: (value: string | undefined) =>
+                render: (value: string | undefined, row: ChannelBindingResponse) =>
                   value === "long_connection" ? (
                     <Space size="small">
                       <Tag>{t("channelTransportLongConnection")}</Tag>
+                      {/*
+                        配置旁边是**状态**。这一列原来只显示存的值，于是
+                        2026-09-03 一根死了十小时的连接整晚显示「长连接」，
+                        而发现它的方式是有人发消息发不出去。
+
+                        判断在后端（`long_connection_state`），这里只负责画：
+                        阈值和心跳周期的关系必须成立，而它们隔着 HTTP 就没有
+                        任何东西能保证一起改。
+                      */}
+                      {row.long_connection_state === "connected" ? (
+                        <Tag color="green">{t("channelConnectionConnected")}</Tag>
+                      ) : row.long_connection_state === "stale" ? (
+                        <Tag color="red">{t("channelConnectionStale")}</Tag>
+                      ) : (
+                        <Tag color="orange">{t("channelConnectionNever")}</Tag>
+                      )}
                       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                         {t("channelTransportRestartRequired")}
                       </Typography.Text>

@@ -22,6 +22,8 @@ function binding(overrides: object = {}) {
     app_id: "cli_a1b2c3",
     encrypt_key_ref: "feishu-encrypt-key",
     transport: "webhook",
+    long_connection_state: "not_applicable",
+    long_connection_seen_at: null,
     created_by: "u1",
     created_at: "2026-08-22T00:00:00Z",
     ...overrides,
@@ -425,6 +427,54 @@ test("a binding already on the long connection says so, and keeps saying a resta
 
   expect(await screen.findByText(t("channelTransportLongConnection"))).toBeVisible();
   expect(await screen.findByText(t("channelTransportRestartRequired"))).toBeVisible();
+});
+
+test("a long connection that stopped being seen is shown as disconnected, not just as its transport", async () => {
+  // 这一列原来只显示存的值。2026-09-03 一根绑定的 socket 死了十个小时，
+  // 页面整晚写着「长连接」，而发现它的方式是有人发消息发不出去 —— 那一列
+  // 自己的注释当时就承认了「carries the stored transport and nothing about
+  // the running scheduler」。
+  //
+  // 判据是**页面上出现了「已断开」**，不是响应体里有那个字段：后端交出来了
+  // 而界面没画，正是这个仓库反复栽的那一种。
+  server.use(
+    http.get("/api/v1/channel-bindings", () =>
+      HttpResponse.json([
+        binding({
+          transport: "long_connection",
+          long_connection_state: "stale",
+          long_connection_seen_at: "2026-09-03T15:53:00Z",
+        }),
+      ]),
+    ),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+  );
+
+  renderChannels();
+
+  expect(await screen.findByText(t("channelConnectionStale"))).toBeVisible();
+  // 配置照旧要看得见：这一格是加在它旁边的，不是替掉它。两件事分开显示，
+  // 因为「配成长连接」和「此刻连着」的修法完全不同。
+  expect(await screen.findByText(t("channelTransportLongConnection"))).toBeVisible();
+});
+
+test("a long connection that is up says so", async () => {
+  server.use(
+    http.get("/api/v1/channel-bindings", () =>
+      HttpResponse.json([
+        binding({
+          transport: "long_connection",
+          long_connection_state: "connected",
+          long_connection_seen_at: "2026-09-04T00:00:00Z",
+        }),
+      ]),
+    ),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+  );
+
+  renderChannels();
+
+  expect(await screen.findByText(t("channelConnectionConnected"))).toBeVisible();
 });
 
 test("a transport this console has no wording for is shown as itself, not as Webhook", async () => {
