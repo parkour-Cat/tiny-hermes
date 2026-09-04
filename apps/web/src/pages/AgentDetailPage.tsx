@@ -35,6 +35,7 @@ import type {
   WritePolicy,
 } from "../api/types";
 import { IMPLEMENTED_TOOLS, MODEL_SCENARIOS } from "../api/types";
+import { FormSection } from "../forms/FormSection";
 import { useT } from "../i18n/locale";
 import type { MessageKey } from "../i18n/zh-CN";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
@@ -125,6 +126,10 @@ type NameValues = {
   name: string;
   alias: string;
 };
+
+/** 一张表单：名称与别名跟人格并排在「身份」里，但保存时各走各的请求——
+ *  名称不是版本化 spec 的一部分，改名不该长出一个草稿修订。 */
+type FormValues = DraftValues & NameValues;
 
 const DEFAULT_DELIVERY = { enabled: false, sync_timeout_seconds: 60 };
 
@@ -224,6 +229,31 @@ function specOf(values: DraftValues): AgentSpecDocument {
   return spec;
 }
 
+/** How many distinct documents a `versionId::name` list binds. */
+function documentsIn(bindings: string[]): number {
+  return new Set(bindings.map((entry) => entry.split("::")[0])).size;
+}
+
+/** 「能力」段折叠时那一行。`t()` 不支持插值，所以数字在这里拼，文案里只有
+ *  固定词。 */
+function capabilitySummary(t: (key: MessageKey) => string, values: DraftValues): string {
+  const mcp = documentsIn(values.mcp_tools);
+  return [
+    `${t("agentSummaryBound")} ${values.skills.length} ${t("agentSummarySkillsUnit")}`,
+    `${values.tools.length} ${t("agentSummaryToolsUnit")}`,
+    `${documentsIn(values.http_tools)} ${t("agentSummaryHttpUnit")}`,
+    mcp === 0 ? t("agentSummaryNoMcp") : `${mcp} ${t("agentSummaryMcpUnit")}`,
+    values.network.length > 0 ? t("agentSummaryNetworkOn") : t("agentSummaryNetworkOff"),
+  ].join(" · ");
+}
+
+function exposureSummary(t: (key: MessageKey) => string, values: DraftValues): string {
+  return [
+    values.end_user_access_enabled ? t("agentSummaryEndUserOn") : t("agentSummaryEndUserOff"),
+    values.delivery_enabled ? t("agentSummaryDeliveryOn") : t("agentSummaryDeliveryOff"),
+  ].join(" · ");
+}
+
 function summarizeSpec(spec: AgentSpecDocument): Record<string, string> {
   const delivery = spec.delivery ?? DEFAULT_DELIVERY;
   return {
@@ -251,8 +281,7 @@ export function AgentDetailPage() {
   const workspaceId = useWorkspaceId();
   const { agentId = "" } = useParams();
   const queryClient = useQueryClient();
-  const [form] = Form.useForm<DraftValues>();
-  const [nameForm] = Form.useForm<NameValues>();
+  const [form] = Form.useForm<FormValues>();
   const [modal, contextHolder] = Modal.useModal();
   const [saveError, setSaveError] = useState<string | null>(null);
   const [publishNote, setPublishNote] = useState<string | null>(null);
@@ -361,7 +390,7 @@ export function AgentDetailPage() {
   });
   const provider = Form.useWatch("provider", form);
   const deliveryEnabled = Form.useWatch("delivery_enabled", form);
-  const watched = Form.useWatch([], form) as DraftValues | undefined;
+  const watched = Form.useWatch([], form) as FormValues | undefined;
   const agentQuery = ["agent", workspaceId, agentId] as const;
   const versionsQuery = ["agent-versions", workspaceId, agentId] as const;
   const versions = useQuery({
@@ -469,6 +498,8 @@ export function AgentDetailPage() {
   if (agent.data === undefined || draft.data === undefined) {
     return <Card loading variant="borderless" />;
   }
+  const loadedAgent = agent.data;
+  const loadedDraft = draft.data;
 
   function reload(): void {
     void modal.confirm({
@@ -543,39 +574,6 @@ export function AgentDetailPage() {
           </Button>
         </Space>
       </div>
-      <Card title={t("renameAgent")} variant="borderless" className="page-alert">
-        <Form<NameValues>
-          form={nameForm}
-          layout="inline"
-          requiredMark={false}
-          initialValues={{ name: agent.data.name, alias: agent.data.alias }}
-          onFinish={(values) => rename.mutate(values)}
-        >
-          <Form.Item
-            name="name"
-            label={t("agentName")}
-            rules={[
-              { required: true, whitespace: true, message: t("required") },
-              { max: 120, message: t("agentNameMaximum") },
-            ]}
-          >
-            <Input />
-          </Form.Item>
-          <Form.Item
-            name="alias"
-            label={t("agentAlias")}
-            extra={t("agentAliasHint")}
-            rules={[{ required: true, whitespace: true, message: t("required") }]}
-          >
-            <Input />
-          </Form.Item>
-          <Form.Item>
-            <Button htmlType="submit" loading={rename.isPending}>
-              {t("saveName")}
-            </Button>
-          </Form.Item>
-        </Form>
-      </Card>
       <Card variant="borderless" className="page-alert">
         <Space size="large" wrap>
           <Typography.Text strong>
@@ -641,13 +639,55 @@ export function AgentDetailPage() {
         />
       )}
       <Card title={t("draftSection")} variant="borderless">
-        <Form<DraftValues>
+        <Form<FormValues>
           form={form}
           layout="vertical"
           requiredMark={false}
-          initialValues={valuesOf(draft.data)}
+          initialValues={{ ...valuesOf(loadedDraft), name: loadedAgent.name, alias: loadedAgent.alias }}
+          // `specOf` reads the draft fields by name, so the two name fields
+          // sharing this form never reach the spec.
           onFinish={(values) => saveDraft.mutate(values)}
         >
+          <FormSection
+            title={t("agentSectionIdentity")}
+            summary=""
+            fields={["name", "alias", "personality"]}
+            collapsible={false}
+          >
+          <Form.Item
+            name="name"
+            label={t("agentName")}
+            rules={[
+              { required: true, whitespace: true, message: t("required") },
+              { max: 120, message: t("agentNameMaximum") },
+            ]}
+          >
+            <Input />
+          </Form.Item>
+          <Form.Item
+            name="alias"
+            label={t("agentAlias")}
+            extra={t("agentAliasHint")}
+            rules={[{ required: true, whitespace: true, message: t("required") }]}
+          >
+            <Input />
+          </Form.Item>
+          {/* Its own button, not the draft's: the name is not part of the
+              versioned document, and saving it must not mint a draft revision.
+              One form because they belong to one 身份; two requests because
+              they are two resources. */}
+          <Form.Item>
+            <Button
+              loading={rename.isPending}
+              onClick={() =>
+                void form.validateFields(["name", "alias"]).then(({ name, alias }) =>
+                  rename.mutate({ name, alias }),
+                )
+              }
+            >
+              {t("saveName")}
+            </Button>
+          </Form.Item>
           <Form.Item
             name="personality"
             label={t("personality")}
@@ -658,6 +698,13 @@ export function AgentDetailPage() {
           >
             <Input.TextArea rows={6} />
           </Form.Item>
+          </FormSection>
+          <FormSection
+            title={t("agentSectionModel")}
+            summary=""
+            fields={[provider === "openai_compatible" ? "endpoint_id" : "scenario", ...limits.map((limit) => limit.name)]}
+            collapsible={false}
+          >
           <Form.Item name="provider" label={t("modelProvider")} rules={[{ required: true }]}>
             <Select
               options={[
@@ -712,6 +759,15 @@ export function AgentDetailPage() {
               </Form.Item>
             ))}
           </div>
+          </FormSection>
+          {/* 能力：全是可选的，所以可以折叠——折叠条上说的是绑了什么，不是「能力」
+              两个字。 */}
+          <FormSection
+            title={t("agentSectionCapability")}
+            summary={capabilitySummary(t, draftValues)}
+            fields={[]}
+            collapsible
+          >
           <Typography.Title level={5}>{t("toolsSection")}</Typography.Title>
           <Typography.Paragraph type="secondary">{t("toolsHint")}</Typography.Paragraph>
           <Form.Item name="tools">
@@ -821,6 +877,13 @@ export function AgentDetailPage() {
               }))}
             />
           </Form.Item>
+          </FormSection>
+          <FormSection
+            title={t("agentSectionExposure")}
+            summary={exposureSummary(t, draftValues)}
+            fields={deliveryEnabled ? ["sync_timeout_seconds"] : []}
+            collapsible
+          >
           <Typography.Title level={5}>{t("endUserSection")}</Typography.Title>
           <Typography.Paragraph type="secondary">{t("endUserAccessIntro")}</Typography.Paragraph>
           <Form.Item
@@ -843,6 +906,7 @@ export function AgentDetailPage() {
               <InputNumber min={1} max={60} className="full-width" />
             </Form.Item>
           ) : null}
+          </FormSection>
           <Space>
             <Button type="primary" htmlType="submit" loading={saveDraft.isPending}>
               {t("saveDraft")}
