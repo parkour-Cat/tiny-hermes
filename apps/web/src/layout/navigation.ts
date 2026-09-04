@@ -104,9 +104,9 @@ export const NAV_GROUPS: NavGroup[] = [
     introKey: "navSettingsIntro",
     sections: [
       // 依据：tenancy/application/workspace_service.py 的 READERS（viewer 200）
-      { key: "members", labelKey: "members", introKey: null, path: "members", roles: null },
+      { key: "members", labelKey: "members", introKey: "membersIntro", path: "members", roles: null },
       // 依据：/api/v1/service-accounts 对 viewer 403、developer 200
-      { key: "api-keys", labelKey: "apiKeys", introKey: null, path: "api-keys", roles: ["workspace_admin", "developer"] },
+      { key: "api-keys", labelKey: "apiKeys", introKey: "apiKeysIntro", path: "api-keys", roles: ["workspace_admin", "developer"] },
       // 依据：identity/application/oidc_service.py 的 _require_admin 看的是
       // is_platform_admin：viewer 与 developer 都 403，这不是 workspace 角色能开的门
       {
@@ -118,11 +118,11 @@ export const NAV_GROUPS: NavGroup[] = [
         platformAdminOnly: true,
       },
       // 依据：/api/v1/model-endpoints 对 viewer 200（列出可选端点是所有成员的事）
-      { key: "model-endpoints", labelKey: "modelEndpoints", introKey: null, path: "model-endpoints", roles: null },
+      { key: "model-endpoints", labelKey: "modelEndpoints", introKey: "modelEndpointsIntro", path: "model-endpoints", roles: null },
       // 依据：/api/v1/secrets 对 viewer 403、developer 200
       { key: "secrets", labelKey: "secrets", introKey: "secretsIntro", path: "secrets", roles: ["workspace_admin", "developer"] },
       // 依据：outbound/application/service.py 的 READERS（viewer 200）
-      { key: "outbound", labelKey: "outboundScopes", introKey: null, path: "outbound", roles: null },
+      { key: "outbound", labelKey: "outboundScopes", introKey: "outboundScopesIntro", path: "outbound", roles: null },
     ],
   },
 ];

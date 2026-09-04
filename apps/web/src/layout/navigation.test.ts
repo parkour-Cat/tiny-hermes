@@ -44,3 +44,12 @@ test("身份提供方只跟着平台管理员的标志走，不跟着角色走",
   // 不是成员的平台管理员看得见其余一切。
   expect(keysFor("platform_admin", true)).toHaveLength(settings.sections.length);
 });
+
+test("每一段都有一句说明", () => {
+  // 这四页原来一句都没有，而它们正是「不知道是干嘛的」那一类。
+  for (const group of NAV_GROUPS) {
+    for (const section of group.sections) {
+      expect(section.introKey, `${section.key} 还没有说明`).not.toBeNull();
+    }
+  }
+});
