@@ -969,6 +969,19 @@ answers with a verdict and a duration. It never reports the endpoint's status or
 body: a `base_url` mistyped into an internal service would otherwise make that
 route a way to read it.
 
+What may change after registration is deliberately little, and all of it is a
+fact about the endpoint rather than a choice of endpoint: `PATCH
+/api/v1/model-endpoints/{id}` takes `status`, `accepts_images`,
+`context_window` and `max_output_tokens`, each optional and absent meaning
+unchanged (the console's *Adjust the window* button sends the last two). A Run
+reads its endpoint's window at the start of every round, so widening it here
+reaches every Run on the endpoint from its next round — including one paused at
+`context_overflow`, which can then be resumed. The reservation still has to fit
+inside the window, checked against the stored half when only one is named.
+`model` and `base_url` stay out: changing either swaps the endpoint for a
+different one underneath every AgentVersion that named it, and that is a new
+registration.
+
 ### Secrets and KEK rewrap
 
 `TINY_HERMES_KEK` is 32 bytes of standard base64. API `/health/ready` reports

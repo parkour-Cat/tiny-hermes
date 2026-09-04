@@ -106,6 +106,18 @@ class SqlModelEndpointStore:
             raise EndpointNameTaken(spec.name) from clash
         return _to_domain(row)
 
+    async def set_window(
+        self, endpoint_id: UUID, context_window: int, max_output_tokens: int
+    ) -> ModelEndpoint | None:
+        row = await self._session.get(ModelEndpointRow, endpoint_id)
+        if row is None:
+            return None
+        row.context_window = context_window
+        row.max_output_tokens = max_output_tokens
+        row.updated_at = datetime.now(UTC)
+        await self._session.flush()
+        return _to_domain(row)
+
     async def set_accepts_images(
         self, endpoint_id: UUID, accepts: bool
     ) -> "ModelEndpoint | None":

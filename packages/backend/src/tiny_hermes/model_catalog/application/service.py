@@ -128,6 +128,8 @@ class ModelEndpointService:
         *,
         status: EndpointStatus | None = None,
         accepts_images: bool | None = None,
+        context_window: int | None = None,
+        max_output_tokens: int | None = None,
     ) -> ModelEndpoint:
         """Change what may be changed after registration.
 
@@ -142,6 +144,28 @@ class ModelEndpointService:
         """
         if not actor.is_platform_admin:
             raise _forbidden()
+        if context_window is not None or max_output_tokens is not None:
+            # The pair is checked against each other the way the spec checks
+            # it at registration, against the stored half when only one was
+            # named — a reservation past the window is refused, not stored.
+            current = await self._store.read(endpoint_id)
+            if current is None:
+                raise self._unknown()
+            window = context_window or current.spec.context_window
+            reserved = max_output_tokens or current.spec.max_output_tokens
+            if reserved > window:
+                raise AppError(
+                    code="endpoint_window_inconsistent",
+                    title="Endpoint window inconsistent",
+                    status=422,
+                    detail=(
+                        "max_output_tokens cannot exceed context_window; the "
+                        "reservation has to fit inside the window it reserves from."
+                    ),
+                )
+            resized = await self._store.set_window(endpoint_id, window, reserved)
+            if resized is None:
+                raise self._unknown()
         if accepts_images is not None:
             amended = await self._store.set_accepts_images(
                 endpoint_id, accepts_images

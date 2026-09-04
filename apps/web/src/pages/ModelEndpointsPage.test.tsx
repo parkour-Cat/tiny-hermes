@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -396,4 +396,34 @@ test("an endpoint's image declaration can be corrected after the fact", async ()
   // Only that field. A PATCH also naming `status` would disable the
   // endpoint as a side effect of correcting a capability.
   expect(sent).not.toHaveProperty("status");
+});
+
+test("an endpoint's window can be widened after the fact, and nothing else moves", async () => {
+  // The reason the control exists: a Run paused at context_overflow could
+  // only be recovered by a database session, because no page and no route
+  // changed a window. The PATCH names the two window facts and never status.
+  let sent: Record<string, unknown> | null = null;
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(user(true))),
+    http.get("/api/v1/model-endpoints", () =>
+      HttpResponse.json([{ ...SUMMARY, accepts_images: false }]),
+    ),
+    http.patch("/api/v1/model-endpoints/:id", async ({ request }) => {
+      sent = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json({ ...SUMMARY, ...sent, accepts_images: false });
+    }),
+  );
+
+  renderEndpoints();
+  await userEvent.click(await screen.findByRole("button", { name: t("adjustWindow") }));
+
+  const dialog = await screen.findByRole("dialog");
+  const windowField = within(dialog).getByLabelText(t("endpointContextWindow"));
+  expect(windowField).toHaveValue("128000");
+  await userEvent.clear(windowField);
+  await userEvent.type(windowField, "512000");
+  await userEvent.click(within(dialog).getByRole("button", { name: t("saveName") }));
+
+  await waitFor(() => expect(sent).not.toBeNull());
+  expect(sent).toEqual({ context_window: 512000, max_output_tokens: 4096 });
 });

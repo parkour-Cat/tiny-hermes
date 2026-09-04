@@ -136,6 +136,30 @@ export function ModelEndpointsPage() {
       priceForm.setFields([{ name: "inputPerMillion", errors: [problemMessage(caught, t)] }]),
   });
 
+  const [windowFor, setWindowFor] = useState<ModelEndpointSummary | null>(null);
+  const [windowForm] = Form.useForm<{ context_window: number; max_output_tokens: number }>();
+
+  // The two window facts and nothing else: like `accepts_images`, a PATCH
+  // naming `status` beside them would disable the endpoint as a side
+  // effect of resizing it.
+  const setWindow = useMutation({
+    mutationFn: (values: { id: string; context_window: number; max_output_tokens: number }) =>
+      api<ModelEndpointSummary>(`/api/v1/model-endpoints/${values.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          context_window: values.context_window,
+          max_output_tokens: values.max_output_tokens,
+        }),
+      }),
+    onSuccess: () => {
+      setWindowFor(null);
+      windowForm.resetFields();
+      void queryClient.invalidateQueries({ queryKey: ["model-endpoints"] });
+    },
+    onError: (caught) =>
+      windowForm.setFields([{ name: "max_output_tokens", errors: [problemMessage(caught, t)] }]),
+  });
+
   // Only this field, and never alongside `status`: a PATCH naming both would
   // disable an endpoint as a side effect of correcting a capability.
   const setAcceptsImages = useMutation({
@@ -400,6 +424,17 @@ export function ModelEndpointsPage() {
                       >
                         {t("setPricing")}
                       </Button>
+                      <Button
+                        onClick={() => {
+                          setWindowFor(entry);
+                          windowForm.setFieldsValue({
+                            context_window: entry.context_window,
+                            max_output_tokens: entry.max_output_tokens,
+                          });
+                        }}
+                      >
+                        {t("adjustWindow")}
+                      </Button>
                       {entry.status === "active" ? (
                         <Button
                           onClick={() =>
@@ -429,6 +464,43 @@ export function ModelEndpointsPage() {
           })
         )}
       </Card>
+      <Modal
+        open={windowFor !== null}
+        title={t("adjustWindow")}
+        okText={t("saveName")}
+        cancelText={t("cancel")}
+        confirmLoading={setWindow.isPending}
+        onCancel={() => setWindowFor(null)}
+        onOk={() => void windowForm.submit()}
+      >
+        <Form
+          form={windowForm}
+          // Its own name, so its fields' ids do not collide with the
+          // registration form's `context_window` on the same page.
+          name="window"
+          layout="vertical"
+          requiredMark={false}
+          onFinish={(values) =>
+            windowFor === null ? undefined : setWindow.mutate({ id: windowFor.id, ...values })
+          }
+        >
+          <Typography.Paragraph type="secondary">{t("adjustWindowHint")}</Typography.Paragraph>
+          <Form.Item
+            name="context_window"
+            label={t("endpointContextWindow")}
+            rules={[{ required: true, message: t("required") }]}
+          >
+            <InputNumber min={1} className="full-width" />
+          </Form.Item>
+          <Form.Item
+            name="max_output_tokens"
+            label={t("endpointMaxOutput")}
+            rules={[{ required: true, message: t("required") }]}
+          >
+            <InputNumber min={1} className="full-width" />
+          </Form.Item>
+        </Form>
+      </Modal>
       <Modal
         open={pricingFor !== null}
         title={t("setPricing")}

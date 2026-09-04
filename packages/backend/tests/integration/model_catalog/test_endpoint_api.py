@@ -282,3 +282,79 @@ async def test_an_ordinary_user_cannot_run_the_check(
 def test_a_write_without_csrf_is_refused(client: TestClient, admin_csrf: str) -> None:
     del admin_csrf
     assert client.post("/api/v1/model-endpoints", json=ENDPOINT).status_code == 403
+
+
+def test_a_platform_administrator_widens_a_window_after_registration(
+    client: TestClient, admin_csrf: str
+) -> None:
+    """A fact about the endpoint, amended like `accepts_images` and for the
+    same reason. What comes back is what every Run on the endpoint plans
+    against from its next round, and a Run paused at `context_overflow` can
+    be resumed against it."""
+    endpoint_id = register(client, admin_csrf).json()["id"]
+
+    widened = client.patch(
+        f"/api/v1/model-endpoints/{endpoint_id}",
+        headers={"X-CSRF-Token": admin_csrf},
+        json={"context_window": 512_000},
+    )
+
+    assert widened.status_code == 200, widened.text
+    assert widened.json()["context_window"] == 512_000
+    # The other half untouched, and the status too: a PATCH naming the window
+    # must not disable the endpoint as a side effect of resizing it.
+    assert widened.json()["max_output_tokens"] == ENDPOINT["max_output_tokens"]
+    assert widened.json()["status"] == "active"
+    listed = client.get("/api/v1/model-endpoints").json()
+    assert listed[0]["context_window"] == 512_000
+
+
+def test_a_reservation_past_the_window_is_refused_when_amended_too(
+    client: TestClient, admin_csrf: str
+) -> None:
+    """Checked against the stored half when only one is named: the rule is
+    the spec's, and amending must not be the way around it."""
+    endpoint_id = register(client, admin_csrf).json()["id"]
+
+    refused = client.patch(
+        f"/api/v1/model-endpoints/{endpoint_id}",
+        headers={"X-CSRF-Token": admin_csrf},
+        json={"max_output_tokens": ENDPOINT["context_window"] + 1},
+    )
+
+    assert refused.status_code == 422
+    assert refused.json()["code"] == "endpoint_window_inconsistent"
+    unchanged = client.get(f"/api/v1/model-endpoints/{endpoint_id}").json()
+    assert unchanged["max_output_tokens"] == ENDPOINT["max_output_tokens"]
+
+
+def test_both_halves_may_move_together_past_where_either_alone_could(
+    client: TestClient, admin_csrf: str
+) -> None:
+    endpoint_id = register(client, admin_csrf).json()["id"]
+
+    moved = client.patch(
+        f"/api/v1/model-endpoints/{endpoint_id}",
+        headers={"X-CSRF-Token": admin_csrf},
+        json={"context_window": 1_000_000, "max_output_tokens": 200_000},
+    )
+
+    assert moved.status_code == 200, moved.text
+    assert (moved.json()["context_window"], moved.json()["max_output_tokens"]) == (
+        1_000_000,
+        200_000,
+    )
+
+
+async def test_someone_who_is_not_a_platform_administrator_cannot_resize_one(
+    client: TestClient, admin_csrf: str, engine: AsyncEngine
+) -> None:
+    endpoint_id = register(client, admin_csrf).json()["id"]
+
+    refused = client.patch(
+        f"/api/v1/model-endpoints/{endpoint_id}",
+        headers={"X-CSRF-Token": await become_someone_else(client, engine)},
+        json={"context_window": 512_000},
+    )
+
+    assert refused.status_code == 403

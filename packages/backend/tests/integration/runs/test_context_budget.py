@@ -352,3 +352,48 @@ async def test_a_conversation_inside_the_window_is_sent_as_it_stands(
     assert ALLOWANCE == SMALL_ENDPOINT["context_window"] - SMALL_ENDPOINT[
         "max_output_tokens"
     ]
+
+
+async def test_a_context_overflow_pause_is_recovered_by_widening_the_window(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    admin_csrf: str,
+    small_endpoint: str,
+    agent_on_the_small_endpoint: Any,
+) -> None:
+    """The other way out, and the one that needs no editing of the
+    conversation: a platform administrator widens the endpoint's window with
+    `PATCH /api/v1/model-endpoints/{id}`, and the paused Run — fixed to a
+    Version that names this endpoint — reads the new window at its first round
+    after the resume. It keeps every message it had and the round that could
+    not be sent is sent. Until this route existed, only a database session
+    could do this."""
+    agent = agent_on_the_small_endpoint()
+    session = start_session(client, scope, agent)
+    run = ask(client, scope, session, "summarize this: " + "y" * 32_000)
+    await drive(engine, Recording(says("never asked")), None)
+    paused = status(client, scope, run)
+    assert paused["pause_reason"] == "context_overflow"
+
+    widened = client.patch(
+        f"/api/v1/model-endpoints/{small_endpoint}",
+        headers={"X-CSRF-Token": admin_csrf},
+        json={"context_window": 200_000},
+    )
+    assert widened.status_code == 200, widened.text
+    resumed = client.post(
+        f"/api/v1/runs/{run}/resume",
+        headers=scope,
+        json={"expected_state_version": paused["state_version"]},
+    )
+    assert resumed.status_code == 200, resumed.text
+
+    model = Recording(says("summarized"))
+    await drive(engine, model, None)
+
+    body = status(client, scope, run)
+    assert body["status"] == "completed"
+    assert len(model.requests) == 1
+    assert body["budget"]["consumed_model_calls"] == 1
+    assert any("y" * 32_000 in content for _, content in await transcript(engine, run))
