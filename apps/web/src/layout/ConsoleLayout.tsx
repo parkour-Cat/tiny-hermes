@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Alert, Avatar, Button, Layout, Select, Space, Typography } from "antd";
+import { Alert, Avatar, Badge, Button, Layout, Select, Space, Typography } from "antd";
 import { useState } from "react";
 import { Link, NavLink, Outlet } from "react-router-dom";
 
@@ -8,6 +8,8 @@ import { useAuth } from "../auth/AuthProvider";
 import { useLocale } from "../i18n/locale";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 import { useConsoleTheme } from "./ConsoleTheme";
+import { NAV_GROUPS } from "./navigation";
+import { useInboxCount } from "./useInboxCount";
 
 type WorkspaceSummary = {
   id: string;
@@ -27,6 +29,7 @@ export function ConsoleLayout() {
   // this list's: a Workspace missing from it still gets its requests sent and
   // its refusal shown, because a console that pre-filters is a console that can
   // disagree with the platform about who may see what.
+  const inboxCount = useInboxCount();
   const workspaces = useQuery({
     queryKey: WORKSPACES_QUERY,
     queryFn: () => api<WorkspaceSummary[]>("/api/v1/workspaces"),
@@ -102,26 +105,23 @@ export function ConsoleLayout() {
           </Space>
         </div>
         <nav className="console-nav">
-          <NavLink to={`/workspaces/${workspaceId}/agents`}>{t("agents")}</NavLink>
-          <NavLink to={`/workspaces/${workspaceId}/runs`}>{t("runs")}</NavLink>
-          <NavLink to={`/workspaces/${workspaceId}/usage`}>{t("usage")}</NavLink>
-          <NavLink to={`/workspaces/${workspaceId}/members`}>{t("members")}</NavLink>
-          <NavLink to={`/workspaces/${workspaceId}/model-endpoints`}>{t("modelEndpoints")}</NavLink>
-          <NavLink to={`/workspaces/${workspaceId}/api-keys`}>{t("apiKeys")}</NavLink>
-          <NavLink to={`/workspaces/${workspaceId}/skills`}>{t("skills")}</NavLink>
-          <NavLink to={`/workspaces/${workspaceId}/skill-proposals`}>{t("proposals")}</NavLink>
-          <NavLink to={`/workspaces/${workspaceId}/approvals`}>{t("approvals")}</NavLink>
-          <NavLink to={`/workspaces/${workspaceId}/memory`}>{t("memoryReview")}</NavLink>
-          <NavLink to={`/workspaces/${workspaceId}/subjects`}>{t("subjectData")}</NavLink>
-          <NavLink to={`/workspaces/${workspaceId}/http-tools`}>{t("httpTools")}</NavLink>
-          <NavLink to={`/workspaces/${workspaceId}/mcp-servers`}>{t("mcpServers")}</NavLink>
-          <NavLink to={`/workspaces/${workspaceId}/channels`}>{t("channels")}</NavLink>
-          <NavLink to={`/workspaces/${workspaceId}/identity-providers`}>
-            {t("identityProviders")}
-          </NavLink>
-          <NavLink to={`/workspaces/${workspaceId}/outbound`}>{t("outboundScopes")}</NavLink>
-          <NavLink to={`/workspaces/${workspaceId}/secrets`}>{t("secrets")}</NavLink>
-          <NavLink to={`/workspaces/${workspaceId}/audit`}>{t("audit")}</NavLink>
+          {/* 只有一段的入口（Agents、运行、渠道）直接指向那一段的路径，不经过
+              合并页——给一个只有一段的页面套一层分段外壳，只会多一层没有内容
+              的标题。 */}
+          {NAV_GROUPS.map((group) => (
+            <NavLink
+              key={group.key}
+              to={`/workspaces/${workspaceId}/${
+                group.sections.length === 1 ? group.sections[0]!.path : group.key
+              }`}
+              title={t(group.introKey)}
+            >
+              {t(group.labelKey)}
+              {group.key === "inbox" && inboxCount !== null ? (
+                <Badge count={inboxCount} className="nav-badge" />
+              ) : null}
+            </NavLink>
+          ))}
         </nav>
       </Layout.Header>
       <Layout.Content className="workspace-content">
