@@ -6,6 +6,7 @@ import { QueryProvider } from "./api/QueryProvider";
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
 import { LocaleProvider, useT } from "./i18n/locale";
 import { ConsoleTheme } from "./layout/ConsoleTheme";
+import { LEGACY_REDIRECTS } from "./layout/redirects";
 
 const ConsoleLayout = lazy(() =>
   import("./layout/ConsoleLayout").then((module) => ({ default: module.ConsoleLayout })),
@@ -34,73 +35,22 @@ const WorkspacesPage = lazy(() =>
 const PlaygroundPage = lazy(() =>
   import("./pages/PlaygroundPage").then((module) => ({ default: module.PlaygroundPage })),
 );
-const MembersPage = lazy(() =>
-  import("./pages/MembersPage").then((module) => ({ default: module.MembersPage })),
+const InboxPage = lazy(() =>
+  import("./pages/InboxPage").then((module) => ({ default: module.InboxPage })),
 );
-const ApiKeysPage = lazy(() =>
-  import("./pages/ApiKeysPage").then((module) => ({ default: module.ApiKeysPage })),
+const ToolingPage = lazy(() =>
+  import("./pages/ToolingPage").then((module) => ({ default: module.ToolingPage })),
 );
-const ModelEndpointsPage = lazy(() =>
-  import("./pages/ModelEndpointsPage").then((module) => ({ default: module.ModelEndpointsPage })),
+const RecordsPage = lazy(() =>
+  import("./pages/RecordsPage").then((module) => ({ default: module.RecordsPage })),
 );
-const SecretsPage = lazy(() =>
-  import("./pages/SecretsPage").then((module) => ({ default: module.SecretsPage })),
-);
-const AuditPage = lazy(() =>
-  import("./pages/AuditPage").then((module) => ({
-    default: module.AuditPage,
-  })),
-);
-const ApprovalsPage = lazy(() =>
-  import("./pages/ApprovalsPage").then((module) => ({
-    default: module.ApprovalsPage,
-  })),
-);
-const HttpToolsPage = lazy(() =>
-  import("./pages/HttpToolsPage").then((module) => ({
-    default: module.HttpToolsPage,
-  })),
-);
-const McpServersPage = lazy(() =>
-  import("./pages/McpServersPage").then((module) => ({
-    default: module.McpServersPage,
-  })),
+const SettingsPage = lazy(() =>
+  import("./pages/SettingsPage").then((module) => ({ default: module.SettingsPage })),
 );
 const ChannelsPage = lazy(() =>
   import("./pages/ChannelsPage").then((module) => ({
     default: module.ChannelsPage,
   })),
-);
-const IdentityProvidersPage = lazy(() =>
-  import("./pages/IdentityProvidersPage").then((module) => ({
-    default: module.IdentityProvidersPage,
-  })),
-);
-const MemoryPage = lazy(() =>
-  import("./pages/MemoryPage").then((module) => ({
-    default: module.MemoryPage,
-  })),
-);
-const SubjectDataPage = lazy(() =>
-  import("./pages/SubjectDataPage").then((module) => ({
-    default: module.SubjectDataPage,
-  })),
-);
-const OutboundScopePage = lazy(() =>
-  import("./pages/OutboundScopePage").then((module) => ({
-    default: module.OutboundScopePage,
-  })),
-);
-const SkillsPage = lazy(() =>
-  import("./pages/SkillsPage").then((module) => ({ default: module.SkillsPage })),
-);
-const SkillProposalsPage = lazy(() =>
-  import("./pages/SkillProposalsPage").then((module) => ({
-    default: module.SkillProposalsPage,
-  })),
-);
-const UsagePage = lazy(() =>
-  import("./pages/UsagePage").then((module) => ({ default: module.UsagePage })),
 );
 
 function AppRoutes() {
@@ -146,22 +96,20 @@ function AppRoutes() {
           <Route path="agents/:agentId/playground" element={<PlaygroundPage />} />
           <Route path="runs" element={<RunsPage />} />
           <Route path="runs/:runId" element={<RunDetailPage />} />
-          <Route path="usage" element={<UsagePage />} />
-          <Route path="members" element={<MembersPage />} />
-          <Route path="api-keys" element={<ApiKeysPage />} />
-          <Route path="model-endpoints" element={<ModelEndpointsPage />} />
-          <Route path="secrets" element={<SecretsPage />} />
-          <Route path="outbound" element={<OutboundScopePage />} />
-          <Route path="skills" element={<SkillsPage />} />
-          <Route path="skill-proposals" element={<SkillProposalsPage />} />
-          <Route path="approvals" element={<ApprovalsPage />} />
-          <Route path="audit" element={<AuditPage />} />
-          <Route path="http-tools" element={<HttpToolsPage />} />
-          <Route path="mcp-servers" element={<McpServersPage />} />
           <Route path="channels" element={<ChannelsPage />} />
-          <Route path="identity-providers" element={<IdentityProvidersPage />} />
-          <Route path="memory" element={<MemoryPage />} />
-          <Route path="subjects" element={<SubjectDataPage />} />
+          <Route path="inbox" element={<InboxPage />} />
+          <Route path="tooling" element={<ToolingPage />} />
+          <Route path="records" element={<RecordsPage />} />
+          <Route path="settings" element={<SettingsPage />} />
+          {/* 旧地址。**长期保留**：一个能打开的链接不会因为新导航上线就变得
+              不该打开。锚点让它落在对应的段上，而不只是那一页的顶部。 */}
+          {LEGACY_REDIRECTS.map(([from, to, anchor]) => (
+            <Route
+              key={from}
+              path={from}
+              element={<Navigate to={`../${to}#${anchor}`} replace />}
+            />
+          ))}
         </Route>
         <Route
           path="*"
