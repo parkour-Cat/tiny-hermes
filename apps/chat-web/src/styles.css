@@ -329,10 +329,12 @@ button:disabled {
   font-weight: 650;
 }
 
+/* The chosen pill is paper tinted with copper, not a block of ink: on a
+   paper page a black slab was the only heavy thing in sight. */
 .choice-pills button.is-on {
-  border-color: var(--th-ink);
-  background: var(--th-ink);
-  color: var(--th-paper);
+  border-color: var(--th-copper);
+  background: rgb(196 92 38 / 14%);
+  color: var(--th-ink);
 }
 
 .user-card-actions {
@@ -457,6 +459,21 @@ button:disabled {
   margin: 8px 10px 0;
   color: var(--th-ink-soft);
   font-size: 13px;
+}
+
+.rail-search {
+  margin: 0 0 8px;
+  border: 1px solid var(--th-line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: var(--th-paper);
+  color: var(--th-ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.rail-search::placeholder {
+  color: var(--th-ink-soft);
 }
 
 .rail-kicker-sub {
@@ -1225,4 +1242,33 @@ html[data-theme="dark"] .rail-agent {
   .rail-sessions {
     max-height: 22vh;
   }
+}
+
+/* The default-Agent choice on the settings page: one card per Agent the
+   credential allows, the chosen one tinted with copper like a chosen pill. */
+.agent-cards {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-card {
+  display: grid;
+  gap: 2px;
+  text-align: left;
+  border: 1px solid var(--th-line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--th-paper-raised);
+  color: var(--th-ink);
+  font: inherit;
+}
+
+.agent-card span {
+  color: var(--th-ink-soft);
+  font-size: 13px;
+}
+
+.agent-card.is-on {
+  border-color: var(--th-copper);
+  background: rgb(196 92 38 / 12%);
 }

@@ -5,15 +5,17 @@ import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import { problemMessage } from "../api/messages";
 import type { CanonicalMessage, EndUserRunResponse, EndUserSessionResponse } from "../api/types";
+import { AgentPicker } from "../chat/AgentPicker";
 import { ApprovalBanner } from "../chat/ApprovalBanner";
 import { Composer } from "../chat/Composer";
 import { downloadMarkdown, exportFilename, transcriptMarkdown } from "../chat/exportTranscript";
 import { chatPath, isAgentAlias, matchSessionId } from "../chat/paths";
-import { forgetSessionId, loadKnownSessionIds, rememberSessionId } from "../chat/localSessions";
+import { forgetSessionId, loadKnownSessions, rememberSessionId } from "../chat/localSessions";
 import { loadSessionPrefs, saveSessionPrefs } from "../chat/sessionPrefs";
 import { SessionRail } from "../chat/SessionRail";
 import { sessionTitle } from "../chat/sessionTitle";
 import { Transcript } from "../chat/Transcript";
+import { useEndUserAgents } from "../chat/useEndUserAgents";
 import { useT } from "../i18n/locale";
 import { cancelEndUserRun, useEndUserRun } from "../runs/useEndUserRun";
 import { useEndUserApprovals } from "../runs/useEndUserApprovals";
@@ -60,7 +62,9 @@ export function ChatPage() {
   const [prefs, setPrefs] = useState(loadSessionPrefs);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
 
-  const known = alias === null ? [] : loadKnownSessionIds(alias);
+  const knownSessions = alias === null ? [] : loadKnownSessions(alias);
+  const known = knownSessions.map((session) => session.id);
+  const agents = useEndUserAgents();
   const routedSession =
     matchSessionId([...known, openedId].filter((id): id is string => id !== null), sessionRef) ??
     (openedId !== null && (sessionRef === null || openedId.startsWith(sessionRef))
@@ -197,6 +201,7 @@ export function ChatPage() {
     .map((id, index) => ({
       id,
       title: sessionTitle(titleQueries[index]?.data ?? [], t("untitledChat")),
+      createdAt: knownSessions.find((session) => session.id === id)?.createdAt ?? "",
     }));
 
   return (
@@ -240,7 +245,18 @@ export function ChatPage() {
       <section className="chat-main">
         <header className="chat-head">
           <div className="chat-identity">
-            <h1>{alias}</h1>
+            {/* The name, and a way to the other Agents the credential names.
+                The alias stays in the address, where a bookmark wants it. */}
+            <AgentPicker
+              agents={agents.data ?? []}
+              alias={alias}
+              onAgent={(next) => {
+                setRunId(null);
+                setOptimistic(null);
+                setError(null);
+                navigate(chatPath(next));
+              }}
+            />
             {run === undefined || run.finished_at !== null ? null : (
               <p className="chat-status">{statusLabel(run.status, t)}</p>
             )}

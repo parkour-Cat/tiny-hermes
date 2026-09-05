@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { api } from "../api/client";
+import { chooseDefaultAgent, loadDefaultAgent, saveDefaultAgent } from "../chat/defaultAgent";
 import { forgetAllSessionIds } from "../chat/localSessions";
+import { useEndUserAgents } from "../chat/useEndUserAgents";
 import { problemMessage } from "../api/messages";
 import type { ErasureResponse, MemoryResponse, SubjectExportResponse } from "../api/types";
 import { useLocale, useT } from "../i18n/locale";
@@ -47,6 +49,9 @@ export function SettingsPage() {
   const [erased, setErased] = useState<ErasureResponse | null>(null);
   const [confirmingErase, setConfirmingErase] = useState(false);
   const [signedOut, setSignedOut] = useState(false);
+  const agents = useEndUserAgents();
+  const [preferred, setPreferred] = useState<string | null>(loadDefaultAgent);
+  const chosenDefault = chooseDefaultAgent(agents.data ?? [], preferred);
 
   const [held, setHeld] = useState<MemoryResponse[] | null>(null);
   const [heldError, setHeldError] = useState<string | null>(null);
@@ -189,6 +194,31 @@ export function SettingsPage() {
             {t("localeEn")}
           </button>
         </div>
+      </section>
+      <section>
+        <h2>{t("defaultAgent")}</h2>
+        <p className="settings-hint">{t("defaultAgentHint")}</p>
+        {(agents.data ?? []).length < 2 ? (
+          <p className="settings-hint">{t("defaultAgentEmpty")}</p>
+        ) : (
+          <div className="agent-cards" role="group" aria-label={t("defaultAgent")}>
+            {(agents.data ?? []).map((agent) => (
+              <button
+                key={agent.alias}
+                type="button"
+                className={agent.alias === chosenDefault?.alias ? "agent-card is-on" : "agent-card"}
+                aria-pressed={agent.alias === chosenDefault?.alias}
+                onClick={() => {
+                  saveDefaultAgent(agent.alias);
+                  setPreferred(agent.alias);
+                }}
+              >
+                <strong>{agent.name}</strong>
+                <span>{agent.alias}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </section>
       <section>
         <h2>{t("heldAboutYou")}</h2>

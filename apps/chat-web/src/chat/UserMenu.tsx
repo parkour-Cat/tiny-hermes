@@ -28,19 +28,31 @@ export function UserMenu() {
       <button
         type="button"
         className="rail-user"
-        aria-label={t("settings")}
+        aria-label={t("visitor")}
         aria-haspopup="dialog"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
+        {/* 「访客」 rather than a name: design §4.5.1 keeps no name of an end
+            user, so the card says what this door knows — nothing — instead of
+            pretending to an account. */}
         <span className="rail-avatar" aria-hidden>
-          ⚙
+          {t("visitor").slice(0, 1)}
         </span>
-        <span>{t("settings")}</span>
+        <span>{t("visitor")}</span>
         <ChevronDown />
       </button>
       {open ? (
-        <div className="user-card" role="dialog" aria-label={t("settings")}>
+        <div className="user-card" role="dialog" aria-label={t("visitor")}>
+          <div className="user-card-head">
+            <span className="rail-avatar" aria-hidden>
+              {t("visitor").slice(0, 1)}
+            </span>
+            <div>
+              <strong>{t("visitor")}</strong>
+              <p>{t("visitorHint")}</p>
+            </div>
+          </div>
           <div className="user-card-row">
             <span>{t("appearance")}</span>
             <div className="choice-pills" role="group" aria-label={t("appearance")}>

@@ -12,6 +12,8 @@ const CREDENTIAL = "header.payload.signature";
 test("a credential in the URL exchanges a session and opens the chat", async () => {
   const exchanges: { authorization: string | null; workspace: string | null }[] = [];
   server.use(
+    // The chat page asks which Agents the new session may open, for its title.
+    http.get("/api/v1/end-user/agents", () => HttpResponse.json([])),
     http.post("/api/v1/end-user/sessions", ({ request }) => {
       exchanges.push({
         authorization: request.headers.get("Authorization"),
@@ -76,6 +78,9 @@ test("a refused credential explains itself instead of offering a form to retry i
 
 test("no credential and no known address waits to be opened from the host page", async () => {
   window.history.pushState({}, "", "/");
+  // No session, so the question "which Agents may I open" is refused — and
+  // `/` falls back to waiting for the host page, as before.
+  server.use(http.get("/api/v1/end-user/agents", () => new HttpResponse(null, { status: 401 })));
 
   render(<App />);
 

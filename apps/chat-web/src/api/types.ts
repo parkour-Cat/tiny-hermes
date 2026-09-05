@@ -30,6 +30,12 @@ export type WorkspaceResponse = {
  * (`EndUserSessionResponse` in `runs/presentation/end_user_routes.py`); this
  * type is that model, not the console's.
  */
+/** One Agent this session's credential may open (`GET /api/v1/end-user/agents`). */
+export type EndUserAgentResponse = {
+  alias: string;
+  name: string;
+};
+
 export type EndUserSessionResponse = {
   id: string;
 };
