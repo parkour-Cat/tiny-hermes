@@ -105,7 +105,6 @@ export function MemoryPage() {
     <>
       <div className="page-heading">
         <div>
-          <Typography.Title level={2}>{t("memoryReview")}</Typography.Title>
           <Typography.Paragraph type="secondary">{t("memoryReviewIntro")}</Typography.Paragraph>
         </div>
         <Button type="primary" onClick={() => setWriting(true)}>

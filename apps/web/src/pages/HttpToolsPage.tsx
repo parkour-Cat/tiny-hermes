@@ -120,7 +120,6 @@ export function HttpToolsPage() {
       {contextHolder}
       <div className="page-heading">
         <div>
-          <Typography.Title level={2}>{t("httpToolsTitle")}</Typography.Title>
           <Typography.Paragraph type="secondary">{t("httpToolsIntro")}</Typography.Paragraph>
         </div>
       </div>

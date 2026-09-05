@@ -383,7 +383,6 @@ export const zhCN = {
   userNotFound: "没有用该邮箱注册的用户，邀请不会自动创建账号",
   memberAlreadyPresent: "该用户已经是此工作空间的成员",
   lastWorkspaceAdmin: "工作空间必须保留至少一名管理员",
-  serviceAccountsTitle: "接入凭证",
   serviceAccountsIntro: "密钥明文只出现一次。之后的列表只有前缀。",
   newServiceAccount: "新建服务账号",
   accountName: "名称",
@@ -400,7 +399,6 @@ export const zhCN = {
     "撤销立即生效。正在用这把凭证调用接口的系统会在下一次请求就被拒绝，且无法恢复——需要新建一把并替换过去。",
   revokeKey: "撤销",
   emptyApiKeys: "还没有 API Key",
-  endpointsTitle: "模型接入",
   endpointsIntro: "工作空间从平台管理员批准的模型服务中选择。",
   registerEndpoint: "接入模型服务",
   endpointName: "名称",
@@ -448,7 +446,6 @@ export const zhCN = {
   openPlayground: "打开调试台",
   credentialAvailable: "凭证已配置",
   credentialMissing: "凭证未配置",
-  secretsTitle: "凭据保管箱",
   secretsIntro: "明文只在创建时出现一次。列表只有名称与掩码。",
   newSecret: "新建 Secret",
   secretName: "名称",
@@ -464,7 +461,6 @@ export const zhCN = {
     "用新的主密钥重新加密所有凭据。可以中断后重跑；如果结果里\"无法恢复\"不为零，说明那些凭据的密文已经打不开了，需要重新录入。",
   rewrapSecrets: "轮换主密钥",
   outboundScopes: "出站范围",
-  outboundTitle: "出站范围",
   outboundIntro:
     "Agent 只能连到这里列出的目标。任何一层都只能收窄上一层，不能放宽——工作空间在平台批准的范围里选，Agent 在工作空间批准的范围里选。",
   outboundPlatform: "平台批准",
@@ -487,7 +483,6 @@ export const zhCN = {
     "这个 Agent 可以连的目标。只能从工作空间已批准的范围里选；发布时会再检查一遍。",
   agentNetworkEmpty: "不允许联网",
   skills: "技能",
-  skillsTitle: "技能目录",
   skillsIntro: "技能是参考资料，不是权限。绑定它不会给 Agent 任何新的工具、网络或凭据。",
   platformSkills: "平台技能",
   workspaceSkills: "本工作空间",
@@ -515,7 +510,6 @@ export const zhCN = {
   skillSourceProposal: "提案",
   skillUnchanged: "内容与现有版本相同，没有产生新版本。",
   proposals: "技能提案",
-  proposalsTitle: "技能提案",
   proposalsIntro:
     "Agent 可以提出修改，但提案永远不会自己变成版本。批准之后产生的是一个新的不可变版本，已发布的 Agent 仍然用它原来绑的那个。",
   emptyProposals: "没有待审提案",
@@ -588,7 +582,6 @@ export const zhCN = {
   auditMore: "加载更多",
   auditScopeOwn: "你只看到与你有关的记录",
   auditScopeOwnHint: "你的角色能读到与自己的资源和操作相关的审计条目，不是整个工作空间的。",
-  approvalsTitle: "等待决定",
   approvalsIntro: "运行停在这里而不是先做完。批准后它回到队列；拒绝会让它停下，并把原因告诉提交的人。",
   approvalsUser: "发起运行的那个人",
   approvalsUserIntro: "只有发起这次运行的终端用户能回答。管理员代替他们决定，正是这个平台不会做的事。",
@@ -622,7 +615,6 @@ export const zhCN = {
 
   // -- HTTP 工具 ---------------------------------------------------------------
   httpTools: "HTTP 工具",
-  httpToolsTitle: "HTTP 工具",
   httpToolsIntro: "工作空间登记的一份 OpenAPI 文档。Agent 绑的是某个版本和其中的一部分操作，不是工具本身。",
   httpToolName: "名称",
   httpToolNameHint: "小写字母、数字和单个连字符。它会成为模型要打出来的名字的一部分。",
@@ -641,7 +633,6 @@ export const zhCN = {
 
   // -- MCP ---------------------------------------------------------------------
   mcpServers: "MCP 服务",
-  mcpServersTitle: "MCP 服务",
   mcpServersIntro: "登记时会穿过出站边界去读它的工具清单，并把读到的记下来。Agent 绑的是那份快照，以及其中明确列出的工具。",
   mcpServerUrl: "地址",
   mcpServerUrlHint: "tools/list 和 tools/call 发到哪里。它的 host 必须已经在这个工作空间的出站范围里。",

@@ -135,7 +135,6 @@ export function McpServersPage() {
       {contextHolder}
       <div className="page-heading">
         <div>
-          <Typography.Title level={2}>{t("mcpServersTitle")}</Typography.Title>
           <Typography.Paragraph type="secondary">{t("mcpServersIntro")}</Typography.Paragraph>
         </div>
       </div>

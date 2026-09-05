@@ -398,7 +398,6 @@ export const enUS: Record<MessageKey, string> = {
   userNotFound: "No registered user has that email. Inviting does not create an account.",
   memberAlreadyPresent: "That user is already a member of this workspace",
   lastWorkspaceAdmin: "A workspace must keep at least one admin",
-  serviceAccountsTitle: "Service accounts and API keys",
   serviceAccountsIntro: "The plaintext key is shown once. Later listings only show a prefix.",
   newServiceAccount: "New service account",
   accountName: "Name",
@@ -415,7 +414,6 @@ export const enUS: Record<MessageKey, string> = {
     "Revoking takes effect at once. A system calling with this key is refused on its next request, and it cannot be restored — issue a new key and swap it in.",
   revokeKey: "Revoke",
   emptyApiKeys: "No API keys yet",
-  endpointsTitle: "Model endpoints",
   endpointsIntro: "Workspaces choose from endpoints a platform administrator approved.",
   registerEndpoint: "Register endpoint",
   endpointName: "Name",
@@ -464,7 +462,6 @@ export const enUS: Record<MessageKey, string> = {
   openPlayground: "Open Playground",
   credentialAvailable: "Credential is configured",
   credentialMissing: "Credential is not configured",
-  secretsTitle: "Secrets",
   secretsIntro: "Plaintext is typed only when creating. The list shows names and a mask.",
   newSecret: "New secret",
   secretName: "Name",
@@ -480,7 +477,6 @@ export const enUS: Record<MessageKey, string> = {
     "Re-encrypts every secret under the new KEK. It can be interrupted and re-run; an \"unrecoverable\" count above zero means that ciphertext cannot be opened again and those secrets must be entered afresh.",
   rewrapSecrets: "Rewrap",
   outboundScopes: "Outbound",
-  outboundTitle: "Outbound scope",
   outboundIntro:
     "An Agent may reach only what is listed here. Every layer narrows the one above it and none may widen it — a workspace chooses inside what the platform approved, and an Agent inside what its workspace did.",
   outboundPlatform: "Approved by the platform",
@@ -503,7 +499,6 @@ export const enUS: Record<MessageKey, string> = {
     "What this Agent may reach. Chosen from what the workspace approved, and checked again at publish.",
   agentNetworkEmpty: "No network access",
   skills: "Skills",
-  skillsTitle: "Skill catalog",
   skillsIntro:
     "A skill is reference material, not a permission. Binding one grants no tool, no network, and no credential.",
   platformSkills: "Platform skills",
@@ -533,7 +528,6 @@ export const enUS: Record<MessageKey, string> = {
   skillSourceProposal: "Proposal",
   skillUnchanged: "The content matches an existing version, so no new version was created.",
   proposals: "Skill proposals",
-  proposalsTitle: "Skill proposals",
   proposalsIntro:
     "An Agent may propose a change, but a proposal never becomes a version on its own. Approving publishes a new immutable version; Agents already published keep the version they bound.",
   emptyProposals: "Nothing waiting for review",
@@ -610,7 +604,6 @@ export const enUS: Record<MessageKey, string> = {
   auditMore: "Load more",
   auditScopeOwn: "You are seeing only rows you are named in",
   auditScopeOwnHint: "Your role reads audit entries related to your own resources and actions, not the whole workspace.",
-  approvalsTitle: "Waiting for a decision",
   approvalsIntro:
     "A Run stops here rather than acting. Approving sends it back to the queue; rejecting stops it and tells whoever submitted it why.",
   approvalsUser: "The person who started the Run",
@@ -649,7 +642,6 @@ export const enUS: Record<MessageKey, string> = {
 
   // -- HTTP tools -------------------------------------------------------------
   httpTools: "HTTP tools",
-  httpToolsTitle: "HTTP tools",
   httpToolsIntro:
     "An OpenAPI document a workspace registered. An Agent binds a version and a subset of its operations, never the tool itself.",
   httpToolName: "Name",
@@ -670,7 +662,6 @@ export const enUS: Record<MessageKey, string> = {
 
   // -- MCP --------------------------------------------------------------------
   mcpServers: "MCP servers",
-  mcpServersTitle: "MCP servers",
   mcpServersIntro:
     "Registering one reads its tool list across the outbound boundary and records what it advertised. An Agent binds that snapshot and an explicit subset of its tools.",
   mcpServerUrl: "Address",

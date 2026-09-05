@@ -105,11 +105,6 @@ export function MembersPage() {
   return (
     <>
       {contextHolder}
-      <div className="page-heading">
-        <div>
-          <Typography.Title level={2}>{t("members")}</Typography.Title>
-        </div>
-      </div>
       {error === null ? null : (
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}

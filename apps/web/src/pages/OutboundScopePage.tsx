@@ -133,7 +133,6 @@ export function OutboundScopePage() {
       {contextHolder}
       <div className="page-heading">
         <div>
-          <Typography.Title level={2}>{t("outboundTitle")}</Typography.Title>
           <Typography.Paragraph type="secondary">{t("outboundIntro")}</Typography.Paragraph>
         </div>
       </div>

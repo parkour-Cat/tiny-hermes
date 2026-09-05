@@ -102,7 +102,6 @@ export function IdentityProvidersPage() {
     <>
       <div className="page-heading">
         <div>
-          <Typography.Title level={2}>{t("identityProviders")}</Typography.Title>
           <Typography.Paragraph type="secondary">
             {t("identityProvidersIntro")}
           </Typography.Paragraph>
