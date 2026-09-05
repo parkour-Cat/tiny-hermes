@@ -125,6 +125,16 @@ class EndUserQueueResponse(BaseModel):
     status: str
 
 
+class EndUserAgentResponse(BaseModel):
+    """One Agent this end user's session may open: the alias the address
+    carries and the name a person recognises. Nothing else — an end user is
+    not told when an Agent was made, by whom, or which version is current.
+    """
+
+    alias: str
+    name: str
+
+
 class EndUserSessionResponse(BaseModel):
     """Task-9 review finding F: `create_session` returned the console's own
     `SessionResponse` verbatim — `caller_type`, `caller_id`, `head_run_id`,
@@ -209,6 +219,34 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
     catalog_dependency = resources.agent_catalog
     runs_dependency = resources.run_coordination
 
+    @router.get("/agents", response_model=list[EndUserAgentResponse])
+    async def list_agents(  # pyright: ignore[reportUnusedFunction]
+        identity: Annotated[EndUserIdentityService, Depends(identity_dependency, scope="function")],
+        catalog: Annotated[AgentCatalog, Depends(catalog_dependency, scope="function")],
+        end_user_session: EndUserSessionCookie = None,
+    ) -> list[EndUserAgentResponse]:
+        """The Agents this session may open, with their names.
+
+        The credential's own `agents` claim, run through the same two gates
+        `create_session` applies to one alias — never a workspace listing.
+        An alias that fails a gate is left out rather than reported: a
+        closed gate is the workspace admin's to open, and an alias that does
+        not exist is the enterprise's to fix; neither is something this end
+        user can act on, and design §8 says an unassigned or unknown Agent
+        teaches them nothing past "no".
+        """
+        caller = await resolve_end_user_caller(identity, end_user_session)
+        listed: list[EndUserAgentResponse] = []
+        for alias in caller.agents:
+            try:
+                agent, _version = await catalog.resolve_end_user_agent(
+                    caller.workspace_id, alias, caller.agents
+                )
+            except (EndUserAccessGateClosed, EndUserAccessNotAssigned):
+                continue
+            listed.append(EndUserAgentResponse(alias=agent.alias, name=agent.name))
+        return listed
+
     @router.post(
         "/agents/{alias}/sessions",
         response_model=EndUserSessionResponse,
@@ -218,9 +256,7 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
         alias: str,
         payload: CreateEndUserSessionRequest,
         request: Request,
-        identity: Annotated[
-            EndUserIdentityService, Depends(identity_dependency, scope="function")
-        ],
+        identity: Annotated[EndUserIdentityService, Depends(identity_dependency, scope="function")],
         catalog: Annotated[AgentCatalog, Depends(catalog_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         end_user_session: EndUserSessionCookie = None,
@@ -248,9 +284,7 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
         payload: CreateEndUserRunRequest,
         request: Request,
         response: Response,
-        identity: Annotated[
-            EndUserIdentityService, Depends(identity_dependency, scope="function")
-        ],
+        identity: Annotated[EndUserIdentityService, Depends(identity_dependency, scope="function")],
         catalog: Annotated[AgentCatalog, Depends(catalog_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         idempotency_key: IdempotencyHeader = None,
@@ -320,9 +354,7 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
     )
     async def list_session_messages(  # pyright: ignore[reportUnusedFunction]
         session_id: UUID,
-        identity: Annotated[
-            EndUserIdentityService, Depends(identity_dependency, scope="function")
-        ],
+        identity: Annotated[EndUserIdentityService, Depends(identity_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         end_user_session: EndUserSessionCookie = None,
     ) -> list[EndUserSessionMessageResponse]:
@@ -338,9 +370,7 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
     @router.get("/runs/{run_id}", response_model=EndUserRunResponse)
     async def get_run(  # pyright: ignore[reportUnusedFunction]
         run_id: UUID,
-        identity: Annotated[
-            EndUserIdentityService, Depends(identity_dependency, scope="function")
-        ],
+        identity: Annotated[EndUserIdentityService, Depends(identity_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         end_user_session: EndUserSessionCookie = None,
     ) -> EndUserRunResponse:
@@ -356,9 +386,7 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
         run_id: UUID,
         payload: CancelEndUserRunRequest,
         request: Request,
-        identity: Annotated[
-            EndUserIdentityService, Depends(identity_dependency, scope="function")
-        ],
+        identity: Annotated[EndUserIdentityService, Depends(identity_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         end_user_session: EndUserSessionCookie = None,
     ) -> EndUserRunResponse:
