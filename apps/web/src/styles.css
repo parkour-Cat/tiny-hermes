@@ -353,6 +353,13 @@ h4,
   padding: 24px;
 }
 
+.onboarding {
+  margin: 0;
+  padding-left: 22px;
+  display: grid;
+  gap: 6px;
+}
+
 /* ---------------------------------------------------------------- empty state */
 
 .th-empty {

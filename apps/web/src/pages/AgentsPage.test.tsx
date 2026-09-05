@@ -8,6 +8,7 @@ import { expect, test } from "vitest";
 import { AgentsPage } from "./AgentsPage";
 import { TestTheme } from "../test/TestTheme";
 import { server } from "../test/server";
+import { t } from "../i18n/zh-CN";
 
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
 const OTHER_WORKSPACE = "99999999-8888-4777-8666-555555555555";
@@ -235,4 +236,18 @@ test("with no model endpoint configured, the example says what is missing first"
 
   expect(await screen.findByText(/模型接入点|model endpoint/i)).toBeVisible();
   expect(screen.queryByRole("button", { name: /创建示例|Create example/i })).toBeNull();
+});
+
+test("空的工作空间先看到三步，第一步指向接模型并说明做没做", async () => {
+  server.use(
+    http.get(`/api/v1/agents`, () => HttpResponse.json([])),
+    http.get("/api/v1/agents/examples", () => HttpResponse.json([])),
+    http.get("/api/v1/model-endpoints", () => HttpResponse.json([])),
+  );
+
+  renderAgents();
+
+  const step = await screen.findByRole("link", { name: t("onboardingStep1") });
+  expect(step).toHaveAttribute("href", `/workspaces/${WORKSPACE}/settings#model-endpoints`);
+  expect(screen.getByText(t("onboardingStep1Todo"))).toBeVisible();
 });

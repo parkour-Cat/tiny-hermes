@@ -53,3 +53,16 @@ test("每一段都有一句说明", () => {
     }
   }
 });
+
+test("设置里的段按依赖排序：先有 Key 才能接模型", () => {
+  // 一个新管理员从上往下看：接模型之前得先把服务商的 Key 存进保管箱。
+  const settings = NAV_GROUPS.find((g) => g.key === "settings")!;
+  expect(settings.sections.map((s) => s.key)).toEqual([
+    "members",
+    "secrets",
+    "model-endpoints",
+    "outbound",
+    "api-keys",
+    "identity-providers",
+  ]);
+});

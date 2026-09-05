@@ -128,6 +128,24 @@ export function AgentsPage() {
         {(agents.data ?? []).length === 0 ? (
           <Space direction="vertical" size="large" style={{ width: "100%" }}>
             <EmptyState title={t("emptyAgents")} />
+            {/* The path from nothing, said where a person with nothing is
+                standing. Step one links to where it happens and says whether
+                it is already done, because the example below cannot be
+                created without it. */}
+            <Card variant="borderless" className="page-alert" title={t("onboardingTitle")}>
+              <ol className="onboarding">
+                <li>
+                  <Link to={`/workspaces/${workspaceId}/settings#model-endpoints`}>
+                    {t("onboardingStep1")}
+                  </Link>{" "}
+                  <Typography.Text type="secondary">
+                    {available.length === 0 ? t("onboardingStep1Todo") : t("onboardingStep1Done")}
+                  </Typography.Text>
+                </li>
+                <li>{t("onboardingStep2")}</li>
+                <li>{t("onboardingStep3")}</li>
+              </ol>
+            </Card>
             {(examples.data ?? []).length === 0 ? null : (
               <Card variant="borderless" className="page-alert" title={t("exampleAgentTitle")}>
                 <Space direction="vertical" size="middle" style={{ width: "100%" }}>
