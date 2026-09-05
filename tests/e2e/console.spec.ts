@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
+import { unfold } from "./session";
+
 /**
  * The console, driven the way a person drives it, against the real stack.
  *
@@ -70,6 +72,7 @@ async function choose(page: Page, label: string, value: string): Promise<void> {
  * bound tool.
  */
 async function bindTool(page: Page, name: string): Promise<void> {
+  await unfold(page, "能力");
   const box = page.getByRole("checkbox", { name });
   await expect(box).not.toBeChecked();
   await page.locator(".ant-checkbox-wrapper").filter({ hasText: name }).click();

@@ -160,6 +160,24 @@ class WorkspaceService:
             request_id=request_id,
         )
 
+    async def my_role(self, actor: Actor, workspace_id: UUID) -> str:
+        """这个人在这个工作空间里是什么角色。
+
+        不走 `_require_member`：那一条问的是「能不能读这个工作空间」，而这里问
+        的是「你是谁」。两者今天的答案恰好相同，但它们会各自演化——把「我是谁」
+        建立在「我能读吗」之上，等于让一次权限收紧顺手改掉一个人的身份。
+
+        平台管理员而非成员时回 `platform_admin`。它不是一个 workspace 角色，
+        但控制台需要知道这个人能看见一切；伪装成 `workspace_admin` 会让页面
+        显示一个他在这个工作空间里并不拥有的身份。
+        """
+        role = await self._store.get_membership(workspace_id, actor.id)
+        if role is not None:
+            return role.value
+        if actor.is_platform_admin:
+            return "platform_admin"
+        raise Forbidden
+
     async def _require_member(self, actor: Actor, workspace_id: UUID) -> bool:
         role = await self._store.get_membership(workspace_id, actor.id)
         if role is not None:

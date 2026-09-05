@@ -51,6 +51,14 @@ class WorkspaceResponse(BaseModel):
         return cls(id=workspace.id, name=workspace.name, status=workspace.status)
 
 
+class MyRoleResponse(BaseModel):
+    """`workspace_admin`、`developer`、`viewer`，或不是成员的平台管理员的
+    `platform_admin`。控制台用它决定**不画**哪些段；后端的拒绝仍是唯一的
+    权限判据。"""
+
+    role: str
+
+
 class WorkspaceMemberResponse(BaseModel):
     user_id: UUID
     display_name: str
@@ -125,6 +133,25 @@ def workspace_router(resources: ApplicationResources) -> APIRouter:
         except Forbidden as error:
             raise forbidden() from error
         return [WorkspaceMemberResponse.from_domain(member) for member in members]
+
+    # 在 `/{workspace_id}/members/{user_id}` 之前：`me` 否则会被当成一个
+    # user_id 匹配掉。
+    @router.get("/{workspace_id}/members/me", response_model=MyRoleResponse)
+    async def my_role(  # pyright: ignore[reportUnusedFunction]
+        workspace_id: UUID,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        workspaces: Annotated[WorkspaceService, Depends(workspace_dependency, scope="function")],
+        selected_workspace: Annotated[str | None, Header(alias="X-Workspace-Id")] = None,
+        session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+    ) -> MyRoleResponse:
+        """任何成员都可以问自己的角色——那不是别人的信息。不是成员就没有角色
+        可报：回一个空角色会让前端把它当成「某种成员」。"""
+        user = await authenticate_browser_user(auth, session_token)
+        _require_path_matches_header(workspace_id, selected_workspace)
+        try:
+            return MyRoleResponse(role=await workspaces.my_role(_actor(user), workspace_id))
+        except Forbidden as error:
+            raise forbidden() from error
 
     @router.post(
         "/{workspace_id}/members",

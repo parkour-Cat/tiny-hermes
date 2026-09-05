@@ -258,3 +258,16 @@ test("narrowing history asks the server, rather than filtering the page it holds
 
   await waitFor(() => expect(asked.at(-1)).toEqual(["rejected"]));
 });
+
+test("历史里的运行 ID 是截断的链接，完整值在 title 上", async () => {
+  // §4.1：一列完整 UUID 是这张表最宽的一格，而点进去才是人要做的事。
+  const run = "2361d9ea-6591-4960-8c67-07fd26c5c38e";
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
+    queue([], [approval({ id: "a9", run_id: run, status: "approved", decided_by: "u1", decided_at: "2026-08-20T09:00:00Z" })]),
+  );
+  renderApprovals();
+  const link = await screen.findByTitle(run);
+  expect(link).toHaveAttribute("href", `/workspaces/${WORKSPACE}/runs/${run}`);
+  expect(link.textContent).not.toContain("07fd26c5c38e");
+});

@@ -8,6 +8,7 @@ import { problemMessage } from "../api/messages";
 import type { ApprovalResponse, ApprovalsPageResponse } from "../api/types";
 import { moment } from "../i18n/moment";
 import { useT } from "../i18n/locale";
+import { shortenId } from "../tables/ShortId";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 /**
@@ -310,8 +311,12 @@ export function ApprovalsPage() {
                 {
                   title: t("approvalRun"),
                   dataIndex: "run_id",
+                  // A link, so still a link — but the uuid is truncated and whole
+                  // on hover (§4.1); the run page is one click away for the rest.
                   render: (value: string) => (
-                    <Link to={`/workspaces/${workspaceId}/runs/${value}`}>{value}</Link>
+                    <Link to={`/workspaces/${workspaceId}/runs/${value}`} title={value}>
+                      {shortenId(value)}
+                    </Link>
                   ),
                 },
               ]}

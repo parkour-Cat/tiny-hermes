@@ -115,3 +115,15 @@ test("a non-platform administrator is told, not shown an empty list", async () =
 
   expect(await screen.findByText(/没有权限|not allowed|forbidden/i)).toBeVisible();
 });
+
+test("客户端密钥引用这一列不整列显示长引用", async () => {
+  // §4.1：表格里的 ID 与引用名一律截断，完整值挂在 title 上。
+  server.use(
+    http.get("/api/v1/oidc/providers", () =>
+      HttpResponse.json([provider({ client_secret_ref: "oidc-client-secret-9f2c4b7a1d3e5f60" })]),
+    ),
+  );
+  renderProviders();
+  const cell = await screen.findByTitle("oidc-client-secret-9f2c4b7a1d3e5f60");
+  expect(cell.textContent).not.toContain("1d3e5f60");
+});

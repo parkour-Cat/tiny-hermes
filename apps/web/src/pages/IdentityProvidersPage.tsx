@@ -7,6 +7,7 @@ import { problemMessage } from "../api/messages";
 import type { OidcProviderResponse } from "../api/types";
 import { moment } from "../i18n/moment";
 import { useT } from "../i18n/locale";
+import { ShortId } from "../tables/ShortId";
 
 /**
  * The identity providers this deployment trusts.
@@ -122,13 +123,15 @@ export function IdentityProvidersPage() {
             dataSource={rows}
             columns={[
               { title: t("oidcIssuer"), dataIndex: "issuer" },
-              { title: t("oidcClientId"), dataIndex: "client_id" },
+              // Both identifiers: truncated past what a person reads, whole on
+              // hover and on copy (§4.1).
+              { title: t("oidcClientId"), dataIndex: "client_id", render: (value: string) => <ShortId value={value} /> },
               {
                 title: t("oidcSecretRef"),
                 dataIndex: "client_secret_ref",
                 // The name of the reference. There is no response field that
                 // could hold the secret itself.
-                render: (value: string) => <Typography.Text code>{value}</Typography.Text>,
+                render: (value: string) => <ShortId value={value} />,
               },
               {
                 title: t("oidcScopes"),

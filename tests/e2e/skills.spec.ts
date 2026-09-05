@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
+import { openSection, unfold } from "./session";
+
 /**
  * A skill's whole life, driven through the console against the real stack.
  *
@@ -62,6 +64,7 @@ async function choose(page: Page, label: string, value: string): Promise<void> {
 }
 
 async function bindTool(page: Page, name: string): Promise<void> {
+  await unfold(page, "能力");
   const box = page.getByRole("checkbox", { name });
   await expect(box).not.toBeChecked();
   await page.locator(".ant-checkbox-wrapper").filter({ hasText: name }).click();
@@ -70,13 +73,13 @@ async function bindTool(page: Page, name: string): Promise<void> {
 
 /** Uploads one SKILL.md through the picker. No archive is ever built. */
 async function uploadSkill(page: Page, line: string): Promise<void> {
-  await page.getByRole("link", { name: "技能", exact: true }).click();
-  await page.getByLabel("选择文件").setInputFiles({
+  const skills = await openSection(page, "工具与技能", "技能", "skills");
+  await skills.getByLabel("选择文件").setInputFiles({
     name: "SKILL.md",
     mimeType: "text/markdown",
     buffer: Buffer.from(skillDocument(line), "utf-8"),
   });
-  await expect(page.getByRole("heading", { name: SKILL_NAME })).toBeVisible();
+  await expect(skills.getByRole("heading", { name: SKILL_NAME })).toBeVisible();
 }
 
 /** Publishes an Agent that binds the skill and the platform tools it needs. */
@@ -159,21 +162,24 @@ test("upload a skill, bind it, load it in a Run, propose a change, approve it", 
   await expect(timeline(page).getByText("skill_proposed")).toBeVisible();
 
   // -- a person reads the difference and decides --------------------------
-  await page.getByRole("link", { name: "技能提案", exact: true }).click();
-  await expect(page.getByText("Agent 提出")).toBeVisible();
-  await page.getByRole("button", { name: "差异" }).click();
+  const proposals = await openSection(page, "待办", "技能提案", "proposals");
+  await expect(proposals.getByText("Agent 提出")).toBeVisible();
+  await proposals.getByRole("button", { name: "差异" }).click();
   await expect(page.getByText(/Check the dashboard before you start\./)).toBeVisible();
   await page.getByRole("button", { name: "批准并发布新版本" }).click();
   await expect(page.getByText(/已发布版本 2/)).toBeVisible();
 
   // -- and the Agent that proposed it did not change ----------------------
-  await page.getByRole("link", { name: "技能", exact: true }).click();
-  await expect(page.getByText("版本 2")).toBeVisible();
+  const published = await openSection(page, "工具与技能", "技能", "skills");
+  await expect(published.getByText("版本 2")).toBeVisible();
   await page.getByRole("link", { name: "Agent", exact: true }).click();
   await page.getByRole("link", { name: author }).click();
   // Still v1 of the Agent, and its draft still names the skill version it was
   // published against. §15.3's last sentence, seen from the console: approving
   // a proposal publishes a skill version and moves nothing.
   await expect(page.getByText("当前版本 v1")).toBeVisible();
+  // The binding lives in 「能力」, folded on a fresh load; the fold's own bar
+  // says how many skills are bound, not which version.
+  await unfold(page, "能力");
   await expect(page.getByText(`${SKILL_NAME} v1`)).toBeVisible();
 });

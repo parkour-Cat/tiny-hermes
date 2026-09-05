@@ -101,3 +101,84 @@ async def test_developer_cannot_invite(
     )
     assert refused.status_code == 403
     assert refused.json()["code"] == "forbidden"
+
+
+def _headers_for(client: TestClient, subject: str, workspace_id: str) -> dict[str, str]:
+    """Sign in as `subject` (seeded with the shared local verifier) and scope
+    requests to `workspace_id`."""
+    client.cookies.clear()
+    login = client.post(
+        "/api/v1/auth/sessions", json={"subject": subject, "password": PASSWORD}
+    )
+    assert login.status_code == 201, login.text
+    return {"X-Workspace-Id": workspace_id, "X-CSRF-Token": login.cookies["tiny_hermes_csrf"]}
+
+
+def _member(
+    client: TestClient, scope: dict[str, str], workspace_id: str, subject: str, role: str
+) -> dict[str, str]:
+    """Invite `subject` as `role` (as the administrator) and come back signed
+    in as them."""
+    invited = client.post(
+        f"/api/v1/workspaces/{workspace_id}/members",
+        headers=scope,
+        json={"email": subject, "role": role},
+    )
+    assert invited.status_code == 201, invited.text
+    return _headers_for(client, subject, workspace_id)
+
+
+async def test_a_viewer_can_ask_what_role_they_have(
+    client: TestClient, scope: dict[str, str], workspace_id: str, engine: AsyncEngine
+) -> None:
+    """任何成员都可以问自己的角色——那不是别人的信息。
+
+    这一条不能用 `/members` 代替：列成员是一个 viewer 可能被拒绝的动作，而
+    「我是谁」不是。控制台需要这个答案来决定不画哪些段。
+    """
+    await _seed_user(engine, "Vera", "vera@example.com")
+    viewer = _member(client, scope, workspace_id, "vera@example.com", "viewer")
+
+    answered = client.get(f"/api/v1/workspaces/{workspace_id}/members/me", headers=viewer)
+
+    assert answered.status_code == 200, answered.text
+    assert answered.json() == {"role": "viewer"}
+
+
+async def test_a_stranger_is_refused_their_own_role(
+    client: TestClient, scope: dict[str, str], workspace_id: str, engine: AsyncEngine
+) -> None:
+    """不是成员就没有角色可报。回一个空角色会让前端把它当成「某种成员」。"""
+    await _seed_user(engine, "Stan", "stan@example.com")
+    stranger = _headers_for(client, "stan@example.com", workspace_id)
+
+    refused = client.get(f"/api/v1/workspaces/{workspace_id}/members/me", headers=stranger)
+
+    assert refused.status_code == 403, refused.text
+
+
+async def test_a_platform_administrator_who_is_not_a_member_is_told_so(
+    client: TestClient, scope: dict[str, str], workspace_id: str, engine: AsyncEngine
+) -> None:
+    """平台管理员能看见一切，但那不是这个工作空间里的一个角色；伪装成
+    `workspace_admin` 会让页面显示一个他并不拥有的身份。
+
+    The bootstrap administrator is the `workspace_admin` of every workspace
+    they created, so the case needs one they have left: hand it to a second
+    administrator first, because the last one may not leave.
+    """
+    await _seed_user(engine, "Ada", "ada@example.com")
+    invited = client.post(
+        f"/api/v1/workspaces/{workspace_id}/members",
+        headers=scope,
+        json={"email": "ada@example.com", "role": "workspace_admin"},
+    )
+    assert invited.status_code == 201, invited.text
+    me = client.get("/api/v1/auth/me").json()["id"]
+    left = client.delete(f"/api/v1/workspaces/{workspace_id}/members/{me}", headers=scope)
+    assert left.status_code == 204, left.text
+
+    answered = client.get(f"/api/v1/workspaces/{workspace_id}/members/me", headers=scope)
+
+    assert answered.status_code == 200, answered.text
+    assert answered.json() == {"role": "platform_admin"}

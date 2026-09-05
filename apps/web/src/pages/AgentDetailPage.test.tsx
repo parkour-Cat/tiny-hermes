@@ -7,6 +7,7 @@ import { expect, test } from "vitest";
 
 import { AgentDetailPage } from "./AgentDetailPage";
 import { TestTheme } from "../test/TestTheme";
+import { t } from "../i18n/zh-CN";
 import { server } from "../test/server";
 
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
@@ -216,6 +217,7 @@ test("the loaded draft fills every field the console can edit", async () => {
 
   expect(await screen.findByLabelText("人格")).toHaveValue("You answer support questions.");
   expect(screen.getByText("continue_once")).toBeInTheDocument();
+  await openSection(t("agentSectionCapability"));
   for (const tool of ["file.list", "file.read", "file.write", "shell.exec"]) {
     expect(screen.getByRole("checkbox", { name: tool })).not.toBeChecked();
   }
@@ -358,6 +360,7 @@ test("the tools checklist puts the bound names on the draft", async () => {
   );
 
   renderDetail();
+  await openSection(t("agentSectionCapability"));
   await userEvent.click(await screen.findByRole("checkbox", { name: "file.list" }));
   await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
 
@@ -509,6 +512,7 @@ test("enabling delivery puts the timeout on the draft", async () => {
   );
 
   renderDetail();
+  await openSection(t("agentSectionExposure"));
   await userEvent.click(await screen.findByRole("switch", { name: "允许用 OpenAI 兼容接口调用" }));
   await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
 
@@ -539,6 +543,7 @@ test("opening the end-user entry point writes the key the backend gates on", asy
   );
 
   renderDetail();
+  await openSection(t("agentSectionExposure"));
   await userEvent.click(await screen.findByRole("switch", { name: "允许终端用户访问" }));
   await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
 
@@ -570,12 +575,18 @@ test("leaving it closed carries no key at all, so an old Agent's hash does not m
 });
 
 test("saving a name sends a patch, not a new draft revision", async () => {
+  // 身份 shares the draft's form now; the name still has its own button,
+  // and the proof is that pressing it produces exactly one request.
   loadedAgent();
   const sent: unknown[] = [];
   server.use(
     http.patch(`/api/v1/agents/${AGENT}`, async ({ request }) => {
       sent.push(await request.json());
       return HttpResponse.json({ ...AGENT_ROW, name: "Renamed" });
+    }),
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push({ unexpected_put: await request.json() });
+      return HttpResponse.json(draftBody(4));
     }),
   );
 
@@ -855,4 +866,57 @@ test("an agent that binds no tool publishes the document it always did", async (
 
   await waitFor(() => expect(sent).toHaveLength(1));
   expect(sent).toEqual([{ expected_revision: 3, spec: SPEC }]);
+});
+
+/** Unfolds a collapsible section of the draft form by its title. */
+async function openSection(title: string): Promise<void> {
+  const header = await screen.findByRole("button", { name: new RegExp(title) });
+  if (header.getAttribute("aria-expanded") !== "true") await userEvent.click(header);
+}
+
+test("「能力」段折叠时说清楚绑了什么，不只是写「能力」", async () => {
+  // 三个技能、一个只读 HTTP 工具、没有 MCP、不许出网——折叠条要把这四件事
+  // 说出来，否则折叠就是把绑定藏起来，人不敢折。
+  server.use(
+    http.get(`/api/v1/agents/${AGENT}`, () => HttpResponse.json(AGENT_ROW)),
+    http.get(`/api/v1/agents/${AGENT}/draft`, () =>
+      HttpResponse.json({
+        ...draftBody(3),
+        spec: {
+          ...SPEC,
+          skills: [
+            { skill_version_id: "s1" },
+            { skill_version_id: "s2" },
+            { skill_version_id: "s3" },
+          ],
+          http_tools: [
+            { http_tool_version_id: "h1", operations: ["getOrder"], write_policy: null },
+          ],
+        },
+      }),
+    ),
+    http.get(`/api/v1/agents/${AGENT}/versions`, () => HttpResponse.json([])),
+    http.get("/api/v1/model-endpoints", () => HttpResponse.json([])),
+    http.get("/api/v1/skills", () => HttpResponse.json([])),
+    http.get("/api/v1/http-tools", () => HttpResponse.json([])),
+    http.get("/api/v1/mcp-servers", () => HttpResponse.json([])),
+    http.get("/api/v1/outbound-scopes/workspace", () => HttpResponse.json([])),
+  );
+
+  renderDetail();
+
+  const capability = await screen.findByRole("button", {
+    name: new RegExp(t("agentSectionCapability")),
+  });
+  await waitFor(() =>
+    expect(capability).toHaveTextContent(
+      `${t("agentSummaryBound")} 3 ${t("agentSummarySkillsUnit")} · 0 ${t("agentSummaryToolsUnit")} · 1 ${t("agentSummaryHttpUnit")} · ${t("agentSummaryNoMcp")} · ${t("agentSummaryNetworkOff")}`,
+    ),
+  );
+  expect(capability).toHaveAttribute("aria-expanded", "false");
+  // 身份 never folds: its fields are all required, and it is what a person
+  // came here to write.
+  expect(
+    screen.getByRole("button", { name: new RegExp(t("agentSectionIdentity")) }),
+  ).toHaveAttribute("aria-disabled", "true");
 });
