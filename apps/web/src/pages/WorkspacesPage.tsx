@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Avatar, Button, Card, Form, Input, Modal, Space, Typography } from "antd";
+import { Alert, Avatar, Button, Card, Form, Input, Modal, Space, Tag, Typography } from "antd";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -7,7 +7,6 @@ import { api } from "../api/client";
 import { useT } from "../i18n/locale";
 import { EmptyState } from "../ui/EmptyState";
 import { PageHeading } from "../ui/PageHeading";
-import { StatusTag } from "../ui/StatusTag";
 import { BrandMark, ConsoleChrome } from "../layout/ConsoleChrome";
 import { useAuth } from "../auth/AuthProvider";
 
@@ -125,7 +124,9 @@ export function WorkspacesPage() {
                       </Typography.Title>
                     </div>
                     <Space>
-                      <StatusTag code={workspace.status} />
+                      {/* 「正常」 rather than the account word 「启用」: a workspace is a
+                          place, and the platform has no other state for one yet. */}
+                      <Tag className={`th-tag th-tag-${workspace.status}`}>{t("workspaceActive")}</Tag>
                       <Link to={`/workspaces/${workspace.id}/agents`}>
                         <Button type="link">{t("openWorkspace")}</Button>
                       </Link>
