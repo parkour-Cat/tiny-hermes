@@ -96,7 +96,6 @@ export function SecretsPage() {
       {contextHolder}
       <div className="page-heading">
         <div>
-          <Typography.Paragraph type="secondary">{t("secretsIntro")}</Typography.Paragraph>
         </div>
       </div>
       {error === null ? null : (

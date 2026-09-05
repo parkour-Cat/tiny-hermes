@@ -132,7 +132,6 @@ export function ApiKeysPage() {
       {contextHolder}
       <div className="page-heading">
         <div>
-          <Typography.Paragraph type="secondary">{t("serviceAccountsIntro")}</Typography.Paragraph>
         </div>
       </div>
       {error === null ? null : (
