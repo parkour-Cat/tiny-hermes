@@ -25,7 +25,14 @@ function wrap({ children }: { children: ReactNode }) {
 
 test("reports the role the server gave", async () => {
   server.use(
-    http.get("/api/v1/workspaces/:id/members/me", () => HttpResponse.json({ role: "viewer" })),
+    // Refuses without the workspace header, as the real route does
+    // (`_require_path_matches_header`). The first real walk found every
+    // grouped page blank because the header was missing and no test noticed.
+    http.get("/api/v1/workspaces/:id/members/me", ({ request, params }) =>
+      request.headers.get("X-Workspace-Id") === params.id
+        ? HttpResponse.json({ role: "viewer" })
+        : HttpResponse.json({ code: "workspace_required" }, { status: 400 }),
+    ),
   );
   const { result } = renderHook(() => useMyRole(), { wrapper: wrap });
   await waitFor(() => expect(result.current.role).toBe("viewer"));

@@ -14,7 +14,13 @@ export function useMyRole(): { role: Role | null; loading: boolean } {
   const workspaceId = useWorkspaceId();
   const query = useQuery({
     queryKey: ["my-role", workspaceId],
-    queryFn: () => api<{ role: Role }>(`/api/v1/workspaces/${workspaceId}/members/me`),
+    // Scoped like every other workspace read: the route refuses without
+    // `X-Workspace-Id` (`_require_path_matches_header`), and the first
+    // real walk found every grouped page blank because this was missing.
+    queryFn: () =>
+      api<{ role: Role }>(`/api/v1/workspaces/${workspaceId}/members/me`, {
+        workspace: workspaceId ?? "",
+      }),
     enabled: workspaceId !== null,
     retry: false,
   });

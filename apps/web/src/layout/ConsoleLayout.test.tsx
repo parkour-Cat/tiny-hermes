@@ -182,7 +182,7 @@ test("the locale switcher changes chrome into English", async () => {
  *  otherwise. Declared last so a test's own handler for one of them wins. */
 function emptyQueues() {
   return [
-    http.get("/api/v1/approvals", () => HttpResponse.json([])),
+    http.get("/api/v1/approvals", () => HttpResponse.json({ items: [], has_more: false })),
     http.get("/api/v1/skill-proposals", () => HttpResponse.json([])),
     http.get("/api/v1/memories/pending", () => HttpResponse.json([])),
   ];
@@ -216,9 +216,21 @@ test("只有一段的入口直接指向那一段，合并的入口指向合并�
 });
 
 test("待办上的数字是三个队列的总数", async () => {
+  // The approvals stub refuses without the workspace header, as the real
+  // route does: the first walk found the badge missing for exactly that.
   renderShell(`/workspaces/${WORKSPACE}/agents`, { count: 0 }, [
-    http.get("/api/v1/approvals", () => HttpResponse.json([{ id: "a" }, { id: "b" }])),
-    http.get("/api/v1/skill-proposals", () => HttpResponse.json([{ id: "c" }])),
+    http.get("/api/v1/approvals", ({ request }) =>
+      request.headers.get("X-Workspace-Id") === WORKSPACE
+        ? HttpResponse.json({ items: [{ id: "a" }, { id: "b" }], has_more: false })
+        : HttpResponse.json({ code: "workspace_required" }, { status: 400 }),
+    ),
+    // Only pending proposals count; without the filter the route also lists
+    // the decided ones (the second thing the first real walk found).
+    http.get("/api/v1/skill-proposals", ({ request }) =>
+      new URL(request.url).searchParams.get("status") === "pending"
+        ? HttpResponse.json([{ id: "c" }])
+        : HttpResponse.json([{ id: "c" }, { id: "decided" }]),
+    ),
     http.get("/api/v1/memories/pending", () => HttpResponse.json([])),
   ]);
   expect(await screen.findByText("3")).toBeVisible();
@@ -227,7 +239,7 @@ test("待办上的数字是三个队列的总数", async () => {
 test("有一个队列读不到时不显示数字", async () => {
   // 显示「2」而其实是「2 + 读不到」，比不显示更糟：它看起来是个准确的数。
   renderShell(`/workspaces/${WORKSPACE}/agents`, { count: 0 }, [
-    http.get("/api/v1/approvals", () => HttpResponse.json([{ id: "a" }, { id: "b" }])),
+    http.get("/api/v1/approvals", () => HttpResponse.json({ items: [{ id: "a" }, { id: "b" }], has_more: false })),
     http.get("/api/v1/skill-proposals", () => new HttpResponse(null, { status: 403 })),
     http.get("/api/v1/memories/pending", () => HttpResponse.json([])),
   ]);
