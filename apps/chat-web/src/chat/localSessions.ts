@@ -18,26 +18,55 @@ function key(alias: string): string {
   return `${KEY_PREFIX}${alias}`;
 }
 
-export function loadKnownSessionIds(alias: string): string[] {
+export type KnownSession = {
+  id: string;
+  /** ISO time this device first opened the Session; "" for an entry
+   *  written before the rail had dates, which the rail files under 更早. */
+  createdAt: string;
+};
+
+/** Every Session this device opened with `alias`, newest first. Reads both
+ *  the current `{id, createdAt}` shape and the bare id list written before
+ *  the rail had dates. */
+export function loadKnownSessions(alias: string): KnownSession[] {
   try {
     const raw = window.localStorage.getItem(key(alias));
     if (raw === null) {
       return [];
     }
     const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : [];
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    const known: KnownSession[] = [];
+    for (const entry of parsed) {
+      if (typeof entry === "string") {
+        known.push({ id: entry, createdAt: "" });
+      } else if (entry !== null && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string") {
+        const createdAt = (entry as { createdAt?: unknown }).createdAt;
+        known.push({ id: (entry as { id: string }).id, createdAt: typeof createdAt === "string" ? createdAt : "" });
+      }
+    }
+    return known;
   } catch {
     return [];
   }
 }
 
-export function rememberSessionId(alias: string, sessionId: string): void {
-  const known = loadKnownSessionIds(alias);
-  if (known.includes(sessionId)) {
+export function loadKnownSessionIds(alias: string): string[] {
+  return loadKnownSessions(alias).map((session) => session.id);
+}
+
+export function rememberSessionId(alias: string, sessionId: string, now: Date = new Date()): void {
+  const known = loadKnownSessions(alias);
+  if (known.some((session) => session.id === sessionId)) {
     return;
   }
   try {
-    window.localStorage.setItem(key(alias), JSON.stringify([sessionId, ...known]));
+    window.localStorage.setItem(
+      key(alias),
+      JSON.stringify([{ id: sessionId, createdAt: now.toISOString() }, ...known]),
+    );
   } catch {
     // Best-effort: a blocked store loses the rail's memory, not the chat.
   }
@@ -47,7 +76,7 @@ export function forgetSessionId(alias: string, sessionId: string): void {
   try {
     window.localStorage.setItem(
       key(alias),
-      JSON.stringify(loadKnownSessionIds(alias).filter((id) => id !== sessionId)),
+      JSON.stringify(loadKnownSessions(alias).filter((session) => session.id !== sessionId)),
     );
   } catch {
     // Best-effort, same as rememberSessionId.

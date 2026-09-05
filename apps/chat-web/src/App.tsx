@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { QueryProvider } from "./api/QueryProvider";
 import { useAuth, AuthProvider } from "./auth/AuthProvider";
 import { LocaleProvider, useT } from "./i18n/locale";
+import { ChatHome } from "./pages/ChatHome";
 import { ChatPage } from "./pages/ChatPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { ChatTheme } from "./theme/ChatTheme";
@@ -42,17 +43,9 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/settings" element={<SettingsPage />} />
+      <Route path="/" element={<ChatHome />} />
       <Route path="/:alias/:sessionRef" element={<ChatPage />} />
       <Route path="/:alias" element={<ChatPage />} />
-      <Route
-        path="/"
-        element={
-          <main className="auth">
-            <h1>{t("connectWaitingTitle")}</h1>
-            <p className="auth-intro">{t("connectWaitingHint")}</p>
-          </main>
-        }
-      />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

@@ -5,17 +5,28 @@ import { MemoryRouter } from "react-router-dom";
 import { expect, test } from "vitest";
 
 import { SettingsPage } from "./SettingsPage";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { LocaleProvider } from "../i18n/locale";
 import { server } from "../test/server";
 import { ChatTheme } from "../theme/ChatTheme";
 
-function renderSettings(): void {
+const AGENTS = [
+  { alias: "support-bot", name: "Support Bot" },
+  { alias: "weekly-report", name: "周报助手" },
+];
+
+function renderSettings(agents = AGENTS): void {
+  // The page now asks which Agents the credential allows, for the default-Agent
+  // choice. Listed first so a test's own handlers still win.
+  server.use(http.get("/api/v1/end-user/agents", () => HttpResponse.json(agents)));
   render(
     <ChatTheme>
       <LocaleProvider>
-        <MemoryRouter initialEntries={["/settings"]}>
-          <SettingsPage />
-        </MemoryRouter>
+        <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+          <MemoryRouter initialEntries={["/settings"]}>
+            <SettingsPage />
+          </MemoryRouter>
+        </QueryClientProvider>
       </LocaleProvider>
     </ChatTheme>,
   );
@@ -167,4 +178,20 @@ test("with nothing remembered, the page says so rather than showing an empty box
   renderSettings();
 
   expect(await screen.findByText("目前没有关于你的记录")).toBeVisible();
+});
+
+test("默认 Agent 只在凭据允许的范围里选，只记在这台设备上", async () => {
+  // 不是账号设置：平台没有这个人的名字，这条偏好也不上传，它是这台设备记住
+  // 「下次先进哪个 Agent」，而且选项只有凭据点名的那几个。
+  renderSettings();
+
+  await userEvent.click(await screen.findByRole("button", { name: /周报助手/ }));
+
+  expect(window.localStorage.getItem("tiny-hermes-chat-default-agent")).toBe("weekly-report");
+  expect(screen.getByRole("button", { name: /周报助手/ })).toHaveAttribute("aria-pressed", "true");
+});
+
+test("凭据只允许一个 Agent 时没有可选的，页面直说", async () => {
+  renderSettings([AGENTS[0]!]);
+  expect(await screen.findByText("凭据只允许一个 Agent，没有可选的。")).toBeVisible();
 });
