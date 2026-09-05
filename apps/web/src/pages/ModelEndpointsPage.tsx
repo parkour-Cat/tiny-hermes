@@ -32,6 +32,9 @@ type EndpointValues = {
   accepts_images: boolean;
   tokenizer?: string;
   credential_ref: string;
+  /** Filled only when the credential is stored from this form. */
+  new_secret_name?: string;
+  new_secret_plaintext?: string;
   currency: string;
   inputPerMillion?: string;
   outputPerMillion?: string;
@@ -48,6 +51,22 @@ const DEFAULTS = {
   currency: "USD",
 } as const;
 
+/** The value the credential select carries when the key is typed here rather
+ *  than picked: the form then stores it first and registers the endpoint
+ *  against the id it got back. */
+const NEW_SECRET = "__new__";
+
+/** Starting points, not facts about a person's account: the address is the
+ *  provider's documented OpenAI-compatible one, the numbers are a common
+ *  model's window at the time of writing, and every field stays editable.
+ *  A wrong window shows up at the first oversized request, never silently. */
+const PRESETS = [
+  { key: "deepseek", label: "DeepSeek", base_url: "https://api.deepseek.com/v1", model: "deepseek-chat", context_window: 128000, max_output_tokens: 8192 },
+  { key: "openai", label: "OpenAI", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini", context_window: 128000, max_output_tokens: 16384 },
+  { key: "moonshot", label: "Moonshot (Kimi)", base_url: "https://api.moonshot.cn/v1", model: "moonshot-v1-128k", context_window: 131072, max_output_tokens: 8192 },
+  { key: "qwen", label: "通义千问 (DashScope)", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus", context_window: 131072, max_output_tokens: 8192 },
+] as const;
+
 function hasPrice(values: Pick<EndpointValues, "inputPerMillion" | "outputPerMillion">): boolean {
   return Boolean(values.inputPerMillion) && Boolean(values.outputPerMillion);
 }
@@ -60,6 +79,7 @@ export function ModelEndpointsPage() {
   const [form] = Form.useForm<EndpointValues>();
   const [error, setError] = useState<string | null>(null);
   const [checkNote, setCheckNote] = useState<string | null>(null);
+  const [preset, setPreset] = useState<string | null>(null);
   const admin = auth.user?.is_platform_admin === true;
   const listQuery = ["model-endpoints"] as const;
 
@@ -150,6 +170,22 @@ export function ModelEndpointsPage() {
 
   const register = useMutation({
     mutationFn: async (values: EndpointValues) => {
+      let credentialRef = values.credential_ref;
+      if (credentialRef === NEW_SECRET) {
+        // The key goes into the vault first and only its id reaches the
+        // endpoint — the same rule as picking one, with one trip less.
+        const stored = await api<SecretResponse>("/api/v1/secrets", {
+          workspace: workspaceId ?? "",
+          method: "POST",
+          body: JSON.stringify({
+            name: values.new_secret_name,
+            scope: "workspace",
+            plaintext: values.new_secret_plaintext,
+          }),
+        });
+        credentialRef = stored.id;
+        void queryClient.invalidateQueries({ queryKey: ["secrets", workspaceId] });
+      }
       const created = await api<ModelEndpointDetail>("/api/v1/model-endpoints", {
         method: "POST",
         body: JSON.stringify({
@@ -163,7 +199,7 @@ export function ModelEndpointsPage() {
           context_accounting: values.context_accounting,
           accepts_images: values.accepts_images,
           tokenizer: values.tokenizer,
-          credential_ref: values.credential_ref,
+          credential_ref: credentialRef,
         }),
       });
       // The price is its own resource with its own history, so it is a
@@ -264,6 +300,12 @@ export function ModelEndpointsPage() {
   const watchedCurrency = Form.useWatch("currency", form) as string | undefined;
   const watchedInput = Form.useWatch("inputPerMillion", form) as string | undefined;
   const watchedOutputPrice = Form.useWatch("outputPerMillion", form) as string | undefined;
+  const watchedCredential = Form.useWatch("credential_ref", form) as string | undefined;
+  const watchedQuality = Form.useWatch("usage_quality", form) as string | undefined;
+  const watchedAccounting = Form.useWatch("context_accounting", form) as string | undefined;
+  const advancedSummary = `${watchedQuality ?? "—"} · ${
+    watchedAccounting === "separate" ? t("endpointAccountingSeparate") : t("endpointAccountingShared")
+  }`;
   const capabilitySummary = `${watchedWindow ?? "—"} ${t("endpointWindowUnit")} · ${t("endpointOutputPrefix")} ${watchedOutput ?? "—"} · ${watchedImages ? t("endpointTakesImages") : t("endpointNoImages")}`;
   const pricingSummary =
     watchedInput && watchedOutputPrice
@@ -322,6 +364,33 @@ export function ModelEndpointsPage() {
               fields={["name", "base_url", "model", "credential_ref"]}
               collapsible={false}
             >
+              {editing === null ? (
+                <Form.Item label={t("endpointPreset")} extra={t("endpointPresetHint")} htmlFor="endpoint-preset">
+                  {/* Not a form field: it writes the others and is forgotten. */}
+                  <Select
+                    id="endpoint-preset"
+                    value={preset}
+                    placeholder={t("endpointPresetCustom")}
+                    onChange={(key: string) => {
+                      setPreset(key);
+                      const chosen = PRESETS.find((candidate) => candidate.key === key);
+                      if (chosen === undefined) return;
+                      form.setFieldsValue({
+                        name: form.getFieldValue("name") || chosen.model,
+                        base_url: chosen.base_url,
+                        model: chosen.model,
+                        context_window: chosen.context_window,
+                        max_output_tokens: chosen.max_output_tokens,
+                        new_secret_name: `${chosen.key}-api-key`,
+                      });
+                    }}
+                    options={[
+                      ...PRESETS.map((candidate) => ({ value: candidate.key, label: candidate.label })),
+                      { value: "custom", label: t("endpointPresetCustom") },
+                    ]}
+                  />
+                </Form.Item>
+              ) : null}
               <Form.Item
                 name="name"
                 label={t("endpointName")}
@@ -335,6 +404,7 @@ export function ModelEndpointsPage() {
               <Form.Item
                 name="base_url"
                 label={t("endpointBaseUrl")}
+                extra={editing === null ? t("endpointBaseUrlHint") : undefined}
                 rules={connectionRules}
               >
                 <Input disabled={editing !== null} />
@@ -342,6 +412,7 @@ export function ModelEndpointsPage() {
               <Form.Item
                 name="model"
                 label={t("endpointModel")}
+                extra={editing === null ? t("endpointModelHint") : undefined}
                 rules={connectionRules}
               >
                 <Input disabled={editing !== null} />
@@ -359,12 +430,17 @@ export function ModelEndpointsPage() {
                       which scope it came from — filtering here would hide
                       credentials that work. */}
                   <Select
-                    options={(secrets.data ?? [])
-                      .filter((secret) => secret.status === "active")
-                      .map((secret) => ({
-                        value: secret.id,
-                        label: `${secret.name} · ${secret.scope}`,
-                      }))}
+                    options={[
+                      ...(secrets.data ?? [])
+                        .filter((secret) => secret.status === "active")
+                        .map((secret) => ({
+                          value: secret.id,
+                          label: `${secret.name} · ${secret.scope}`,
+                        })),
+                      // Last, after what is stored: the common first-time case is
+                      // that nothing is, and the vault is another section away.
+                      { value: NEW_SECRET, label: t("endpointNewCredential") },
+                    ]}
                   />
                 </Form.Item>
               ) : (
@@ -375,6 +451,25 @@ export function ModelEndpointsPage() {
                   <Input />
                 </Form.Item>
               )}
+              {editing === null && watchedCredential === NEW_SECRET ? (
+                <>
+                  <Form.Item
+                    name="new_secret_name"
+                    label={t("endpointNewCredentialName")}
+                    rules={[{ required: true, whitespace: true, message: t("required") }]}
+                  >
+                    <Input />
+                  </Form.Item>
+                  <Form.Item
+                    name="new_secret_plaintext"
+                    label={t("endpointNewCredentialKey")}
+                    extra={t("endpointNewCredentialHint")}
+                    rules={[{ required: true, whitespace: true, message: t("required") }]}
+                  >
+                    <Input.Password autoComplete="off" />
+                  </Form.Item>
+                </>
+              ) : null}
             </FormSection>
             {/* Keyed on what is being edited: switching between 新建 and an
                 endpoint remounts the fold, so an edit opens folded on its
@@ -392,6 +487,7 @@ export function ModelEndpointsPage() {
               <Form.Item
                 name="context_window"
                 label={t("endpointContextWindow")}
+                extra={t("endpointWindowHint")}
                 rules={[{ required: true, message: t("required") }]}
               >
                 <InputNumber min={1} className="full-width" />
@@ -403,7 +499,25 @@ export function ModelEndpointsPage() {
               >
                 <InputNumber min={1} className="full-width" />
               </Form.Item>
-              <Form.Item name="usage_quality" label={t("endpointUsageQuality")}>
+              <Form.Item
+                name="accepts_images"
+                label={t("endpointAcceptsImages")}
+                extra={t("endpointAcceptsImagesNote")}
+                valuePropName="checked"
+              >
+                <Switch />
+              </Form.Item>
+            </FormSection>
+            {/* 高级：三个字段一个刚接模型的人不该先看到，也很少改。折叠条上是
+                当前值，所以折着也知道里面是什么。 */}
+            <FormSection
+              key={`advanced-${editing?.id ?? "new"}`}
+              title={t("endpointSectionAdvanced")}
+              summary={advancedSummary}
+              fields={[]}
+              collapsible
+            >
+              <Form.Item name="usage_quality" label={t("endpointUsageQuality")} extra={t("endpointUsageQualityHint")}>
                 <Select
                   disabled={editing !== null}
                   options={[
@@ -412,7 +526,7 @@ export function ModelEndpointsPage() {
                   ]}
                 />
               </Form.Item>
-              <Form.Item name="context_accounting" label={t("endpointContextAccounting")}>
+              <Form.Item name="context_accounting" label={t("endpointContextAccounting")} extra={t("endpointContextAccountingHint")}>
                 <Select
                   disabled={editing !== null}
                   options={[
@@ -420,14 +534,6 @@ export function ModelEndpointsPage() {
                     { value: "separate", label: t("endpointAccountingSeparate") },
                   ]}
                 />
-              </Form.Item>
-              <Form.Item
-                name="accepts_images"
-                label={t("endpointAcceptsImages")}
-                extra={t("endpointAcceptsImagesNote")}
-                valuePropName="checked"
-              >
-                <Switch />
               </Form.Item>
               <Form.Item
                 name="tokenizer"

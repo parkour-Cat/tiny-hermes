@@ -103,8 +103,16 @@ export const NAV_GROUPS: NavGroup[] = [
     labelKey: "navSettings",
     introKey: "navSettingsIntro",
     sections: [
+      // 顺序按依赖：接模型之前得先有 Key，所以凭据保管箱在模型接入前面；出站范围
+      // 是模型和工具都要过的门；程序用的 API 密钥和登录用的身份提供方放最后。
       // 依据：tenancy/application/workspace_service.py 的 READERS（viewer 200）
       { key: "members", labelKey: "members", introKey: "membersIntro", path: "members", roles: null },
+      // 依据：/api/v1/secrets 对 viewer 403、developer 200
+      { key: "secrets", labelKey: "secrets", introKey: "secretsIntro", path: "secrets", roles: ["workspace_admin", "developer"] },
+      // 依据：/api/v1/model-endpoints 对 viewer 200（列出可选端点是所有成员的事）
+      { key: "model-endpoints", labelKey: "modelEndpoints", introKey: "modelEndpointsIntro", path: "model-endpoints", roles: null },
+      // 依据：outbound/application/service.py 的 READERS（viewer 200）
+      { key: "outbound", labelKey: "outboundScopes", introKey: "outboundScopesIntro", path: "outbound", roles: null },
       // 依据：/api/v1/service-accounts 对 viewer 403、developer 200
       { key: "api-keys", labelKey: "apiKeys", introKey: "apiKeysIntro", path: "api-keys", roles: ["workspace_admin", "developer"] },
       // 依据：identity/application/oidc_service.py 的 _require_admin 看的是
@@ -117,12 +125,6 @@ export const NAV_GROUPS: NavGroup[] = [
         roles: null,
         platformAdminOnly: true,
       },
-      // 依据：/api/v1/model-endpoints 对 viewer 200（列出可选端点是所有成员的事）
-      { key: "model-endpoints", labelKey: "modelEndpoints", introKey: "modelEndpointsIntro", path: "model-endpoints", roles: null },
-      // 依据：/api/v1/secrets 对 viewer 403、developer 200
-      { key: "secrets", labelKey: "secrets", introKey: "secretsIntro", path: "secrets", roles: ["workspace_admin", "developer"] },
-      // 依据：outbound/application/service.py 的 READERS（viewer 200）
-      { key: "outbound", labelKey: "outboundScopes", introKey: "outboundScopesIntro", path: "outbound", roles: null },
     ],
   },
 ];
