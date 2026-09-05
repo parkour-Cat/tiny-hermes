@@ -1,4 +1,4 @@
-import { Anchor, Typography } from "antd";
+import { Typography } from "antd";
 import type { ReactNode } from "react";
 
 import { NAV_GROUPS, visibleSections } from "./navigation";
@@ -35,15 +35,18 @@ export function GroupedPage({
   return (
     <div className="grouped-page">
       <PageHeading kicker={t("workspaceTitle")} title={t(group.labelKey)} intro={t(group.introKey)} />
-      <Anchor
-        affix={false}
-        direction="horizontal"
-        items={visible.map((section) => ({
-          key: section.key,
-          href: `#${section.key}`,
-          title: t(section.labelKey),
-        }))}
-      />
+      {/* Plain links, not antd's Anchor. Anchor tracks the window's scroll to
+          highlight the active section, and on this page that tracking dragged
+          the window back to the link row on every wheel — the page could not
+          be scrolled at all (2026-09-05). A hash link and `scroll-margin-top`
+          do the one job these links have. */}
+      <nav className="section-links" aria-label={t(group.labelKey)}>
+        {visible.map((section) => (
+          <a key={section.key} href={`#${section.key}`}>
+            {t(section.labelKey)}
+          </a>
+        ))}
+      </nav>
       {visible.map((section) => (
         <section key={section.key} id={section.key} className="grouped-section">
           <Typography.Title level={4}>{t(section.labelKey)}</Typography.Title>

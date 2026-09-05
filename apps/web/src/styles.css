@@ -274,6 +274,23 @@ h4,
   gap: 32px;
 }
 
+.section-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--th-line);
+}
+
+.section-links a {
+  color: var(--th-ink-soft);
+  white-space: nowrap;
+}
+
+.section-links a:hover {
+  color: var(--th-copper);
+}
+
 .grouped-section {
   scroll-margin-top: 80px; /* 顶栏一行，锚点跳过去不能被它盖住 */
 }
