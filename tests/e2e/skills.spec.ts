@@ -178,5 +178,8 @@ test("upload a skill, bind it, load it in a Run, propose a change, approve it", 
   // published against. §15.3's last sentence, seen from the console: approving
   // a proposal publishes a skill version and moves nothing.
   await expect(page.getByText("当前版本 v1")).toBeVisible();
+  // The binding lives in 「能力」, folded on a fresh load; the fold's own bar
+  // says how many skills are bound, not which version.
+  await unfold(page, "能力");
   await expect(page.getByText(`${SKILL_NAME} v1`)).toBeVisible();
 });
