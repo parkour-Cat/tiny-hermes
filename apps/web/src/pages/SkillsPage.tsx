@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Form, Input, Modal, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Form, Input, Modal, Space, Tag, Typography } from "antd";
 import { useState } from "react";
 
 import { api, apiWithStatus } from "../api/client";
 import { problemMessage } from "../api/messages";
 import type { SkillFilePayload, SkillResponse, SkillVersionResponse } from "../api/types";
 import { useT } from "../i18n/locale";
+import { EmptyState } from "../ui/EmptyState";
 import type { MessageKey } from "../i18n/zh-CN";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
@@ -174,7 +175,7 @@ export function SkillsPage() {
         loading={listed.isPending}
       >
         {mine.length === 0 ? (
-          <Empty description={t("emptySkills")} />
+          <EmptyState title={t("emptySkills")} />
         ) : (
           mine.map((skill) => (
             <SkillRow
@@ -193,7 +194,7 @@ export function SkillsPage() {
       <Card title={t("platformSkills")} variant="borderless" loading={listed.isPending}>
         <Typography.Paragraph type="secondary">{t("platformSkillsReadOnly")}</Typography.Paragraph>
         {platform.length === 0 ? (
-          <Empty description={t("emptySkills")} />
+          <EmptyState title={t("emptySkills")} />
         ) : (
           platform.map((skill) => (
             <SkillRow

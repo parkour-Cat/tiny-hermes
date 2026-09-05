@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Form, Input, Modal, Select, Space, Typography } from "antd";
+import { Alert, Button, Card, Form, Input, Modal, Select, Space, Typography } from "antd";
 import { useState } from "react";
 
 import { api } from "../api/client";
 import { problemMessage } from "../api/messages";
 import type { WorkspaceMemberResponse } from "../api/types";
 import { useT } from "../i18n/locale";
+import { EmptyState } from "../ui/EmptyState";
 import type { MessageKey } from "../i18n/zh-CN";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
@@ -138,7 +139,7 @@ export function MembersPage() {
       </Card>
       <Card loading={members.isPending} variant="borderless">
         {(members.data ?? []).length === 0 ? (
-          <Empty description={t("emptyMembers")} />
+          <EmptyState title={t("emptyMembers")} />
         ) : (
           (members.data ?? []).map((member) => (
             <Space key={member.user_id} className="workspace-row" wrap>

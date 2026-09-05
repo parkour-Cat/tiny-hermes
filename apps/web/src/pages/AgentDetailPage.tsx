@@ -36,6 +36,7 @@ import type {
 } from "../api/types";
 import { IMPLEMENTED_TOOLS, MODEL_SCENARIOS } from "../api/types";
 import { FormSection } from "../forms/FormSection";
+import { PageHeading } from "../ui/PageHeading";
 import { useT } from "../i18n/locale";
 import type { MessageKey } from "../i18n/zh-CN";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
@@ -556,12 +557,12 @@ export function AgentDetailPage() {
   return (
     <>
       {contextHolder}
-      <div className="page-heading">
-        <div>
-          <Typography.Title level={2}>{agent.data.name}</Typography.Title>
-          <Typography.Paragraph type="secondary">{agent.data.alias}</Typography.Paragraph>
-        </div>
-        <Space wrap>
+      <PageHeading
+        kicker={t("agents")}
+        title={agent.data.name}
+        intro={agent.data.alias}
+        extra={
+          <Space wrap>
           <Link to={`/workspaces/${workspaceId}/agents/${agentId}/playground`}>
             <Button>{t("openPlayground")}</Button>
           </Link>
@@ -572,8 +573,9 @@ export function AgentDetailPage() {
           >
             {t("publish")}
           </Button>
-        </Space>
-      </div>
+          </Space>
+        }
+      />
       <Card variant="borderless" className="page-alert">
         <Space size="large" wrap>
           <Typography.Text strong>

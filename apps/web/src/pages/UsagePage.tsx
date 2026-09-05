@@ -1,9 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
-import { Card, Empty, Space, Statistic, Table, Tag, Typography } from "antd";
+import { Card, Space, Statistic, Table, Tag, Typography } from "antd";
 
 import { api } from "../api/client";
 import type { UsageByQualityResponse, UsageSummaryResponse } from "../api/types";
 import { useT } from "../i18n/locale";
+import { EmptyState } from "../ui/EmptyState";
 import type { MessageKey } from "../i18n/zh-CN";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
@@ -64,7 +65,7 @@ export function UsagePage() {
         )}
 
         {buckets.length === 0 && !usage.isLoading ? (
-          <Empty description={t("usageEmpty")} />
+          <EmptyState title={t("usageEmpty")} />
         ) : (
           <Table<UsageByQualityResponse>
             rowKey="cost_quality"

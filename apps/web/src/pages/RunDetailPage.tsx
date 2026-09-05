@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Descriptions, Empty, Form, InputNumber, Modal, Space, Tag, Timeline, Typography } from "antd";
+import { Alert, Button, Card, Descriptions, Form, InputNumber, Modal, Space, Tag, Timeline, Typography } from "antd";
 import type { DescriptionsProps } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -16,6 +16,9 @@ import type {
 } from "../api/types";
 import { moment } from "../i18n/moment";
 import { useT } from "../i18n/locale";
+import { StatusTag } from "../ui/StatusTag";
+import { EmptyState } from "../ui/EmptyState";
+import { PageHeading } from "../ui/PageHeading";
 import type { MessageKey } from "../i18n/zh-CN";
 import { RUN_ACTIONS } from "../runs/actions";
 import { eventNote, fill, outcomeLabel, statusNote } from "../runs/explain";
@@ -289,7 +292,7 @@ export function RunDetailPage() {
   const outcome = outcomeLabel(run.goal.outcome);
 
   const facts: Rows = [
-    { key: "status", label: t("runStatus"), children: <Tag>{run.status}</Tag> },
+    { key: "status", label: t("runStatus"), children: <StatusTag code={run.status} /> },
     { key: "queue", label: t("runQueue"), children: run.queue.status },
     {
       key: "goal-round",
@@ -418,12 +421,12 @@ export function RunDetailPage() {
   return (
     <>
       {contextHolder}
-      <div className="page-heading">
-        <div>
-          <Typography.Title level={2}>{t("runDetailTitle")}</Typography.Title>
-          <Typography.Paragraph type="secondary">{run.id}</Typography.Paragraph>
-        </div>
-        <Space wrap>
+      <PageHeading
+        kicker={t("runs")}
+        title={t("runDetailTitle")}
+        intro={run.id}
+        extra={
+          <Space wrap>
           {run.available_actions.includes("widen_budget") && (
             // Not routed through `RUN_ACTIONS`: every entry in that table is
             // a bare POST, and this one carries a number a person has to
@@ -442,8 +445,9 @@ export function RunDetailPage() {
               </Button>
             );
           })}
-        </Space>
-      </div>
+          </Space>
+        }
+      />
       {note === null ? null : <Alert className="page-alert" type="info" title={note} showIcon />}
       {actionError === null ? null : (
         <Alert className="page-alert" type="warning" title={actionError} showIcon />
@@ -475,7 +479,7 @@ export function RunDetailPage() {
             <Typography.Paragraph type="secondary">{t("taskTreeIntro")}</Typography.Paragraph>
             {treeNodes.map((node) => (
               <Space key={node.id} size="small" style={{ paddingLeft: node.depth * 24 }}>
-                <Tag>{node.status}</Tag>
+                <StatusTag code={node.status} />
                 <Tag>{t(relationKey(node.relation))}</Tag>
                 {node.id === runId ? (
                   // Marked rather than left to the reader to match ids: a
@@ -491,7 +495,7 @@ export function RunDetailPage() {
       )}
       <Card title={t("messagesSection")} variant="borderless" className="page-alert">
         {turns.length === 0 ? (
-          <Empty description={t("emptyMessages")} />
+          <EmptyState title={t("emptyMessages")} />
         ) : (
           /* `index` as the key is safe here and only here: this list is
              read-only, append-only and never reordered, and a message
@@ -515,7 +519,7 @@ export function RunDetailPage() {
       </Card>
       <Card title={t("toolsCallsSection")} variant="borderless" className="page-alert">
         {rounds.length === 0 ? (
-          <Empty description={t("emptyTools")} />
+          <EmptyState title={t("emptyTools")} />
         ) : (
           rounds.map((round) => (
             <article className="workspace-row" key={round.callId || round.name}>
@@ -544,7 +548,7 @@ export function RunDetailPage() {
       </Card>
       <Card title={t("filesSection")} variant="borderless" className="page-alert">
         {files.length === 0 ? (
-          <Empty description={t("emptyFiles")} />
+          <EmptyState title={t("emptyFiles")} />
         ) : (
           files.map((file) => (
             <Space key={file.id} className="workspace-row">
@@ -564,7 +568,7 @@ export function RunDetailPage() {
       </Card>
       <Card title={t("timelineSection")} variant="borderless">
         {timeline.length === 0 ? (
-          <Empty description={t("emptyTimeline")} />
+          <EmptyState title={t("emptyTimeline")} />
         ) : (
           <Timeline items={timeline} />
         )}

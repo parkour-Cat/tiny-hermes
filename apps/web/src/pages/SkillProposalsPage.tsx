@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Modal, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Modal, Space, Tag, Typography } from "antd";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -12,6 +12,7 @@ import type {
   SkillVersionResponse,
 } from "../api/types";
 import { useT } from "../i18n/locale";
+import { EmptyState } from "../ui/EmptyState";
 import type { MessageKey } from "../i18n/zh-CN";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
@@ -131,7 +132,7 @@ export function SkillProposalsPage() {
       )}
       <Card variant="borderless" loading={listed.isPending}>
         {proposals.length === 0 ? (
-          <Empty description={t("emptyProposals")} />
+          <EmptyState title={t("emptyProposals")} />
         ) : (
           proposals.map((proposal) => (
             <article key={proposal.id} className="workspace-row">

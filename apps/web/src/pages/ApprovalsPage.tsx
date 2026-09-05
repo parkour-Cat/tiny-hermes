@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Descriptions, Empty, Form, Input, Modal, Radio, Space, Table, Tag, Typography } from "antd";
+import { Alert, Button, Card, Descriptions, Form, Input, Modal, Radio, Space, Table, Tag, Typography } from "antd";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -8,6 +8,7 @@ import { problemMessage } from "../api/messages";
 import type { ApprovalResponse, ApprovalsPageResponse } from "../api/types";
 import { moment } from "../i18n/moment";
 import { useT } from "../i18n/locale";
+import { EmptyState } from "../ui/EmptyState";
 import { shortenId } from "../tables/ShortId";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
@@ -225,7 +226,7 @@ export function ApprovalsPage() {
         loading={approvals.isPending}
       >
         <Typography.Paragraph type="secondary">{t("approvalsUserIntro")}</Typography.Paragraph>
-        {user.length === 0 ? <Empty description={t("emptyApprovals")} /> : user.map(card)}
+        {user.length === 0 ? <EmptyState title={t("emptyApprovals")} /> : user.map(card)}
       </Card>
 
       <Card
@@ -242,7 +243,7 @@ export function ApprovalsPage() {
           {t("approvalsGovernanceIntro")}
         </Typography.Paragraph>
         {governance.length === 0 ? (
-          <Empty description={t("emptyApprovals")} />
+          <EmptyState title={t("emptyApprovals")} />
         ) : (
           governance.map(card)
         )}
@@ -272,7 +273,7 @@ export function ApprovalsPage() {
             <Alert type="error" showIcon title={problemMessage(history.error, t)} />
           ) : null}
           {(history.data?.items ?? []).length === 0 && !history.isPending ? (
-            <Empty description={t("approvalsHistoryEmpty")} />
+            <EmptyState title={t("approvalsHistoryEmpty")} />
           ) : (
             <Table<ApprovalResponse>
               rowKey="id"

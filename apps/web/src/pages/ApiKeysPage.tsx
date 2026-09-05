@@ -1,5 +1,5 @@
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Checkbox, Empty, Form, Input, Select, Space, Tag, Typography , Modal } from "antd";
+import { Alert, Button, Card, Checkbox, Form, Input, Select, Space, Tag, Typography, Modal } from "antd";
 import { useState } from "react";
 
 import { api } from "../api/client";
@@ -11,6 +11,7 @@ import type {
 } from "../api/types";
 import { API_KEY_SCOPES, VIEWER_API_KEY_SCOPES } from "../api/types";
 import { useT } from "../i18n/locale";
+import { EmptyState } from "../ui/EmptyState";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 type AccountValues = {
@@ -185,7 +186,7 @@ export function ApiKeysPage() {
       </Card>
       <Card loading={accounts.isPending} variant="borderless">
         {(accounts.data ?? []).length === 0 ? (
-          <Empty description={t("emptyServiceAccounts")} />
+          <EmptyState title={t("emptyServiceAccounts")} />
         ) : (
           (accounts.data ?? []).map((account, index) => {
             const keys = keyQueries[index]?.data ?? [];

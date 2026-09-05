@@ -135,7 +135,8 @@ test("概要 states the Run's status, its state version, its checkpoint, and eve
   renderRun();
   const card = within(await summary());
 
-  expect(card.getByText("running")).toBeInTheDocument();
+  // The state as a person reads it (`StatusTag`), not the protocol code.
+  expect(card.getByText(t("statusRunning"))).toBeInTheDocument();
   expect(card.getByText("4")).toBeInTheDocument();
   expect(card.getByText(t("yes"))).toBeInTheDocument();
   expect(card.getByText("none")).toBeInTheDocument();
@@ -309,7 +310,7 @@ test("an event re-reads the snapshot, because only the state machine knows the s
 
   renderRun();
 
-  expect(await screen.findByText("completed")).toBeInTheDocument();
+  expect(await screen.findByText(t("statusCompleted"))).toBeInTheDocument();
   expect(reads).toBeGreaterThan(1);
 });
 

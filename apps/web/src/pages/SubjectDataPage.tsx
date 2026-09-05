@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Descriptions, Empty, Form, Input, Modal, Select, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Descriptions, Form, Input, Modal, Select, Space, Tag, Typography } from "antd";
 import { useState } from "react";
 
 import { ApiError, api } from "../api/client";
@@ -7,6 +7,7 @@ import { problemMessage } from "../api/messages";
 import type { MemoryResponse, ResolvedSubjectResponse, SubjectExportResponse } from "../api/types";
 import { moment } from "../i18n/moment";
 import { useT } from "../i18n/locale";
+import { EmptyState } from "../ui/EmptyState";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 /**
@@ -222,7 +223,7 @@ export function SubjectDataPage() {
       {subjectId === null ? null : (
         <Card title={t("subjectMemories")} variant="borderless" loading={held.isPending}>
           {memories.length === 0 ? (
-            <Empty description={t("subjectNoMemories")} />
+            <EmptyState title={t("subjectNoMemories")} />
           ) : (
             <Space direction="vertical" size="middle" style={{ width: "100%" }}>
               {memories.map((row) => (

@@ -1,19 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Alert,
-  Button,
-  Card,
-  Empty,
-  Form,
-  Input,
-  InputNumber,
-  Modal,
-  Select,
-  Space,
-  Switch,
-  Tag,
-  Typography,
-} from "antd";
+import { Alert, Button, Card, Form, Input, InputNumber, Modal, Select, Space, Switch, Tag, Typography } from "antd";
 import { useState } from "react";
 
 import { ApiError, api } from "../api/client";
@@ -29,6 +15,7 @@ import { useAuth } from "../auth/AuthProvider";
 import { FormSection } from "../forms/FormSection";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 import { useT } from "../i18n/locale";
+import { EmptyState } from "../ui/EmptyState";
 
 /** One form for both registering and editing, in three sections: 连到哪、
  *  这个模型的能力、计价. The pricing fields are optional at registration
@@ -495,7 +482,7 @@ export function ModelEndpointsPage() {
       ) : null}
       <Card loading={listed.isPending} variant="borderless">
         {(listed.data ?? []).length === 0 ? (
-          <Empty description={t("emptyEndpoints")} />
+          <EmptyState title={t("emptyEndpoints")} />
         ) : (
           (listed.data ?? []).map((entry) => {
             const detail = details.data?.[entry.id];

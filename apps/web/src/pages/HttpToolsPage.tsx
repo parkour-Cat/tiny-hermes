@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Form, Input, Modal, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Form, Input, Modal, Space, Tag, Typography } from "antd";
 import { useState } from "react";
 
 import { ApiError, api } from "../api/client";
 import { problemMessage } from "../api/messages";
 import type { HttpToolResponse, HttpToolVersionResponse } from "../api/types";
 import { useT } from "../i18n/locale";
+import { EmptyState } from "../ui/EmptyState";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 type ToolValues = {
@@ -182,7 +183,7 @@ export function HttpToolsPage() {
       </Card>
 
       {(tools.data ?? []).length === 0 ? (
-        <Empty description={t("emptyHttpTools")} />
+        <EmptyState title={t("emptyHttpTools")} />
       ) : (
         (tools.data ?? []).map((tool) => (
           <Card

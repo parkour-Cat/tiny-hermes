@@ -9,6 +9,7 @@ import { RunsPage } from "./RunsPage";
 import { moment } from "../i18n/moment";
 import { TestTheme } from "../test/TestTheme";
 import { server } from "../test/server";
+import { t } from "../i18n/zh-CN";
 
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
 const AGENT = "22222222-3333-4444-8555-666666666666";
@@ -118,7 +119,7 @@ test("a row states the Run's status, its place in the session, and its times", a
   renderRuns();
   const row = await rowOf(HEAD_RUN);
 
-  expect(within(row).getByText("completed")).toBeInTheDocument();
+  expect(within(row).getByText(t("statusCompleted"))).toBeInTheDocument();
   expect(within(row).getByText("1")).toBeInTheDocument();
   expect(within(row).getByText(moment("2026-08-10T02:00:00Z"))).toBeInTheDocument();
   expect(within(row).getByText(moment("2026-08-10T02:04:00Z"))).toBeInTheDocument();
@@ -295,6 +296,6 @@ test("a run that has not failed shows no reason", async () => {
 
   renderRuns();
 
-  expect(await screen.findByText("running")).toBeVisible();
+  expect(await screen.findByText(t("statusRunning"))).toBeVisible();
   expect(screen.queryByText("model_provider_unreachable")).toBeNull();
 });

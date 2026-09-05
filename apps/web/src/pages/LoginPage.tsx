@@ -7,6 +7,7 @@ import { api } from "../api/client";
 import type { OfferableProviderResponse } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
 import { useT } from "../i18n/locale";
+import { HermesMark } from "../ui/HermesMark";
 
 type LoginValues = {
   subject: string;
@@ -119,11 +120,17 @@ export function PublicShell({ children }: { children: React.ReactNode }) {
   const t = useT();
   return (
     <main className="public-shell">
+      {/* The lockup with the word, once, at hero size: this is where the
+          product's face is established, and everywhere else uses the silent
+          mark. The headline says what the product does, not what kind of
+          thing it is. */}
       <div className="brand-panel">
-        <Typography.Text className="brand-kicker">{t("appName")}</Typography.Text>
+        <HermesMark size={280} variant="hero" />
+        <p className="brand-kicker">{t("appKicker")}</p>
         <Typography.Title>{t("appTagline")}</Typography.Title>
+        <p className="brand-aside">{t("appAside")}</p>
       </div>
-      {children}
+      <div className="auth-slot">{children}</div>
     </main>
   );
 }

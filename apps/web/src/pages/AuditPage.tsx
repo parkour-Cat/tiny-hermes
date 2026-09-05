@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Input, Space, Table, Tag, Typography } from "antd";
+import { Alert, Button, Card, Input, Space, Table, Tag, Typography } from "antd";
 import { useState } from "react";
 
 import { api, download } from "../api/client";
@@ -8,6 +8,7 @@ import type { AuditEventsPageResponse } from "../api/types";
 import { moment } from "../i18n/moment";
 import { useLocale, useT } from "../i18n/locale";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
+import { EmptyState } from "../ui/EmptyState";
 
 /**
  * The trail, and — just as importantly — how much of it this reader is
@@ -121,7 +122,7 @@ export function AuditPage() {
         ) : null}
 
         {items.length === 0 && !events.isLoading ? (
-          <Empty description={t("auditEmpty")} />
+          <EmptyState title={t("auditEmpty")} />
         ) : (
           <Table
             rowKey="id"

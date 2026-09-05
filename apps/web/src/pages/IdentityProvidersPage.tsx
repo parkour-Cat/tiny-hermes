@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Form, Input, Modal, Space, Table, Tag, Typography } from "antd";
+import { Alert, Button, Card, Form, Input, Modal, Space, Table, Tag, Typography } from "antd";
 import { useState } from "react";
 
 import { api } from "../api/client";
@@ -7,6 +7,7 @@ import { problemMessage } from "../api/messages";
 import type { OidcProviderResponse } from "../api/types";
 import { moment } from "../i18n/moment";
 import { useT } from "../i18n/locale";
+import { EmptyState } from "../ui/EmptyState";
 import { ShortId } from "../tables/ShortId";
 
 /**
@@ -113,7 +114,7 @@ export function IdentityProvidersPage() {
 
       <Card loading={providers.isPending} variant="borderless">
         {rows.length === 0 ? (
-          <Empty description={t("identityProvidersEmpty")} />
+          <EmptyState title={t("identityProvidersEmpty")} />
         ) : (
           <Table<OidcProviderResponse>
             rowKey="id"

@@ -1,23 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Alert,
-  Avatar,
-  Button,
-  Card,
-  Empty,
-  Form,
-  Input,
-  Layout,
-  Modal,
-  Space,
-  Tag,
-  Typography,
-} from "antd";
+import { Alert, Avatar, Button, Card, Form, Input, Modal, Space, Typography } from "antd";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
 import { useT } from "../i18n/locale";
+import { EmptyState } from "../ui/EmptyState";
+import { PageHeading } from "../ui/PageHeading";
+import { StatusTag } from "../ui/StatusTag";
+import { BrandMark, ConsoleChrome } from "../layout/ConsoleChrome";
 import { useAuth } from "../auth/AuthProvider";
 
 type Workspace = {
@@ -63,38 +54,31 @@ export function WorkspacesPage() {
     },
   });
 
-  async function logout(): Promise<void> {
-    setActionError(null);
-    try {
-      await auth.logout();
-    } catch (caught) {
-      setActionError(caught instanceof Error ? caught.message : t("requestFailed"));
-    }
-  }
-
   return (
-    <Layout className="app-layout">
-      <Layout.Header className="app-header">
-        <Typography.Text className="header-brand">{t("appName")}</Typography.Text>
-        <Space>
-          <Avatar>{auth.user?.display_name.slice(0, 1).toUpperCase()}</Avatar>
-          <div className="user-summary">
-            <Typography.Text>{auth.user?.display_name}</Typography.Text>
-            <Typography.Text type="secondary">{auth.user?.subject}</Typography.Text>
-          </div>
-          <Button onClick={() => void logout()}>{t("logout")}</Button>
-        </Space>
-      </Layout.Header>
-      <Layout.Content className="workspace-content">
-        <div className="page-heading">
-          <div>
-            <Typography.Title level={2}>{t("workspaceTitle")}</Typography.Title>
-            <Typography.Paragraph type="secondary">{t("workspaceIntro")}</Typography.Paragraph>
-          </div>
-          <Button type="primary" onClick={() => setOpen(true)}>
-            {t("newWorkspace")}
-          </Button>
-        </div>
+    <ConsoleChrome
+      sidebar={
+        <>
+          <BrandMark />
+          {/* No workspace yet, so the chip names the person: the same slot,
+              the one thing that is certain before a workspace is chosen. */}
+          <div className="th-workspace-chip">{auth.user?.display_name}</div>
+          <nav className="th-nav" aria-label={t("workspaceTitle")}>
+            <span className="th-nav-link active">{t("workspaceTitle")}</span>
+          </nav>
+        </>
+      }
+    >
+      <>
+        <PageHeading
+          kicker={t("appKicker")}
+          title={t("workspaceTitle")}
+          intro={t("workspaceIntro")}
+          extra={
+            <Button type="primary" onClick={() => setOpen(true)}>
+              {t("newWorkspace")}
+            </Button>
+          }
+        />
         {actionError === null ? null : (
           <Alert className="page-alert" type="error" title={actionError} showIcon />
         )}
@@ -116,8 +100,8 @@ export function WorkspacesPage() {
               // reads to the second as "this system is empty", which sends
               // them looking for a bug that is not there.
               auth.user?.is_platform_admin === false ? (
-                <Empty
-                  description={
+                <EmptyState
+                  title={
                     <Space orientation="vertical" size={4}>
                       <Typography.Text>{t("noWorkspacesTitle")}</Typography.Text>
                       <Typography.Text type="secondary">{t("noWorkspacesBody")}</Typography.Text>
@@ -125,21 +109,23 @@ export function WorkspacesPage() {
                   }
                 />
               ) : (
-                <Empty description={t("emptyWorkspaces")} />
+                <EmptyState title={t("emptyWorkspaces")} />
               )
             ) : (
               <div className="workspace-list" role="list">
                 {(workspaces.data ?? []).map((workspace) => (
                   <article className="workspace-row" role="listitem" key={workspace.id}>
                     <Avatar shape="square">{workspace.name.slice(0, 1)}</Avatar>
+                    {/* The name, and only the name. The id is what a URL carries;
+                        printed here it took the widest line in the row and nobody
+                        read it (§4.1). */}
                     <div className="workspace-summary">
                       <Typography.Title level={4}>
                         <Link to={`/workspaces/${workspace.id}/agents`}>{workspace.name}</Link>
                       </Typography.Title>
-                      <Typography.Text type="secondary">{workspace.id}</Typography.Text>
                     </div>
                     <Space>
-                      <Tag color="green">{t("workspaceActive")}</Tag>
+                      <StatusTag code={workspace.status} />
                       <Link to={`/workspaces/${workspace.id}/agents`}>
                         <Button type="link">{t("openWorkspace")}</Button>
                       </Link>
@@ -150,7 +136,6 @@ export function WorkspacesPage() {
             )}
           </Card>
         )}
-      </Layout.Content>
       <Modal
         open={open}
         title={t("newWorkspace")}
@@ -179,6 +164,7 @@ export function WorkspacesPage() {
           </Form.Item>
         </Form>
       </Modal>
-    </Layout>
+      </>
+    </ConsoleChrome>
   );
 }

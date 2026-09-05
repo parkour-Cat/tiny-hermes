@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Input, Modal, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Input, Modal, Space, Tag, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
@@ -15,6 +15,7 @@ import type {
 } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
 import { useT } from "../i18n/locale";
+import { EmptyState } from "../ui/EmptyState";
 import { RUN_ACTIONS } from "../runs/actions";
 import { artifactIdsIn, mergeArtifacts, toolsOf, transcriptLineOf } from "../runs/transcript";
 import { runQueryOptions, useRunEvents } from "../runs/useRunEvents";
@@ -272,7 +273,7 @@ export function PlaygroundPage() {
       )}
       <Card title={t("messagesSection")} variant="borderless" className="page-alert">
         {turns.length === 0 ? (
-          <Empty description={t("emptyPlayground")} />
+          <EmptyState title={t("emptyPlayground")} />
         ) : (
           /* `index` as the key is safe here and only here: this list is
              read-only, append-only and never reordered, and a message
@@ -296,7 +297,7 @@ export function PlaygroundPage() {
       </Card>
       <Card title={t("toolsCallsSection")} variant="borderless" className="page-alert">
         {toolsOf(turns).length === 0 ? (
-          <Empty description={t("emptyTools")} />
+          <EmptyState title={t("emptyTools")} />
         ) : (
           toolsOf(turns).map((round) => (
             <article className="workspace-row" key={round.callId || round.name}>
@@ -311,7 +312,7 @@ export function PlaygroundPage() {
       </Card>
       <Card title={t("filesSection")} variant="borderless" className="page-alert">
         {files.length === 0 ? (
-          <Empty description={t("emptyFiles")} />
+          <EmptyState title={t("emptyFiles")} />
         ) : (
           files.map((file) => (
             <Space key={file.id} className="workspace-row">

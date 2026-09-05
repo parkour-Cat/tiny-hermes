@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { NAV_GROUPS, visibleSections } from "./navigation";
 import { useAuth } from "../auth/AuthProvider";
 import { useT } from "../i18n/locale";
+import { PageHeading } from "../ui/PageHeading";
 import { useMyRole } from "../workspace/useMyRole";
 
 /**
@@ -33,8 +34,7 @@ export function GroupedPage({
 
   return (
     <div className="grouped-page">
-      <Typography.Title level={2}>{t(group.labelKey)}</Typography.Title>
-      <Typography.Paragraph type="secondary">{t(group.introKey)}</Typography.Paragraph>
+      <PageHeading kicker={t("workspaceTitle")} title={t(group.labelKey)} intro={t(group.introKey)} />
       <Anchor
         affix={false}
         direction="horizontal"

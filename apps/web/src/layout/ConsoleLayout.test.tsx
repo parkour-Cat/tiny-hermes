@@ -8,7 +8,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, test } from "vitest";
 
 import { ConsoleLayout } from "./ConsoleLayout";
-import { ConsoleTheme } from "./ConsoleTheme";
+import { ConsoleTheme, consoleDesignToken } from "./ConsoleTheme";
 import { AuthProvider } from "../auth/AuthProvider";
 import { TestTheme } from "../test/TestTheme";
 import { t } from "../i18n/zh-CN";
@@ -147,15 +147,16 @@ test("a dark system preference selects the dark algorithm", () => {
 
   renderThemed(<ThemeProbe />);
 
-  const dark = theme.getDesignToken({ algorithm: theme.darkAlgorithm });
-  expect(screen.getByTestId("container")).toHaveTextContent(dark.colorBgContainer);
+  // The console's own paper, not the algorithm's default: both themes name
+  // their surfaces in `consoleDesignToken`, and the dark one is a darker
+  // paper rather than an inverted white.
+  expect(screen.getByTestId("container")).toHaveTextContent(consoleDesignToken(true).colorBgContainer);
 });
 
 test("a light system preference keeps the default algorithm", () => {
   renderThemed(<ThemeProbe />);
 
-  const light = theme.getDesignToken({ algorithm: theme.defaultAlgorithm });
-  expect(screen.getByTestId("container")).toHaveTextContent(light.colorBgContainer);
+  expect(screen.getByTestId("container")).toHaveTextContent(consoleDesignToken(false).colorBgContainer);
 });
 
 test("a stored dark theme wins over a light system preference", () => {
@@ -163,8 +164,7 @@ test("a stored dark theme wins over a light system preference", () => {
 
   renderThemed(<ThemeProbe />);
 
-  const dark = theme.getDesignToken({ algorithm: theme.darkAlgorithm });
-  expect(screen.getByTestId("container")).toHaveTextContent(dark.colorBgContainer);
+  expect(screen.getByTestId("container")).toHaveTextContent(consoleDesignToken(true).colorBgContainer);
 });
 
 test("the locale switcher changes chrome into English", async () => {

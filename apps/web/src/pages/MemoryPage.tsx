@@ -1,13 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { Alert, Button, Card, Empty, Form, Input, Modal, Select, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Form, Input, Modal, Select, Space, Tag, Typography } from "antd";
 
 import { api } from "../api/client";
 import { problemMessage } from "../api/messages";
 import type { AgentResponse, MemoryResponse, SearchHitResponse } from "../api/types";
 import { moment } from "../i18n/moment";
 import { useT } from "../i18n/locale";
+import { EmptyState } from "../ui/EmptyState";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 /**
@@ -131,7 +132,7 @@ export function MemoryPage() {
             <Alert type="warning" showIcon message={problemMessage(hits.error, t)} />
           ) : null}
           {asked !== null && (hits.data ?? []).length === 0 && !hits.isFetching ? (
-            <Empty description={t("searchNoHits")} />
+            <EmptyState title={t("searchNoHits")} />
           ) : null}
           {(hits.data ?? []).map((hit) => (
             <Card key={`${hit.session_id}-${hit.sequence}`} variant="borderless" className="page-alert">
@@ -157,7 +158,7 @@ export function MemoryPage() {
 
       <Card loading={pending.isPending} variant="borderless">
         {rows.length === 0 ? (
-          <Empty description={t("memoryEmpty")} />
+          <EmptyState title={t("memoryEmpty")} />
         ) : (
           <Space direction="vertical" size="middle" style={{ width: "100%" }}>
             {rows.map((row) => (
