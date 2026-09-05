@@ -260,6 +260,8 @@ test("the credential is chosen from stored secrets, not typed as a uuid", async 
   await userEvent.type(screen.getByLabelText(t("endpointBaseUrl")), "https://api.openai.com/v1");
   await userEvent.type(screen.getByLabelText(t("endpointModel")), "gpt-4o-mini");
   // The secret is picked by the name a person recognises...
+  await userEvent.type(screen.getByLabelText(t("endpointContextWindow")), "128000");
+  await userEvent.type(screen.getByLabelText(t("endpointMaxOutput")), "4096");
   await userEvent.click(screen.getByLabelText(t("endpointCredentialRef")));
   // The option shows the scope beside the name, so an operator can tell two
   // secrets with the same name apart.
@@ -312,6 +314,8 @@ test("an endpoint can be declared as accepting images", async () => {
     screen.getByLabelText(t("endpointModel")),
     "deepseek-v4-flash-vision-exp",
   );
+  await userEvent.type(screen.getByLabelText(t("endpointContextWindow")), "128000");
+  await userEvent.type(screen.getByLabelText(t("endpointMaxOutput")), "4096");
   await userEvent.click(screen.getByLabelText(t("endpointCredentialRef")));
   await userEvent.click(await screen.findByTitle("openai-api-key · workspace"));
   await userEvent.click(screen.getByLabelText(t("endpointAcceptsImages")));
@@ -358,6 +362,8 @@ test("an endpoint is text-only unless somebody says otherwise", async () => {
   await userEvent.type(await screen.findByLabelText(t("endpointName")), "plain");
   await userEvent.type(screen.getByLabelText(t("endpointBaseUrl")), "https://api.deepseek.com/v1");
   await userEvent.type(screen.getByLabelText(t("endpointModel")), "deepseek-v4-flash");
+  await userEvent.type(screen.getByLabelText(t("endpointContextWindow")), "128000");
+  await userEvent.type(screen.getByLabelText(t("endpointMaxOutput")), "4096");
   await userEvent.click(screen.getByLabelText(t("endpointCredentialRef")));
   await userEvent.click(await screen.findByTitle("openai-api-key · workspace"));
   await userEvent.click(screen.getByRole("button", { name: t("registerEndpoint") }));
@@ -442,7 +448,7 @@ test("an endpoint's window can be widened after the fact, and nothing else moves
   expect(sent).toEqual({ context_window: 512000, max_output_tokens: 4096 });
 });
 
-test("新建时「连到哪」展开且不可折叠，另两段折着并说出当前值", async () => {
+test("新建时「连到哪」与「能力」展开且不可折叠，「计价」折着并说出留空的后果", async () => {
   // 三段的划分按「填错的代价」：连接填错什么都跑不起来，所以它从不折叠；
   // 能力有默认值，可以折叠但折叠条必须说出默认值是什么；计价可以留空，
   // 但留空的后果要写在折叠条上——不是「未设置」三个字，而是它意味着什么。
@@ -459,12 +465,11 @@ test("新建时「连到哪」展开且不可折叠，另两段折着并说出�
   });
   expect(connection).toHaveAttribute("aria-expanded", "true");
   expect(connection).toHaveAttribute("aria-disabled", "true");
+  // Two required fields are empty (no guessed default), so this section
+  // is open and cannot be folded until they are filled.
   const capability = screen.getByRole("button", { name: new RegExp(t("endpointSectionCapability")) });
-  expect(capability).toHaveAttribute("aria-expanded", "false");
-  await waitFor(() =>
-    expect(capability).toHaveTextContent(`128000 ${t("endpointWindowUnit")}`),
-  );
-  expect(capability).toHaveTextContent(t("endpointNoImages"));
+  expect(capability).toHaveAttribute("aria-expanded", "true");
+  expect(capability).toHaveAttribute("aria-disabled", "true");
   const pricing = screen.getByRole("button", { name: new RegExp(t("endpointSectionPricing")) });
   expect(pricing).toHaveAttribute("aria-expanded", "false");
   expect(pricing).toHaveTextContent(t("pricingUnsetSummary"));

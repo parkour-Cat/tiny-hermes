@@ -55,8 +55,9 @@ const DEFAULTS = {
   usage_quality: "unavailable",
   context_accounting: "shared",
   accepts_images: false,
-  context_window: 128000,
-  max_output_tokens: 4096,
+  // No default window: a guessed 128000 that is silently wrong for this
+  // model is worse than an empty required field, and the empty field is
+  // what keeps 「这个模型的能力」 open on a new form (§5.5).
   currency: "USD",
 } as const;
 
@@ -389,7 +390,11 @@ export function ModelEndpointsPage() {
                 </Form.Item>
               )}
             </FormSection>
+            {/* Keyed on what is being edited: switching between 新建 and an
+                endpoint remounts the fold, so an edit opens folded on its
+                current values instead of inheriting the new form's open state. */}
             <FormSection
+              key={`capability-${editing?.id ?? "new"}`}
               title={t("endpointSectionCapability")}
               summary={capabilitySummary}
               fields={["context_window", "max_output_tokens"]}
@@ -447,6 +452,7 @@ export function ModelEndpointsPage() {
               </Form.Item>
             </FormSection>
             <FormSection
+              key={`pricing-${editing?.id ?? "new"}`}
               title={t("endpointSectionPricing")}
               summary={pricingSummary}
               fields={[]}
