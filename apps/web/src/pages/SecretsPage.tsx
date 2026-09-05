@@ -95,7 +95,6 @@ export function SecretsPage() {
       {contextHolder}
       <div className="page-heading">
         <div>
-          <Typography.Title level={2}>{t("secretsTitle")}</Typography.Title>
           <Typography.Paragraph type="secondary">{t("secretsIntro")}</Typography.Paragraph>
         </div>
       </div>

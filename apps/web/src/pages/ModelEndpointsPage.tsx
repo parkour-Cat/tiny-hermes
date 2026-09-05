@@ -302,7 +302,6 @@ export function ModelEndpointsPage() {
       {contextHolder}
       <div className="page-heading">
         <div>
-          <Typography.Title level={2}>{t("endpointsTitle")}</Typography.Title>
           <Typography.Paragraph type="secondary">{t("endpointsIntro")}</Typography.Paragraph>
         </div>
       </div>

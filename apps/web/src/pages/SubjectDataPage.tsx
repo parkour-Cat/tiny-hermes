@@ -106,7 +106,6 @@ export function SubjectDataPage() {
       {contextHolder}
       <div className="page-heading">
         <div>
-          <Typography.Title level={2}>{t("subjectData")}</Typography.Title>
           <Typography.Paragraph type="secondary">{t("subjectDataIntro")}</Typography.Paragraph>
         </div>
       </div>

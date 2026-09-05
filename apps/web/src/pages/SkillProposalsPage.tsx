@@ -120,7 +120,6 @@ export function SkillProposalsPage() {
       {contextHolder}
       <div className="page-heading">
         <div>
-          <Typography.Title level={2}>{t("proposalsTitle")}</Typography.Title>
           <Typography.Paragraph type="secondary">{t("proposalsIntro")}</Typography.Paragraph>
         </div>
       </div>

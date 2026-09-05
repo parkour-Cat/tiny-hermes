@@ -131,7 +131,6 @@ export function ApiKeysPage() {
       {contextHolder}
       <div className="page-heading">
         <div>
-          <Typography.Title level={2}>{t("serviceAccountsTitle")}</Typography.Title>
           <Typography.Paragraph type="secondary">{t("serviceAccountsIntro")}</Typography.Paragraph>
         </div>
       </div>

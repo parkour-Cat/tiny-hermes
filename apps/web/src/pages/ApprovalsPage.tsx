@@ -206,7 +206,6 @@ export function ApprovalsPage() {
       {contextHolder}
       <div className="page-heading">
         <div>
-          <Typography.Title level={2}>{t("approvalsTitle")}</Typography.Title>
           <Typography.Paragraph type="secondary">{t("approvalsIntro")}</Typography.Paragraph>
         </div>
       </div>
