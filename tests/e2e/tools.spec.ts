@@ -167,7 +167,7 @@ test("register an HTTP tool, call it, and let a person approve the write", async
   // -- the read goes all the way -----------------------------------------
   const reader = await publishAgent(page, "GET readLiveness");
   await submitRun(page, reader, "http.health.readLiveness");
-  await expect(page.getByText("completed", { exact: true }).first()).toBeVisible({
+  await expect(page.getByText("已完成", { exact: true }).first()).toBeVisible({
     timeout: 120_000,
   });
   // The far end's own words came back into the conversation — twice over:
@@ -196,7 +196,7 @@ test("register an HTTP tool, call it, and let a person approve the write", async
 
   // -- and the Run finishes the call it was stopped for -------------------
   await page.goto(writeRun);
-  await expect(page.getByText("completed", { exact: true }).first()).toBeVisible({
+  await expect(page.getByText("已完成", { exact: true }).first()).toBeVisible({
     timeout: 120_000,
   });
 });

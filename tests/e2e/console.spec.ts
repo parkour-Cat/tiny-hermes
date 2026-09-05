@@ -176,7 +176,7 @@ test("draft, publish, submit, watch, retry, and be refused a foreign workspace",
   // the whole history rather than the part that happened after the reload.
   await page.reload();
 
-  await expect(summary(page).getByText("completed", { exact: true })).toBeVisible();
+  await expect(summary(page).getByText("已完成", { exact: true })).toBeVisible();
   await expect(timeline(page).getByText("run_completed")).toBeVisible();
 
   const shown = await sequences(page);
@@ -192,7 +192,7 @@ test("draft, publish, submit, watch, retry, and be refused a foreign workspace",
   // offers rather than from one the console decided to show.
   const failing = await publishAgent(page, "fail_replay_safe");
   const failedRun = await submitRun(page, failing);
-  await expect(summary(page).getByText("failed", { exact: true })).toBeVisible();
+  await expect(summary(page).getByText("失败", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "重试任务" }).click();
   await page.getByRole("button", { name: "确定" }).click();
@@ -244,7 +244,7 @@ test("a run that has not finished says which round it is on and why", async ({ p
   // Woken by the Scheduler when the deadline passed, then finished on the next
   // round. The wait is a minute and the wake is a scan behind it, so this one
   // outlasts the default expectation window on purpose.
-  await expect(summary(page).getByText("completed", { exact: true })).toBeVisible({
+  await expect(summary(page).getByText("已完成", { exact: true })).toBeVisible({
     timeout: 120_000,
   });
   // Two, not one: the count is across the Run, so a Run that resumed in a new

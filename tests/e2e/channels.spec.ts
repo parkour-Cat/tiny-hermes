@@ -88,5 +88,5 @@ test("an administrator binds a channel, and the delivery path knows about it", a
   // Closing it is a state, not a deletion — `channel_events` is the record
   // of what this channel already delivered.
   await page.getByRole("button", { name: "停用" }).click();
-  await expect(page.getByRole("cell", { name: "disabled" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "停用" })).toBeVisible();
 });
