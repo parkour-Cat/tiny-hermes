@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Form, Input, Select, Space, Tag, Typography , Modal } from "antd";
+import { Alert, Button, Card, Form, Input, Select, Space, Tag, Typography, Modal } from "antd";
 import { useState } from "react";
 
 import { api } from "../api/client";
@@ -7,6 +7,7 @@ import { problemMessage } from "../api/messages";
 import type { RewrapResponse, SecretResponse } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
 import { useT } from "../i18n/locale";
+import { EmptyState } from "../ui/EmptyState";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 type CreateValues = {
@@ -161,7 +162,7 @@ export function SecretsPage() {
       ) : null}
       <Card loading={listed.isPending} variant="borderless">
         {(listed.data ?? []).length === 0 ? (
-          <Empty description={t("emptySecrets")} />
+          <EmptyState title={t("emptySecrets")} />
         ) : (
           (listed.data ?? []).map((secret) => (
             <article key={secret.id} className="workspace-row">

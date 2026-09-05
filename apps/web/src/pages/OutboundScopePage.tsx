@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Form, Input, Modal, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Form, Input, Modal, Space, Tag, Typography } from "antd";
 import { useState } from "react";
 
 import { api } from "../api/client";
@@ -7,6 +7,7 @@ import { problemMessage } from "../api/messages";
 import type { OutboundScopeEntry } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
 import { useT } from "../i18n/locale";
+import { EmptyState } from "../ui/EmptyState";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 type EntryValues = { entry: string; note?: string };
@@ -181,7 +182,7 @@ export function OutboundScopePage() {
           </Form>
         ) : null}
         {(platform.data ?? []).length === 0 ? (
-          <Empty description={t("emptyOutboundPlatform")} />
+          <EmptyState title={t("emptyOutboundPlatform")} />
         ) : (
           rows(platform.data ?? [], admin)
         )}
@@ -220,7 +221,7 @@ export function OutboundScopePage() {
           </Form.Item>
         </Form>
         {(workspace.data ?? []).length === 0 ? (
-          <Empty description={t("emptyOutboundWorkspace")} />
+          <EmptyState title={t("emptyOutboundWorkspace")} />
         ) : (
           rows(workspace.data ?? [], true)
         )}

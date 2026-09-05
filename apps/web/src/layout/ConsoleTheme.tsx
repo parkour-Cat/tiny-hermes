@@ -7,6 +7,53 @@ const STORAGE_KEY = "tiny-hermes-theme";
 
 export type ThemeChoice = "light" | "dark";
 
+// 纸与铜。底色是暖纸色而不是白，强调色是铜而不是 Ant Design 的蓝：这是控制台
+// 自己的身份，也是聊天页已经在用的那一套。两套各自完整，深色不是亮色的反相。
+const INK = "#1a1612";
+const PAPER = "#f6f1e8";
+const PAPER_RAISED = "#fbf7f0";
+const COPPER = "#c45c26";
+const LINE = "#ddd4c6";
+const INK_DARK = "#f3ece3";
+const PAPER_DARK = "#161310";
+const PAPER_RAISED_DARK = "#1e1a16";
+const COPPER_DARK = "#e08a4f";
+const LINE_DARK = "#3a332c";
+
+const FONT = '"Noto Sans SC", "Source Sans 3", ui-sans-serif, system-ui, sans-serif';
+
+/** The Ant Design tokens for one theme; exported so a test can ask what a
+ *  surface resolved to. */
+export function consoleDesignToken(dark: boolean) {
+  return dark
+    ? {
+        colorPrimary: COPPER_DARK,
+        colorLink: COPPER_DARK,
+        colorInfo: COPPER_DARK,
+        colorBgBase: PAPER_DARK,
+        colorBgContainer: PAPER_RAISED_DARK,
+        colorBgLayout: PAPER_DARK,
+        colorText: INK_DARK,
+        colorBorder: LINE_DARK,
+        colorBorderSecondary: LINE_DARK,
+        borderRadius: 8,
+        fontFamily: FONT,
+      }
+    : {
+        colorPrimary: COPPER,
+        colorLink: COPPER,
+        colorInfo: COPPER,
+        colorBgBase: PAPER,
+        colorBgContainer: PAPER_RAISED,
+        colorBgLayout: PAPER,
+        colorText: INK,
+        colorBorder: LINE,
+        colorBorderSecondary: LINE,
+        borderRadius: 8,
+        fontFamily: FONT,
+      };
+}
+
 function subscribe(onChange: () => void): () => void {
   const query = window.matchMedia(DARK_QUERY);
   query.addEventListener("change", onChange);
@@ -84,11 +131,7 @@ export function ConsoleTheme({ children }: { children: ReactNode }) {
         button={{ autoInsertSpace: false }}
         theme={{
           algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm,
-          token: {
-            colorPrimary: "#155e75",
-            borderRadius: 10,
-            fontFamily: 'Inter, "Noto Sans SC", system-ui, sans-serif',
-          },
+          token: consoleDesignToken(dark),
         }}
       >
         {children}

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Avatar, Button, Card, Empty, Form, Input, Modal, Select, Space, Tag, Typography } from "antd";
+import { Alert, Avatar, Button, Card, Form, Input, Modal, Select, Space, Typography } from "antd";
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
@@ -12,6 +12,9 @@ import type {
   ModelEndpointSummary,
 } from "../api/types";
 import { useT } from "../i18n/locale";
+import { StatusTag } from "../ui/StatusTag";
+import { EmptyState } from "../ui/EmptyState";
+import { PageHeading } from "../ui/PageHeading";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 type AgentValues = {
@@ -111,19 +114,20 @@ export function AgentsPage() {
 
   return (
     <>
-      <div className="page-heading">
-        <div>
-          <Typography.Title level={2}>{t("agentsTitle")}</Typography.Title>
-          <Typography.Paragraph type="secondary">{t("agentsIntro")}</Typography.Paragraph>
-        </div>
-        <Button type="primary" onClick={() => setOpen(true)}>
-          {t("newAgent")}
-        </Button>
-      </div>
+      <PageHeading
+        kicker={t("workspaceTitle")}
+        title={t("agentsTitle")}
+        intro={t("agentsIntro")}
+        extra={
+          <Button type="primary" onClick={() => setOpen(true)}>
+            {t("newAgent")}
+          </Button>
+        }
+      />
       <Card loading={agents.isPending} variant="borderless">
         {(agents.data ?? []).length === 0 ? (
           <Space direction="vertical" size="large" style={{ width: "100%" }}>
-            <Empty description={t("emptyAgents")} />
+            <EmptyState title={t("emptyAgents")} />
             {(examples.data ?? []).length === 0 ? null : (
               <Card variant="borderless" className="page-alert" title={t("exampleAgentTitle")}>
                 <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -192,9 +196,7 @@ export function AgentsPage() {
                     )}
                   </div>
                 </div>
-                <Tag color={entry.current_version_id === null ? "default" : "green"}>
-                  {entry.current_version_id === null ? t("agentUnpublished") : t("agentPublished")}
-                </Tag>
+                <StatusTag code={entry.current_version_id === null ? "unpublished" : "published"} />
               </article>
             ))}
           </div>

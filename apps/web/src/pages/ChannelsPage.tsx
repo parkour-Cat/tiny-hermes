@@ -1,19 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Alert,
-  Button,
-  Card,
-  Empty,
-  Form,
-  Input,
-  Modal,
-  Radio,
-  Select,
-  Space,
-  Table,
-  Tag,
-  Typography,
-} from "antd";
+import { Alert, Button, Card, Form, Input, Modal, Radio, Select, Space, Table, Tag, Typography } from "antd";
 import { useState } from "react";
 
 import { api } from "../api/client";
@@ -27,6 +13,9 @@ import type {
 import { moment } from "../i18n/moment";
 import { FormSection } from "../forms/FormSection";
 import { useT } from "../i18n/locale";
+import { StatusTag } from "../ui/StatusTag";
+import { EmptyState } from "../ui/EmptyState";
+import { PageHeading } from "../ui/PageHeading";
 import { ShortId } from "../tables/ShortId";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
@@ -278,15 +267,16 @@ export function ChannelsPage() {
 
   return (
     <>
-      <div className="page-heading">
-        <div>
-          <Typography.Title level={2}>{t("channels")}</Typography.Title>
-          <Typography.Paragraph type="secondary">{t("channelsIntro")}</Typography.Paragraph>
-        </div>
-        <Button type="primary" onClick={() => setOpen(true)}>
-          {t("bindChannel")}
-        </Button>
-      </div>
+      <PageHeading
+        kicker={t("workspaceTitle")}
+        title={t("channels")}
+        intro={t("channelsIntro")}
+        extra={
+          <Button type="primary" onClick={() => setOpen(true)}>
+            {t("bindChannel")}
+          </Button>
+        }
+      />
 
       {transportRestartHint ? (
         // Left up until dismissed, not a toast: the scheduler does not
@@ -305,7 +295,7 @@ export function ChannelsPage() {
       <Card loading={bindings.isPending} variant="borderless">
         {rows.length === 0 ? (
           <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-            <Empty description={t("channelsEmpty")} />
+            <EmptyState title={t("channelsEmpty")} />
             {usable.length === 0 && !secrets.isPending ? (
               // The first thing to do, said where somebody who has bound
               // nothing is actually standing.
@@ -436,7 +426,7 @@ export function ChannelsPage() {
                     <Tag color="orange">{t("channelConnectionNever")}</Tag>
                   ),
               },
-              { title: t("channelStatus"), dataIndex: "status", render: (v: string) => <Tag>{v}</Tag> },
+              { title: t("channelStatus"), dataIndex: "status", render: (v: string) => <StatusTag code={v} /> },
               { title: t("channelBoundAt"), dataIndex: "created_at", render: (v: string) => moment(v) },
               {
                 title: "",
@@ -493,7 +483,7 @@ export function ChannelsPage() {
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
           <Typography.Paragraph type="secondary">{t("channelIssuersIntro")}</Typography.Paragraph>
           {(issuers.data ?? []).length === 0 ? (
-            <Empty description={t("channelIssuersEmpty")} />
+            <EmptyState title={t("channelIssuersEmpty")} />
           ) : (
             <Table<ChannelIssuerResponse>
               rowKey="id"
@@ -511,7 +501,7 @@ export function ChannelsPage() {
                   // working, and this is the only list of them.
                   render: (value: string[]) => (value.length === 0 ? "—" : value.join(" ")),
                 },
-                { title: t("channelStatus"), dataIndex: "status", render: (v: string) => <Tag>{v}</Tag> },
+                { title: t("channelStatus"), dataIndex: "status", render: (v: string) => <StatusTag code={v} /> },
                 {
                   title: "",
                   key: "actions",

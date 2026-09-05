@@ -1,10 +1,13 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Form, Input, Modal, Select, Space, Table, Tag, Typography } from "antd";
+import { Alert, Button, Card, Form, Input, Modal, Select, Space, Table, Typography } from "antd";
 import { useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../api/client";
 import { useT } from "../i18n/locale";
+import { StatusTag } from "../ui/StatusTag";
+import { EmptyState } from "../ui/EmptyState";
+import { PageHeading } from "../ui/PageHeading";
 import { problemMessage } from "../api/messages";
 import type { AgentResponse, RunResponse, SessionResponse } from "../api/types";
 import { moment } from "../i18n/moment";
@@ -130,7 +133,7 @@ export function RunsPage() {
       // same reason as the status itself.
       render: (_: unknown, run: RunResponse) => (
         <Space direction="vertical" size={0}>
-          <Tag>{run.status}</Tag>
+          <StatusTag code={run.status} />
           {run.failure_reason === null ? null : (
             <Typography.Text type="danger">{run.failure_reason}</Typography.Text>
           )}
@@ -171,15 +174,16 @@ export function RunsPage() {
 
   return (
     <>
-      <div className="page-heading">
-        <div>
-          <Typography.Title level={2}>{t("runsTitle")}</Typography.Title>
-          <Typography.Paragraph type="secondary">{t("runsIntro")}</Typography.Paragraph>
-        </div>
-        <Button type="primary" onClick={() => setOpen(true)}>
-          {t("newRun")}
-        </Button>
-      </div>
+      <PageHeading
+        kicker={t("workspaceTitle")}
+        title={t("runsTitle")}
+        intro={t("runsIntro")}
+        extra={
+          <Button type="primary" onClick={() => setOpen(true)}>
+            {t("newRun")}
+          </Button>
+        }
+      />
       {/* Said out loud rather than papered over with a pager the platform
           cannot honour: the route takes no page or cursor, so any control here
           would sort a list that already arrived whole. */}
@@ -190,7 +194,7 @@ export function RunsPage() {
           columns={columns}
           dataSource={runs.data ?? []}
           pagination={false}
-          locale={{ emptyText: <Empty description={t("emptyRuns")} /> }}
+          locale={{ emptyText: <EmptyState title={t("emptyRuns")} /> }}
         />
       </Card>
       <Modal

@@ -140,7 +140,7 @@ test("upload a skill, bind it, load it in a Run, propose a change, approve it", 
   // -- the skill reaches a Run ------------------------------------------
   const reader = await publishAgent(page, "skill_once", "skill.load");
   await submitRun(page, reader);
-  await expect(page.getByText("completed", { exact: true }).first()).toBeVisible({
+  await expect(page.getByText("已完成", { exact: true }).first()).toBeVisible({
     timeout: 90_000,
   });
   await expect(timeline(page).getByText("skill_loaded")).toBeVisible();
@@ -156,7 +156,7 @@ test("upload a skill, bind it, load it in a Run, propose a change, approve it", 
   // -- the Agent suggests a change ---------------------------------------
   const author = await publishAgent(page, "propose_once", "skill.propose");
   await submitRun(page, author);
-  await expect(page.getByText("completed", { exact: true }).first()).toBeVisible({
+  await expect(page.getByText("已完成", { exact: true }).first()).toBeVisible({
     timeout: 90_000,
   });
   await expect(timeline(page).getByText("skill_proposed")).toBeVisible();

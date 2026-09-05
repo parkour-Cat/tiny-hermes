@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Empty, Form, Input, Modal, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Form, Input, Modal, Space, Tag, Typography } from "antd";
 import { useState } from "react";
 
 import { api, apiWithStatus } from "../api/client";
@@ -7,6 +7,7 @@ import { problemMessage } from "../api/messages";
 import type { McpServerResponse, McpServerVersionResponse } from "../api/types";
 import { moment } from "../i18n/moment";
 import { useT } from "../i18n/locale";
+import { EmptyState } from "../ui/EmptyState";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 type ServerValues = { name: string; url: string; credential_ref?: string };
@@ -184,7 +185,7 @@ export function McpServersPage() {
       </Card>
 
       {(servers.data ?? []).length === 0 ? (
-        <Empty description={t("emptyMcpServers")} />
+        <EmptyState title={t("emptyMcpServers")} />
       ) : (
         (servers.data ?? []).map((server) => (
           <Card
