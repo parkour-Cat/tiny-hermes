@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
+import { openSection, unfold } from "./session";
+
 /**
  * An external tool's whole life, driven through the console against the real
  * stack — and the one moment this stage exists for: a write that stops.
@@ -78,30 +80,30 @@ async function choose(page: Page, label: string, value: string): Promise<void> {
 /** Approves the host at both levels. A workspace may only choose inside the
  *  platform's, so the platform entry has to exist first. */
 async function approveHost(page: Page): Promise<void> {
-  await page.getByRole("link", { name: "出站范围", exact: true }).click();
+  const outbound = await openSection(page, "设置", "出站范围", "outbound");
   // The two forms by position rather than by their cards' text: each card's
   // prose mentions the other level — that is the point of the page, each layer
   // narrowing the one above — so a text filter matches both. The platform's
   // form is first because that is the order the rule runs in.
-  const forms = page.locator("form");
+  const forms = outbound.locator("form");
   await expect(forms).toHaveCount(2);
   for (const index of [0, 1]) {
     const form = forms.nth(index);
     await form.getByLabel("目标").fill(TOOL_HOST);
     await form.getByRole("button", { name: "批准" }).click();
-    await expect(page.getByText(TOOL_HOST, { exact: true })).toHaveCount(index + 1);
+    await expect(outbound.getByText(TOOL_HOST, { exact: true })).toHaveCount(index + 1);
   }
 }
 
 async function registerTool(page: Page): Promise<void> {
-  await page.getByRole("link", { name: "HTTP 工具", exact: true }).click();
-  await page.getByLabel("名称").fill("health");
-  await page.getByLabel("基础地址").fill(TOOL_BASE);
-  await page.getByLabel("OpenAPI 文档").fill(DOCUMENT);
-  await page.getByRole("button", { name: "登记" }).click();
+  const tools = await openSection(page, "工具与技能", "HTTP 工具", "http-tools");
+  await tools.getByLabel("名称").fill("health");
+  await tools.getByLabel("基础地址").fill(TOOL_BASE);
+  await tools.getByLabel("OpenAPI 文档").fill(DOCUMENT);
+  await tools.getByRole("button", { name: "登记" }).click();
   // Both operations, with the write marked where somebody is choosing.
-  await expect(page.getByText(/GET readLiveness/)).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByText(/POST pokeLiveness · 会改数据/)).toBeVisible();
+  await expect(tools.getByText(/GET readLiveness/)).toBeVisible({ timeout: 30_000 });
+  await expect(tools.getByText(/POST pokeLiveness · 会改数据/)).toBeVisible();
 }
 
 /** Publishes an Agent bound to both operations, with §16.3's choice made. */
@@ -119,6 +121,7 @@ async function publishAgent(page: Page, operation: string): Promise<string> {
   await expect(page.getByText("草稿修订 1")).toBeVisible();
   await page.getByLabel("人格").fill("A tools acceptance agent.");
   await choose(page, "模型场景", "http_once");
+  await unfold(page, "能力");
   await choose(page, "网络", TOOL_HOST);
   await choose(page, "HTTP 操作", operation);
   // Required for a bound write, and chosen here rather than discovered at
@@ -181,8 +184,8 @@ test("register an HTTP tool, call it, and let a person approve the write", async
   await expect(timeline(page).getByText(/这次运行在等人/)).toBeVisible();
 
   // -- a person reads exactly what would be sent, and decides -------------
-  await page.getByRole("link", { name: "审批", exact: true }).click();
-  const governance = page.locator(".ant-card", { hasText: "工作空间的决定" }).first();
+  const inbox = await openSection(page, "待办", "审批", "approvals");
+  const governance = inbox.locator(".ant-card", { hasText: "工作空间的决定" }).first();
   // Named twice: once in the summary row and once inside the document, which
   // is the assertion the whole page exists for — a reviewer who cannot see the
   // request cannot approve it. The URL appears only in the document.
