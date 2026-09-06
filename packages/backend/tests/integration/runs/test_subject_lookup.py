@@ -50,6 +50,24 @@ async def _seed_subject(
     return subject
 
 
+async def test_session_lookup_requires_a_scoped_end_user_and_is_audited(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine,
+    workspace_id: str, session_id: str,
+) -> None:
+    path = f"/api/v1/subjects/from-session/{session_id}"
+    assert client.get(path, headers=scope).status_code == 404
+    subject = await _seed_subject(engine, workspace_id=workspace_id)
+    async with engine.begin() as connection:
+        await connection.execute(text("UPDATE sessions SET caller_type='end_user', caller_id=:subject WHERE id=:session"), {"subject": subject, "session": UUID(session_id)})
+    response = client.get(path, headers=scope)
+    assert response.status_code == 200, response.text
+    assert response.json()["subject_id"] == str(subject)
+    assert client.get(path, headers={**scope, "X-Workspace-Id": str(uuid4())}).status_code == 404
+    async with engine.connect() as connection:
+        count = await connection.scalar(text("SELECT count(*) FROM audit_events WHERE action='subject.resolved_from_session' AND resource_id=:subject"), {"subject": subject})
+    assert count == 1
+
+
 async def test_a_steward_finds_the_subject_a_request_names(
     client: TestClient, scope: dict[str, str], engine: AsyncEngine, workspace_id: str
 ) -> None:
@@ -181,6 +199,7 @@ async def test_a_viewer_cannot_resolve_anybody(
         "X-Workspace-Id": workspace_id,
     }
 
+    assert client.get(f"/api/v1/subjects/from-session/{uuid4()}", headers=viewer).status_code == 403
     refused = client.get(
         "/api/v1/subjects/lookup",
         headers=viewer,

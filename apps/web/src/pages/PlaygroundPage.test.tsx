@@ -9,6 +9,7 @@ import { PlaygroundPage } from "./PlaygroundPage";
 import { AuthProvider } from "../auth/AuthProvider";
 import { TestTheme } from "../test/TestTheme";
 import { server } from "../test/server";
+import { WorkspacePermissions } from "../workspace/WorkspacePermissions";
 
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
 const AGENT = "22222222-3333-4444-8555-666666666666";
@@ -111,7 +112,7 @@ function loadedPlayground(): void {
   );
 }
 
-function renderPlayground(): void {
+function renderPlayground(viewer = false): void {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <TestTheme>
@@ -121,7 +122,7 @@ function renderPlayground(): void {
             <Routes>
               <Route
                 path="/workspaces/:workspaceId/agents/:agentId/playground"
-                element={<PlaygroundPage />}
+                element={<WorkspacePermissions role={viewer ? "viewer" : "workspace_admin"}><PlaygroundPage /></WorkspacePermissions>}
               />
             </Routes>
           </AuthProvider>
@@ -130,6 +131,15 @@ function renderPlayground(): void {
     </TestTheme>,
   );
 }
+
+test("a viewer cannot send or automatically create a debugging session", async () => {
+  loadedPlayground();
+  let posts = 0;
+  server.use(http.get("/api/v1/sessions", () => HttpResponse.json([])), http.post("/api/v1/sessions", () => { posts += 1; return HttpResponse.json(sessionRow()); }));
+  renderPlayground(true);
+  expect(await screen.findByText("当前角色只能查看，不能在调试中创建或提交任务。")).toBeInTheDocument();
+  expect(posts).toBe(0);
+});
 
 test("sending a message posts a run with a fresh idempotency key", async () => {
   loadedPlayground();
