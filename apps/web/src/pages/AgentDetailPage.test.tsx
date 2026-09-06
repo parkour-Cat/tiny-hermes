@@ -1009,7 +1009,7 @@ test("shared memory is written for the Agent currently open", async () => {
     http.get(`/api/v1/workspaces/${WORKSPACE}/members/me`, () => HttpResponse.json({ role: "workspace_admin" })),
     http.post("/api/v1/memories/shared", async ({ request }) => { sent = await request.json(); return HttpResponse.json({ id: "m1" }); }),
   );
-  renderDetail();
+  renderDetail("workspace_admin");
   await userEvent.click(await screen.findByRole("button", { name: t("writeShared") }));
   await userEvent.type(await screen.findByLabelText(t("memoryBody")), "Ship notes on Fridays.");
   await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: t("saveName") }));
