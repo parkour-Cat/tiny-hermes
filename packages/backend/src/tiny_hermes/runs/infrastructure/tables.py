@@ -119,7 +119,11 @@ class SessionMessageRow(IdMixin, CreatedAtMixin, Base):
         TSVECTOR,
         Computed(
             "to_tsvector('simple', "
-            "jsonb_path_query_array(content::jsonb, '$.parts[*].text')::text)",
+            "jsonb_path_query_array(content::jsonb, "
+            "'$.parts[*] ? (@.type == \"text\").text')::text) "
+            "|| to_tsvector('simple', th_cjk_bigrams("
+            "jsonb_path_query_array(content::jsonb, "
+            "'$.parts[*] ? (@.type == \"text\").text')::text))",
             persisted=True,
         ),
     )
