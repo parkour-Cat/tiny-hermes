@@ -30,12 +30,12 @@ function binding(overrides: object = {}) {
   };
 }
 
-function renderChannels(): void {
+function renderChannels(scenario = "feishu"): void {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <TestTheme>
       <QueryClientProvider client={client}>
-        <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE}/channels`]}>
+        <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE}/channels#${scenario}`]}>
           <Routes>
             <Route path="/workspaces/:workspaceId/channels" element={<ChannelsPage />} />
           </Routes>
@@ -126,7 +126,7 @@ test("the form sends the secret's id, never a key and never its name", async () 
   );
 
   renderChannels();
-  await userEvent.click(await screen.findByRole("button", { name: /绑定渠道|Bind a channel/i }));
+  await userEvent.click(await screen.findByRole("button", { name: /接入飞书机器人|Connect Feishu/i }));
   await userEvent.click(await screen.findByLabelText(/Agent/));
   await userEvent.click(await screen.findByTitle("Support"));
   await userEvent.click(screen.getByLabelText(/加密密钥|Encrypt key/i));
@@ -170,7 +170,7 @@ test("the app secret is optional — a receive-only binding is allowed", async (
   );
 
   renderChannels();
-  await userEvent.click(await screen.findByRole("button", { name: /绑定渠道|Bind a channel/i }));
+  await userEvent.click(await screen.findByRole("button", { name: /接入飞书机器人|Connect Feishu/i }));
   await userEvent.click(await screen.findByLabelText(/Agent/));
   await userEvent.click(await screen.findByTitle("Support"));
   await userEvent.click(screen.getByLabelText(/加密密钥|Encrypt key/i));
@@ -243,16 +243,14 @@ const ISSUER = {
 };
 
 test("who may vouch for an end user is listed beside what they can talk to", async () => {
-  // A binding says which Agent is published; an issuer says whose word this
-  // platform takes for who a person is. Neither is usable without the other,
-  // and until now only one of them had a page.
+  // Web identity configuration is independent of Feishu bindings.
   server.use(
     http.get("/api/v1/channel-bindings", () => HttpResponse.json([binding()])),
     http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
     http.get("/api/v1/channel-issuers", () => HttpResponse.json([ISSUER])),
   );
 
-  renderChannels();
+  renderChannels("web");
 
   expect(await screen.findByText("https://sso.example.com")).toBeVisible();
   // The origins are the embedding allow-list. Shown, because an origin
@@ -273,7 +271,7 @@ test("registering an issuer sends the key reference shape the API takes", async 
     }),
   );
 
-  renderChannels();
+  renderChannels("web");
   await userEvent.click(await screen.findByRole("button", { name: t("registerIssuer") }));
   await userEvent.type(await screen.findByLabelText(t("issuerName")), "https://sso.example.com");
   await userEvent.type(
@@ -315,7 +313,7 @@ test("an issuer can be registered by pasting its public key instead of a JWKS ur
     }),
   );
 
-  renderChannels();
+  renderChannels("web");
   await userEvent.click(await screen.findByRole("button", { name: t("registerIssuer") }));
   await userEvent.type(await screen.findByLabelText(t("issuerName")), "https://sso.example.com");
   await userEvent.click(await screen.findByRole("radio", { name: t("issuerKeyModePublicKey") }));
@@ -686,4 +684,16 @@ test("可回复是文字，不是彩色标签", async () => {
   );
   expect(cell).toBeDefined();
   expect(cell!.className).not.toContain("ant-tag");
+});
+
+ test("a Feishu load failure leaves the web scenario reachable", async () => {
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json({ code: "forbidden" }, { status: 403 })),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/channel-issuers", () => HttpResponse.json([])),
+  );
+  renderChannels();
+  await screen.findByText(/没有权限|not allowed|forbidden/i);
+  await userEvent.click(screen.getByRole("link", { name: "网页聊天" }));
+  expect(await screen.findByRole("button", { name: "配置网页登录验证" })).toBeVisible();
 });

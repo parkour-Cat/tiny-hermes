@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { expect, test } from "vitest";
+import { beforeEach, expect, test } from "vitest";
 
 import { ApprovalsPage } from "./ApprovalsPage";
 import { AuthProvider } from "../auth/AuthProvider";
@@ -11,6 +11,10 @@ import { TestTheme } from "../test/TestTheme";
 import { server } from "../test/server";
 
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
+
+beforeEach(() => {
+  server.use(http.get(`/api/v1/workspaces/${WORKSPACE}/members/me`, () => HttpResponse.json({ role: "workspace_admin" })));
+});
 
 const ADMIN = {
   id: "u1",
@@ -99,6 +103,34 @@ function renderApprovals(): void {
   );
 }
 
+test("queue paging and scenario changes ask the server for the correct scope", async () => {
+  const asked: URLSearchParams[] = [];
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
+    http.get("/api/v1/approvals", ({ request }) => {
+      const query = new URL(request.url).searchParams;
+      asked.push(query);
+      return HttpResponse.json({ items: [approval({ id: `a${query.get("offset")}` })], has_more: query.get("offset") === "0" });
+    }),
+  );
+  renderApprovals();
+  await screen.findByRole("button", { name: "批准" });
+  expect(asked.at(-1)?.get("approval_type")).toBe("governance_approval");
+  await userEvent.click(screen.getByRole("button", { name: "下一页" }));
+  await waitFor(() => expect(asked.at(-1)?.get("offset")).toBe("20"));
+  await userEvent.click(screen.getByRole("radio", { name: "等待他人" }));
+  await waitFor(() => expect(asked.at(-1)?.get("approval_type")).toBe("user_confirmation"));
+  expect(asked.at(-1)?.get("offset")).toBe("0");
+  await userEvent.click(screen.getByRole("radio", { name: "处理历史" }));
+  await screen.findByRole("button", { name: "下一页" });
+  await userEvent.click(screen.getByRole("button", { name: "下一页" }));
+  await waitFor(() => expect(asked.at(-1)?.get("offset")).toBe("20"));
+  const rejected = await screen.findByRole("radio", { name: "已拒绝" });
+  await userEvent.click(rejected.closest("label") ?? rejected);
+  await waitFor(() => expect(asked.at(-1)?.getAll("status")).toEqual(["rejected"]));
+  expect(asked.at(-1)?.get("offset")).toBe("0");
+});
+
 test("the two kinds are shown apart, because they are two different powers", async () => {
   server.use(
     http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
@@ -115,9 +147,10 @@ test("the two kinds are shown apart, because they are two different powers", asy
   // Awaited on the rows rather than on the headings: the headings are static
   // and render before the list has arrived.
   expect(await screen.findAllByText(/http\.orders\.createOrder/)).not.toHaveLength(0);
-  expect(screen.getByText("用户确认")).toBeInTheDocument();
-  expect(screen.getByText("管理员审批")).toBeInTheDocument();
-  expect(screen.getAllByText(/file\.write/).length).toBeGreaterThan(0);
+  expect(screen.queryByText("file.write")).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("radio", { name: "等待他人" }));
+  expect(await screen.findByText("file.write")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "批准" })).not.toBeInTheDocument();
 });
 
 test("the arguments shown are the normalized ones the platform hashed", async () => {
@@ -132,7 +165,7 @@ test("the arguments shown are the normalized ones the platform hashed", async ()
   // console rewrote would be approving something nobody can check.
   // Twice per card now: once in the summary row, once in the document.
   await screen.findAllByText(/http\.orders\.createOrder/);
-  expect(screen.getByText(/abc-123/)).toBeInTheDocument();
+  expect(screen.getByText(JSON.stringify({ sku: "abc-123" }, null, 2), { exact: true, collapseWhitespace: false })).toBeVisible();
 });
 
 test("approving asks first and says what exactly it allows", async () => {
@@ -207,7 +240,7 @@ test("a rejection with a reason sends it", async () => {
   );
 });
 
-test("nothing waiting says so in both sections", async () => {
+test("nothing waiting has one empty state per active queue", async () => {
   server.use(
     http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
     queue([]),
@@ -215,7 +248,9 @@ test("nothing waiting says so in both sections", async () => {
 
   renderApprovals();
 
-  expect(await screen.findAllByText("没有待处理的审批。")).toHaveLength(2);
+  expect(await screen.findAllByText("没有待处理的审批。")).toHaveLength(1);
+  await userEvent.click(screen.getByRole("radio", { name: "等待他人" }));
+  expect(await screen.findAllByText("没有待处理的审批。")).toHaveLength(1);
 });
 
 test("a decision is readable afterwards, with who made it and why", async () => {
@@ -238,6 +273,7 @@ test("a decision is readable afterwards, with who made it and why", async () => 
   );
 
   renderApprovals();
+  await userEvent.click(await screen.findByRole("radio", { name: "处理历史" }));
 
   expect(await screen.findByText("not this quarter")).toBeVisible();
 });
@@ -252,6 +288,7 @@ test("an answered approval is not offered a second decision", async () => {
   );
 
   renderApprovals();
+  await userEvent.click(await screen.findByRole("radio", { name: "处理历史" }));
 
   // The run link, not the status word: "已批准" is also the label of the
   // filter chip above the table, and a matcher that hits both proves nothing.
@@ -274,6 +311,7 @@ test("narrowing history asks the server, rather than filtering the page it holds
   );
 
   renderApprovals();
+  await userEvent.click(await screen.findByRole("radio", { name: "处理历史" }));
   await waitFor(() => expect(asked.length).toBeGreaterThan(0));
   // The label, not the input: antd's button-style radios put
   // `pointer-events: none` on the input itself, so a real click lands here.
@@ -291,6 +329,7 @@ test("历史里的运行 ID 是截断的链接，完整值在 title 上", async 
     queue([], [approval({ id: "a9", run_id: run, status: "approved", decided_by: "u1", decided_at: "2026-08-20T09:00:00Z" })]),
   );
   renderApprovals();
+  await userEvent.click(await screen.findByRole("radio", { name: "处理历史" }));
   const link = await screen.findByTitle(run);
   expect(link).toHaveAttribute("href", `/workspaces/${WORKSPACE}/runs/${run}`);
   expect(link.textContent).not.toContain("07fd26c5c38e");

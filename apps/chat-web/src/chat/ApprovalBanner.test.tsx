@@ -11,5 +11,5 @@ test("the user sees the real target and parameters before confirming", () => {
     required_permission: null, requested_by: "u1", expires_at: "2026-10-01T00:00:00Z",
   }} /></QueryClientProvider></LocaleProvider>);
   expect(screen.getByText("https://example.com/orders")).toBeVisible();
-  expect(screen.getByText(/blue-42/)).toBeVisible();
+  expect(screen.getByText(JSON.stringify({ sku: "blue-42", quantity: 2 }, null, 2), { exact: true, collapseWhitespace: false })).toBeVisible();
 });
