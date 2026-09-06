@@ -66,7 +66,7 @@ test("disabling a login provider needs confirmation and shows failure without lo
   expect(calls).toBe(0);
   const dialog = await screen.findByRole("dialog");
   expect(dialog).toHaveTextContent("https://login.example.com");
-  await userEvent.click(screen.getByRole("button", { name: "确认" }));
+  await userEvent.click(screen.getByRole("button", { name: "确定" }));
   await waitFor(() => expect(calls).toBe(1));
   expect(await screen.findByRole("alert")).toBeInTheDocument();
   expect(screen.getByText("https://login.example.com")).toBeVisible();
