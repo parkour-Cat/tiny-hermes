@@ -48,5 +48,9 @@ test.each(LEGACY_REDIRECTS.map(([from, to, anchor]) => [from, to, anchor]))(
 );
 
 test("十五个旧地址，一个不少", () => {
-  expect(LEGACY_REDIRECTS).toHaveLength(15);
+  expect(LEGACY_REDIRECTS.map(([from]) => from)).toEqual(expect.arrayContaining([
+    "approvals", "skill-proposals", "memory", "skills", "http-tools", "mcp-servers",
+    "audit", "usage", "subjects", "members", "api-keys", "identity-providers",
+    "model-endpoints", "secrets", "outbound",
+  ]));
 });

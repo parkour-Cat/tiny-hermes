@@ -1023,3 +1023,10 @@ test("a platform administrator can add shared memory even with viewer membership
   renderDetail();
   expect(await screen.findByRole("button", { name: t("writeShared") })).toBeVisible();
 });
+
+test("a developer cannot add shared memory from the Agent page", async () => {
+  loadedAgent();
+  renderDetail();
+  await screen.findByLabelText("人格");
+  expect(screen.queryByRole("button", { name: t("writeShared") })).not.toBeInTheDocument();
+});
