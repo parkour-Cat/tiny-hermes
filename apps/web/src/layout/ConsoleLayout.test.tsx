@@ -194,10 +194,10 @@ function emptyQueues() {
   ];
 }
 
-test("导航上是七个入口，不是十八个", async () => {
+test("平台管理员看到七个工作入口和独立平台管理", async () => {
   renderShell(`/workspaces/${WORKSPACE}/agents`);
   const nav = await screen.findByRole("navigation");
-  expect(within(nav).getAllByRole("link")).toHaveLength(7);
+  expect(within(nav).getAllByRole("link")).toHaveLength(8);
 });
 
 test("每个入口都带着它自己那句说明", async () => {
