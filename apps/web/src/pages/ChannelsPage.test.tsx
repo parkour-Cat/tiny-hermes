@@ -9,6 +9,7 @@ import { ChannelsPage } from "./ChannelsPage";
 import { TestTheme } from "../test/TestTheme";
 import { server } from "../test/server";
 import { t } from "../i18n/zh-CN";
+import { WorkspacePermissions } from "../workspace/WorkspacePermissions";
 
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
 const AGENT = "22222222-3333-4444-8555-666666666666";
@@ -30,14 +31,14 @@ function binding(overrides: object = {}) {
   };
 }
 
-function renderChannels(scenario = "feishu"): void {
+function renderChannels(scenario = "feishu", readonly = false): void {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <TestTheme>
       <QueryClientProvider client={client}>
         <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE}/channels#${scenario}`]}>
           <Routes>
-            <Route path="/workspaces/:workspaceId/channels" element={<ChannelsPage />} />
+            <Route path="/workspaces/:workspaceId/channels" element={<WorkspacePermissions role={readonly ? "developer" : "workspace_admin"}><ChannelsPage /></WorkspacePermissions>} />
           </Routes>
         </MemoryRouter>
       </QueryClientProvider>
@@ -48,6 +49,17 @@ function renderChannels(scenario = "feishu"): void {
 const AGENTS = [
   { id: AGENT, name: "Support", alias: "support", status: "active", current_version_id: "v1", created_at: "2026-08-01T00:00:00Z" },
 ];
+
+test("developers can read channels without being invited to administer them", async () => {
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json([binding()])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+  );
+  renderChannels("feishu", true);
+  await screen.findByText("Support");
+  expect(screen.queryByRole("button", { name: t("bindChannel") })).toBeNull();
+  expect(screen.queryByRole("button", { name: t("channelEdit") })).toBeNull();
+});
 
 test.each([false, true])("new long connection saves once and validates credentials after selection (clear=%s)", async (clearCredentials) => {
   const sent: unknown[] = [];
