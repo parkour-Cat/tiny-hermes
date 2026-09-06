@@ -813,6 +813,7 @@ test("results belong to this task and platform instructions have a distinct auth
       { role: "assistant", source_run_id: OTHER_RUN, parts: [{ type: "text", text: "Earlier task result" }] },
       { role: "user", author: "platform", source_run_id: RUN, parts: [{ type: "text", text: "Completion check feedback" }] },
       { role: "assistant", source_run_id: RUN, parts: [{ type: "text", text: "Current task result" }] },
+      { role: "assistant", source_run_id: RUN, parts: [{ type: "text", text: "I will now inspect the files" }, { type: "tool_call", call_id: "inspect", name: "terminal" }] },
     ])),
   );
   renderRun();
