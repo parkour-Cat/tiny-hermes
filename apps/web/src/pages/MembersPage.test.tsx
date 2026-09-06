@@ -108,5 +108,5 @@ test("developers can read membership without being offered administrator writes"
   renderMembers(true);
   expect(await screen.findByText("Admin")).toBeVisible();
   expect(screen.getByRole("button", { name: "邀请成员" })).toBeDisabled();
-  expect(screen.getByRole("button", { name: "移除成员" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "移除" })).toBeDisabled();
 });

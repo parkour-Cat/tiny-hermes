@@ -38,6 +38,13 @@ function renderKeys(): void {
   );
 }
 
+test("key loading failures remain distinguishable from an empty account", async () => {
+  server.use(http.get("/api/v1/service-accounts", () => HttpResponse.json([ACCOUNT_ROW])), http.get(`/api/v1/service-accounts/${ACCOUNT}/api-keys`, () => HttpResponse.json({ detail: "Key lookup unavailable" }, { status: 503 })));
+  renderKeys();
+  expect(await screen.findByRole("button", { name: "重试" })).toBeInTheDocument();
+  expect(screen.queryByText("还没有 API Key")).toBeNull();
+});
+
 test("a minted key's plaintext is shown once and then dismissed", async () => {
   document.cookie = "tiny_hermes_csrf=token-value";
   const token = "thk_plaintext-only-once";

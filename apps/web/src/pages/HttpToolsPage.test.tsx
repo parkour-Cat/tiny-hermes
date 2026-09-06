@@ -97,6 +97,24 @@ test("an operation that writes is marked where somebody is choosing", async () =
   expect(screen.getByText(/POST createOrder · 会改数据/)).toBeInTheDocument();
 });
 
+test("catalog search finds a tool by its address", async () => {
+  server.use(http.get("/api/v1/http-tools", () => HttpResponse.json([tool()])), http.get("/api/v1/http-tools/t1/versions", () => HttpResponse.json([version()])));
+  renderTools();
+  await screen.findByText(/GET listOrders/);
+  await userEvent.type(screen.getByRole("textbox", { name: "查找能力" }), "no-such-tool");
+  expect(screen.queryByText(/GET listOrders/)).toBeNull();
+});
+
+test("previewing a document shows write operations without registering", async () => {
+  document.cookie = "tiny_hermes_csrf=token-value";
+  server.use(http.get("/api/v1/http-tools", () => HttpResponse.json([])), http.post("/api/v1/http-tools/preview", () => HttpResponse.json({ title: "Orders", operations: version().operations })));
+  renderTools();
+  await userEvent.click(await screen.findByRole("button", { name: "添加 HTTP 工具" }));
+  await userEvent.type(await screen.findByLabelText("OpenAPI 文档"), "{{}}");
+  await userEvent.click(screen.getByRole("button", { name: "解析预览" }));
+  expect(await screen.findByText(/POST.*createOrder.*会改数据/)).toBeInTheDocument();
+});
+
 test("a host the workspace never approved is refused with the host named", async () => {
   document.cookie = "tiny_hermes_csrf=token-value";
   server.use(
