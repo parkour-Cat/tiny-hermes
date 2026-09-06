@@ -55,9 +55,7 @@ def _member(
         json={"email": email, "role": role},
     )
     assert invited.status_code == 201, invited.text
-    login = client.post(
-        "/api/v1/auth/sessions", json={"subject": email, "password": PASSWORD}
-    )
+    login = client.post("/api/v1/auth/sessions", json={"subject": email, "password": PASSWORD})
     assert login.status_code == 201, login.text
     return {
         "X-CSRF-Token": login.cookies["tiny_hermes_csrf"],
@@ -102,9 +100,7 @@ def test_a_binding_carries_the_app_secret_reference_it_replies_with(
     tenant token). It is a **reference**, like the encrypt key — the value
     never touches this table — and it is returned so a console can show
     which secret a binding was wired to."""
-    created = _create(
-        client, scope, published_agent, secret_ref, app_secret_ref=secret_ref
-    )
+    created = _create(client, scope, published_agent, secret_ref, app_secret_ref=secret_ref)
 
     assert created.status_code == 201, created.text
     assert created.json()["app_secret_ref"] == secret_ref
@@ -128,9 +124,7 @@ def test_an_app_secret_naming_no_workspace_secret_is_refused(
     """Same reasoning as the encrypt key: a reference to a secret that does
     not exist fails when it is used — inside an outbound call nobody is
     watching — instead of here, where the person who typed it is."""
-    refused = _create(
-        client, scope, published_agent, secret_ref, app_secret_ref="no-such-secret"
-    )
+    refused = _create(client, scope, published_agent, secret_ref, app_secret_ref="no-such-secret")
 
     assert refused.status_code == 400, refused.text
     assert refused.json()["code"] == "channel_key_unknown"
@@ -259,9 +253,7 @@ def test_disabling_a_binding_closes_the_door_without_deleting_the_trail(
     and those rows are the record of what this channel already delivered."""
     binding_id = _create(client, scope, published_agent, secret_ref).json()["id"]
 
-    disabled = client.post(
-        f"/api/v1/channel-bindings/{binding_id}/disable", headers=scope
-    )
+    disabled = client.post(f"/api/v1/channel-bindings/{binding_id}/disable", headers=scope)
 
     assert disabled.status_code == 200, disabled.text
     assert disabled.json()["status"] == "disabled"
@@ -391,9 +383,7 @@ def test_an_app_secret_can_be_removed_to_make_a_binding_receive_only(
     "clear" rather than "unchanged": §929's drill needs a binding that
     replies to nobody, and turning an existing one back into that is how an
     operator runs the drill without deleting the conversation history."""
-    created = _create(
-        client, scope, published_agent, secret_ref, app_secret_ref=secret_ref
-    )
+    created = _create(client, scope, published_agent, secret_ref, app_secret_ref=secret_ref)
     binding_id = created.json()["id"]
 
     updated = client.patch(
@@ -421,9 +411,7 @@ async def test_a_developer_may_not_rewire_a_binding(
     created = _create(client, scope, published_agent, secret_ref)
     binding_id = created.json()["id"]
     await _seed_user(engine, "Dev Rewire", "dev-rewire@example.com")
-    developer = _member(
-        client, scope, workspace_id, "dev-rewire@example.com", "developer"
-    )
+    developer = _member(client, scope, workspace_id, "dev-rewire@example.com", "developer")
 
     refused = client.patch(
         f"/api/v1/channel-bindings/{binding_id}",
@@ -434,9 +422,7 @@ async def test_a_developer_may_not_rewire_a_binding(
     assert refused.status_code == 403, refused.text
 
 
-def test_an_unknown_binding_cannot_be_updated(
-    client: TestClient, scope: dict[str, str]
-) -> None:
+def test_an_unknown_binding_cannot_be_updated(client: TestClient, scope: dict[str, str]) -> None:
     missing = client.patch(
         f"/api/v1/channel-bindings/{uuid4()}",
         headers=scope,
@@ -473,9 +459,7 @@ def test_switching_a_binding_to_the_long_connection_through_the_api(
     握手**的：没有它们，scheduler 会跳过这个绑定（`api/cli.py` 的
     `continue`），切过去只会得到一个看起来正常、实际收不到消息的配置。
     """
-    created = _create(
-        client, scope, published_agent, secret_ref, app_secret_ref=secret_ref
-    )
+    created = _create(client, scope, published_agent, secret_ref, app_secret_ref=secret_ref)
     assert created.status_code == 201, created.text
     binding_id = created.json()["id"]
 
@@ -527,9 +511,7 @@ def test_a_long_connection_binding_cannot_have_its_app_secret_cleared(
     绑定已经在长连接上跑着，这次 PATCH 只清 `app_secret_ref`——没提
     `transport`，但结果一样是一个 scheduler 会跳过的绑定。
     """
-    created = _create(
-        client, scope, published_agent, secret_ref, app_secret_ref=secret_ref
-    )
+    created = _create(client, scope, published_agent, secret_ref, app_secret_ref=secret_ref)
     assert created.status_code == 201, created.text
     binding_id = created.json()["id"]
     switched = client.patch(
@@ -615,9 +597,7 @@ def test_the_long_connection_is_refused_when_the_named_secret_no_longer_resolves
     `changes`，一个这次没被碰到的失效引用永远不会被重新校验，而它正是这里
     唯一的 app secret。
     """
-    created = _create(
-        client, scope, published_agent, secret_ref, app_secret_ref=secret_ref
-    )
+    created = _create(client, scope, published_agent, secret_ref, app_secret_ref=secret_ref)
     assert created.status_code == 201, created.text
     binding_id = created.json()["id"]
     disabled = client.post(f"/api/v1/secrets/{secret_ref}/disable", headers=scope)
@@ -640,14 +620,7 @@ def test_the_long_connection_is_refused_when_the_named_secret_no_longer_resolves
 def test_creating_a_binding_refuses_a_field_it_would_otherwise_swallow(
     client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
 ) -> None:
-    """请求被接受、字段被丢掉、状态码是成功——三件事不能同时发生。
-
-    `CreateChannelBindingRequest` 没有 `transport`，也没有 `extra="forbid"`
-    （这个 repo 别处用了，见 `agents/domain/models.py`），所以带上它会拿到
-    201 和一个 `transport: "webhook"` 的响应体。POST 上不接 `transport` 是
-    有意的——真要接，after-state 校验也得搬进 `create()`——但「不接」必须说
-    出来，而不是默默吃掉。
-    """
+    """Unsupported fields must be refused rather than silently discarded."""
     created = client.post(
         "/api/v1/channel-bindings",
         headers=scope,
@@ -657,11 +630,84 @@ def test_creating_a_binding_refuses_a_field_it_would_otherwise_swallow(
             "app_id": "cli_a1b2c3",
             "encrypt_key_ref": secret_ref,
             "app_secret_ref": secret_ref,
-            "transport": "long_connection",
+            "unsupported_field": "long_connection",
         },
     )
 
     assert created.status_code == 422, created.text
+    assert client.get("/api/v1/channel-bindings", headers=scope).json() == []
+
+
+def test_create_long_connection_in_one_request(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    created = _create(
+        client,
+        scope,
+        published_agent,
+        secret_ref,
+        app_secret_ref=secret_ref,
+        transport="long_connection",
+    )
+    assert created.status_code == 201, created.text
+    row = next(
+        item
+        for item in client.get("/api/v1/channel-bindings", headers=scope).json()
+        if item["id"] == created.json()["id"]
+    )
+    assert row["transport"] == "long_connection"
+    assert row["app_secret_ref"] == secret_ref
+    assert row["long_connection_state"] == "never"
+    assert row["long_connection_seen_at"] is None
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        {"app_id": None},
+        {"app_id": ""},
+        {"app_id": "   "},
+        {"app_secret_ref": None},
+        {"app_secret_ref": "missing-secret"},
+    ],
+)
+def test_create_long_connection_refuses_unusable_credentials_without_saving(
+    client: TestClient,
+    scope: dict[str, str],
+    published_agent: str,
+    secret_ref: str,
+    missing: dict[str, str | None],
+) -> None:
+    values = {"app_secret_ref": secret_ref, "transport": "long_connection", **missing}
+    refused = _create(client, scope, published_agent, secret_ref, **values)
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["code"] == "channel_transport_unusable"
+    assert client.get("/api/v1/channel-bindings", headers=scope).json() == []
+
+
+def test_create_long_connection_refuses_disabled_app_secret(
+    client: TestClient, scope: dict[str, str], published_agent: str, secret_ref: str
+) -> None:
+    app_secret = client.post(
+        "/api/v1/secrets",
+        headers=scope,
+        json={
+            "name": "disabled-app-secret",
+            "scope": "workspace",
+            "plaintext": "test-only",
+        },
+    ).json()["id"]
+    assert client.post(f"/api/v1/secrets/{app_secret}/disable", headers=scope).status_code == 200
+    refused = _create(
+        client,
+        scope,
+        published_agent,
+        secret_ref,
+        app_secret_ref=app_secret,
+        transport="long_connection",
+    )
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["code"] == "channel_transport_unusable"
     assert client.get("/api/v1/channel-bindings", headers=scope).json() == []
 
 
@@ -684,17 +730,13 @@ async def test_the_list_says_whether_a_long_connection_is_actually_connected(
       却从没连上过是个真问题，合并会让它看起来正常）
     - 刚写过心跳：`connected`
     """
-    created = _create(
-        client, scope, published_agent, secret_ref, app_secret_ref=secret_ref
-    )
+    created = _create(client, scope, published_agent, secret_ref, app_secret_ref=secret_ref)
     assert created.status_code == 201, created.text
     binding_id = created.json()["id"]
 
     def state_now() -> str:
         listed = client.get("/api/v1/channel-bindings", headers=scope).json()
-        return next(item for item in listed if item["id"] == binding_id)[
-            "long_connection_state"
-        ]
+        return next(item for item in listed if item["id"] == binding_id)["long_connection_state"]
 
     assert created.json()["long_connection_state"] == "not_applicable"
     assert created.json()["long_connection_seen_at"] is None
@@ -712,10 +754,7 @@ async def test_the_list_says_whether_a_long_connection_is_actually_connected(
     # 守着。两条分开，坏的时候才知道坏在哪一半。
     async with engine.begin() as connection:
         await connection.execute(
-            text(
-                "UPDATE channel_bindings SET long_connection_seen_at = now()"
-                " WHERE id = :b"
-            ),
+            text("UPDATE channel_bindings SET long_connection_seen_at = now() WHERE id = :b"),
             {"b": UUID(binding_id)},
         )
 

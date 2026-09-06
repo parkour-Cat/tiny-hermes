@@ -49,6 +49,47 @@ const AGENTS = [
   { id: AGENT, name: "Support", alias: "support", status: "active", current_version_id: "v1", created_at: "2026-08-01T00:00:00Z" },
 ];
 
+test.each([false, true])("new long connection saves once and validates credentials after selection (clear=%s)", async (clearCredentials) => {
+  const sent: unknown[] = [];
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json([])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/secrets", () => HttpResponse.json([
+      { id: "s1", name: "encrypt-key", scope: "workspace", status: "active" },
+      { id: "s2", name: "app-secret", scope: "workspace", status: "active" },
+    ])),
+    http.post("/api/v1/channel-bindings", async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(binding({ transport: "long_connection", app_secret_ref: "s2", long_connection_state: "never" }), { status: 201 });
+    }),
+  );
+  renderChannels();
+  await userEvent.click(await screen.findByRole("button", { name: t("bindChannel") }));
+  await userEvent.click(screen.getByLabelText(t("channelAgent")));
+  await userEvent.click(await screen.findByTitle("Support"));
+  await userEvent.click(screen.getByLabelText(t("channelKeyRef")));
+  await userEvent.click(await screen.findByTitle("encrypt-key"));
+  await userEvent.type(screen.getByLabelText(t("channelAppId")), "cli_new");
+  await userEvent.click(screen.getByLabelText(t("channelAppSecretRef")));
+  const option = (await screen.findAllByTitle("app-secret")).find((node) => node.closest(".ant-select-dropdown:not(.ant-select-dropdown-hidden)"));
+  await userEvent.click(option!);
+  await userEvent.click(screen.getByLabelText(t("channelTransport")));
+  await userEvent.click(await screen.findByTitle(t("channelTransportLongConnection")));
+  if (clearCredentials) await userEvent.clear(screen.getByLabelText(t("channelAppId")));
+  await userEvent.click(screen.getByRole("button", { name: t("bindChannelConfirm") }));
+  if (clearCredentials) {
+    await waitFor(() => expect(screen.getByLabelText(t("channelAppId"))).toHaveAttribute("aria-invalid", "true"));
+    expect(sent).toEqual([]);
+  } else {
+    await waitFor(() => expect(sent).toEqual([{
+      channel: "feishu", agent_id: AGENT, app_id: "cli_new",
+      encrypt_key_ref: "s1", app_secret_ref: "s2", transport: "long_connection",
+    }]));
+    expect(await screen.findByText(t("channelTransportRestartHint"))).toBeVisible();
+    expect(screen.queryByText(t("channelConnectionConnected"))).not.toBeInTheDocument();
+  }
+});
+
 test("channel setup separates Feishu from web chat before showing credentials", async () => {
   server.use(
     http.get("/api/v1/channel-bindings", () => HttpResponse.json([])),
