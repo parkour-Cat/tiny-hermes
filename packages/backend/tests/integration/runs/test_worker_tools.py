@@ -276,6 +276,54 @@ async def test_both_turns_land_in_the_transcript(
     assert roles == ["user", "assistant", "tool", "assistant"]
 
 
+@pytest.mark.parametrize("output", ["", "file.txt"])
+async def test_empty_file_tool_results_are_counted_in_run_and_workspace_usage(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_with_tools: Any,
+    output: str,
+) -> None:
+    agent = agent_with_tools(["file.list"])
+    run = submit(client, scope, agent, "list two directories")
+    sandbox = StandInSandbox(output=output)
+    model = Recording(ModelResponse(
+        stop_reason=StopReason.TOOL_CALL,
+        text="",
+        tool_calls=tuple(
+            ToolCallBlock(call_id=f"c{index}", name="file.list", arguments={"path": "."})
+            for index in range(2)
+        ),
+    ), _text("done"))
+
+    await drive(engine, model, sandbox)
+
+    assert sandbox.calls.count("execute") == 2
+    snapshot = client.get(f"/api/v1/runs/{run}", headers=scope).json()
+    assert snapshot["budget"]["consumed_tool_calls"] == 2
+    usage = client.get("/api/v1/usage", headers=scope).json()
+    assert usage["total_tool_calls"] == 2
+
+
+async def test_a_multi_call_round_stops_dispatching_at_the_tool_limit(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_with_tools: Any
+) -> None:
+    agent = agent_with_tools(["file.list"])
+    run = submit(client, scope, agent, "list directories")
+    async with engine.begin() as db:
+        await db.execute(text("UPDATE run_budget_scopes SET max_tool_calls=1 WHERE root_run_id=:id"), {"id": run})
+    sandbox = StandInSandbox()
+    response = ModelResponse(stop_reason=StopReason.TOOL_CALL, text="", tool_calls=tuple(
+        ToolCallBlock(call_id=f"c{index}", name="file.list", arguments={"path": "."})
+        for index in range(3)
+    ))
+
+    await drive(engine, Recording(response), sandbox)
+
+    assert sandbox.calls.count("execute") == 1
+    snapshot = client.get(f"/api/v1/runs/{run}", headers=scope).json()
+    assert snapshot["budget"]["consumed_tool_calls"] == 1
+    assert snapshot["status"] == "paused"
+    assert snapshot["pause_reason"] == "limit"
+
+
 async def test_two_tool_rounds_reuse_one_container(
     client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_with_tools: Any
 ) -> None:
