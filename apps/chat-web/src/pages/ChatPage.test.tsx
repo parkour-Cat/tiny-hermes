@@ -17,6 +17,24 @@ const SESSION = "33333333-4444-4555-8666-777777777777";
 const RUN = "55555555-6666-4777-8888-999999999999";
 const APPROVAL = "77777777-8888-4999-a000-111111111111";
 
+test("reopening a conversation exposes its saved files without an active run", async () => {
+  rememberSessionId(ALIAS, SESSION);
+  server.use(
+    http.get("/api/v1/end-user/agents", () => HttpResponse.json([])),
+    http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([])),
+    http.get(`/api/v1/end-user/sessions/${SESSION}/files`, () => HttpResponse.json({
+      revision_id: "revision-1", items: [{ path: "notes/summary.md", size_bytes: 42 }],
+    })),
+    http.get(`/api/v1/end-user/sessions/${SESSION}/files/content`, ({ request }) => {
+      expect(new URL(request.url).searchParams.get("revision_id")).toBe("revision-1");
+      return HttpResponse.json({ code: "workspace_files_changed" }, { status: 409 });
+    }),
+  );
+  renderChat(`/${ALIAS}/${SESSION}`);
+  await userEvent.click(await screen.findByRole("button", { name: "下载 notes/summary.md" }));
+  expect(await screen.findByText("文件已更新，请从刷新后的列表重新下载。")).toBeInTheDocument();
+});
+
 const BUDGET = {
   max_execution_seconds: 600,
   consumed_execution_ms: 0,

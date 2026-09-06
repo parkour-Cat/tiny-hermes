@@ -308,7 +308,10 @@ async def test_a_multi_call_round_stops_dispatching_at_the_tool_limit(
     agent = agent_with_tools(["file.list"])
     run = submit(client, scope, agent, "list directories")
     async with engine.begin() as db:
-        await db.execute(text("UPDATE run_budget_scopes SET max_tool_calls=1 WHERE root_run_id=:id"), {"id": run})
+        await db.execute(
+            text("UPDATE run_budget_scopes SET max_tool_calls=1 WHERE root_run_id=:id"),
+            {"id": run},
+        )
     sandbox = StandInSandbox()
     response = ModelResponse(stop_reason=StopReason.TOOL_CALL, text="", tool_calls=tuple(
         ToolCallBlock(call_id=f"c{index}", name="file.list", arguments={"path": "."})

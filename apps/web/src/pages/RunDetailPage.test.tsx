@@ -19,6 +19,30 @@ const THIRD_RUN = "66666666-7777-4888-8999-aaaaaaaaaaaa";
 const SESSION = "33333333-4444-4555-8666-777777777777";
 const VERSION = "66666666-7777-4888-8999-aaaaaaaaaaaa";
 
+test("saved workspace files have a download even without artifacts, and stale downloads refresh the list", async () => {
+  stream();
+  let stale = false;
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run({ status: "completed" }))),
+    http.get(`/api/v1/runs/${RUN}/tree`, () => HttpResponse.json({ root_run_id: RUN, nodes: [] })),
+    http.get(`/api/v1/runs/${RUN}/files`, () => HttpResponse.json({
+      revision_id: stale ? "revision-2" : "revision-1",
+      items: [{ path: stale ? "notes/new.md" : "notes/summary.md", size_bytes: 42 }],
+    })),
+    http.get(`/api/v1/runs/${RUN}/files/content`, ({ request }) => {
+      expect(request.headers.get("X-Workspace-Id")).toBe(WORKSPACE);
+      expect(new URL(request.url).searchParams.get("revision_id")).toBe("revision-1");
+      expect(new URL(request.url).searchParams.get("path")).toBe("notes/summary.md");
+      stale = true;
+      return HttpResponse.json({ code: "workspace_files_changed" }, { status: 409 });
+    }),
+  );
+  renderRun();
+  await userEvent.click(await screen.findByRole("button", { name: "下载 notes/summary.md" }));
+  expect(await screen.findByText("文件已更新，请从刷新后的列表重新下载。")).toBeInTheDocument();
+  expect(await screen.findByText("notes/new.md")).toBeInTheDocument();
+});
+
 const BUDGET = {
   max_execution_seconds: 600,
   consumed_execution_ms: 1_200,

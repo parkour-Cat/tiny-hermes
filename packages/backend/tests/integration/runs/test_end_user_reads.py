@@ -30,6 +30,7 @@ from tiny_hermes.shared.config import Settings
 
 from ..conftest import VALID_SPEC
 from ..egress_support import ProxyHandle
+from ..workspace_file_support import seed_files
 from .http_tool_support import StandIn, approve_host, register_tool, worker
 
 ISSUER = "https://idp.acme.example"
@@ -52,6 +53,31 @@ def _rsa_keypair() -> tuple[str, str]:
 
 
 RSA_PRIVATE_PEM, RSA_PUBLIC_PEM = _rsa_keypair()
+
+
+async def test_saved_session_files_are_only_available_to_the_owner(
+    client: TestClient, scope: dict[str, str], workspace_id: str,
+    engine: AsyncEngine, settings: Settings, registered_issuer: None, published_agent: None,
+) -> None:
+    del registered_issuer, published_agent
+    _sign_in(client, workspace_id, "file-owner")
+    session_id = _start_session(client)
+    run_id = _submit_run(client, session_id, "saved-files")
+    revision, body = await seed_files(engine, settings, run_id)
+    base = f"/api/v1/end-user/sessions/{session_id}/files"
+    result = client.get(base)
+    assert result.status_code == 200, result.text
+    assert result.json() == {"revision_id": str(revision), "items": [
+        {"path": "notes/summary.md", "size_bytes": len(body)},
+    ]}
+    params = {"revision_id": str(revision), "path": "notes/summary.md"}
+    assert client.get(f"{base}/content", params=params).content == body
+    from tiny_hermes.identity.presentation.dependencies import SESSION_COOKIE
+    client.cookies.delete(SESSION_COOKIE)
+    assert client.get(f"/api/v1/runs/{run_id}/files", headers=scope).status_code == 403
+    _sign_in(client, workspace_id, "another-reader")
+    assert client.get(base).status_code == 403
+    assert client.get(f"{base}/content", params=params).status_code == 403
 
 
 def _credential(*, workspace_id: str, sub: str) -> str:
