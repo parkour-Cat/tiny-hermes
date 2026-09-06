@@ -267,3 +267,51 @@ async def test_english_search_still_works_alongside_chinese(
     await _worker(engine, workspace_id).run_once()
 
     assert "pelican rollout" in await _transcript(engine, found)
+
+
+async def _reasoned_reply(engine: AsyncEngine, session_id: str, workspace_id: str) -> None:
+    from tiny_hermes.runs.domain.models import CanonicalMessage, ReasoningBlock, TextBlock
+    from tiny_hermes.runs.infrastructure.tables import SessionMessageRow
+
+    message = CanonicalMessage(role="assistant", blocks=(
+        ReasoningBlock(text="privatequartz 隐藏推演 pelican"),
+        TextBlock(text="The pelican rollout is on Tuesday. 鹈鹕项目定在下周二发布。"),
+    ))
+    async with async_sessionmaker(engine).begin() as db:
+        db.add(SessionMessageRow(
+            session_id=UUID(session_id), workspace_id=UUID(workspace_id), sequence=1,
+            role=message.role, content=message.document(), redacted=False,
+        ))
+
+
+@pytest.mark.parametrize("query", ["privatequartz", "隐藏推演"])
+async def test_reasoning_only_terms_do_not_match_console_search(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine,
+    session_for: Callable[[str], str], searcher: str, query: str,
+) -> None:
+    await _reasoned_reply(engine, session_for(searcher), scope["X-Workspace-Id"])
+    response = client.get("/api/v1/memories/search", headers=scope, params={"q": query})
+    assert response.status_code == 200, response.text
+    assert response.json() == []
+
+
+async def test_search_snippets_include_only_visible_text_parts(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine,
+    session_for: Callable[[str], str], searcher: str,
+) -> None:
+    session_id = session_for(searcher)
+    await _reasoned_reply(engine, session_id, scope["X-Workspace-Id"])
+    response = client.get("/api/v1/memories/search", headers=scope, params={"q": "pelican"})
+    assert response.status_code == 200, response.text
+    hit = next(item for item in response.json() if item["session_id"] == session_id)
+    assert hit["snippet"] == "The pelican rollout is on Tuesday. 鹈鹕项目定在下周二发布。"
+
+
+async def test_run_search_does_not_retrieve_reasoning_from_earlier_sessions(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine,
+    session_for: Callable[[str], str], searcher: str,
+) -> None:
+    await _reasoned_reply(engine, session_for(searcher), scope["X-Workspace-Id"])
+    found = _run(client, scope, session_for(searcher), "privatequartz")
+    await _worker(engine, scope["X-Workspace-Id"]).run_once()
+    assert "No past message matched" in await _transcript(engine, found)
