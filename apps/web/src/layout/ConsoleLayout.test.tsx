@@ -50,6 +50,7 @@ function renderShell(
     // handlers, listed *before* the empty ones: within one `use`, the earlier
     // handler is the one that answers.
     ...handlers,
+    http.get("/api/v1/workspaces/:id/members/me", () => HttpResponse.json({ role: "workspace_admin" })),
     ...emptyQueues(),
   );
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -236,7 +237,7 @@ test("待办上的数字是三个队列的总数", async () => {
   expect(await screen.findByText("3")).toBeVisible();
 });
 
-test("有一个队列读不到时不显示数字", async () => {
+test("有一个可处理队列读不到时显示未知", async () => {
   // 显示「2」而其实是「2 + 读不到」，比不显示更糟：它看起来是个准确的数。
   renderShell(`/workspaces/${WORKSPACE}/agents`, { count: 0 }, [
     http.get("/api/v1/approvals", () => HttpResponse.json({ items: [{ id: "a" }, { id: "b" }], has_more: false })),
@@ -244,5 +245,6 @@ test("有一个队列读不到时不显示数字", async () => {
     http.get("/api/v1/memories/pending", () => HttpResponse.json([])),
   ]);
   await screen.findByRole("navigation");
-  await waitFor(() => expect(screen.queryByText("2")).toBeNull());
+  expect(await screen.findByText("?")).toBeVisible();
+  expect(screen.queryByText("2")).toBeNull();
 });

@@ -66,3 +66,10 @@ test("设置里的段按依赖排序：先有 Key 才能接模型", () => {
     "identity-providers",
   ]);
 });
+
+test("conversation search belongs to records and retains administrator access", () => {
+  const records = NAV_GROUPS.find((group) => group.key === "records")!;
+  expect(visibleSections(records, "workspace_admin", false).map((s) => s.key)).toContain("sessions");
+  expect(visibleSections(records, "developer", false).map((s) => s.key)).not.toContain("sessions");
+  expect(visibleSections(records, "viewer", false).map((s) => s.key)).not.toContain("sessions");
+});

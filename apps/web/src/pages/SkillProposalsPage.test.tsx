@@ -153,7 +153,9 @@ test("approving publishes a version and says the bindings did not move", async (
   expect(
     await screen.findByText("已发布版本 2。已发布的 Agent 的绑定没有改变。"),
   ).toBeInTheDocument();
-  await waitFor(() => expect(screen.getByText("已批准")).toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByRole("button", { name: "批准并发布新版本" })).not.toBeInTheDocument());
+  await userEvent.click(screen.getByRole("radio", { name: "已批准" }));
+  expect(await screen.findByText("rollout")).toBeVisible();
 });
 
 test("a proposal the scan blocked has no approve control at all", async () => {
@@ -208,7 +210,9 @@ test("rejecting warns that it produces nothing, then ends the proposal", async (
 
   expect(await screen.findByText("拒绝之后这条提案就结束了，不会产生任何版本。")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "确定" }));
-  expect(await screen.findByText("已拒绝")).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByRole("button", { name: "拒绝" })).not.toBeInTheDocument());
+  await userEvent.click(screen.getByRole("radio", { name: "已拒绝" }));
+  expect(await screen.findByText("rollout")).toBeVisible();
 });
 
 test("an empty queue says so rather than showing an empty page", async () => {

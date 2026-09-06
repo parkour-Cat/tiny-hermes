@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { expect, test } from "vitest";
+import { beforeEach, expect, test } from "vitest";
 
+import { AuthProvider } from "../auth/AuthProvider";
 import { AgentDetailPage } from "./AgentDetailPage";
 import { TestTheme } from "../test/TestTheme";
 import { t } from "../i18n/zh-CN";
@@ -12,6 +13,11 @@ import { server } from "../test/server";
 
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
 const AGENT = "22222222-3333-4444-8555-666666666666";
+
+beforeEach(() => server.use(
+  http.get("/api/v1/auth/me", () => HttpResponse.json({ id: "u1", is_platform_admin: false })),
+  http.get(`/api/v1/workspaces/${WORKSPACE}/members/me`, () => HttpResponse.json({ role: "developer" })),
+));
 
 const SPEC = {
   schema_version: 1,
@@ -198,12 +204,12 @@ function renderDetail(): QueryClient {
     <TestTheme>
       <QueryClientProvider client={client}>
         <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE}/agents/${AGENT}`]}>
-          <Routes>
+          <AuthProvider><Routes>
             <Route
               path="/workspaces/:workspaceId/agents/:agentId"
               element={<AgentDetailPage />}
             />
-          </Routes>
+          </Routes></AuthProvider>
         </MemoryRouter>
       </QueryClientProvider>
     </TestTheme>,
@@ -1004,6 +1010,16 @@ test("shared memory is written for the Agent currently open", async () => {
   renderDetail();
   await userEvent.click(await screen.findByRole("button", { name: t("writeShared") }));
   await userEvent.type(await screen.findByLabelText(t("memoryBody")), "Ship notes on Fridays.");
-  await userEvent.click(screen.getByRole("button", { name: t("saveName") }));
+  await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: t("saveName") }));
   await waitFor(() => expect(sent).toEqual({ agent_id: AGENT, body: "Ship notes on Fridays." }));
+});
+
+test("a platform administrator can add shared memory even with viewer membership", async () => {
+  loadedAgent();
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json({ id: "u1", is_platform_admin: true })),
+    http.get(`/api/v1/workspaces/${WORKSPACE}/members/me`, () => HttpResponse.json({ role: "viewer" })),
+  );
+  renderDetail();
+  expect(await screen.findByRole("button", { name: t("writeShared") })).toBeVisible();
 });

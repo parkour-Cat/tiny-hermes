@@ -44,7 +44,7 @@ test("待办通过二级入口切换队列，每次只显示一个", async () =>
     http.get("/api/v1/workspaces/:id/members/me", () =>
       HttpResponse.json({ role: "workspace_admin" }),
     ),
-    http.get("/api/v1/approvals", () => HttpResponse.json([])),
+    http.get("/api/v1/approvals", () => HttpResponse.json({ items: [], has_more: false })),
     http.get("/api/v1/skill-proposals", () => HttpResponse.json([])),
     http.get("/api/v1/memories/pending", () => HttpResponse.json([])),
     http.get("/api/v1/memories/shared", () => HttpResponse.json([])),
