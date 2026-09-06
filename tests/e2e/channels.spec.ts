@@ -73,7 +73,7 @@ test("an administrator binds a channel, and the delivery path knows about it", a
   expect(agentId).toBeTruthy();
 
   await page.goto(`/workspaces/${workspaceId}/channels`);
-  await page.getByRole("button", { name: "绑定渠道" }).click();
+  await page.getByRole("button", { name: "接入飞书机器人" }).click();
   await page.getByLabel("Agent").click();
   await page.getByTitle("Greeter", { exact: true }).click();
   await page.getByLabel("加密密钥").click();
@@ -88,5 +88,6 @@ test("an administrator binds a channel, and the delivery path knows about it", a
   // Closing it is a state, not a deletion — `channel_events` is the record
   // of what this channel already delivered.
   await page.getByRole("button", { name: "停用" }).click();
+  await page.getByRole("button", { name: "确定", exact: true }).click();
   await expect(page.getByRole("cell", { name: "停用" })).toBeVisible();
 });

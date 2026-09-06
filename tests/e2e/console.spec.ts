@@ -12,6 +12,22 @@ import { unfold } from "./session";
  */
 
 /** A name nothing else in the stack will have. */
+test("responsive workspace pages retain a usable content width", async ({ page }) => {
+  await openWorkspace(page);
+  for (const width of [320, 390, 768, 1280]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.getByRole("link", { name: "待办", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "待办", exact: true })).toBeVisible();
+    const dimensions = await page.locator("main").evaluate((element) => ({
+      content: element.getBoundingClientRect().width,
+      viewport: innerWidth,
+      scroll: document.documentElement.scrollWidth,
+    }));
+    expect(dimensions.content).toBeGreaterThan(Math.min(width - 64, 600));
+    expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.viewport);
+  }
+});
+
 function unique(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1_000)}`;
 }
