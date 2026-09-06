@@ -12,7 +12,6 @@ worklist, where the thing you came to look at is the thing that just
 happened and every new row pushes it further from the top.
 """
 
-
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -101,9 +100,7 @@ def test_a_session_filtered_listing_stays_in_queue_order(
     first = _submit(client, scope, session_id, "s-a")
     second = _submit(client, scope, session_id, "s-b")
 
-    listed = client.get(
-        "/api/v1/runs", headers=scope, params={"session_id": session_id}
-    )
+    listed = client.get("/api/v1/runs", headers=scope, params={"session_id": session_id})
 
     body = listed.json()
     assert [str(entry["id"]) for entry in body][:2] == [first, second]
@@ -111,7 +108,9 @@ def test_a_session_filtered_listing_stays_in_queue_order(
 
 
 def test_console_tasks_are_identifiable_by_their_request_and_agent(
-    client: TestClient, scope: dict[str, str], session_id: str,
+    client: TestClient,
+    scope: dict[str, str],
+    session_id: str,
 ) -> None:
     run_id = _submit(client, scope, session_id, "readable-title")
     listing = client.get("/api/v1/runs", headers=scope).json()

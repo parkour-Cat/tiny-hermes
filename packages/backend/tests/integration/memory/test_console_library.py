@@ -1,5 +1,5 @@
-from uuid import UUID, uuid4
 from typing import Any
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -97,7 +97,9 @@ async def test_viewer_cannot_read_or_modify_shared_library(
 
 
 def test_exact_memory_read_is_scoped_and_empty_edits_are_refused(
-    client: TestClient, scope: dict[str, str], published_agent: str,
+    client: TestClient,
+    scope: dict[str, str],
+    published_agent: str,
 ) -> None:
     row = create(client, scope, published_agent)
     exact = client.get(f"/api/v1/memories/{row['id']}", headers=scope)
@@ -106,7 +108,19 @@ def test_exact_memory_read_is_scoped_and_empty_edits_are_refused(
     other = {**scope, "X-Workspace-Id": str(uuid4())}
     assert client.get(f"/api/v1/memories/{row['id']}", headers=other).status_code == 404
     assert client.get("/api/v1/memories", headers=other).json()["items"] == []
-    assert client.patch(f"/api/v1/memories/shared/{row['id']}", headers=other,
-        json={"body": "wrong scope", "expected_updated_at": row["updated_at"]}).status_code == 404
-    assert client.patch(f"/api/v1/memories/shared/{row['id']}", headers=scope,
-        json={"expected_updated_at": row["updated_at"]}).status_code == 422
+    assert (
+        client.patch(
+            f"/api/v1/memories/shared/{row['id']}",
+            headers=other,
+            json={"body": "wrong scope", "expected_updated_at": row["updated_at"]},
+        ).status_code
+        == 404
+    )
+    assert (
+        client.patch(
+            f"/api/v1/memories/shared/{row['id']}",
+            headers=scope,
+            json={"expected_updated_at": row["updated_at"]},
+        ).status_code
+        == 422
+    )

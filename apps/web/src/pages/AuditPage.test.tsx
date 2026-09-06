@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -177,4 +177,20 @@ test("a refused export says why, instead of handing over an error page as a file
   await userEvent.click(await screen.findByRole("button", { name: /导出|Export/i }));
 
   expect(await screen.findByText(/Narrow the time window/)).toBeVisible();
+});
+
+
+test("readable audit actions and date filters retain the underlying query", async () => {
+  const queries: URLSearchParams[] = [];
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(USER)),
+    http.get("/api/v1/audit-events", ({ request }) => {
+      queries.push(new URL(request.url).searchParams);
+      return HttpResponse.json({ items: [row()], has_more: false, visibility: "full" });
+    }),
+  );
+  renderAudit();
+  expect(await screen.findByText("暂停任务")).toBeVisible();
+  fireEvent.change(screen.getByLabelText("开始日期"), { target: { value: "2026-09-01" } });
+  await waitFor(() => expect(queries.at(-1)?.get("since")).toBe(new Date("2026-09-01T00:00:00").toISOString()));
 });
