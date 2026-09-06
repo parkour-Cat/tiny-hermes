@@ -69,6 +69,18 @@ test("the list is asked for inside the workspace the address names", async () =>
   expect(scopes).toEqual([WORKSPACE]);
 });
 
+test("examples remain reachable after the first Agent was created", async () => {
+  server.use(
+    http.get("/api/v1/agents", () => HttpResponse.json([agent()])),
+    http.get("/api/v1/agents/examples", () => HttpResponse.json([{ slug: "notes", name: "Notes example", summary: "test" }])),
+    http.get("/api/v1/model-endpoints", () => HttpResponse.json([{ id: "m1", name: "Model", model: "test" }])),
+  );
+  renderAgents();
+  await screen.findByText("Analyst");
+  await userEvent.click(screen.getByRole("button", { name: "从示例创建" }));
+  expect(await screen.findByText("Notes example")).toBeVisible();
+});
+
 test("a published agent and an unpublished one are told apart", async () => {
   server.use(
     http.get("/api/v1/agents", () =>

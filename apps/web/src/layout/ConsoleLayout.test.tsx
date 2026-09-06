@@ -107,6 +107,11 @@ test("both sections stay inside the workspace the address names", async () => {
   expect(screen.getByText("agent list")).toBeInTheDocument();
 });
 
+test("workspace switching is available in the sidebar", async () => {
+  renderShell(`/workspaces/${WORKSPACE}/agents`);
+  expect(await screen.findByRole("combobox", { name: "切换工作空间" })).toBeVisible();
+});
+
 test("an address that cannot name a workspace is refused without asking the platform", async () => {
   const { hits } = renderShell("/workspaces/not-a-uuid/agents");
 
