@@ -21,3 +21,15 @@ test("selects a saved credential by name and offers unclassified legacy credenti
   expect(changed).toHaveBeenCalledWith("tool-key");
   expect(screen.queryByText("Model only · 平台")).toBeNull();
 });
+
+test("platform login only offers platform credentials and keeps the form open when adding", async () => {
+  server.use(http.get("/api/v1/secrets", () => HttpResponse.json([
+    { id: "local", name: "Space login", status: "active", purpose: "login", scope: "workspace" },
+    { id: "global", name: "Global login", status: "active", purpose: "login", scope: "platform" },
+  ])));
+  render(<TestTheme><QueryClientProvider client={new QueryClient()}><MemoryRouter initialEntries={["/workspaces/11111111-2222-4333-8444-555555555555"]}><Routes><Route path="/workspaces/:workspaceId" element={<CredentialPicker purpose="login" />} /></Routes></MemoryRouter></QueryClientProvider></TestTheme>);
+  await userEvent.click(screen.getByRole("combobox"));
+  await screen.findByText("Global login · 平台");
+  expect(screen.queryByText("Space login · 工作空间")).toBeNull();
+  expect(screen.getByRole("link", { name: "新建凭据" })).toHaveAttribute("target", "_blank");
+});

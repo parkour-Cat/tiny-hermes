@@ -41,6 +41,19 @@ def test_the_newest_run_is_listed_first(
     assert ids[:3] == [third, second, first]
 
 
+def test_filters_are_applied_before_pagination(
+    client: TestClient, scope: dict[str, str], session_id: str
+) -> None:
+    first = _submit(client, scope, session_id, "invoice-first")
+    second = _submit(client, scope, session_id, "invoice-second")
+    _submit(client, scope, session_id, "unrelated")
+    page = client.get("/api/v1/runs", headers=scope, params={"q": "invoice", "limit": 1})
+    assert [row["id"] for row in page.json()] == [second]
+    older = client.get("/api/v1/runs", headers=scope, params={"q": "invoice", "limit": 1, "offset": 1})
+    assert [row["id"] for row in older.json()] == [first]
+    assert client.get("/api/v1/runs", headers=scope, params={"limit": 101}).status_code == 422
+
+
 async def test_runs_sharing_a_timestamp_still_have_one_order(
     client: TestClient, scope: dict[str, str], session_id: str, engine: AsyncEngine
 ) -> None:

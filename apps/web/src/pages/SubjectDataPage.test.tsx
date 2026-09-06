@@ -93,6 +93,7 @@ test("a request names a person, not a uuid", async () => {
   await waitFor(() => expect(asked).not.toBeNull());
   expect(asked!.searchParams.get("external_user_id")).toBe("alice@example.com");
   expect(await screen.findByText("They prefer mornings.")).toBeVisible();
+  expect(screen.getByText("alice@example.com")).toBeVisible();
 });
 
 test("a name nobody here uses says so, rather than showing an empty person", async () => {

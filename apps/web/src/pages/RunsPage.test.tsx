@@ -308,3 +308,18 @@ test("tasks can be found by request text while keeping their full identifier acc
   expect(screen.queryByText("Summarize September notes")).toBeNull();
   expect(screen.getByText("Organize receipts")).toBeVisible();
 });
+
+test("task lookup requests a bounded page and a next page from the server", async () => {
+  const offsets: string[] = [];
+  listing([]);
+  server.use(http.get("/api/v1/runs", ({ request }) => {
+    const query = new URL(request.url).searchParams;
+    if (query.get("limit") !== "21") return HttpResponse.json([]);
+    offsets.push(query.get("offset") ?? "");
+    return HttpResponse.json(query.get("offset") === "20" ? [runRow({ id: QUEUED_RUN, input_preview: "Last page" })] : Array.from({ length: 21 }, (_, i) => runRow({ id: `run-${i}`, input_preview: `Task ${i}` })));
+  }));
+  renderRuns();
+  await userEvent.click(await screen.findByRole("button", { name: "下一页" }));
+  expect(await screen.findByText("Last page")).toBeVisible();
+  expect(offsets).toEqual(["0", "20"]);
+});
