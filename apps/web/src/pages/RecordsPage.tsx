@@ -1,4 +1,5 @@
 import { GroupedPage } from "../layout/GroupedPage";
+import { SessionSearchPage } from "./SessionSearchPage";
 import { AuditPage } from "./AuditPage";
 import { SubjectDataPage } from "./SubjectDataPage";
 import { UsagePage } from "./UsagePage";
@@ -11,7 +12,8 @@ export function RecordsPage() {
       render={(key) =>
         key === "audit" ? <AuditPage /> :
         key === "usage" ? <UsagePage /> :
-        key === "subjects" ? <SubjectDataPage /> : null
+        key === "subjects" ? <SubjectDataPage /> :
+        key === "sessions" ? <SessionSearchPage /> : null
       }
     />
   );

@@ -35,6 +35,7 @@ import type {
   WritePolicy,
 } from "../api/types";
 import { IMPLEMENTED_TOOLS, MODEL_SCENARIOS } from "../api/types";
+import { SharedMemoryButton } from "./SharedMemoryButton";
 import { FormSection } from "../forms/FormSection";
 import { PageHeading } from "../ui/PageHeading";
 import { useT } from "../i18n/locale";
@@ -582,6 +583,7 @@ export function AgentDetailPage() {
         intro={agent.data.alias}
         extra={
           <Space wrap>
+          <SharedMemoryButton key={agent.data.id} agentId={agent.data.id} agentName={agent.data.name} />
           <Link to={`/workspaces/${workspaceId}/agents/${agentId}/playground`}>
             <Button>{t("openPlayground")}</Button>
           </Link>

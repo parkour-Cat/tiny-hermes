@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Card, Modal, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Modal, Radio, Space, Tag, Typography } from "antd";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -14,6 +14,8 @@ import type {
 import { useT } from "../i18n/locale";
 import { EmptyState } from "../ui/EmptyState";
 import type { MessageKey } from "../i18n/zh-CN";
+import { useProposalAccess } from "../workspace/useProposalAccess";
+import { moment } from "../i18n/moment";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 const STATUSES: Record<string, MessageKey> = {
@@ -46,6 +48,8 @@ const MARKS: Record<string, string> = {
  */
 export function SkillProposalsPage() {
   const t = useT();
+  const access = useProposalAccess();
+  const [status, setStatus] = useState("pending");
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
   const [modal, contextHolder] = Modal.useModal();
@@ -56,19 +60,20 @@ export function SkillProposalsPage() {
   const listQuery = ["skill-proposals", workspaceId] as const;
 
   const listed = useQuery({
-    queryKey: listQuery,
-    queryFn: () => api<ProposalResponse[]>("/api/v1/skill-proposals", scope),
+    queryKey: [...listQuery, status],
+    queryFn: () => api<ProposalResponse[]>(`/api/v1/skill-proposals?status=${status}`, scope),
     enabled: workspaceId !== null,
   });
 
   const opened = useQuery({
-    queryKey: ["skill-proposal", openId] as const,
+    queryKey: ["skill-proposal", workspaceId, openId] as const,
     queryFn: () => api<ProposalDetailResponse>(`/api/v1/skill-proposals/${openId ?? ""}`, scope),
     enabled: workspaceId !== null && openId !== null,
   });
 
   function settled(): void {
     setError(null);
+    void queryClient.invalidateQueries({ queryKey: ["inbox-count", workspaceId] });
     void queryClient.invalidateQueries({ queryKey: listQuery });
     void queryClient.invalidateQueries({ queryKey: ["skill-proposal"] });
     void queryClient.invalidateQueries({ queryKey: ["skills", workspaceId] });
@@ -103,18 +108,7 @@ export function SkillProposalsPage() {
     onError: (caught) => setError(problemMessage(caught, t)),
   });
 
-  if (listed.isError) {
-    return (
-      <Alert
-        type="error"
-        title={problemMessage(listed.error, t)}
-        action={<Button onClick={() => void listed.refetch()}>{t("retry")}</Button>}
-        showIcon
-      />
-    );
-  }
-
-  const proposals = listed.data ?? [];
+  const proposals = (listed.data ?? []).filter((proposal) => proposal.status === status);
 
   return (
     <>
@@ -125,9 +119,13 @@ export function SkillProposalsPage() {
       {note === null ? null : (
         <Alert className="page-alert" type="success" title={note} showIcon />
       )}
-      <Card variant="borderless" loading={listed.isPending}>
-        {proposals.length === 0 ? (
-          <EmptyState title={t("emptyProposals")} />
+      <Radio.Group className="page-alert" aria-label={t("proposalView")} value={status}
+        onChange={(event) => { setStatus(String(event.target.value)); setOpenId(null); }}
+        options={[{ value: "pending", label: t("proposalPending") }, { value: "approved", label: t("proposalApproved") }, { value: "rejected", label: t("proposalRejected") }]} />
+      <Typography.Paragraph type="secondary">{t("proposalQueueHint")}</Typography.Paragraph>
+      <Card variant="borderless" loading={listed.isPending || access.loading}>
+        {listed.isError ? <Alert type="error" title={problemMessage(listed.error, t)} action={<Button onClick={() => void listed.refetch()}>{t("retry")}</Button>} /> : proposals.length === 0 ? (
+          <EmptyState title={t(status === "pending" ? "emptyProposals" : "proposalHistoryEmpty")} />
         ) : (
           proposals.map((proposal) => (
             <article key={proposal.id} className="workspace-row">
@@ -158,7 +156,7 @@ export function SkillProposalsPage() {
                   {/* Absent rather than disabled for anything that cannot be
                       approved: a control that does not move makes the reader
                       guess whether it is their permissions or the content. */}
-                  {proposal.approvable ? (
+                  {status === "pending" && proposal.approvable && access.canDecide(proposal) ? (
                     <Button
                       type="primary"
                       size="small"
@@ -168,7 +166,7 @@ export function SkillProposalsPage() {
                       {t("proposalApprove")}
                     </Button>
                   ) : null}
-                  {proposal.status === "pending" ? (
+                  {proposal.status === "pending" && access.canDecide(proposal) ? (
                     <Button
                       size="small"
                       loading={reject.isPending}
@@ -186,6 +184,8 @@ export function SkillProposalsPage() {
                     </Button>
                   ) : null}
                 </Space>
+                {proposal.status === "pending" && !access.canDecide(proposal) ? <Typography.Paragraph type="secondary">{t("proposalWaitReviewer")}</Typography.Paragraph> : null}
+                {proposal.status !== "pending" ? <Typography.Paragraph type="secondary">{t("approvalDecidedBy")}: {proposal.decided_by ?? "—"} · {proposal.decided_at === null ? "—" : moment(proposal.decided_at)}</Typography.Paragraph> : null}
                 {proposal.status === "pending" &&
                 proposal.findings.some((finding) => finding.severity === "blocking") ? (
                   <Alert

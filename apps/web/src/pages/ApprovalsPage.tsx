@@ -100,6 +100,7 @@ export function ApprovalsPage() {
         body: JSON.stringify({ decision: input.decision, reason: input.reason ?? null }),
       }),
     onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["inbox-count", workspaceId] });
       setError(null);
       setRejecting(null);
       form.resetFields();

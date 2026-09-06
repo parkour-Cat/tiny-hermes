@@ -72,7 +72,7 @@ export function ConsoleLayout() {
               >
                 {t(group.labelKey)}
                 {group.key === "inbox" && inboxCount !== null ? (
-                  <Badge count={inboxCount} className="nav-badge" />
+                  <Badge count={inboxCount} title={t(inboxCount === "?" ? "inboxCountUnknown" : "inboxCountHint")} className="nav-badge" />
                 ) : null}
               </NavLink>
             ))}

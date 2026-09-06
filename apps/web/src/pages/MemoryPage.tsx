@@ -1,11 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
 import { Link } from "react-router-dom";
-import { Alert, Button, Card, Form, Input, Modal, Select, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Space, Tag, Typography } from "antd";
 
 import { api } from "../api/client";
 import { problemMessage } from "../api/messages";
-import type { AgentResponse, MemoryResponse, SearchHitResponse } from "../api/types";
+import type { AgentResponse, MemoryResponse } from "../api/types";
 import { moment } from "../i18n/moment";
 import { useT } from "../i18n/locale";
 import { EmptyState } from "../ui/EmptyState";
@@ -43,47 +42,16 @@ export function MemoryPage() {
     enabled: workspaceId !== null,
   });
 
-  const [query, setQuery] = useState("");
-  const [asked, setAsked] = useState<string | null>(null);
-  const [writing, setWriting] = useState(false);
-  const [form] = Form.useForm<{ agentId: string; body: string }>();
-
-  // §4.6 gives searching somebody else's conversations to the same steward
-  // that reviews memory, which is why it lives on this page rather than
-  // beside Runs: one page, one permission, one thing to explain.
-  const hits = useQuery({
-    queryKey: ["session-search", workspaceId, asked] as const,
-    queryFn: () =>
-      api<SearchHitResponse[]>(
-        `/api/v1/memories/search?q=${encodeURIComponent(asked ?? "")}`,
-        scope,
-      ),
-    enabled: workspaceId !== null && asked !== null && asked !== "",
-  });
-
-  const writeShared = useMutation({
-    mutationFn: (values: { agentId: string; body: string }) =>
-      api<MemoryResponse>("/api/v1/memories/shared", {
-        ...scope,
-        method: "POST",
-        body: JSON.stringify({ agent_id: values.agentId, body: values.body }),
-      }),
-    onSuccess: () => {
-      setWriting(false);
-      form.resetFields();
-      void queryClient.invalidateQueries({ queryKey: pendingQuery });
-    },
-    onError: (caught) =>
-      form.setFields([{ name: "body", errors: [problemMessage(caught, t)] }]),
-  });
-
   const decide = useMutation({
     mutationFn: (input: { id: string; decision: "approve" | "reject" }) =>
       api<MemoryResponse>(`/api/v1/memories/${input.id}/${input.decision}`, {
         ...scope,
         method: "POST",
       }),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: pendingQuery }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: pendingQuery });
+      void queryClient.invalidateQueries({ queryKey: ["inbox-count", workspaceId] });
+    },
   });
 
   if (pending.isError) {
@@ -94,7 +62,7 @@ export function MemoryPage() {
         type="warning"
         showIcon
         message={problemMessage(pending.error, t)}
-        description={t("memoryForbiddenHint")}
+        action={<Button onClick={() => void pending.refetch()}>{t("retry")}</Button>}
       />
     );
   }
@@ -104,62 +72,17 @@ export function MemoryPage() {
 
   return (
     <>
-      <div className="page-heading">
-        <Button type="primary" onClick={() => setWriting(true)}>
-          {t("writeShared")}
-        </Button>
-      </div>
-
-      <Card title={t("searchSessions")} variant="borderless" className="page-alert">
-        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-          <Typography.Paragraph type="secondary">{t("searchSessionsIntro")}</Typography.Paragraph>
-          <Space wrap>
-            <Input
-              aria-label={t("searchSessions")}
-              style={{ minWidth: 320 }}
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              onPressEnter={() => setAsked(query)}
-            />
-            <Button loading={hits.isFetching} onClick={() => setAsked(query)}>
-              {t("searchRun")}
-            </Button>
-          </Space>
-          {hits.isError ? (
-            <Alert type="warning" showIcon message={problemMessage(hits.error, t)} />
-          ) : null}
-          {asked !== null && (hits.data ?? []).length === 0 && !hits.isFetching ? (
-            <EmptyState title={t("searchNoHits")} />
-          ) : null}
-          {(hits.data ?? []).map((hit) => (
-            <Card key={`${hit.session_id}-${hit.sequence}`} variant="borderless" className="page-alert">
-              <Space direction="vertical" size={4} style={{ width: "100%" }}>
-                <Space wrap>
-                  <Tag>{hit.role}</Tag>
-                  {hit.run_id === null ? null : (
-                    <Link to={`/workspaces/${workspaceId}/runs/${hit.run_id}`}>{hit.run_id}</Link>
-                  )}
-                </Space>
-                <Typography.Paragraph>{hit.snippet}</Typography.Paragraph>
-                {hit.shortened ? (
-                  // Said, not implied by an ellipsis: a reader who does not
-                  // know they are holding part of a message reads it as the
-                  // whole of one.
-                  <Typography.Text type="secondary">{t("searchShortened")}</Typography.Text>
-                ) : null}
-              </Space>
-            </Card>
-          ))}
-        </Space>
-      </Card>
-
+      <Space wrap className="page-alert">
+        <Link to={`/workspaces/${workspaceId}/records#sessions`}>{t("searchSessions")}</Link>
+        <Link to={`/workspaces/${workspaceId}/agents`}>{t("memoryManageAtAgent")}</Link>
+      </Space>
       <Card loading={pending.isPending} variant="borderless">
         {rows.length === 0 ? (
           <EmptyState title={t("memoryEmpty")} />
         ) : (
           <Space direction="vertical" size="middle" style={{ width: "100%" }}>
             {rows.map((row) => (
-              <Card key={row.id} variant="borderless" className="page-alert">
+              <Card key={row.id} variant="borderless" className="page-alert memory-review">
                 <Space direction="vertical" size="small" style={{ width: "100%" }}>
                   <Space wrap>
                     <Tag>{row.kind}</Tag>
@@ -194,35 +117,6 @@ export function MemoryPage() {
           </Space>
         )}
       </Card>
-      <Modal
-        open={writing}
-        title={t("writeShared")}
-        okText={t("saveName")}
-        cancelText={t("cancel")}
-        confirmLoading={writeShared.isPending}
-        onCancel={() => setWriting(false)}
-        onOk={() => void form.submit()}
-      >
-        <Form
-          form={form}
-          layout="vertical"
-          requiredMark={false}
-          onFinish={(values) => writeShared.mutate(values)}
-        >
-          <Typography.Paragraph type="secondary">{t("writeSharedHint")}</Typography.Paragraph>
-          <Form.Item name="agentId" label={t("memoryAgent")} rules={[{ required: true }]}>
-            <Select
-              options={(agents.data ?? []).map((agent) => ({
-                value: agent.id,
-                label: agent.name,
-              }))}
-            />
-          </Form.Item>
-          <Form.Item name="body" label={t("memoryBody")} rules={[{ required: true }]}>
-            <Input.TextArea rows={4} />
-          </Form.Item>
-        </Form>
-      </Modal>
       {decide.isError ? (
         <Alert
           className="page-alert"

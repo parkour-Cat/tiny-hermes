@@ -13,6 +13,7 @@ export const LEGACY_REDIRECTS: readonly (readonly [from: string, to: string, anc
   ["mcp-servers", "tooling", "mcp-servers"],
   ["audit", "records", "audit"],
   ["usage", "records", "usage"],
+  ["session-search", "records", "sessions"],
   ["subjects", "records", "subjects"],
   ["members", "settings", "members"],
   ["api-keys", "settings", "api-keys"],

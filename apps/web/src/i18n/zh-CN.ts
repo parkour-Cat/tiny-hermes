@@ -1,4 +1,13 @@
 export const zhCN = {
+  proposalView: "技能提案状态",
+  proposalQueueHint: "待审只列出尚未处理的提案；已批准、已拒绝保留处理记录。工作空间技能由管理员或开发者处理，平台技能由平台管理员处理。",
+  proposalHistoryEmpty: "没有此状态的提案记录",
+  proposalWaitReviewer: "当前账号无法处理此提案，或尚未确认技能权限；可查看差异，交由有权限的管理员或开发者处理。",
+  inboxCountHint: "当前账号可处理的事项；带 + 表示还有更多",
+  inboxCountUnknown: "暂时无法确认待办数量，请进入待办查看",
+  memoryManageAtAgent: "前往 Agent 添加共享记忆",
+  memorySaved: "共享记忆已保存",
+
   approvalTarget: "操作目标",
   approvalTargetUnspecified: "此请求未提供目标信息，请核对下方参数。",
   approvalRequestParameters: "本次调用参数",

@@ -614,3 +614,6 @@ html[data-theme="dark"] .th-tag-interrupted {
 
 .approval-request { overflow-wrap: anywhere; }
 .approval-request pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; padding: 12px; background: rgba(128, 128, 128, .1); border-radius: 8px; }
+
+.memory-review pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; padding: 12px; border-radius: 8px; background: rgba(128, 128, 128, .1); }
+.session-search-result { overflow-wrap: anywhere; }

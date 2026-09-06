@@ -1,6 +1,15 @@
 import type { MessageKey } from "./zh-CN";
 
 export const enUS: Record<MessageKey, string> = {
+  proposalView: "Proposal status",
+  proposalQueueHint: "Pending contains undecided proposals; Approved and Rejected contain history. Workspace administrators and developers review workspace skills; platform administrators review platform skills.",
+  proposalHistoryEmpty: "No proposals with this status",
+  proposalWaitReviewer: "This account cannot decide this proposal, or its skill permissions could not be confirmed. You can inspect its changes and ask an authorized administrator or developer to review it.",
+  inboxCountHint: "Items this account can act on; + means more items exist",
+  inboxCountUnknown: "The actionable count is unavailable. Open Inbox to check.",
+  memoryManageAtAgent: "Add shared memory from an Agent",
+  memorySaved: "Shared memory saved",
+
   approvalTarget: "Target",
   approvalTargetUnspecified: "No target was provided. Review the parameters below.",
   approvalRequestParameters: "Parameters for this call",
