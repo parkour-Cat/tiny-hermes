@@ -993,3 +993,17 @@ test("「能力」段折叠时说清楚绑了什么，不只是写「能力」",
     screen.getByRole("button", { name: new RegExp(t("agentSectionIdentity")) }),
   ).toHaveAttribute("aria-disabled", "true");
 });
+
+test("shared memory is written for the Agent currently open", async () => {
+  loadedAgent();
+  let sent: unknown;
+  server.use(
+    http.get(`/api/v1/workspaces/${WORKSPACE}/members/me`, () => HttpResponse.json({ role: "workspace_admin" })),
+    http.post("/api/v1/memories/shared", async ({ request }) => { sent = await request.json(); return HttpResponse.json({ id: "m1" }); }),
+  );
+  renderDetail();
+  await userEvent.click(await screen.findByRole("button", { name: t("writeShared") }));
+  await userEvent.type(await screen.findByLabelText(t("memoryBody")), "Ship notes on Fridays.");
+  await userEvent.click(screen.getByRole("button", { name: t("saveName") }));
+  await waitFor(() => expect(sent).toEqual({ agent_id: AGENT, body: "Ship notes on Fridays." }));
+});
