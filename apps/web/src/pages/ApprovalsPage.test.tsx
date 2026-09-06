@@ -20,6 +20,30 @@ const ADMIN = {
   is_platform_admin: true,
 };
 
+test("a console administrator cannot decide an end-user confirmation", async () => {
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
+    http.get(`/api/v1/workspaces/${WORKSPACE}/members/me`, () => HttpResponse.json({ role: "workspace_admin" })),
+    queue([approval({ approval_type: "user_confirmation" })]),
+  );
+  renderApprovals();
+  await userEvent.click(await screen.findByRole("radio", { name: "等待他人" }));
+  expect(await screen.findByText("由发起对话的用户在聊天入口确认，控制台不能代为批准。")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "批准" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "拒绝" })).not.toBeInTheDocument();
+});
+
+test("a viewer sees the waiting queue with no decision buttons", async () => {
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json({ ...ADMIN, is_platform_admin: false })),
+    http.get(`/api/v1/workspaces/${WORKSPACE}/members/me`, () => HttpResponse.json({ role: "viewer" })),
+    queue([approval()]),
+  );
+  renderApprovals();
+  expect(await screen.findByText("由工作空间管理员或平台管理员处理。")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "批准" })).not.toBeInTheDocument();
+});
+
 function approval(overrides: object = {}) {
   return {
     id: "a1",

@@ -49,6 +49,43 @@ const AGENTS = [
   { id: AGENT, name: "Support", alias: "support", status: "active", current_version_id: "v1", created_at: "2026-08-01T00:00:00Z" },
 ];
 
+test("channel setup separates Feishu from web chat before showing credentials", async () => {
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json([])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/secrets", () => HttpResponse.json([])),
+    http.get("/api/v1/channel-issuers", () => HttpResponse.json([])),
+  );
+  renderChannels();
+  expect(await screen.findByRole("button", { name: "接入飞书机器人" })).toBeVisible();
+  expect(screen.queryByRole("button", { name: "配置网页登录验证" })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("link", { name: "网页聊天" }));
+  expect(await screen.findByRole("button", { name: "配置网页登录验证" })).toBeVisible();
+  expect(screen.queryByRole("button", { name: "接入飞书机器人" })).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "配置 Support" })).toHaveAttribute("href", `/workspaces/${WORKSPACE}/agents/${AGENT}`);
+});
+
+test("editing can add credentials and switch transport in one save", async () => {
+  let sent: unknown;
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json([binding({ app_secret_ref: null })])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/secrets", () => HttpResponse.json([{ id: "s2", name: "reply-key", scope: "workspace", status: "active" }])),
+    http.patch("/api/v1/channel-bindings/b1", async ({ request }) => {
+      sent = await request.json();
+      return HttpResponse.json(binding({ app_secret_ref: "s2", transport: "long_connection" }));
+    }),
+  );
+  renderChannels();
+  await userEvent.click(await screen.findByRole("button", { name: t("channelEdit") }));
+  await userEvent.click(screen.getByLabelText(t("channelAppSecretRef")));
+  await userEvent.click(await screen.findByTitle("reply-key"));
+  await userEvent.click(screen.getByLabelText(t("channelTransport")));
+  await userEvent.click(await screen.findByTitle(t("channelTransportLongConnection")));
+  await userEvent.click(screen.getByRole("button", { name: t("channelEditConfirm") }));
+  await waitFor(() => expect(sent).toEqual({ app_secret_ref: "s2", transport: "long_connection" }));
+});
+
 test("a bound channel says which Agent it publishes and where", async () => {
   server.use(
     http.get("/api/v1/channel-bindings", () => HttpResponse.json([binding()])),
