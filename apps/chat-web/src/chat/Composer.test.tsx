@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test } from "vitest";
 
@@ -23,6 +23,18 @@ function renderComposer(
     </LocaleProvider>,
   );
 }
+
+test("Enter confirms an IME candidate without sending, then ordinary Enter sends", async () => {
+  const sent: unknown[] = [];
+  renderComposer({ onSend: (value) => { sent.push(value); } });
+  const input = screen.getByLabelText("写给智能体");
+  fireEvent.change(input, { target: { value: "中文输入" } });
+  await act(async () => { fireEvent.keyDown(input, { key: "Enter", isComposing: true }); });
+  expect(sent).toEqual([]);
+  expect(input).toHaveValue("中文输入");
+  fireEvent.keyDown(input, { key: "Enter", isComposing: false });
+  await waitFor(() => expect(sent).toHaveLength(1));
+});
 
 afterEach(() => {
   delete (window as Window & { webkitSpeechRecognition?: unknown }).webkitSpeechRecognition;

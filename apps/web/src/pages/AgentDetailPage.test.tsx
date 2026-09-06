@@ -386,6 +386,60 @@ function version(number: number) {
   };
 }
 
+test("publishing saves edited fields first and publishes the returned revision", async () => {
+  loadedAgent(3);
+  const sent: unknown[] = [];
+  const published = version(1);
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4, "Changed before publishing."));
+    }),
+    http.post(`/api/v1/agents/${AGENT}/publish`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(published, { status: 201 });
+    }),
+    http.get(`/api/v1/agents/${AGENT}/versions/${published.id}`, () =>
+      HttpResponse.json({ ...published, spec: SPEC }),
+    ),
+  );
+  renderDetail();
+  const personality = await screen.findByLabelText("人格");
+  await userEvent.clear(personality);
+  await userEvent.type(personality, "Changed before publishing.");
+  await userEvent.click(screen.getByRole("button", { name: "发布" }));
+  expect(sent).toEqual([]);
+  await userEvent.click(await screen.findByRole("button", { name: "确定" }));
+  await screen.findByText("当前版本 v1");
+  expect(sent).toEqual([
+    { expected_revision: 3, spec: { ...SPEC, personality: "Changed before publishing." } },
+    { expected_revision: 4 },
+  ]);
+});
+
+test("a failed save blocks publication and retains edited fields", async () => {
+  loadedAgent(3);
+  let published = false;
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, () => HttpResponse.json(
+      { code: "draft_revision_conflict", title: "Conflict" }, { status: 409 },
+    )),
+    http.post(`/api/v1/agents/${AGENT}/publish`, () => {
+      published = true;
+      return HttpResponse.json(version(1));
+    }),
+  );
+  renderDetail();
+  const personality = await screen.findByLabelText("人格");
+  await userEvent.clear(personality);
+  await userEvent.type(personality, "Keep this draft.");
+  await userEvent.click(screen.getByRole("button", { name: "发布" }));
+  await userEvent.click(await screen.findByRole("button", { name: "确定" }));
+  await screen.findByText("草稿已被改动，你的修改仍在表单中。请重新载入后再保存。");
+  expect(published).toBe(false);
+  expect(personality).toHaveValue("Keep this draft.");
+});
+
 test("publishing asks first, and sends nothing while the question is open", async () => {
   loadedAgent(3);
   let attempts = 0;
