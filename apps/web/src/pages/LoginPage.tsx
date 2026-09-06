@@ -57,7 +57,6 @@ export function LoginPage() {
         <Space orientation="vertical" size="large" className="full-width">
           <div>
             <Typography.Title level={2}>{t("loginTitle")}</Typography.Title>
-            <Typography.Text type="secondary">{t("appTagline")}</Typography.Text>
           </div>
           {initialized ? <Alert type="success" title={t("bootstrapSucceeded")} /> : null}
           {ssoFailed ? <Alert type="error" title={t("ssoFailed")} showIcon /> : null}

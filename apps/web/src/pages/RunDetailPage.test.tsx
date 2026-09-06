@@ -448,10 +448,10 @@ test("shows a tool turn in the transcript rather than an empty row", async () =>
   renderRun();
 
   expect(await screen.findByText("先看看目录。")).toBeInTheDocument();
-  // The arrows only appear in a transcript line, never in the tools section,
+  // The markers only appear in a transcript line, never in the tools section,
   // so matching them pins the assertion to the row that used to be blank.
   expect(screen.getByText(/→ file\.list/)).toBeInTheDocument();
-  expect(screen.getByText(/← 3 entries/)).toBeInTheDocument();
+  expect(screen.getByText(/✓ 3 entries/)).toBeInTheDocument();
 });
 
 test("a withdrawn turn is marked as withdrawn instead of reading as a live one", async () => {

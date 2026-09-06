@@ -77,7 +77,7 @@ test("a failed usage query offers retry and does not report zero usage", async (
   );
   renderUsage();
   expect(await screen.findByRole("button", { name: "重试" })).toBeVisible();
-  expect(screen.queryByText("还没有用量记录")).toBeNull();
+  expect(screen.queryByText("这个工作空间还没有用量数据")).toBeNull();
 });
 
 test("a provider figure and an unknown one render as two separate rows, not one blended total", async () => {

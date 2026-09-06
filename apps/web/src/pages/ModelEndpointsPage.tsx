@@ -126,10 +126,16 @@ export function ModelEndpointsPage() {
       const rows = await Promise.all(
         (listed.data ?? []).map(async (entry) => {
           try {
-            return [
-              entry.id,
-              await api<PricingVersionResponse>(`/api/v1/model-endpoints/${entry.id}/pricing`),
-            ] as const;
+            const versions = await api<PricingVersionResponse[]>(
+              `/api/v1/model-endpoints/${entry.id}/pricing`,
+            );
+            // Match the backend's current price: future rates do not apply yet.
+            const now = Date.now();
+            const current = versions
+              .filter((version) => Date.parse(version.effective_at) <= now)
+              .sort((a, b) => Date.parse(b.effective_at) - Date.parse(a.effective_at)
+                || b.version_number - a.version_number)[0] ?? null;
+            return [entry.id, current] as const;
           } catch (caught) {
             // A 404 is "no price set", which is a state rather than a
             // failure — and a different one from "priced at nothing".
@@ -329,11 +335,6 @@ export function ModelEndpointsPage() {
   return (
     <>
       {contextHolder}
-      <div className="page-heading">
-        <div>
-          <Typography.Paragraph type="secondary">{t("endpointsIntro")}</Typography.Paragraph>
-        </div>
-      </div>
       {error === null ? null : (
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}

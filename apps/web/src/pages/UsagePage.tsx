@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import { Card, Space, Statistic, Table, Tag, Typography } from "antd";
+import { Alert, Button, Card, Space, Statistic, Table, Tag } from "antd";
 
 import { api } from "../api/client";
+import { problemMessage } from "../api/messages";
 import type { UsageByQualityResponse, UsageSummaryResponse } from "../api/types";
 import { useT } from "../i18n/locale";
 import { EmptyState } from "../ui/EmptyState";
@@ -50,10 +51,15 @@ export function UsagePage() {
   const data = usage.data;
   const buckets = data?.by_cost_quality ?? [];
 
+  if (usage.isError) {
+    return <Alert type="error" showIcon title={problemMessage(usage.error, t)} action={
+      <Button onClick={() => void usage.refetch()}>{t("retry")}</Button>
+    } />;
+  }
+
   return (
-    <Card title={t("usage")} loading={usage.isPending}>
+    <Card loading={usage.isPending} extra={t("usagePeriod")}>
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-        <Typography.Paragraph type="secondary">{t("usageIntro")}</Typography.Paragraph>
 
         {data === undefined ? null : (
           <Space size="large" wrap>

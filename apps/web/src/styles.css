@@ -274,8 +274,66 @@ h4,
   gap: 32px;
 }
 
+.grouped-page > .page-heading {
+  margin-bottom: 0;
+}
+
+/* Keep consecutive page cards apart even when the earlier card has no
+   page-alert margin. In normal block flow this collapses with that existing
+   margin, so already-spaced cards keep the same 20px gap. */
+.th-content > .ant-card + .ant-card,
+.grouped-section > .ant-card + .ant-card {
+  margin-top: 20px;
+}
+
+.grouped-section > .ant-card:last-child {
+  margin-bottom: 0;
+}
+
+.section-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--th-line);
+}
+
+.section-links a {
+  color: var(--th-ink-soft);
+  white-space: nowrap;
+  padding: 8px 12px;
+  border-radius: 6px;
+}
+
+.section-links a[aria-current="page"] {
+  color: var(--th-copper);
+  background: var(--th-paper);
+  box-shadow: inset 0 -2px var(--th-copper);
+}
+
+.tool-output,
+.skill-file-preview {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.section-links a:hover {
+  color: var(--th-copper);
+}
+
 .grouped-section {
   scroll-margin-top: 80px; /* 顶栏一行，锚点跳过去不能被它盖住 */
+}
+
+.grouped-section .th-empty {
+  min-height: 0;
+  padding: 24px 12px;
+}
+
+.grouped-section .th-empty > .th-hermes-wrap {
+  display: none;
 }
 
 .form-section {

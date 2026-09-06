@@ -61,10 +61,10 @@ test("a failed query offers retry rather than an empty history", async () => {
   );
   renderAudit();
   expect(await screen.findByRole("button", { name: "重试" })).toBeVisible();
-  expect(screen.queryByText("还没有操作记录")).toBeNull();
+  expect(screen.queryByText("还没有记录")).toBeNull();
 });
 
-test("more history uses the next offset and retains current filters", async () => {
+test("more history uses the next offset and retains earlier rows", async () => {
   const offsets: string[] = [];
   server.use(
     http.get("/api/v1/auth/me", () => HttpResponse.json(USER)),

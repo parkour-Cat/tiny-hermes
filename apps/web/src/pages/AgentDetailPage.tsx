@@ -411,12 +411,12 @@ export function AgentDetailPage() {
   });
 
   const saveDraft = useMutation({
-    mutationFn: (values: DraftValues) =>
+    mutationFn: ({ values, revision }: { values: DraftValues; revision: number }) =>
       api<AgentDraftResponse>(`/api/v1/agents/${agentId}/draft`, {
         ...scope,
         method: "PUT",
         body: JSON.stringify({
-          expected_revision: draft.data?.revision ?? 0,
+          expected_revision: revision,
           spec: specOf(values),
         }),
       }),
@@ -521,10 +521,25 @@ export function AgentDetailPage() {
   function askToPublish(revision: number): void {
     void modal.confirm({
       title: t("publish"),
-      content: `${t("publishWarningPrefix")}${revision}${t("publishWarningSuffix")}`,
+      content: dirty ? t("publishSaveWarning") : `${t("publishWarningPrefix")}${revision}${t("publishWarningSuffix")}`,
       okText: t("confirm"),
       cancelText: t("cancel"),
-      onOk: () => publish.mutateAsync(revision).catch(() => undefined),
+      onOk: async () => {
+        try {
+          const values = await form.validateFields();
+          if (values.name !== loadedAgent.name || values.alias !== loadedAgent.alias) {
+            await rename.mutateAsync({ name: values.name, alias: values.alias });
+          }
+          const changed = JSON.stringify(specOf(values)) !== JSON.stringify(specOf(valuesOf(loadedDraft)));
+          const savedRevision = changed
+            ? (await saveDraft.mutateAsync({ values, revision })).revision
+            : revision;
+          await publish.mutateAsync(savedRevision);
+        } catch {
+          // Mutation errors are shown beside the retained draft; validation
+          // errors remain on the fields. Neither path may publish old content.
+        }
+      },
     });
   }
 
@@ -547,6 +562,10 @@ export function AgentDetailPage() {
       ? watched
       : valuesOf(draft.data);
   const draftSummary = summarizeSpec(specOf(draftValues));
+  const dirty = JSON.stringify(specOf(draftValues)) !== JSON.stringify(specOf(valuesOf(loadedDraft))) ||
+    (watched?.name !== undefined && watched.name !== loadedAgent.name) ||
+    (watched?.alias !== undefined && watched.alias !== loadedAgent.alias);
+  const saving = saveDraft.isPending || rename.isPending || publish.isPending;
   const publishedSummary =
     published.data === undefined ? null : summarizeSpec(published.data.spec);
   const diffEntries =
@@ -568,7 +587,7 @@ export function AgentDetailPage() {
           </Link>
           <Button
             type="primary"
-            loading={publish.isPending}
+            loading={saving}
             onClick={() => askToPublish(draft.data?.revision ?? 0)}
           >
             {t("publish")}
@@ -581,6 +600,7 @@ export function AgentDetailPage() {
           <Typography.Text strong>
             {`${t("draftRevision")} ${draft.data.revision}`}
           </Typography.Text>
+          {dirty ? <Typography.Text type="warning">{t("draftUnsaved")}</Typography.Text> : null}
           {agent.data.current_version_id === null ? (
             <Typography.Text>{t("agentUnpublished")}</Typography.Text>
           ) : (
@@ -643,12 +663,13 @@ export function AgentDetailPage() {
       <Card title={t("draftSection")} variant="borderless">
         <Form<FormValues>
           form={form}
+          disabled={saving}
           layout="vertical"
           requiredMark={false}
           initialValues={{ ...valuesOf(loadedDraft), name: loadedAgent.name, alias: loadedAgent.alias }}
           // `specOf` reads the draft fields by name, so the two name fields
           // sharing this form never reach the spec.
-          onFinish={(values) => saveDraft.mutate(values)}
+          onFinish={(values) => saveDraft.mutate({ values, revision: loadedDraft.revision })}
         >
           <FormSection
             title={t("agentSectionIdentity")}

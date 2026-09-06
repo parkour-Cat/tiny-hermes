@@ -36,6 +36,7 @@ export function HttpToolsPage() {
   const [modal, contextHolder] = Modal.useModal();
   const [form] = Form.useForm<ToolValues>();
   const [error, setError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
   const [missingHost, setMissingHost] = useState<string | null>(null);
   const scope = { workspace: workspaceId ?? "" };
 
@@ -83,6 +84,7 @@ export function HttpToolsPage() {
       }),
     onSuccess: () => {
       form.resetFields();
+      setAdding(false);
       refresh();
     },
     onError: (caught) => {
@@ -119,15 +121,10 @@ export function HttpToolsPage() {
   return (
     <>
       {contextHolder}
-      <div className="page-heading">
-        <div>
-          <Typography.Paragraph type="secondary">{t("httpToolsIntro")}</Typography.Paragraph>
-        </div>
-      </div>
-      {error === null ? null : (
+      {error === null || adding ? null : (
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}
-      {missingHost === null ? null : (
+      {missingHost === null || adding ? null : (
         <Alert
           className="page-alert"
           type="info"
@@ -136,7 +133,9 @@ export function HttpToolsPage() {
         />
       )}
 
-      <Card title={t("httpToolRegister")} variant="borderless" className="page-alert">
+      <Button type="primary" className="page-alert" onClick={() => { setError(null); setMissingHost(null); setAdding(true); }}>{t("addHttpTool")}</Button>
+      <Modal title={t("addHttpTool")} open={adding} footer={null} onCancel={() => { if (!register.isPending) setAdding(false); }}>
+        {error === null ? null : <Alert type="error" title={error} showIcon />}
         <Form<ToolValues>
           form={form}
           layout="vertical"
@@ -180,7 +179,7 @@ export function HttpToolsPage() {
             </Button>
           </Form.Item>
         </Form>
-      </Card>
+      </Modal>
 
       {(tools.data ?? []).length === 0 ? (
         <EmptyState title={t("emptyHttpTools")} />

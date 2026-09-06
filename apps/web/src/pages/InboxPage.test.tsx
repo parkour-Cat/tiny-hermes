@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { expect, test } from "vitest";
@@ -29,7 +30,7 @@ function renderInbox(): void {
   );
 }
 
-test("待办把三个队列放在一页上", async () => {
+test("待办通过二级入口切换队列，每次只显示一个", async () => {
   server.use(
     http.get("/api/v1/auth/me", () =>
       HttpResponse.json({
@@ -52,6 +53,9 @@ test("待办把三个队列放在一页上", async () => {
   renderInbox();
 
   expect(await screen.findByRole("heading", { name: t("approvals"), level: 4 })).toBeVisible();
+  expect(screen.queryByRole("heading", { name: t("proposals"), level: 4 })).toBeNull();
+  await userEvent.click(screen.getByRole("link", { name: t("proposals") }));
   expect(await screen.findByRole("heading", { name: t("proposals"), level: 4 })).toBeVisible();
+  await userEvent.click(screen.getByRole("link", { name: t("memoryReview") }));
   expect(await screen.findByRole("heading", { name: t("memoryReview"), level: 4 })).toBeVisible();
 });

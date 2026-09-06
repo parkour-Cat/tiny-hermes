@@ -1,5 +1,6 @@
-import { Anchor, Typography } from "antd";
-import type { ReactNode } from "react";
+import { Typography } from "antd";
+import { Activity, useState, type ReactNode } from "react";
+import { Link, useLocation } from "react-router-dom";
 
 import { NAV_GROUPS, visibleSections } from "./navigation";
 import { useAuth } from "../auth/AuthProvider";
@@ -27,31 +28,34 @@ export function GroupedPage({
   const t = useT();
   const auth = useAuth();
   const { role } = useMyRole();
+  const location = useLocation();
+  const [opened, setOpened] = useState<string[]>([]);
   const group = NAV_GROUPS.find((candidate) => candidate.key === groupKey);
   if (group === undefined || role === null) return null;
 
   const visible = visibleSections(group, role, auth.user?.is_platform_admin === true);
+  const active = visible.find((section) => `#${section.key}` === location.hash) ?? visible[0];
+  if (active !== undefined && !opened.includes(`${groupKey}:${active.key}`)) {
+    setOpened([...opened, `${groupKey}:${active.key}`]);
+  }
 
   return (
     <div className="grouped-page">
-      <PageHeading kicker={t("workspaceTitle")} title={t(group.labelKey)} intro={t(group.introKey)} />
-      <Anchor
-        affix={false}
-        direction="horizontal"
-        items={visible.map((section) => ({
-          key: section.key,
-          href: `#${section.key}`,
-          title: t(section.labelKey),
-        }))}
-      />
-      {visible.map((section) => (
-        <section key={section.key} id={section.key} className="grouped-section">
-          <Typography.Title level={4}>{t(section.labelKey)}</Typography.Title>
-          {section.introKey === null ? null : (
-            <Typography.Paragraph type="secondary">{t(section.introKey)}</Typography.Paragraph>
-          )}
-          {render(section.key)}
-        </section>
+      <PageHeading kicker={t("workspaceTitle")} title={t(group.labelKey)} />
+      <nav className="section-links" aria-label={t(group.labelKey)}>
+        {visible.map((section) => (
+          <Link key={section.key} to={{ pathname: location.pathname, hash: `#${section.key}` }} aria-current={active?.key === section.key ? "page" : undefined}>
+            {t(section.labelKey)}
+          </Link>
+        ))}
+      </nav>
+      {visible.filter((section) => opened.includes(`${groupKey}:${section.key}`)).map((section) => (
+        <Activity key={section.key} mode={active?.key === section.key ? "visible" : "hidden"}>
+          <section className="grouped-section" aria-label={t(section.labelKey)}>
+            <Typography.Title level={4}>{t(section.labelKey)}</Typography.Title>
+            {render(section.key)}
+          </section>
+        </Activity>
       ))}
     </div>
   );

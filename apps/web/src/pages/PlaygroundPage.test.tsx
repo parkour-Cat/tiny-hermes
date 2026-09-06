@@ -192,7 +192,7 @@ test("a blocked queue offers the head run's actions, not a fake completions refu
   await userEvent.type(await screen.findByLabelText("输入要发给 Agent 的消息"), "Next");
   await userEvent.click(screen.getByRole("button", { name: "发送" }));
 
-  expect(await screen.findByText("当前 Session 被队列挡住")).toBeInTheDocument();
+  expect(await screen.findByText("当前会话有未完成任务")).toBeInTheDocument();
   expect(screen.getByText("paused")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "继续" }));
 
@@ -201,7 +201,7 @@ test("a blocked queue offers the head run's actions, not a fake completions refu
   expect(resumes[0]?.body).toEqual({ expected_state_version: 4 });
 });
 
-test("新 Session posts another persistent session and switches to it", async () => {
+test("新会话 posts another persistent session and switches to it", async () => {
   loadedPlayground();
   document.cookie = "tiny_hermes_csrf=token-value";
   const created = sessionRow({
@@ -219,7 +219,7 @@ test("新 Session posts another persistent session and switches to it", async ()
 
   renderPlayground();
   await screen.findByText(SESSION);
-  await userEvent.click(screen.getByRole("button", { name: "新 Session" }));
+  await userEvent.click(screen.getByRole("button", { name: "新会话" }));
 
   await waitFor(() => expect(posts).toEqual([{ agent_id: AGENT, session_mode: "persistent" }]));
   expect(await screen.findByText(created.id)).toBeInTheDocument();

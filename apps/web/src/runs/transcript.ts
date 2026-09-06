@@ -7,6 +7,7 @@ export type ToolRound = {
   name: string;
   arguments: Record<string, unknown>;
   output: string;
+  status: "pending" | "succeeded" | "failed" | "returned";
   artifactIds: string[];
 };
 
@@ -51,12 +52,11 @@ export function transcriptLineOf(message: CanonicalMessage): string {
       return [`→ ${part.name ?? "?"}`];
     }
     if (part.type === "tool_result") {
-      // The arrow direction carries "sent" versus "came back" without a word
-      // to translate, and the marker distinguishes a failure from a result —
-      // rendering both the same made a failing Run read as though every step
-      // had worked.
-      const mark = part.failed === true ? "✗" : "←";
-      return [`${mark} ${preview(part.output ?? "")}`];
+      // Only explicit result status warrants a success/failure marker.
+      // Older messages without status still read as a returned result.
+      const status = resultStatus(part);
+      const mark = status === "failed" ? "✗" : status === "succeeded" ? "✓" : "←";
+      return [`${mark} ${preview(part.output ?? "") || "—"}`];
     }
     return [];
   });
@@ -87,9 +87,10 @@ export function toolsOf(messages: CanonicalMessage[]): ToolRound[] {
         existing.name = round.name;
         existing.arguments = round.arguments;
       }
-      if (round.output !== "") {
+      if (round.status !== "pending") {
         existing.output = round.output;
         existing.artifactIds = round.artifactIds;
+        existing.status = round.status;
       }
     }
   }
@@ -103,6 +104,7 @@ function roundFrom(part: CanonicalMessagePart): ToolRound | null {
       name: part.name ?? "",
       arguments: part.arguments ?? {},
       output: "",
+      status: "pending",
       artifactIds: [],
     };
   }
@@ -113,10 +115,17 @@ function roundFrom(part: CanonicalMessagePart): ToolRound | null {
       name: "",
       arguments: {},
       output,
+      status: resultStatus(part),
       artifactIds: artifactIdsIn(output),
     };
   }
   return null;
+}
+
+function resultStatus(part: CanonicalMessagePart): ToolRound["status"] {
+  if (part.failed === true || (part.exit_code !== undefined && part.exit_code !== 0)) return "failed";
+  if (part.failed === false || part.exit_code === 0) return "succeeded";
+  return "returned";
 }
 
 export function mergeArtifacts(

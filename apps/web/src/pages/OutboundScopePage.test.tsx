@@ -181,6 +181,6 @@ test("a platform with nothing approved says that nothing can be sent", async () 
 
   const platform = (await screen.findByText("平台批准")).closest(".ant-card");
   expect(
-    within(platform as HTMLElement).getByText(/现在什么都发不出去/),
+    within(platform as HTMLElement).getByText(/尚未批准外部访问目标/),
   ).toBeInTheDocument();
 });

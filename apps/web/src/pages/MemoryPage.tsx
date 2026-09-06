@@ -105,9 +105,6 @@ export function MemoryPage() {
   return (
     <>
       <div className="page-heading">
-        <div>
-          <Typography.Paragraph type="secondary">{t("memoryReviewIntro")}</Typography.Paragraph>
-        </div>
         <Button type="primary" onClick={() => setWriting(true)}>
           {t("writeShared")}
         </Button>

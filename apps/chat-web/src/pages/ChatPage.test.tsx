@@ -101,7 +101,7 @@ test("an empty conversation offers the composer and no console chrome", async ()
   renderChat(`/${ALIAS}`);
 
   expect(await screen.findByLabelText("写给智能体")).toBeInTheDocument();
-  expect(screen.getByText(/直接说要做什么/)).toBeInTheDocument();
+  expect(screen.getByText("有什么需要帮忙的？")).toBeInTheDocument();
   expect(screen.queryByText("成员")).toBeNull();
   expect(screen.queryByText("API 密钥")).toBeNull();
   expect(document.querySelector("select")).toBeNull();
@@ -293,8 +293,8 @@ test("session-rail actions stay behind the row menu, backed by this device's mem
   expect(await screen.findByRole("button", { name: "Summarize yesterday" })).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "会话操作" }));
   expect(screen.getByRole("dialog", { name: "会话操作" })).toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button", { name: "删除" }));
-  await userEvent.click(screen.getByRole("button", { name: "确认删除" }));
+  await userEvent.click(screen.getByRole("button", { name: "从列表移除" }));
+  await userEvent.click(screen.getByRole("button", { name: "确认移除" }));
 
   expect(screen.queryByRole("button", { name: "Summarize yesterday" })).toBeNull();
 });

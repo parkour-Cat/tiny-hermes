@@ -54,6 +54,13 @@ export function SkillsPage() {
   const [importForm] = Form.useForm<{ url: string }>();
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [adding, setAdding] = useState<"upload" | "import" | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const selectionProblem = selectedFiles.length === 0 ? null
+    : !selectedFiles.some((file) => relativePath(file) === "SKILL.md") ? t("skillMissingMain")
+    : selectedFiles.length > 64 || selectedFiles.reduce((size, file) => size + file.size, 0) > 1024 * 1024 ||
+      selectedFiles.some((file) => file.size > (relativePath(file) === "SKILL.md" ? 64 : 256) * 1024)
+      ? t("skillUploadLimits") : null;
   const scope = { workspace: workspaceId ?? "" };
   const listQuery = ["skills", workspaceId] as const;
 
@@ -78,6 +85,8 @@ export function SkillsPage() {
       }),
     onSuccess: () => {
       setNote(null);
+      setSelectedFiles([]);
+      setAdding(null);
       refresh();
     },
     onError: (caught) => setError(problemMessage(caught, t)),
@@ -92,6 +101,7 @@ export function SkillsPage() {
       }),
     onSuccess: () => {
       importForm.resetFields();
+      setAdding(null);
       setNote(null);
       refresh();
     },
@@ -116,11 +126,6 @@ export function SkillsPage() {
   return (
     <>
       {contextHolder}
-      <div className="page-heading">
-        <div>
-          <Typography.Paragraph type="secondary">{t("skillsIntro")}</Typography.Paragraph>
-        </div>
-      </div>
       {error === null ? null : (
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}
@@ -128,28 +133,41 @@ export function SkillsPage() {
         <Alert className="page-alert" type="success" title={note} showIcon />
       )}
 
-      <Card title={t("uploadSkill")} variant="borderless" className="page-alert">
+      <Space wrap className="page-alert">
+        <Button type="primary" onClick={() => setAdding("upload")}>{t("uploadSkill")}</Button>
+        <Button onClick={() => setAdding("import")}>{t("importSkill")}</Button>
+      </Space>
+      <Modal title={t("uploadSkill")} open={adding === "upload"} okText={t("confirmUpload")} cancelText={t("cancel")}
+        confirmLoading={upload.isPending} okButtonProps={{ disabled: selectedFiles.length === 0 || selectionProblem !== null }}
+        onOk={() => upload.mutate(selectedFiles)} onCancel={() => { if (!upload.isPending) { setAdding(null); setSelectedFiles([]); } }}>
         <Typography.Paragraph type="secondary">{t("uploadSkillHint")}</Typography.Paragraph>
+        {error === null ? null : <Alert type="error" title={error} showIcon />}
         <input
           type="file"
           multiple
+          {...{ webkitdirectory: "" }}
           aria-label={t("chooseFiles")}
           disabled={upload.isPending}
           onChange={(event) => {
             const chosen = Array.from(event.target.files ?? []);
             if (chosen.length > 0) {
-              upload.mutate(chosen);
+              setSelectedFiles(chosen);
             }
             event.target.value = "";
           }}
         />
-      </Card>
+        {selectionProblem === null ? null : <Alert type="warning" title={selectionProblem} showIcon />}
+        {selectedFiles.length === 0 ? null : <ul className="skill-file-preview">
+          {selectedFiles.map((file) => <li key={relativePath(file)}>{relativePath(file)}</li>)}
+        </ul>}
+      </Modal>
 
-      <Card title={t("importSkill")} variant="borderless" className="page-alert">
+      <Modal title={t("importSkill")} open={adding === "import"} footer={null} onCancel={() => { if (!importing.isPending) setAdding(null); }}>
         <Typography.Paragraph type="secondary">{t("importSkillHint")}</Typography.Paragraph>
+        {error === null ? null : <Alert type="error" title={error} showIcon />}
         <Form<{ url: string }>
           form={importForm}
-          layout="inline"
+          layout="vertical"
           requiredMark={false}
           onFinish={(values) => importing.mutate(values.url)}
         >
@@ -158,7 +176,7 @@ export function SkillsPage() {
             label={t("importSkillUrl")}
             rules={[{ required: true, whitespace: true, message: t("required") }]}
           >
-            <Input style={{ minWidth: 320 }} />
+            <Input />
           </Form.Item>
           <Form.Item>
             <Button type="primary" htmlType="submit" loading={importing.isPending}>
@@ -166,7 +184,7 @@ export function SkillsPage() {
             </Button>
           </Form.Item>
         </Form>
-      </Card>
+      </Modal>
 
       <Card
         title={t("workspaceSkills")}

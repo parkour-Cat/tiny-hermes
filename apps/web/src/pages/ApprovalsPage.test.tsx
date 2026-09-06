@@ -91,8 +91,8 @@ test("the two kinds are shown apart, because they are two different powers", asy
   // Awaited on the rows rather than on the headings: the headings are static
   // and render before the list has arrived.
   expect(await screen.findAllByText(/http\.orders\.createOrder/)).not.toHaveLength(0);
-  expect(screen.getByText("发起运行的那个人")).toBeInTheDocument();
-  expect(screen.getByText("工作空间的决定")).toBeInTheDocument();
+  expect(screen.getByText("用户确认")).toBeInTheDocument();
+  expect(screen.getByText("管理员审批")).toBeInTheDocument();
   expect(screen.getAllByText(/file\.write/).length).toBeGreaterThan(0);
 });
 

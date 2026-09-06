@@ -18,6 +18,7 @@ import { useT } from "../i18n/locale";
 import { EmptyState } from "../ui/EmptyState";
 import { RUN_ACTIONS } from "../runs/actions";
 import { artifactIdsIn, mergeArtifacts, toolsOf, transcriptLineOf } from "../runs/transcript";
+import { ToolOutput } from "../runs/ToolOutput";
 import { runQueryOptions, useRunEvents } from "../runs/useRunEvents";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
@@ -305,7 +306,7 @@ export function PlaygroundPage() {
               <Typography.Paragraph className="fact-note">
                 {JSON.stringify(round.arguments)}
               </Typography.Paragraph>
-              <Typography.Paragraph type="secondary">{round.output}</Typography.Paragraph>
+              <ToolOutput round={round} />
             </article>
           ))
         )}

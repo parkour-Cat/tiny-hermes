@@ -105,11 +105,6 @@ export function SubjectDataPage() {
   return (
     <>
       {contextHolder}
-      <div className="page-heading">
-        <div>
-          <Typography.Paragraph type="secondary">{t("subjectDataIntro")}</Typography.Paragraph>
-        </div>
-      </div>
 
       <Card variant="borderless" className="page-alert">
         <Space wrap align="end">

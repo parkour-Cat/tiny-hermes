@@ -119,11 +119,6 @@ export function SkillProposalsPage() {
   return (
     <>
       {contextHolder}
-      <div className="page-heading">
-        <div>
-          <Typography.Paragraph type="secondary">{t("proposalsIntro")}</Typography.Paragraph>
-        </div>
-      </div>
       {error === null ? null : (
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}

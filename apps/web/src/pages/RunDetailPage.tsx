@@ -23,6 +23,7 @@ import type { MessageKey } from "../i18n/zh-CN";
 import { RUN_ACTIONS } from "../runs/actions";
 import { eventNote, fill, outcomeLabel, statusNote } from "../runs/explain";
 import { artifactIdsIn, mergeArtifacts, toolsOf, transcriptLineOf } from "../runs/transcript";
+import { ToolOutput } from "../runs/ToolOutput";
 import { runQueryOptions, useRunEvents } from "../runs/useRunEvents";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
@@ -293,7 +294,7 @@ export function RunDetailPage() {
 
   const facts: Rows = [
     { key: "status", label: t("runStatus"), children: <StatusTag code={run.status} /> },
-    { key: "queue", label: t("runQueue"), children: run.queue.status },
+    ...(run.queue.status === "terminal" ? [] : [{ key: "queue", label: t("runQueue"), children: run.queue.status }]),
     {
       key: "goal-round",
       label: t("runGoalRound"),
@@ -528,7 +529,7 @@ export function RunDetailPage() {
                 <Typography.Paragraph className="fact-note">
                   {JSON.stringify(round.arguments)}
                 </Typography.Paragraph>
-                <Typography.Paragraph type="secondary">{round.output}</Typography.Paragraph>
+                <ToolOutput round={round} />
                 {round.artifactIds.map((id) => (
                   <Button
                     key={id}

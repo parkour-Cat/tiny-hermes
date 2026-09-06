@@ -234,7 +234,7 @@ test("with no model endpoint configured, the example says what is missing first"
 
   renderAgents();
 
-  expect(await screen.findByText(/模型接入点|model endpoint/i)).toBeVisible();
+  expect(await screen.findByText(/请先接入一个模型服务|Connect a model/i)).toBeVisible();
   expect(screen.queryByRole("button", { name: /创建示例|Create example/i })).toBeNull();
 });
 

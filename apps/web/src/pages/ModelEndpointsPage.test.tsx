@@ -147,7 +147,11 @@ test("the price in force is shown, because usage is money and nothing else showe
         credential_available: true,
       }),
     ),
-    http.get(`/api/v1/model-endpoints/${ENDPOINT}/pricing`, () => HttpResponse.json(PRICE)),
+    http.get(`/api/v1/model-endpoints/${ENDPOINT}/pricing`, () => HttpResponse.json([
+      { ...PRICE, id: "future", version_number: 3, effective_at: "2099-01-01T00:00:00Z", input_per_million: "99.00" },
+      { ...PRICE, id: "old", version_number: 1, effective_at: "2000-01-01T00:00:00Z", input_per_million: "1.00" },
+      { ...PRICE, effective_at: "2001-01-01T00:00:00Z" },
+    ])),
   );
 
   renderEndpoints();
@@ -172,7 +176,7 @@ test("an endpoint with no price says so, rather than showing zero", async () => 
       }),
     ),
     http.get(`/api/v1/model-endpoints/${ENDPOINT}/pricing`, () =>
-      HttpResponse.json({ code: "pricing_not_set", detail: "" }, { status: 404 }),
+      HttpResponse.json([]),
     ),
   );
 
@@ -487,7 +491,7 @@ test("编辑走的是同一张表单：连接段只读，其余两段带着现�
         credential_available: true,
       }),
     ),
-    http.get(`/api/v1/model-endpoints/${ENDPOINT}/pricing`, () => HttpResponse.json(PRICE)),
+    http.get(`/api/v1/model-endpoints/${ENDPOINT}/pricing`, () => HttpResponse.json([PRICE])),
     http.get("/api/v1/secrets", () => HttpResponse.json([])),
   );
 

@@ -179,7 +179,7 @@ test("importing the same content again says no version was created", async () =>
   // The re-import control appears only once the versions are loaded and one of
   // them says where it came from — an upload has nowhere to re-import from.
   await userEvent.click(
-    await within(row as HTMLElement).findByRole("button", { name: "从 Git 导入" }),
+    await within(row as HTMLElement).findByRole("button", { name: "从归档地址导入" }),
   );
 
   expect(

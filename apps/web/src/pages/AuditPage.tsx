@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { Alert, Button, Card, Input, Space, Table, Tag, Typography } from "antd";
 import { useState } from "react";
 
@@ -39,17 +39,21 @@ export function AuditPage() {
   if (resourceType.trim() !== "") query.set("resource_type", resourceType.trim());
   const suffix = query.toString() === "" ? "" : `?${query.toString()}`;
 
-  const events = useQuery({
+  const events = useInfiniteQuery({
     queryKey: ["audit-events", workspaceId, action, resourceType] as const,
-    queryFn: () =>
-      api<AuditEventsPageResponse>(`/api/v1/audit-events${suffix}`, {
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) =>
+      api<AuditEventsPageResponse>(`/api/v1/audit-events${suffix}${suffix === "" ? "?" : "&"}offset=${pageParam}`, {
         workspace: workspaceId ?? "",
       }),
     enabled: workspaceId !== null,
+    getNextPageParam: (lastPage, pages) => lastPage.has_more
+      ? pages.reduce((count, page) => count + page.items.length, 0)
+      : undefined,
   });
 
-  const page = events.data;
-  const items = page?.items ?? [];
+  const page = events.data?.pages[0];
+  const items = [...new Map((events.data?.pages.flatMap((page) => page.items) ?? []).map((item) => [item.id, item])).values()];
 
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
@@ -71,9 +75,8 @@ export function AuditPage() {
   }
 
   return (
-    <Card title={t("audit")}>
+    <Card>
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-        <Typography.Paragraph type="secondary">{t("auditIntro")}</Typography.Paragraph>
 
         {page?.visibility === "redacted" ? (
           <Alert
@@ -121,7 +124,12 @@ export function AuditPage() {
           <Alert type="error" showIcon message={exportError} closable onClose={() => setExportError(null)} />
         ) : null}
 
-        {items.length === 0 && !events.isLoading ? (
+        {events.isError ? (
+          <Alert type="error" showIcon title={problemMessage(events.error, t)} action={
+            <Button onClick={() => void (events.isFetchNextPageError ? events.fetchNextPage() : events.refetch())}>{t("retry")}</Button>
+          } />
+        ) : null}
+        {items.length === 0 && !events.isLoading && !events.isError ? (
           <EmptyState title={t("auditEmpty")} />
         ) : (
           <Table
@@ -172,6 +180,9 @@ export function AuditPage() {
             ]}
           />
         )}
+        {events.hasNextPage ? (
+          <Button onClick={() => void events.fetchNextPage()} loading={events.isFetchingNextPage}>{t("auditMore")}</Button>
+        ) : null}
       </Space>
     </Card>
   );

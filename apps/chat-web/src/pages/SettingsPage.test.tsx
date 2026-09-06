@@ -193,5 +193,5 @@ test("默认 Agent 只在凭据允许的范围里选，只记在这台设备上"
 
 test("凭据只允许一个 Agent 时没有可选的，页面直说", async () => {
   renderSettings([AGENTS[0]!]);
-  expect(await screen.findByText("凭据只允许一个 Agent，没有可选的。")).toBeVisible();
+  expect(await screen.findByText("当前只有一个可用 Agent。")).toBeVisible();
 });

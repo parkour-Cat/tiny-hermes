@@ -102,11 +102,6 @@ export function IdentityProvidersPage() {
   return (
     <>
       <div className="page-heading">
-        <div>
-          <Typography.Paragraph type="secondary">
-            {t("identityProvidersIntro")}
-          </Typography.Paragraph>
-        </div>
         <Button type="primary" onClick={() => setOpen(true)}>
           {t("registerIdentityProvider")}
         </Button>

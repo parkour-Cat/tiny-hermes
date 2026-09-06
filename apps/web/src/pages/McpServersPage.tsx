@@ -33,6 +33,7 @@ export function McpServersPage() {
   const [modal, contextHolder] = Modal.useModal();
   const [form] = Form.useForm<ServerValues>();
   const [error, setError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const scope = { workspace: workspaceId ?? "" };
 
@@ -79,6 +80,7 @@ export function McpServersPage() {
     onSuccess: () => {
       setNote(null);
       form.resetFields();
+      setAdding(false);
       refresh();
     },
     onError: (caught) => {
@@ -134,19 +136,16 @@ export function McpServersPage() {
   return (
     <>
       {contextHolder}
-      <div className="page-heading">
-        <div>
-          <Typography.Paragraph type="secondary">{t("mcpServersIntro")}</Typography.Paragraph>
-        </div>
-      </div>
-      {error === null ? null : (
+      {error === null || adding ? null : (
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}
       {note === null ? null : (
         <Alert className="page-alert" type="info" title={note} showIcon />
       )}
 
-      <Card title={t("httpToolRegister")} variant="borderless" className="page-alert">
+      <Button type="primary" className="page-alert" onClick={() => { setError(null); setAdding(true); }}>{t("addMcpServer")}</Button>
+      <Modal title={t("addMcpServer")} open={adding} footer={null} onCancel={() => { if (!register.isPending) setAdding(false); }}>
+        {error === null ? null : <Alert type="error" title={error} showIcon />}
         <Form<ServerValues>
           form={form}
           layout="vertical"
@@ -182,7 +181,7 @@ export function McpServersPage() {
             </Button>
           </Form.Item>
         </Form>
-      </Card>
+      </Modal>
 
       {(servers.data ?? []).length === 0 ? (
         <EmptyState title={t("emptyMcpServers")} />

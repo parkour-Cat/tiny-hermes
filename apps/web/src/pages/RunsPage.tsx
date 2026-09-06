@@ -143,10 +143,10 @@ export function RunsPage() {
     {
       title: t("runQueue"),
       key: "queue",
-      render: (_: unknown, run: RunResponse) => (
+      render: (_: unknown, run: RunResponse) => run.queue.status === "terminal" ? "—" : (
         <>
           <Typography.Text>{run.queue.status}</Typography.Text>
-          {run.queue.status === "head" ? null : (
+          {run.queue.status === "head" || run.queue.position <= 0 ? null : (
             <Typography.Paragraph type="secondary" className="fact-note">
               {`${t("queuePositionPrefix")}${run.queue.position}${t("queuePositionSuffix")}`}
             </Typography.Paragraph>
@@ -187,7 +187,6 @@ export function RunsPage() {
       {/* Said out loud rather than papered over with a pager the platform
           cannot honour: the route takes no page or cursor, so any control here
           would sort a list that already arrived whole. */}
-      <Alert className="page-alert" type="info" title={t("runsUnpaginated")} showIcon />
       <Card loading={runs.isPending} variant="borderless">
         <Table<RunResponse>
           rowKey="id"
