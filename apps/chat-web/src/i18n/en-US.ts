@@ -1,6 +1,16 @@
 import type { MessageKey } from "./zh-CN";
 
 export const enUS: Record<MessageKey, string> = {
+  savedFilesTitle: "Saved files",
+  savedFilesHint: "Working files saved in this conversation.",
+  savedFilesChanged: "Files have changed. Download again from the refreshed list.",
+  savedFilesDownloadFailed: "Download failed. Please try again.",
+  savedFilesLoadFailed: "Could not load files. Please refresh.",
+  savedFilesRefresh: "Refresh files",
+  savedFilesEmpty: "No saved files yet",
+  savedFileDownload: "Download",
+  savedFileDownloading: "Downloading…",
+  toolAttachments: "Tool output attachments",
   appName: "tiny hermes",
   loading: "Loading",
   retry: "Retry",

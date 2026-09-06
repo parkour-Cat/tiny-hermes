@@ -1272,3 +1272,10 @@ html[data-theme="dark"] .rail-agent {
   border-color: var(--th-copper);
   background: rgb(196 92 38 / 12%);
 }
+
+.saved-files { min-width: 0; margin-bottom: 20px; }
+.saved-files > p { color: var(--text-secondary, inherit); }
+.saved-files-list { list-style: none; padding: 0; margin: 12px 0 0; max-height: 320px; overflow-y: auto; }
+.saved-file-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; flex-wrap: wrap; border-bottom: 1px solid rgba(128, 128, 128, .18); }
+.saved-file-name { min-width: 0; flex: 1 1 180px; overflow-wrap: anywhere; }
+.saved-file-row button { flex-shrink: 0; }

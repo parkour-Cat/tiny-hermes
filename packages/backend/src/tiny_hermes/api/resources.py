@@ -70,7 +70,9 @@ from tiny_hermes.runs.ports.notifier import WakeUpNotifier
 from tiny_hermes.secrets.application.service import KekSettings, SecretService
 from tiny_hermes.secrets.domain.envelope import optional_kek
 from tiny_hermes.secrets.infrastructure.sql_store import SqlSecretStore
+from tiny_hermes.session_workspace.application.files import WorkspaceFiles
 from tiny_hermes.session_workspace.infrastructure.minio_store import MinioObjectStore
+from tiny_hermes.session_workspace.infrastructure.sql_files import SqlWorkspaceFiles
 from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.errors import AppError, AuditedDenial
 from tiny_hermes.skills.application.service import SkillCatalog
@@ -256,9 +258,7 @@ class ApplicationResources:
         """Notifications only; the platform is correct without them."""
         if self._notifier is None:
             url = self.settings.redis_url
-            self._notifier = (
-                RedisWakeUpNotifier(url) if url else NullWakeUpNotifier()
-            )
+            self._notifier = RedisWakeUpNotifier(url) if url else NullWakeUpNotifier()
         return self._notifier
 
     async def close(self) -> None:
@@ -398,6 +398,10 @@ class ApplicationResources:
         """Reads only: nothing here writes, so nothing here commits."""
         async with self.session_factory()() as session:
             yield ArtifactService(SqlArtifactStore(session), self.object_store())
+
+    async def workspace_files(self) -> AsyncGenerator[WorkspaceFiles]:
+        async with self.session_factory()() as session:
+            yield WorkspaceFiles(SqlWorkspaceFiles(session), self.object_store())
 
     async def skill_catalog(self) -> AsyncGenerator[SkillCatalog]:
         async with self.session_factory()() as session:

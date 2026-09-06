@@ -146,7 +146,7 @@ class SessionWorkspaceService:
             raise WorkspaceIntegrityFailed(f"manifest object missing: {gone}") from gone
         if hashlib.sha256(data).hexdigest() != record.manifest_sha256:
             raise WorkspaceIntegrityFailed("manifest bytes fail their recorded hash")
-        manifest = _parse_manifest(data)
+        manifest = parse_saved_manifest(data)
         if manifest.schema_version != record.manifest_schema_version:
             raise WorkspaceIntegrityFailed("manifest schema differs from the record")
         del command
@@ -337,7 +337,7 @@ class SessionWorkspaceService:
             raise WorkspaceIntegrityFailed(f"base manifest missing: {gone}") from gone
         if hashlib.sha256(data).hexdigest() != record.manifest_sha256:
             raise WorkspaceIntegrityFailed("base manifest fails its recorded hash")
-        return _parse_manifest(data)
+        return parse_saved_manifest(data)
 
     async def _stage_bodies(
         self,
@@ -456,7 +456,7 @@ def _manifest_of_scan(entries: tuple[ScanEntry, ...]) -> WorkspaceManifest:
     return build_manifest(judged, schema_version=MANIFEST_SCHEMA_VERSION)
 
 
-def _parse_manifest(data: bytes) -> WorkspaceManifest:
+def parse_saved_manifest(data: bytes) -> WorkspaceManifest:
     try:
         parsed: Any = json.loads(data)
     except (UnicodeDecodeError, json.JSONDecodeError) as broken:

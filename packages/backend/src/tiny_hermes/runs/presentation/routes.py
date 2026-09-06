@@ -3,6 +3,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Cookie, Depends, Header, Request, Response, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_serializer
 
 from tiny_hermes.api.resources import ApplicationResources
@@ -28,6 +29,14 @@ from tiny_hermes.runs.domain.models import (
     WorkspaceUsageSummary,
 )
 from tiny_hermes.runs.presentation.errors import as_app_error
+from tiny_hermes.session_workspace.application.files import WorkspaceFiles
+from tiny_hermes.session_workspace.presentation.files import (
+    FILE_ERRORS,
+    ConsoleFileResponse,
+    ConsoleFilesResponse,
+    file_download,
+    file_error,
+)
 
 WorkspaceHeader = Annotated[str | None, Header(alias="X-Workspace-Id")]
 CsrfHeader = Annotated[str | None, Header(alias="X-CSRF-Token")]
@@ -503,6 +512,75 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         except RunCoordinationError as error:
             raise as_app_error(error) from error
         return RunTreeResponse.model_validate(tree.document())
+
+    @router.get("/{run_id}/files", response_model=ConsoleFilesResponse)
+    async def list_saved_files(  # pyright: ignore[reportUnusedFunction]
+        run_id: UUID,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
+        files: Annotated[WorkspaceFiles, Depends(resources.workspace_files, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        authorization: AuthorizationHeader = None,
+    ) -> ConsoleFilesResponse:
+        caller = await resolve_workspace_caller(
+            auth,
+            machines,
+            session_token=session_token,
+            authorization=authorization,
+            csrf_token=None,
+            workspace_header=selected_workspace,
+            write=False,
+            required_scope="runs.read",
+        )
+        try:
+            await runs.get_run(caller.workspace_id, caller.actor, run_id)
+            source = await files.store.run_source(caller.workspace_id, run_id)
+            snapshot = await files.list_files(source)
+        except RunCoordinationError as error:
+            raise as_app_error(error) from error
+        except FILE_ERRORS as error:
+            raise file_error(error) from error
+        return ConsoleFilesResponse(
+            revision_id=snapshot.revision_id,
+            items=[
+                ConsoleFileResponse(path=item.path, size_bytes=item.size, sha256=item.sha256)
+                for item in snapshot.items
+            ],
+        )
+
+    @router.get("/{run_id}/files/content")
+    async def download_saved_file(  # pyright: ignore[reportUnusedFunction]
+        run_id: UUID,
+        revision_id: UUID,
+        path: str,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
+        files: Annotated[WorkspaceFiles, Depends(resources.workspace_files, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        authorization: AuthorizationHeader = None,
+    ) -> StreamingResponse:
+        caller = await resolve_workspace_caller(
+            auth,
+            machines,
+            session_token=session_token,
+            authorization=authorization,
+            csrf_token=None,
+            workspace_header=selected_workspace,
+            write=False,
+            required_scope="runs.read",
+        )
+        try:
+            await runs.get_run(caller.workspace_id, caller.actor, run_id)
+            source = await files.store.run_source(caller.workspace_id, run_id)
+            return await file_download(files, source, revision_id, path)
+        except RunCoordinationError as error:
+            raise as_app_error(error) from error
+        except FILE_ERRORS as error:
+            raise file_error(error) from error
 
     @router.get("/{run_id}/artifacts", response_model=list[ArtifactResponse])
     async def list_run_artifacts(  # pyright: ignore[reportUnusedFunction]

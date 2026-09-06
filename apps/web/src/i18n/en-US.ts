@@ -1,6 +1,16 @@
 import type { MessageKey } from "./zh-CN";
 
 export const enUS: Record<MessageKey, string> = {
+  savedFilesTitle: "Saved files",
+  savedFilesHint: "Working files saved by this task, including files retained from earlier turns.",
+  savedFilesChanged: "Files have changed. Download again from the refreshed list.",
+  savedFilesDownloadFailed: "Download failed. Please try again.",
+  savedFilesLoadFailed: "Could not load files. Please refresh.",
+  savedFilesRefresh: "Refresh files",
+  savedFilesEmpty: "No saved files yet",
+  savedFileDownload: "Download",
+  savedFileDownloading: "Downloading…",
+  toolAttachments: "Tool output attachments",
   appName: "tiny-hermes",
   appTagline: "Manage and run your agents",
   appKicker: "Operator console",
@@ -375,7 +385,7 @@ export const enUS: Record<MessageKey, string> = {
   messagesSection: "Messages",
   withdrawnTurn: "Withdrawn",
   toolsCallsSection: "Tools",
-  filesSection: "Artifacts",
+  filesSection: "Files",
   emptyMessages: "No messages yet",
   emptyTools: "No tool calls yet",
   emptyFiles: "No artifacts yet",

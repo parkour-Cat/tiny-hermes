@@ -245,7 +245,6 @@ class SqlRunStore:
         )
         await self._session.flush()
 
-
     async def create_session(self, command: CreateSessionCommand) -> SessionSnapshot:
         agent = await self._session.scalar(
             select(AgentRow).where(
@@ -724,10 +723,7 @@ class SqlRunStore:
                 raise InvalidStateMetadata(
                     "the run's recorded cleanup intent does not match this confirmation"
                 )
-        if (
-            command.signal is RunSignal.RECOVERY_FAILED
-            and command.confirmed_sandbox_id is not None
-        ):
+        if command.signal is RunSignal.RECOVERY_FAILED and command.confirmed_sandbox_id is not None:
             # The conflict path's confirmation: same shape, different target.
             if (
                 run.workspace_cleanup_target != WorkspaceCleanupTarget.FAILED_CONFLICT.value
@@ -1559,9 +1555,36 @@ class SqlRunStore:
             .values(last_heartbeat_at=now)
             .execution_options(synchronize_session=False)
         )
-        return RenewedLease(
-            lease_id=command.lease_id, version=renewed, expires_at=expires_at
+        return RenewedLease(lease_id=command.lease_id, version=renewed, expires_at=expires_at)
+
+    async def reserve_tool_call(self, workspace_id: UUID, run_id: UUID, lease_id: UUID) -> bool:
+        """Reserve an attempt before dispatch; children and retries share this row.
+
+        The reservation survives uncertain tool outcomes. Refunding after a
+        timeout would allow an operation that may have run to evade the limit.
+        """
+        run = await self._lock_run(workspace_id, run_id)
+        if run is None:
+            raise UnknownRun
+        lease = await self._lock_lease(lease_id, run_id)
+        now = datetime.now(UTC)
+        if lease is None or lease.released_at is not None or lease.expires_at <= now:
+            raise LeaseLost
+        reserved = await self._session.scalar(
+            update(RunBudgetScopeRow)
+            .where(
+                RunBudgetScopeRow.root_run_id == run.budget_root_run_id,
+                RunBudgetScopeRow.consumed_tool_calls < RunBudgetScopeRow.max_tool_calls,
+                RunBudgetScopeRow.elapsed_deadline_at > now,
+            )
+            .values(
+                consumed_tool_calls=RunBudgetScopeRow.consumed_tool_calls + 1,
+                version=RunBudgetScopeRow.version + 1,
+            )
+            .returning(RunBudgetScopeRow.root_run_id)
+            .execution_options(synchronize_session=False)
         )
+        return reserved is not None
 
     async def record_slice(self, command: RecordSliceCommand) -> RunSnapshot:
         """Persist one slice's checkpoint, accounting, state change, and lease."""
@@ -2033,10 +2056,7 @@ class SqlRunStore:
             .group_by(RunRow.session_id)
             .subquery()
         )
-        head = (
-            select(RunRow.session_id, RunRow.session_sequence, RunRow.status)
-            .subquery()
-        )
+        head = select(RunRow.session_id, RunRow.session_sequence, RunRow.status).subquery()
         statement = (
             select(SessionRow.id)
             .outerjoin(live, live.c.session_id == SessionRow.id)
@@ -2781,10 +2801,7 @@ class SqlRunStore:
             )
         if len(requests) > policy.max_parallel:
             return DelegationResult(
-                refusal=(
-                    f"you asked for {len(requests)} at once and may run "
-                    f"{policy.max_parallel}"
-                )
+                refusal=(f"you asked for {len(requests)} at once and may run {policy.max_parallel}")
             )
         agents = await self._child_agents(
             parent.workspace_id, tuple(bindings[item.alias].alias for item in requests)
@@ -2806,10 +2823,7 @@ class SqlRunStore:
             # what it can read and nothing else. Refused before any child
             # exists, so a delegation is never half granted.
             return DelegationResult(
-                refusal=(
-                    f"you cannot read {', '.join(unreadable)}, so you cannot "
-                    f"pass it on"
-                )
+                refusal=(f"you cannot read {', '.join(unreadable)}, so you cannot pass it on")
             )
 
         now = datetime.now(UTC)
@@ -3360,9 +3374,13 @@ class SqlRunStore:
         )
         blocker = await self._retry_blocker(run, session, summary)
         retry_allowed = capabilities.can_retry and blocker is None
-        head_status, head_pause, head_wait, head_deadline, head_actions = (
-            await self._blocked_head_fields(queue_status, run, capabilities)
-        )
+        (
+            head_status,
+            head_pause,
+            head_wait,
+            head_deadline,
+            head_actions,
+        ) = await self._blocked_head_fields(queue_status, run, capabilities)
         return RunSnapshot(
             id=run.id,
             purpose=RunPurpose(run.purpose),

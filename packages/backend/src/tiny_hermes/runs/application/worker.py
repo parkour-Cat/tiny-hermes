@@ -220,6 +220,7 @@ class _RoundWork:
 
     appended: tuple[CanonicalMessage, ...]
     wrote: bool
+    tool_limit_reached: bool = False
     wait_seconds: int | None = None
     #: Set when a call in this round needs a person and did not get one. The
     #: round's turns are discarded rather than appended — see `HttpCallOutcome`
@@ -547,10 +548,10 @@ class WorkerRuntime:
                             author="platform",
                         ),
                     )
-                budget_allows = _budget_after(after, response, executed_ms)
-                slice_expired = (
-                    monotonic() - started
-                ) >= self._settings.max_slice_seconds
+                budget_allows = (
+                    _budget_after(after, response, executed_ms) and not work.tool_limit_reached
+                )
+                slice_expired = (monotonic() - started) >= self._settings.max_slice_seconds
                 hold_slice = after.compat_deadline_at is not None and not compat_expired
                 # §12.1: `_has_waiting_run` opens its own transaction, worth
                 # paying only when the answer could change this round's
@@ -1087,7 +1088,32 @@ class WorkerRuntime:
         # three times must not get three answers out of one round's worth of
         # room.
         loaded = list(context.loaded_skills)
+        tool_limit_reached = False
+
+        async def reserve() -> bool:
+            nonlocal tool_limit_reached
+            if tool_limit_reached:
+                return False
+            async with self._sessions.begin() as session:
+                accepted = await SqlRunStore(session).reserve_tool_call(
+                    claimed.run.workspace_id, claimed.run.id, handle.lease_id
+                )
+            tool_limit_reached = not accepted
+            return accepted
+
         for call in response.tool_calls:
+            external = call.name.startswith((f"{MCP_PREFIX}.", f"{HTTP_PREFIX}."))
+            # External writes pass their approval gate before spending a call.
+            if not external and not await reserve():
+                results.append(
+                    ToolResultBlock(
+                        call_id=call.call_id,
+                        output="refused: tool_budget_exceeded",
+                        exit_code=126,
+                        failed=True,
+                    )
+                )
+                continue
             if call.name == "skill.load":
                 answered, event = await answer_skill_load(self._skills, context, call, loaded)
                 results.append(answered)
@@ -1143,6 +1169,7 @@ class WorkerRuntime:
                     mcp,
                     _claim_of(claimed),
                     self._approvals,
+                    before_call=reserve,
                 )
                 if outcome.event is not None:
                     events.append(outcome.event)
@@ -1161,6 +1188,7 @@ class WorkerRuntime:
                     call,
                     _claim_of(claimed),
                     self._approvals,
+                    before_call=reserve,
                 )
                 if outcome.event is not None:
                     events.append(outcome.event)
@@ -1227,7 +1255,8 @@ class WorkerRuntime:
         return _RoundWork(
             (assistant, CanonicalMessage("tool", tuple(results))),
             wrote,
-            wait_seconds,
+            tool_limit_reached=tool_limit_reached,
+            wait_seconds=wait_seconds,
             events=tuple(events),
             delegated=delegated,
         )
@@ -2042,9 +2071,7 @@ class WorkerRuntime:
             else None
         )
         policy = _summary_policy(context)
-        endpoint_id = (
-            policy.endpoint_id if isinstance(policy, EndpointModelPolicy) else None
-        )
+        endpoint_id = policy.endpoint_id if isinstance(policy, EndpointModelPolicy) else None
         async with self._sessions.begin() as session:
             model: str | None = None
             prices: TokenPrices | None = None
@@ -2102,9 +2129,7 @@ class WorkerRuntime:
         # would misname the answerer if it looked at the Agent's own policy
         # instead.
         policy = _summary_policy(context)
-        endpoint_id = (
-            policy.endpoint_id if isinstance(policy, EndpointModelPolicy) else None
-        )
+        endpoint_id = policy.endpoint_id if isinstance(policy, EndpointModelPolicy) else None
         async with self._sessions.begin() as session:
             model: str | None = None
             if endpoint_id is not None:

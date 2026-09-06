@@ -16,6 +16,7 @@ Every path returns a result. A model left without an answer to a call it made
 will retry it or invent what it returned.
 """
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
@@ -284,10 +285,7 @@ async def answer_memory_remember(
         return (
             ToolResultBlock(
                 call_id=call.call_id,
-                output=(
-                    "Recorded for future conversations. It does not affect this "
-                    "Run."
-                ),
+                output=("Recorded for future conversations. It does not affect this Run."),
                 exit_code=0,
                 failed=False,
             ),
@@ -545,6 +543,8 @@ async def answer_http_call(
     call: ToolCallBlock,
     claim: EgressClaim,
     gate: ApprovalGate | None = None,
+    *,
+    before_call: Callable[[], Awaitable[bool]] | None = None,
 ) -> HttpCallOutcome:
     """Call somebody else's API, wait for a person, or say why not.
 
@@ -587,9 +587,9 @@ async def answer_http_call(
             return stopped
 
     if sender is None:
-        return HttpCallOutcome(
-            text_refusal(call.call_id, "no outbound face is configured here")
-        )
+        return HttpCallOutcome(text_refusal(call.call_id, "no outbound face is configured here"))
+    if before_call is not None and not await before_call():
+        return HttpCallOutcome(text_refusal(call.call_id, "tool_budget_exceeded"))
     answer = await sender.send(plan, entry.credential_ref, claim)
     if answer.refusal is not None:
         return HttpCallOutcome(
@@ -716,6 +716,8 @@ async def answer_mcp_call(
     revalidated: tuple[BoundMcpTool, ...],
     claim: EgressClaim,
     approvals: ApprovalGate | None = None,
+    *,
+    before_call: Callable[[], Awaitable[bool]] | None = None,
 ) -> HttpCallOutcome:
     """Call a bound MCP tool, wait for a person, or say why not.
 
@@ -785,9 +787,9 @@ async def answer_mcp_call(
             return HttpCallOutcome(None, approval=checked)
 
     if gateway is None:
-        return HttpCallOutcome(
-            text_refusal(call.call_id, "no MCP gateway is configured here")
-        )
+        return HttpCallOutcome(text_refusal(call.call_id, "no MCP gateway is configured here"))
+    if before_call is not None and not await before_call():
+        return HttpCallOutcome(text_refusal(call.call_id, "tool_budget_exceeded"))
     answer = await gateway.call(entry, dict(call.arguments), claim)
     if answer.failed:
         return HttpCallOutcome(

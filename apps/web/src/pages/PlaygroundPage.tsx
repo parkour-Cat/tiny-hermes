@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { downloadArtifact } from "../api/artifacts";
+import { SavedFiles } from "../runs/SavedFiles";
 import { api } from "../api/client";
 import { problemMessage } from "../api/messages";
 import type {
@@ -312,9 +313,9 @@ export function PlaygroundPage() {
         )}
       </Card>
       <Card title={t("filesSection")} variant="borderless" className="page-alert">
-        {files.length === 0 ? (
-          <EmptyState title={t("emptyFiles")} />
-        ) : (
+        <SavedFiles key={activeRunId} workspaceId={workspaceId ?? ""} runId={activeRunId} refreshToken={snapshot.data?.state_version} />
+        {files.length > 0 && <Typography.Title level={5}>{t("toolAttachments")}</Typography.Title>}
+        {files.length > 0 && (
           files.map((file) => (
             <Space key={file.id} className="workspace-row">
               <Typography.Text>{file.filename}</Typography.Text>

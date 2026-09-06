@@ -15,6 +15,7 @@ import { loadSessionPrefs, saveSessionPrefs } from "../chat/sessionPrefs";
 import { SessionRail } from "../chat/SessionRail";
 import { sessionTitle } from "../chat/sessionTitle";
 import { Transcript } from "../chat/Transcript";
+import { SavedFiles } from "../chat/SavedFiles";
 import { useEndUserAgents } from "../chat/useEndUserAgents";
 import { useT } from "../i18n/locale";
 import { cancelEndUserRun, useEndUserRun } from "../runs/useEndUserRun";
@@ -307,6 +308,7 @@ export function ChatPage() {
             onDownload={() => setError(t("artifactUnavailable"))}
             onRetry={() => undefined}
           />
+          <SavedFiles key={activeSessionId} sessionId={activeSessionId} refreshToken={snapshot.data?.state_version} />
         </div>
         <Composer
           disabled={false}
