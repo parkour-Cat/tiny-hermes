@@ -78,7 +78,7 @@ test("examples remain reachable after the first Agent was created", async () => 
   renderAgents();
   await screen.findByText("Analyst");
   await userEvent.click(screen.getByRole("button", { name: "从示例创建" }));
-  expect(await screen.findByText("Notes example")).toBeVisible();
+  await waitFor(() => expect(screen.getByText("Notes example")).toBeVisible());
 });
 
 test("a published agent and an unpublished one are told apart", async () => {

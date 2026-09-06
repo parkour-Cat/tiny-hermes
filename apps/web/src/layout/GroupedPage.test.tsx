@@ -73,7 +73,7 @@ test("平台管理员的段跟着标志走", async () => {
       HttpResponse.json({ role: "workspace_admin" }),
     ),
   );
-  renderGrouped("settings", true, "#identity-providers");
+  renderGrouped("platform", true, "#identity-providers");
 
   expect(await screen.findByText("section identity-providers")).toBeVisible();
   expect(screen.queryByText(t("navSettingsIntro"))).toBeNull();

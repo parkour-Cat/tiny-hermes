@@ -49,7 +49,9 @@ def test_filters_are_applied_before_pagination(
     _submit(client, scope, session_id, "unrelated")
     page = client.get("/api/v1/runs", headers=scope, params={"q": "invoice", "limit": 1})
     assert [row["id"] for row in page.json()] == [second]
-    older = client.get("/api/v1/runs", headers=scope, params={"q": "invoice", "limit": 1, "offset": 1})
+    older = client.get(
+        "/api/v1/runs", headers=scope, params={"q": "invoice", "limit": 1, "offset": 1}
+    )
     assert [row["id"] for row in older.json()] == [first]
     assert client.get("/api/v1/runs", headers=scope, params={"limit": 101}).status_code == 422
 

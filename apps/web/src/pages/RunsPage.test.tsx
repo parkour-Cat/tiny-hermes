@@ -76,7 +76,10 @@ const AGENTS = [
 
 function listing(runs: unknown[]): void {
   server.use(
-    http.get("/api/v1/runs", () => HttpResponse.json(runs)),
+      http.get("/api/v1/runs", ({ request }) => {
+        const q = new URL(request.url).searchParams.get("q")?.toLowerCase() ?? "";
+        return HttpResponse.json(runs.filter((row) => JSON.stringify(row).toLowerCase().includes(q)));
+      }),
     http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
   );
 }
@@ -306,7 +309,7 @@ test("tasks can be found by request text while keeping their full identifier acc
   expect(await screen.findByText("Summarize September notes")).toBeVisible();
   await userEvent.type(screen.getByRole("textbox", { name: "查找任务" }), "receipts");
   expect(screen.queryByText("Summarize September notes")).toBeNull();
-  expect(screen.getByText("Organize receipts")).toBeVisible();
+  expect(await screen.findByText("Organize receipts")).toBeVisible();
 });
 
 test("task lookup requests a bounded page and a next page from the server", async () => {

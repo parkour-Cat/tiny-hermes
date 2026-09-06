@@ -96,6 +96,14 @@ test("a request names a person, not a uuid", async () => {
   expect(screen.getByText("alice@example.com")).toBeVisible();
 });
 
+test("a failed user data read cannot look like an empty memory collection", async () => {
+  server.use(http.get("/api/v1/subjects/lookup", () => HttpResponse.json(resolved())), http.get(`/api/v1/subjects/${SUBJECT}/export`, () => HttpResponse.json({ detail: "Data lookup unavailable" }, { status: 503 })));
+  renderSubjects();
+  await lookUp();
+  expect(await screen.findByRole("button", { name: "重试" })).toBeVisible();
+  expect(screen.queryByText(t("subjectNoMemories"))).toBeNull();
+});
+
 test("a name nobody here uses says so, rather than showing an empty person", async () => {
   // An empty memory list under a heading with their name would read as
   // "we hold nothing about this person" — which is a different statement

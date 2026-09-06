@@ -18,7 +18,7 @@ function renderAt(path: string): void {
     <MemoryRouter initialEntries={[path]}>
       <Routes>
         <Route path="/workspaces/:workspaceId">
-          {["inbox", "tooling", "records", "settings"].map((group) => (
+          {["inbox", "tooling", "records", "settings", "platform"].map((group) => (
             <Route key={group} path={group} element={<Probe />} />
           ))}
           {LEGACY_REDIRECTS.map(([from, to, anchor]) => (

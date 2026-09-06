@@ -31,5 +31,5 @@ test("platform login only offers platform credentials and keeps the form open wh
   await userEvent.click(screen.getByRole("combobox"));
   await screen.findByText("Global login · 平台");
   expect(screen.queryByText("Space login · 工作空间")).toBeNull();
-  expect(screen.getByRole("link", { name: "新建凭据" })).toHaveAttribute("target", "_blank");
+  expect(screen.getByRole("link", { name: "存入凭据" })).toHaveAttribute("target", "_blank");
 });

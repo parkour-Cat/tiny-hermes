@@ -75,3 +75,18 @@ test("the default inbox puts all three actionable kinds in one list", async () =
   expect(await screen.findByText("Remember agreed date")).toBeVisible();
   expect(screen.getAllByRole("link", { name: "查看并处理" })).toHaveLength(3);
 });
+
+test("memory history filters on the server before paging and names the outcome", async () => {
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json({ id: "u1", is_platform_admin: true })),
+    http.get("/api/v1/workspaces/:id/members/me", () => HttpResponse.json({ role: "workspace_admin" })),
+    http.get("/api/v1/approvals", () => HttpResponse.json({ items: [], has_more: false })),
+    http.get("/api/v1/skill-proposals", () => HttpResponse.json([])),
+    http.get("/api/v1/memories/pending", () => HttpResponse.json([])),
+    http.get("/api/v1/memories", ({ request }) => HttpResponse.json({ items: new URL(request.url).searchParams.get("status") === "rejected" ? [{ id: "old", body: "Older rejected memory", kind: "private", status: "rejected", updated_at: "2026-09-06" }] : [], has_more: false })),
+  );
+  renderInbox();
+  await userEvent.click(await screen.findByText("处理历史"));
+  expect(await screen.findByText("Older rejected memory")).toBeVisible();
+  expect(screen.getByText("已拒绝")).toBeVisible();
+});

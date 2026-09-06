@@ -3,7 +3,7 @@ import { expect, test } from "vitest";
 import { NAV_GROUPS, visibleSections } from "./navigation";
 
 test("平台管理单列，普通工作空间入口保留", () => {
-  expect(NAV_GROUPS.filter((group) => group.key !== "platform")).toHaveLength(7);
+  expect(NAV_GROUPS.filter((group) => group.key !== "platform")).toHaveLength(8);
   expect(NAV_GROUPS.some((group) => group.key === "platform")).toBe(true);
 });
 
