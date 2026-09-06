@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { expect, test } from "vitest";
@@ -12,7 +13,7 @@ import { server } from "../test/server";
 
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
 
-function renderGrouped(groupKey: string, isPlatformAdmin = false): void {
+function renderGrouped(groupKey: string, isPlatformAdmin = false, hash = ""): void {
   server.use(
     http.get("/api/v1/auth/me", () =>
       HttpResponse.json({
@@ -28,7 +29,7 @@ function renderGrouped(groupKey: string, isPlatformAdmin = false): void {
   render(
     <TestTheme>
       <QueryClientProvider client={client}>
-        <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE}/${groupKey}`]}>
+        <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE}/${groupKey}${hash}`]}>
           <AuthProvider>
             <Routes>
               <Route
@@ -72,8 +73,25 @@ test("平台管理员的段跟着标志走", async () => {
       HttpResponse.json({ role: "workspace_admin" }),
     ),
   );
-  renderGrouped("settings", true);
+  renderGrouped("settings", true, "#identity-providers");
 
   expect(await screen.findByText("section identity-providers")).toBeVisible();
-  expect(screen.getByText(t("navSettingsIntro"))).toBeVisible();
+  expect(screen.queryByText(t("navSettingsIntro"))).toBeNull();
+});
+
+test("shows one section at a time and switches through navigable links", async () => {
+  server.use(http.get("/api/v1/workspaces/:id/members/me", () => HttpResponse.json({ role: "viewer" })));
+  renderGrouped("records");
+  expect(await screen.findByText("section audit")).toBeVisible();
+  expect(screen.queryByText("section usage")).toBeNull();
+  await userEvent.click(screen.getByRole("link", { name: t("usage") }));
+  expect(await screen.findByText("section usage")).toBeVisible();
+  expect(screen.queryByText("section audit")).toBeNull();
+});
+
+test("a forbidden or obsolete hash falls back to a visible section", async () => {
+  server.use(http.get("/api/v1/workspaces/:id/members/me", () => HttpResponse.json({ role: "viewer" })));
+  renderGrouped("settings", false, "#identity-providers");
+  expect(await screen.findByText("section members")).toBeVisible();
+  expect(screen.queryByText("section identity-providers")).toBeNull();
 });

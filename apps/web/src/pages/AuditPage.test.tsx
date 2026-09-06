@@ -54,6 +54,34 @@ function renderAudit(): void {
   );
 }
 
+test("a failed query offers retry rather than an empty history", async () => {
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(USER)),
+    http.get("/api/v1/audit-events", () => HttpResponse.json({ title: "Unavailable" }, { status: 503 })),
+  );
+  renderAudit();
+  expect(await screen.findByRole("button", { name: "重试" })).toBeVisible();
+  expect(screen.queryByText("还没有操作记录")).toBeNull();
+});
+
+test("more history uses the next offset and retains current filters", async () => {
+  const offsets: string[] = [];
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(USER)),
+    http.get("/api/v1/audit-events", ({ request }) => {
+      const query = new URL(request.url).searchParams;
+      const offset = query.get("offset") ?? "0";
+      offsets.push(offset);
+      return HttpResponse.json({ items: [row({ id: offset, request_id: offset, action: offset === "0" ? "run.paused" : "run.completed" })], has_more: offset === "0", visibility: "full" });
+    }),
+  );
+  renderAudit();
+  await userEvent.click(await screen.findByRole("button", { name: "加载更多" }));
+  expect(await screen.findByText("run.completed")).toBeVisible();
+  expect(screen.getByText("run.paused")).toBeVisible();
+  expect(offsets).toEqual(["0", "1"]);
+});
+
 test("a redacted view says so, because an empty detail column cannot", async () => {
   server.use(
     http.get("/api/v1/auth/me", () => HttpResponse.json(USER)),
