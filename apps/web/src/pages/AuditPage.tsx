@@ -1,5 +1,7 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
-import { Alert, Button, Card, Input, Space, Table, Tag, Typography } from "antd";
+import { Alert, Button, Card, AutoComplete, Space, Table, Tag, Typography } from "antd";
+import { Link, useSearchParams } from "react-router-dom";
+import { TimeRangeFilter, timeBounds } from "../ui/TimeRangeFilter";
 import { useState } from "react";
 
 import { api, download } from "../api/client";
@@ -31,16 +33,31 @@ export function AuditPage() {
   const t = useT();
   const { locale } = useLocale();
   const workspaceId = useWorkspaceId();
-  const [action, setAction] = useState("");
-  const [resourceType, setResourceType] = useState("");
+  const [params, setParams] = useSearchParams();
+  const action = params.get("action") ?? "";
+  const resourceType = params.get("resource") ?? "";
+  const from = params.get("from") ?? "";
+  const through = params.get("through") ?? "";
+  function filter(values: Record<string, string>) {
+    const next = new URLSearchParams(params);
+    for (const [key, value] of Object.entries(values)) { if (value) next.set(key, value); else next.delete(key); }
+    setParams(next, { replace: true });
+  }
+  const actionLabels: Record<string, string> = {
+    "run.paused": t("auditTaskPaused"), "run.completed": t("auditTaskCompleted"),
+    "secret.created": t("newSecret"), "secret.disabled": t("disableSecret"),
+    "memory.shared_created": t("memorySharedCreatedAction"), "memory.shared_updated": t("memorySharedUpdatedAction"),
+    "workspace.created": t("auditWorkspaceCreated"),
+  };
 
-  const query = new URLSearchParams();
+
+  const query = new URLSearchParams(timeBounds(from, through));
   if (action.trim() !== "") query.set("action", action.trim());
   if (resourceType.trim() !== "") query.set("resource_type", resourceType.trim());
   const suffix = query.toString() === "" ? "" : `?${query.toString()}`;
 
   const events = useInfiniteQuery({
-    queryKey: ["audit-events", workspaceId, action, resourceType] as const,
+    queryKey: ["audit-events", workspaceId, suffix] as const,
     initialPageParam: 0,
     queryFn: ({ pageParam }) =>
       api<AuditEventsPageResponse>(`/api/v1/audit-events${suffix}${suffix === "" ? "?" : "&"}offset=${pageParam}`, {
@@ -96,20 +113,23 @@ export function AuditPage() {
         ) : null}
 
         <Space wrap>
-          <Input
+          <AutoComplete
+            options={Object.entries(actionLabels).map(([value, label]) => ({ value, label }))}
             aria-label={t("auditFilterAction")}
             placeholder={t("auditFilterAction")}
             value={action}
-            onChange={(event) => setAction(event.target.value)}
+            onChange={(value) => filter({ action: value })}
             allowClear
           />
-          <Input
+          <AutoComplete
+            options={[{ value: "run", label: t("runs") }, { value: "agent", label: t("agents") }, { value: "secret", label: t("secrets") }, { value: "memory", label: t("memoryReview") }]}
             aria-label={t("auditFilterResource")}
             placeholder={t("auditFilterResource")}
             value={resourceType}
-            onChange={(event) => setResourceType(event.target.value)}
+            onChange={(value) => filter({ resource: value })}
             allowClear
           />
+          <TimeRangeFilter from={from} through={through} onChange={(a, b) => filter({ from: a, through: b })} />
           <Button onClick={() => void exportEvents()} loading={exporting}>
             {t("auditExport")}
           </Button>
@@ -137,6 +157,7 @@ export function AuditPage() {
             loading={events.isLoading}
             dataSource={items}
             pagination={false}
+            scroll={{ x: 900 }}
             columns={[
               {
                 title: t("auditWhen"),
@@ -155,14 +176,14 @@ export function AuditPage() {
                   </Space>
                 ),
               },
-              { title: t("auditAction"), dataIndex: "action" },
+              { title: t("auditAction"), dataIndex: "action", render: (value: string) => <div>{actionLabels[value] && <div>{actionLabels[value]}</div>}<Typography.Text type="secondary">{value}</Typography.Text></div> },
               {
                 title: t("auditResource"),
                 dataIndex: "resource_type",
                 render: (value: string, row) => (
                   <Space direction="vertical" size={0}>
                     <span>{value}</span>
-                    <Typography.Text type="secondary">{row.resource_id ?? "—"}</Typography.Text>
+                    {row.resource_id && ["run", "agent"].includes(value) ? <Link to={`/workspaces/${workspaceId}/${value === "run" ? "runs" : "agents"}/${row.resource_id}`}>{row.resource_id}</Link> : <Typography.Text type="secondary">{row.resource_id ?? "—"}</Typography.Text>}
                   </Space>
                 ),
               },

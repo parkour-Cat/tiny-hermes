@@ -27,7 +27,7 @@ from tiny_hermes.http_tools.domain.models import (
 )
 from tiny_hermes.outbound.domain.scope import OutboundScope, ScopeEntryInvalid, parse_entry
 from tiny_hermes.tenancy.domain.models import Actor, Role
-from tiny_hermes.tools.domain.openapi import OpenApiRefused, parse_document
+from tiny_hermes.tools.domain.openapi import OpenApiDocument, OpenApiRefused, parse_document
 
 WRITERS = frozenset({Role.WORKSPACE_ADMIN, Role.DEVELOPER})
 READERS = frozenset({Role.WORKSPACE_ADMIN, Role.DEVELOPER, Role.VIEWER})
@@ -153,6 +153,15 @@ class HostOutsideWorkspaceScope(HttpToolError):
 
 
 class HttpToolCatalog:
+    async def preview(
+        self, actor: Actor, workspace_id: UUID, document: str, request_id: str
+    ) -> OpenApiDocument:
+        await self._require_writer(actor, workspace_id, request_id)
+        try:
+            return parse_document(document)
+        except OpenApiRefused as error:
+            raise InvalidOpenApiDocument(str(error)) from error
+
     def __init__(self, store: HttpToolStore, scopes: WorkspaceScopeReader | None = None) -> None:
         self._store = store
         # Optional for the reason `AgentCatalog`'s readers are: the fast domain
@@ -261,9 +270,7 @@ class HttpToolCatalog:
         version = await self._store.get_version(version_id)
         if version is None or version.http_tool_id != tool.id:
             raise UnknownHttpToolVersion
-        withdrawn = await self._store.set_version_status(
-            version.id, HttpToolStatus.WITHDRAWN
-        )
+        withdrawn = await self._store.set_version_status(version.id, HttpToolStatus.WITHDRAWN)
         if withdrawn is None:  # pragma: no cover - read a line above
             raise UnknownHttpToolVersion
         if tool.current_version_id == withdrawn.id:
@@ -282,9 +289,7 @@ class HttpToolCatalog:
     async def _checked_host(self, workspace_id: UUID, base_url: str) -> str:
         parts = urlsplit(base_url)
         if parts.scheme not in ("http", "https") or not parts.hostname:
-            raise InvalidBaseUrl(
-                f"{base_url!r} is not an http or https URL with a host"
-            )
+            raise InvalidBaseUrl(f"{base_url!r} is not an http or https URL with a host")
         if parts.query or parts.fragment:
             raise InvalidBaseUrl("a base URL carries no query and no fragment")
         host = parts.hostname
@@ -314,9 +319,7 @@ class HttpToolCatalog:
         await self._require_writer(actor, workspace_id, request_id)
         return tool
 
-    async def _require_writer(
-        self, actor: Actor, workspace_id: UUID, request_id: str
-    ) -> None:
+    async def _require_writer(self, actor: Actor, workspace_id: UUID, request_id: str) -> None:
         if actor.is_service_account:
             # Registering an API this platform will call is a decision a person
             # makes. A key that could add one would be a quiet way to widen
@@ -324,9 +327,7 @@ class HttpToolCatalog:
             raise ForbiddenHttpToolAction
         await self._require_role(actor, workspace_id, request_id, allowed=WRITERS)
 
-    async def _require_reader(
-        self, actor: Actor, workspace_id: UUID, request_id: str
-    ) -> None:
+    async def _require_reader(self, actor: Actor, workspace_id: UUID, request_id: str) -> None:
         if actor.is_service_account:
             if actor.role is None or actor.role not in READERS:
                 raise ForbiddenHttpToolAction

@@ -19,6 +19,7 @@ import { EmptyState } from "../ui/EmptyState";
 import { PageHeading } from "../ui/PageHeading";
 import { ShortId } from "../tables/ShortId";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
+import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
 
 /**
  * §20.1's Channels, which had nothing behind it.
@@ -35,6 +36,8 @@ import { useWorkspaceId } from "../workspace/useWorkspaceId";
  * thing migration 0037 restructured the table to avoid.
  */
 export function ChannelsPage() {
+  const { admin } = useWorkspacePermissions();
+  const [modal, contextHolder] = Modal.useModal();
   const t = useT();
   const workspaceId = useWorkspaceId();
   const location = useLocation();
@@ -245,18 +248,20 @@ export function ChannelsPage() {
   const rows = bindings.data ?? [];
   const named = new Map((agents.data ?? []).map((agent) => [agent.id, agent.name]));
   const usable = (secrets.data ?? []).filter(
-    (secret) => secret.status === "active" && secret.scope === "workspace",
+    (secret) => secret.status === "active" && secret.scope === "workspace" && (!secret.purpose || secret.purpose === "general" || secret.purpose === "channel"),
   );
   const canHoldLongConnection = Boolean(editedAppId?.trim() && editedAppSecret);
 
   return (
     <>
+      {contextHolder}
+      {disable.isError || disableIssuer.isError ? <Alert type="error" title={problemMessage(disable.error ?? disableIssuer.error, t)} className="page-alert" /> : null}
       <PageHeading
         kicker={t("workspaceTitle")}
         title={t("channels")}
         intro={t("channelsIntro")}
         extra={
-          !web && <Button type="primary" onClick={() => setOpen(true)}>
+          !web && admin && <Button type="primary" onClick={() => setOpen(true)}>
             {t("bindChannel")}
           </Button>
         }
@@ -268,6 +273,7 @@ export function ChannelsPage() {
       </nav>
 
       {!web && <Typography.Paragraph>{t("channelFeishuIntro")}</Typography.Paragraph>}
+      {!web && <details className="page-alert"><summary>{t("feishuVerification")}</summary><Typography.Paragraph>{t("feishuVerificationHint")}</Typography.Paragraph></details>}
       {web && <Card title={t("channelWebGuide")} variant="borderless" className="page-alert">
         <ol className="setup-steps">
           <li><strong>{t("channelWebStepAgent")}</strong><p>{t("channelWebAgentHint")}</p>
@@ -437,7 +443,7 @@ export function ChannelsPage() {
                 title: "",
                 key: "actions",
                 render: (_value, row) =>
-                  row.status === "active" ? (
+                  row.status === "active" && admin ? (
                     <Space size="small">
                       <Button
                         size="small"
@@ -464,7 +470,7 @@ export function ChannelsPage() {
                         danger
                         size="small"
                         loading={disable.isPending}
-                        onClick={() => disable.mutate(row.id)}
+                        onClick={() => modal.confirm({ title: t("channelDisable"), content: `${named.get(row.agent_id) ?? row.agent_id} — ${t("channelDisableImpact")}`, okText: t("confirm"), cancelText: t("cancel"), onOk: () => { disable.mutate(row.id); } })}
                       >
                         {t("channelDisable")}
                       </Button>
@@ -482,7 +488,7 @@ export function ChannelsPage() {
         className="page-alert"
         loading={issuers.isPending}
         extra={
-          <Button onClick={() => setRegistering(true)}>{t("registerIssuer")}</Button>
+          admin && <Button onClick={() => setRegistering(true)}>{t("registerIssuer")}</Button>
         }
       >
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -511,12 +517,12 @@ export function ChannelsPage() {
                   title: "",
                   key: "actions",
                   render: (_value, row) =>
-                    row.status === "active" ? (
+                    row.status === "active" && admin ? (
                       <Button
                         danger
                         size="small"
                         loading={disableIssuer.isPending}
-                        onClick={() => disableIssuer.mutate(row.id)}
+                        onClick={() => modal.confirm({ title: t("channelDisable"), content: `${row.issuer} — ${t("chatIssuerDisableImpact")}`, okText: t("confirm"), cancelText: t("cancel"), onOk: () => { disableIssuer.mutate(row.id); } })}
                       >
                         {t("channelDisable")}
                       </Button>

@@ -97,41 +97,72 @@ class HttpToolVersionResponse(BaseModel):
     created_at: datetime
 
 
+class PreviewResponse(BaseModel):
+    title: str
+    operations: list[OperationResponse]
+
+
 def http_tool_router(resources: ApplicationResources) -> APIRouter:
     router = APIRouter(prefix="/api/v1/http-tools", tags=["http-tools"])
     auth_dependency = resources.auth_service
     catalog_dependency = resources.http_tool_catalog
 
+    @router.post("/preview", response_model=PreviewResponse)
+    async def preview_document(  # pyright: ignore[reportUnusedFunction]
+        payload: AddVersionRequest,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        catalog: Annotated[HttpToolCatalog, Depends(catalog_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> PreviewResponse:
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        workspace_id = require_workspace_id(selected_workspace)
+        try:
+            parsed = await catalog.preview(
+                _actor(user), workspace_id, payload.document, request.state.request_id
+            )
+        except ForbiddenHttpToolAction as error:
+            raise forbidden() from error
+        except InvalidOpenApiDocument as error:
+            raise _invalid_document(error) from error
+        return PreviewResponse(
+            title=parsed.title,
+            operations=[
+                OperationResponse(
+                    operation_id=operation.operation_id,
+                    method=operation.method,
+                    path=operation.path,
+                    summary=operation.summary,
+                    read_only=operation.read_only,
+                )
+                for operation in parsed.operations
+            ],
+        )
+
     @router.get("", response_model=list[HttpToolResponse])
     async def list_tools(  # pyright: ignore[reportUnusedFunction]
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        catalog: Annotated[
-            HttpToolCatalog, Depends(catalog_dependency, scope="function")
-        ],
+        catalog: Annotated[HttpToolCatalog, Depends(catalog_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
     ) -> list[HttpToolResponse]:
         user = await authenticate_browser_user(auth, session_token)
         workspace_id = require_workspace_id(selected_workspace)
         try:
-            listed = await catalog.list_tools(
-                _actor(user), workspace_id, request.state.request_id
-            )
+            listed = await catalog.list_tools(_actor(user), workspace_id, request.state.request_id)
         except ForbiddenHttpToolAction as error:
             raise forbidden() from error
         return [_tool(tool) for tool in listed]
 
-    @router.post(
-        "", response_model=HttpToolResponse, status_code=status.HTTP_201_CREATED
-    )
+    @router.post("", response_model=HttpToolResponse, status_code=status.HTTP_201_CREATED)
     async def register_tool(  # pyright: ignore[reportUnusedFunction]
         payload: RegisterHttpToolRequest,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        catalog: Annotated[
-            HttpToolCatalog, Depends(catalog_dependency, scope="function")
-        ],
+        catalog: Annotated[HttpToolCatalog, Depends(catalog_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
@@ -185,9 +216,7 @@ def http_tool_router(resources: ApplicationResources) -> APIRouter:
         tool_id: UUID,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        catalog: Annotated[
-            HttpToolCatalog, Depends(catalog_dependency, scope="function")
-        ],
+        catalog: Annotated[HttpToolCatalog, Depends(catalog_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
     ) -> list[HttpToolVersionResponse]:
@@ -214,9 +243,7 @@ def http_tool_router(resources: ApplicationResources) -> APIRouter:
         request: Request,
         response: Response,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        catalog: Annotated[
-            HttpToolCatalog, Depends(catalog_dependency, scope="function")
-        ],
+        catalog: Annotated[HttpToolCatalog, Depends(catalog_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
@@ -252,9 +279,7 @@ def http_tool_router(resources: ApplicationResources) -> APIRouter:
         version_id: UUID,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        catalog: Annotated[
-            HttpToolCatalog, Depends(catalog_dependency, scope="function")
-        ],
+        catalog: Annotated[HttpToolCatalog, Depends(catalog_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,

@@ -15,6 +15,7 @@ from tiny_hermes.secrets.domain.envelope import (
 )
 from tiny_hermes.secrets.domain.mask import mask_plaintext
 from tiny_hermes.secrets.domain.models import (
+    SecretPurpose,
     SecretRecord,
     SecretScope,
     SecretStatus,
@@ -98,6 +99,7 @@ class SecretService:
         scope: SecretScope,
         plaintext: str,
         request_id: str,
+        purpose: SecretPurpose = SecretPurpose.GENERAL,
     ) -> SecretView:
         await self._require_writer(actor, workspace_id, scope, request_id)
         normalized = name.strip()
@@ -110,6 +112,7 @@ class SecretService:
         record = SecretRecord(
             id=uuid4(),
             name=normalized,
+            purpose=purpose,
             scope=scope,
             workspace_id=None if scope is SecretScope.PLATFORM else workspace_id,
             status=SecretStatus.ACTIVE,
@@ -136,9 +139,7 @@ class SecretService:
         )
         return _view(stored)
 
-    async def list(
-        self, actor: Actor, workspace_id: UUID, request_id: str
-    ) -> list[SecretView]:
+    async def list(self, actor: Actor, workspace_id: UUID, request_id: str) -> list[SecretView]:
         await self._require_lister(actor, workspace_id, request_id)
         return [_view(record) for record in await self._store.list_visible(workspace_id)]
 
@@ -163,9 +164,7 @@ class SecretService:
         )
         return _view(disabled)
 
-    async def rewrap(
-        self, actor: Actor, workspace_id: UUID, request_id: str
-    ) -> RewrapResult:
+    async def rewrap(self, actor: Actor, workspace_id: UUID, request_id: str) -> RewrapResult:
         if actor.is_service_account or not actor.is_platform_admin:
             raise ForbiddenSecretAction
         current = self._current_kek()
@@ -286,9 +285,7 @@ class SecretService:
         except InvalidKek as error:
             raise PreviousKekMissing from error
 
-    async def _require_lister(
-        self, actor: Actor, workspace_id: UUID, request_id: str
-    ) -> None:
+    async def _require_lister(self, actor: Actor, workspace_id: UUID, request_id: str) -> None:
         await self._require_role(
             actor,
             workspace_id,
@@ -356,6 +353,7 @@ def _view(record: SecretRecord) -> SecretView:
     return SecretView(
         id=record.id,
         name=record.name,
+        purpose=record.purpose,
         scope=record.scope,
         workspace_id=record.workspace_id,
         status=record.status,

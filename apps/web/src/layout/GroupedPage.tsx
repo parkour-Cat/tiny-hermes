@@ -41,7 +41,7 @@ export function GroupedPage({
 
   return (
     <div className="grouped-page">
-      <PageHeading kicker={t("workspaceTitle")} title={t(group.labelKey)} />
+      <PageHeading kicker={t(groupKey === "platform" ? "navPlatformIntro" : "workspaceTitle")} title={t(group.labelKey)} />
       <nav className="section-links" aria-label={t(group.labelKey)}>
         {visible.map((section) => (
           <Link key={section.key} to={{ pathname: location.pathname, hash: `#${section.key}` }} aria-current={active?.key === section.key ? "page" : undefined}>

@@ -617,3 +617,7 @@ html[data-theme="dark"] .th-tag-interrupted {
 
 .memory-review pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; padding: 12px; border-radius: 8px; background: rgba(128, 128, 128, .1); }
 .session-search-result { overflow-wrap: anywhere; }
+
+.editor-actions { position: sticky; top: 0; z-index: 5; padding: 12px; border: 1px solid var(--ant-color-border); border-radius: 12px; background: var(--ant-color-bg-container); box-shadow: 0 4px 16px #0002; }
+.spec-change { margin-block: 12px; overflow-wrap: anywhere; }
+.overview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 20px; margin-bottom: 20px; }

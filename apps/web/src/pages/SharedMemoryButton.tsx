@@ -7,6 +7,7 @@ import { useAuth } from "../auth/AuthProvider";
 import { useT } from "../i18n/locale";
 import { useMyRole } from "../workspace/useMyRole";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
+import { MemoryPage } from "./MemoryPage";
 
 export function SharedMemoryButton({ agentId, agentName }: { agentId: string; agentName: string }) {
   const t = useT();
@@ -14,6 +15,7 @@ export function SharedMemoryButton({ agentId, agentName }: { agentId: string; ag
   const workspaceId = useWorkspaceId();
   const { role } = useMyRole();
   const [open, setOpen] = useState(false);
+  const [managing, setManaging] = useState(false);
   const [saved, setSaved] = useState(false);
   const [form] = Form.useForm<{ body: string }>();
   const write = useMutation({
@@ -25,6 +27,8 @@ export function SharedMemoryButton({ agentId, agentName }: { agentId: string; ag
   });
   if (!user?.is_platform_admin && role !== "workspace_admin" && role !== "platform_admin") return null;
   return <>
+    <Button onClick={() => setManaging(true)}>{t("memoryManage")}</Button>
+    <Modal open={managing} title={`${t("memoryManage")} · ${agentName}`} footer={null} onCancel={() => setManaging(false)} width={760} destroyOnHidden>{managing && <MemoryPage agentId={agentId} />}</Modal>
     <Button onClick={() => { setSaved(false); setOpen(true); }}>{t("writeShared")}</Button>
     {saved ? <Typography.Text type="success">{t("memorySaved")}</Typography.Text> : null}
     <Modal open={open} title={`${t("writeShared")} · ${agentName}`} okText={t("saveName")} cancelText={t("cancel")}

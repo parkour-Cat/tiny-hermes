@@ -53,6 +53,7 @@ export function SessionSearchPage() {
               <Space direction="vertical" size={4} style={{ width: "100%" }}>
                 <Space wrap>
                   <Tag>{hit.role}</Tag>
+                  <Link to={`/workspaces/${workspaceId}/records?session=${hit.session_id}#subjects`}>{t("sessionSubject")}</Link>
                   {hit.run_id === null ? null : (
                     <Link title={hit.run_id} to={`/workspaces/${workspaceId}/runs/${hit.run_id}`}>{shortenId(hit.run_id)}</Link>
                   )}

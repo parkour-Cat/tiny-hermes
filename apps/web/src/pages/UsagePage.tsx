@@ -1,3 +1,5 @@
+import { useSearchParams } from "react-router-dom";
+import { TimeRangeFilter, timeBounds } from "../ui/TimeRangeFilter";
 import { useQuery } from "@tanstack/react-query";
 import { Alert, Button, Card, Space, Statistic, Table, Tag } from "antd";
 
@@ -40,11 +42,15 @@ function costCell(bucket: UsageByQualityResponse, t: (key: MessageKey) => string
 export function UsagePage() {
   const t = useT();
   const workspaceId = useWorkspaceId();
+  const [params, setParams] = useSearchParams();
+  const from = params.get("from") ?? "";
+  const through = params.get("through") ?? "";
+  const query = new URLSearchParams(timeBounds(from, through)).toString();
 
   const usage = useQuery({
-    queryKey: ["usage-summary", workspaceId] as const,
+    queryKey: ["usage-summary", workspaceId, query] as const,
     queryFn: () =>
-      api<UsageSummaryResponse>("/api/v1/usage", { workspace: workspaceId ?? "" }),
+      api<UsageSummaryResponse>(`/api/v1/usage${query ? `?${query}` : ""}`, { workspace: workspaceId ?? "" }),
     enabled: workspaceId !== null,
   });
 
@@ -58,7 +64,13 @@ export function UsagePage() {
   }
 
   return (
-    <Card loading={usage.isPending} extra={t("usagePeriod")}>
+    <Card loading={usage.isPending} extra={t(query ? "usageSelectedPeriod" : "usagePeriod")}>
+      <TimeRangeFilter from={from} through={through} onChange={(a, b) => {
+        const next = new URLSearchParams(params);
+        if (a) next.set("from", a); else next.delete("from");
+        if (b) next.set("through", b); else next.delete("through");
+        setParams(next, { replace: true });
+      }} />
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
 
         {data === undefined ? null : (

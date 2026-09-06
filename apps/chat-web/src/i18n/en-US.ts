@@ -1,6 +1,8 @@
 import type { MessageKey } from "./zh-CN";
 
 export const enUS: Record<MessageKey, string> = {
+  noAvailableAgents: "No available Agents",
+  noAvailableAgentsHint: "Ask an administrator to check publication and your access to Agents.",
   approvalTarget: "Target",
   approvalTargetUnspecified: "No target was provided. Review the parameters below.",
   approvalRequestParameters: "Parameters for this call",

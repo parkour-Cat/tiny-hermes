@@ -27,6 +27,7 @@ export type NavGroup = {
 // 每一段的可见角色不是猜的：2026-09-04 用集成测试夹具，以 viewer 和 developer
 // 身份逐个 GET 各页的列表接口，记下 200/403，再对照服务层的判定写下来源。
 export const NAV_GROUPS: NavGroup[] = [
+  { key: "overview", labelKey: "overview", introKey: "overviewIntro", sections: [{ key: "overview", labelKey: "overview", introKey: "overviewIntro", path: "overview", roles: null }] },
   {
     key: "agents",
     labelKey: "agents",
@@ -62,6 +63,7 @@ export const NAV_GROUPS: NavGroup[] = [
     labelKey: "navInbox",
     introKey: "navInboxIntro",
     sections: [
+      { key: "actionable", labelKey: "inboxUnified", introKey: "navInboxIntro", path: "inbox", roles: null },
       // 依据：/api/v1/approvals 对 viewer 200
       { key: "approvals", labelKey: "approvals", introKey: "approvalsIntro", path: "approvals", roles: null },
       // 依据：/api/v1/skill-proposals 对 viewer 200
@@ -115,12 +117,21 @@ export const NAV_GROUPS: NavGroup[] = [
       // 依据：outbound/application/service.py 的 READERS（viewer 200）
       { key: "outbound", labelKey: "outboundScopes", introKey: "outboundScopesIntro", path: "outbound", roles: null },
       // 依据：/api/v1/service-accounts 对 viewer 403、developer 200
-      { key: "api-keys", labelKey: "apiKeys", introKey: "apiKeysIntro", path: "api-keys", roles: ["workspace_admin", "developer"] },
+      { key: "api-keys", labelKey: "programAccess", introKey: "apiKeysIntro", path: "api-keys", roles: ["workspace_admin", "developer"] },
+
+    ],
+  },
+  {
+    key: "platform", labelKey: "navPlatform", introKey: "navPlatformIntro",
+    sections: [
+      { key: "model-endpoints", labelKey: "modelEndpoints", introKey: "modelEndpointsIntro", path: "model-endpoints", roles: null, platformAdminOnly: true },
+      { key: "secrets", labelKey: "secrets", introKey: "secretsIntro", path: "secrets", roles: null, platformAdminOnly: true },
+      { key: "outbound", labelKey: "outboundScopes", introKey: "outboundScopesIntro", path: "outbound", roles: null, platformAdminOnly: true },
       // 依据：identity/application/oidc_service.py 的 _require_admin 看的是
       // is_platform_admin：viewer 与 developer 都 403，这不是 workspace 角色能开的门
       {
         key: "identity-providers",
-        labelKey: "identityProviders",
+        labelKey: "consoleLogin",
         introKey: "identityProvidersIntro",
         path: "identity-providers",
         roles: null,

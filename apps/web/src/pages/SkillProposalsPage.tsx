@@ -46,7 +46,7 @@ const MARKS: Record<string, string> = {
  * not disabled — for anything the scan blocked, with the findings underneath
  * saying which file stopped it.
  */
-export function SkillProposalsPage() {
+export function SkillProposalsPage({ focusId }: { focusId?: string }) {
   const t = useT();
   const access = useProposalAccess();
   const [status, setStatus] = useState("pending");
@@ -55,7 +55,7 @@ export function SkillProposalsPage() {
   const [modal, contextHolder] = Modal.useModal();
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<string | null>(focusId ?? null);
   const scope = { workspace: workspaceId ?? "" };
   const listQuery = ["skill-proposals", workspaceId] as const;
 

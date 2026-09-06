@@ -1,8 +1,11 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Alert, Button, Card, Form, Input, Modal, Select, Space, Table, Typography } from "antd";
 import { useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
+import { TimeRangeFilter, timeBounds } from "../ui/TimeRangeFilter";
+import { shortenId } from "../tables/ShortId";
+import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
 import { api } from "../api/client";
 import { useT } from "../i18n/locale";
 import { StatusTag } from "../ui/StatusTag";
@@ -36,6 +39,19 @@ type Attempt = {
 
 export function RunsPage() {
   const t = useT();
+  const { writer } = useWorkspacePermissions();
+  const [params, setParams] = useSearchParams();
+  const search = params.get("q") ?? "";
+  const from = params.get("from") ?? "";
+  const through = params.get("through") ?? "";
+  const status = params.get("status") ?? "";
+  const agentFilter = params.get("agent") ?? "";
+  function filter(values: Record<string, string>) {
+    const next = new URLSearchParams(params);
+    for (const [key, value] of Object.entries(values)) { if (value) next.set(key, value); else next.delete(key); }
+    setParams(next, { replace: true });
+  }
+
   const workspaceId = useWorkspaceId();
   const navigate = useNavigate();
   const [form] = Form.useForm<SubmitValues>();
@@ -52,9 +68,7 @@ export function RunsPage() {
   const agents = useQuery({
     queryKey: ["agents", workspaceId] as const,
     queryFn: () => api<AgentResponse[]>("/api/v1/agents", scope),
-    // Only the submission dialog needs the agent list; asking for it on every
-    // visit to the Run list would be a request nobody made.
-    enabled: open && workspaceId !== null,
+    enabled: workspaceId !== null,
   });
 
   const submit = useMutation({
@@ -117,7 +131,7 @@ export function RunsPage() {
       render: (_: unknown, run: RunResponse) => (
         // The whole identifier: it is what the address bar, the API and the
         // logs all use, and half of one matches none of them.
-        <Link to={`/workspaces/${workspaceId ?? ""}/runs/${run.id}`}>{run.id}</Link>
+        <div><Link aria-label={run.id} title={run.id} to={`/workspaces/${workspaceId ?? ""}/runs/${run.id}`}>{run.input_preview || shortenId(run.id)}</Link><div><Typography.Text type="secondary">{(agents.data ?? []).find((agent) => agent.id === run.agent_id)?.name ?? run.agent_id ?? ""}</Typography.Text></div></div>
       ),
     },
     {
@@ -179,7 +193,7 @@ export function RunsPage() {
         title={t("runsTitle")}
         intro={t("runsIntro")}
         extra={
-          <Button type="primary" onClick={() => setOpen(true)}>
+          <Button type="primary" disabled={!writer} onClick={() => setOpen(true)}>
             {t("newRun")}
           </Button>
         }
@@ -187,12 +201,25 @@ export function RunsPage() {
       {/* Said out loud rather than papered over with a pager the platform
           cannot honour: the route takes no page or cursor, so any control here
           would sort a list that already arrived whole. */}
+      <Space wrap className="page-alert">
+        <Input aria-label={t("runSearch")} placeholder={t("runSearch")} value={search} allowClear onChange={(event) => filter({ q: event.target.value })} />
+        <Select aria-label={t("runStatus")} style={{ minWidth: 150 }} value={status} onChange={(value) => filter({ status: value })} options={[{ value: "", label: t("allStatuses") }, ...[...new Set((runs.data ?? []).map((run) => run.status))].map((value) => ({ value, label: <StatusTag code={value} /> }))]} />
+        <Select aria-label={t("allAgents")} style={{ minWidth: 150 }} value={agentFilter} onChange={(value) => filter({ agent: value })} options={[{ value: "", label: t("allAgents") }, ...(agents.data ?? []).map((agent) => ({ value: agent.id, label: agent.name }))]} />
+        <TimeRangeFilter from={from} through={through} onChange={(a, b) => filter({ from: a, through: b })} />
+      </Space>
       <Card loading={runs.isPending} variant="borderless">
         <Table<RunResponse>
           rowKey="id"
           columns={columns}
-          dataSource={runs.data ?? []}
-          pagination={false}
+          dataSource={(runs.data ?? []).filter((run) => {
+            const bounds = timeBounds(from, through);
+            const name = (agents.data ?? []).find((agent) => agent.id === run.agent_id)?.name ?? "";
+            return (!status || run.status === status) && (!agentFilter || run.agent_id === agentFilter) &&
+              (!bounds.since || Date.parse(run.created_at) >= Date.parse(bounds.since)) && (!bounds.until || Date.parse(run.created_at) < Date.parse(bounds.until)) &&
+              `${run.input_preview ?? ""} ${run.id} ${name}`.toLocaleLowerCase().includes(search.toLocaleLowerCase());
+          })}
+          scroll={{ x: 850 }}
+          pagination={{ pageSize: 20, hideOnSinglePage: true }}
           locale={{ emptyText: <EmptyState title={t("emptyRuns")} /> }}
         />
       </Card>

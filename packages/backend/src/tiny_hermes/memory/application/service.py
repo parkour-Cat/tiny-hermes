@@ -51,6 +51,20 @@ class MemoryRecord:
 
 
 class MemoryStore(Protocol):
+    async def list_records(
+        self,
+        workspace_id: UUID,
+        status: MemoryStatus | None,
+        kind: MemoryKind | None,
+        agent_id: UUID | None,
+        limit: int,
+        offset: int,
+    ) -> Sequence[MemoryRecord]: ...
+
+    async def update_shared(
+        self, memory_id: UUID, expected: datetime, body: str | None, status: MemoryStatus | None
+    ) -> MemoryRecord | None: ...
+
     async def user_role(self, workspace_id: UUID, user_id: UUID) -> Role | None: ...
 
     async def list_pending(self, workspace_id: UUID) -> Sequence[MemoryRecord]: ...
@@ -109,6 +123,60 @@ class InvalidMemoryBody(MemoryError):
 class MemoryService:
     store: MemoryStore
 
+    async def list_records(
+        self,
+        actor: Actor,
+        workspace_id: UUID,
+        *,
+        status: MemoryStatus | None,
+        kind: MemoryKind | None,
+        agent_id: UUID | None,
+        limit: int,
+        offset: int,
+    ) -> Sequence[MemoryRecord]:
+        await self._require_steward(actor, workspace_id)
+        return await self.store.list_records(workspace_id, status, kind, agent_id, limit, offset)
+
+    async def get_record(self, actor: Actor, workspace_id: UUID, memory_id: UUID) -> MemoryRecord:
+        await self._require_steward(actor, workspace_id)
+        record = await self.store.get(memory_id)
+        if record is None or record.workspace_id != workspace_id:
+            raise UnknownMemory
+        return record
+
+    async def update_shared(
+        self,
+        actor: Actor,
+        workspace_id: UUID,
+        memory_id: UUID,
+        *,
+        expected: datetime,
+        body: str | None,
+        status: MemoryStatus | None,
+        request_id: str,
+    ) -> MemoryRecord:
+        await self._require_steward(actor, workspace_id)
+        record = await self.store.get(memory_id)
+        if (
+            record is None
+            or record.workspace_id != workspace_id
+            or record.kind is not MemoryKind.SHARED
+        ):
+            raise UnknownMemory
+        updated = await self.store.update_shared(
+            memory_id, expected, cleaned_body(body) if body is not None else None, status
+        )
+        if updated is None:
+            raise MemoryAlreadyDecided(record.status)
+        await self.store.append_audit(
+            workspace_id=workspace_id,
+            actor_id=actor.id,
+            action="memory.shared_updated",
+            resource_id=memory_id,
+            request_id=request_id,
+        )
+        return updated
+
     async def list_pending(
         self, actor: Actor, workspace_id: UUID, request_id: str
     ) -> Sequence[MemoryRecord]:
@@ -119,16 +187,12 @@ class MemoryService:
     async def approve(
         self, actor: Actor, workspace_id: UUID, memory_id: UUID, request_id: str
     ) -> MemoryRecord:
-        return await self._decide(
-            actor, workspace_id, memory_id, MemoryStatus.ACTIVE, request_id
-        )
+        return await self._decide(actor, workspace_id, memory_id, MemoryStatus.ACTIVE, request_id)
 
     async def reject(
         self, actor: Actor, workspace_id: UUID, memory_id: UUID, request_id: str
     ) -> MemoryRecord:
-        return await self._decide(
-            actor, workspace_id, memory_id, MemoryStatus.REJECTED, request_id
-        )
+        return await self._decide(actor, workspace_id, memory_id, MemoryStatus.REJECTED, request_id)
 
     async def create_shared(
         self,
@@ -178,9 +242,7 @@ class MemoryService:
             raise UnknownMemory
         if record.status is not MemoryStatus.PENDING:
             raise MemoryAlreadyDecided(record.status)
-        decided = await self.store.set_status(
-            memory_id, status, datetime_now()
-        )
+        decided = await self.store.set_status(memory_id, status, datetime_now())
         if decided is None:  # pragma: no cover - read a line above
             raise UnknownMemory
         await self.store.append_audit(

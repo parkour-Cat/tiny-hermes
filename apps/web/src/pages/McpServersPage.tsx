@@ -1,3 +1,5 @@
+import { CapabilityUsage } from "./CapabilityUsage";
+import { CredentialPicker } from "../forms/CredentialPicker";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Button, Card, Form, Input, Modal, Space, Tag, Typography } from "antd";
 import { useState } from "react";
@@ -9,6 +11,7 @@ import { moment } from "../i18n/moment";
 import { useT } from "../i18n/locale";
 import { EmptyState } from "../ui/EmptyState";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
+import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
 
 type ServerValues = { name: string; url: string; credential_ref?: string };
 
@@ -27,6 +30,7 @@ type ServerValues = { name: string; url: string; credential_ref?: string };
  * growing the list.
  */
 export function McpServersPage() {
+  const { writer } = useWorkspacePermissions();
   const t = useT();
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
@@ -34,6 +38,7 @@ export function McpServersPage() {
   const [form] = Form.useForm<ServerValues>();
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  const [search, setSearch] = useState("");
   const [note, setNote] = useState<string | null>(null);
   const scope = { workspace: workspaceId ?? "" };
 
@@ -136,6 +141,8 @@ export function McpServersPage() {
   return (
     <>
       {contextHolder}
+      <Input.Search className="page-alert" aria-label={t("catalogSearch")} placeholder={t("catalogSearch")} value={search} onChange={(event) => setSearch(event.target.value)} allowClear />
+      {versions.isError && <Alert type="error" title={problemMessage(versions.error, t)} action={<Button onClick={() => void versions.refetch()}>{t("retry")}</Button>} />}
       {error === null || adding ? null : (
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}
@@ -143,7 +150,7 @@ export function McpServersPage() {
         <Alert className="page-alert" type="info" title={note} showIcon />
       )}
 
-      <Button type="primary" className="page-alert" onClick={() => { setError(null); setAdding(true); }}>{t("addMcpServer")}</Button>
+      <Button disabled={!writer} type="primary" className="page-alert" onClick={() => { setError(null); setAdding(true); }}>{t("addMcpServer")}</Button>
       <Modal title={t("addMcpServer")} open={adding} footer={null} onCancel={() => { if (!register.isPending) setAdding(false); }}>
         {error === null ? null : <Alert type="error" title={error} showIcon />}
         <Form<ServerValues>
@@ -173,7 +180,7 @@ export function McpServersPage() {
             label={t("httpToolCredential")}
             extra={t("httpToolCredentialHint")}
           >
-            <Input />
+            <CredentialPicker purpose="tool" />
           </Form.Item>
           <Form.Item>
             <Button type="primary" htmlType="submit" loading={register.isPending}>
@@ -186,7 +193,7 @@ export function McpServersPage() {
       {(servers.data ?? []).length === 0 ? (
         <EmptyState title={t("emptyMcpServers")} />
       ) : (
-        (servers.data ?? []).map((server) => (
+        (servers.data ?? []).filter((server) => `${server.name} ${server.url}`.toLowerCase().includes(search.trim().toLowerCase())).map((server) => (
           <Card
             key={server.id}
             title={
@@ -200,6 +207,7 @@ export function McpServersPage() {
             extra={
               <Button
                 size="small"
+                disabled={!writer}
                 loading={reread.isPending}
                 onClick={() => reread.mutate(server.id)}
               >
@@ -220,9 +228,10 @@ export function McpServersPage() {
               <div key={version.id} className="skill-version-row">
                 <Space wrap>
                   <Tag>v{version.version_number}</Tag>
+                  <CapabilityUsage kind="mcp_tools" versionId={version.id} />
                   <Typography.Text type="secondary">{t("mcpServerTools")}</Typography.Text>
                   {version.bindable ? null : <Tag color="default">{version.status}</Tag>}
-                  {version.bindable ? (
+                  {version.bindable && writer ? (
                     <Button
                       size="small"
                       loading={withdraw.isPending}

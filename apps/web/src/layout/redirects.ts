@@ -17,7 +17,7 @@ export const LEGACY_REDIRECTS: readonly (readonly [from: string, to: string, anc
   ["subjects", "records", "subjects"],
   ["members", "settings", "members"],
   ["api-keys", "settings", "api-keys"],
-  ["identity-providers", "settings", "identity-providers"],
+  ["identity-providers", "platform", "identity-providers"],
   ["model-endpoints", "settings", "model-endpoints"],
   ["secrets", "settings", "secrets"],
   ["outbound", "settings", "outbound"],

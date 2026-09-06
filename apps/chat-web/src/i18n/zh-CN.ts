@@ -1,4 +1,6 @@
 export const zhCN = {
+  noAvailableAgents: "暂无可用 Agent",
+  noAvailableAgentsHint: "请联系管理员检查 Agent 是否已发布，以及你是否有权使用。",
   approvalTarget: "操作目标",
   approvalTargetUnspecified: "此请求未提供目标信息，请核对下方参数。",
   approvalRequestParameters: "本次调用参数",

@@ -28,6 +28,9 @@ class AuthService:
         self._session_ttl = timedelta(seconds=session_ttl_seconds)
         self._passwords = PasswordHash.recommended()
 
+    async def initialized(self) -> bool:
+        return await self._store.has_platform_admin()
+
     async def bootstrap(
         self, presented_token: str, command: NewLocalUser, request_id: str
     ) -> AuthenticatedUser:

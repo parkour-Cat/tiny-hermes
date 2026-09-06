@@ -71,7 +71,7 @@ function hasPrice(values: Pick<EndpointValues, "inputPerMillion" | "outputPerMil
   return Boolean(values.inputPerMillion) && Boolean(values.outputPerMillion);
 }
 
-export function ModelEndpointsPage() {
+export function ModelEndpointsPage({ readOnly = false }: { readOnly?: boolean }) {
   const t = useT();
   const [modal, contextHolder] = Modal.useModal();
   const auth = useAuth();
@@ -80,7 +80,7 @@ export function ModelEndpointsPage() {
   const [error, setError] = useState<string | null>(null);
   const [checkNote, setCheckNote] = useState<string | null>(null);
   const [preset, setPreset] = useState<string | null>(null);
-  const admin = auth.user?.is_platform_admin === true;
+  const admin = !readOnly && auth.user?.is_platform_admin === true;
   const listQuery = ["model-endpoints"] as const;
 
   // The credential is picked from what is stored, never typed. The channel
@@ -185,7 +185,8 @@ export function ModelEndpointsPage() {
           method: "POST",
           body: JSON.stringify({
             name: values.new_secret_name,
-            scope: "workspace",
+            scope: "platform",
+            purpose: "model",
             plaintext: values.new_secret_plaintext,
           }),
         });
@@ -433,7 +434,7 @@ export function ModelEndpointsPage() {
                   <Select
                     options={[
                       ...(secrets.data ?? [])
-                        .filter((secret) => secret.status === "active")
+                        .filter((secret) => secret.status === "active" && (!secret.purpose || secret.purpose === "general" || secret.purpose === "model"))
                         .map((secret) => ({
                           value: secret.id,
                           label: `${secret.name} · ${secret.scope}`,

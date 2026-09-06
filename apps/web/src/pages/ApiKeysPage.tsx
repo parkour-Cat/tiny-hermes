@@ -1,3 +1,4 @@
+import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Button, Card, Checkbox, Form, Input, Select, Space, Tag, Typography, Modal } from "antd";
 import { useState } from "react";
@@ -25,6 +26,7 @@ type KeyValues = {
 
 export function ApiKeysPage() {
   const t = useT();
+  const { admin } = useWorkspacePermissions();
   const [modal, contextHolder] = Modal.useModal();
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
@@ -32,6 +34,7 @@ export function ApiKeysPage() {
   const [error, setError] = useState<string | null>(null);
   const [plaintext, setPlaintext] = useState<IssuedApiKeyResponse | null>(null);
   const scope = { workspace: workspaceId ?? "" };
+  const scopeLabel = (name: string) => ({ "runs.read": t("scopeReadRuns"), "runs.write": t("scopeWriteRuns"), "runs.control": t("scopeControlRuns"), "agents.read": t("scopeReadAgents") })[name] ?? name;
   const accountsQuery = ["service-accounts", workspaceId] as const;
 
   const accounts = useQuery({
@@ -130,10 +133,8 @@ export function ApiKeysPage() {
   return (
     <>
       {contextHolder}
-      <div className="page-heading">
-        <div>
-        </div>
-      </div>
+      <Typography.Paragraph>{t("programAccessGuide")}</Typography.Paragraph>
+      <details className="page-alert"><summary>{t("programAccessExample")}</summary><pre className="skill-file-body">{`curl '${window.location.origin}/api/v1/runs' -H 'Authorization: Bearer YOUR_API_KEY' -H 'X-Workspace-Id: ${workspaceId}'`}</pre></details>
       {error === null ? null : (
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}
@@ -154,7 +155,7 @@ export function ApiKeysPage() {
         />
       )}
       <Card title={t("newServiceAccount")} variant="borderless" className="page-alert">
-        <Form<AccountValues>
+        <Form<AccountValues> disabled={!admin}
           form={accountForm}
           layout="inline"
           requiredMark={false}
@@ -197,7 +198,7 @@ export function ApiKeysPage() {
                   <Space wrap>
                     <Tag>{account.role}</Tag>
                     <Tag>{account.status}</Tag>
-                    {account.status === "active" ? (
+                    {account.status === "active" && admin ? (
                       <Button
                         loading={disableAccount.isPending}
                         onClick={() =>
@@ -214,14 +215,14 @@ export function ApiKeysPage() {
                       </Button>
                     ) : null}
                   </Space>
-                  {keys.length === 0 ? (
+                  {keyQueries[index]?.isError ? <Alert type="error" title={problemMessage(keyQueries[index]!.error, t)} action={<Button onClick={() => void keyQueries[index]!.refetch()}>{t("retry")}</Button>} /> : keyQueries[index]?.isPending ? <Typography.Paragraph>{t("loading")}</Typography.Paragraph> : keys.length === 0 ? (
                     <Typography.Paragraph type="secondary">{t("emptyApiKeys")}</Typography.Paragraph>
                   ) : (
                     keys.map((key) => (
                       <Space key={key.id} wrap>
                         <Typography.Text code>{key.prefix}</Typography.Text>
-                        <Typography.Text type="secondary">{key.scopes.join(", ")}</Typography.Text>
-                        {key.revoked_at === null ? (
+                        <Typography.Text type="secondary">{key.scopes.map(scopeLabel).join(", ")}</Typography.Text>
+                        {key.revoked_at === null && admin ? (
                           <Button
                             onClick={() =>
                             void modal.confirm({
@@ -236,13 +237,13 @@ export function ApiKeysPage() {
                             {t("revokeKey")}
                           </Button>
                         ) : (
-                          <Tag>{key.revoked_at}</Tag>
+                          key.revoked_at ? <Tag>{key.revoked_at}</Tag> : null
                         )}
                       </Space>
                     ))
                   )}
-                  {account.status === "active" ? (
-                    <Form<KeyValues>
+                  {account.status === "active" && admin ? (
+                    <Form<KeyValues> disabled={!admin}
                       layout="inline"
                       requiredMark={false}
                       initialValues={{ scopes: [...allowed] }}
@@ -252,7 +253,7 @@ export function ApiKeysPage() {
                     >
                       <Form.Item name="scopes" label={t("keyScopes")}>
                         <Checkbox.Group
-                          options={allowed.map((name) => ({ value: name, label: name }))}
+                          options={allowed.map((name) => ({ value: name, label: `${scopeLabel(name)} (${name})` }))}
                         />
                       </Form.Item>
                       <Form.Item>

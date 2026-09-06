@@ -1,3 +1,5 @@
+import { CapabilityUsage, SkillPreview } from "./CapabilityUsage";
+import { readUtf8 } from "../forms/readUtf8";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Button, Card, Form, Input, Modal, Space, Tag, Typography } from "antd";
 import { useState } from "react";
@@ -9,6 +11,7 @@ import { useT } from "../i18n/locale";
 import { EmptyState } from "../ui/EmptyState";
 import type { MessageKey } from "../i18n/zh-CN";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
+import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
 
 const SOURCES: Record<string, MessageKey> = {
   upload: "skillSourceUpload",
@@ -28,11 +31,11 @@ const SOURCES: Record<string, MessageKey> = {
  * archive, which is red line three on the manual path: the server never grows
  * a face that unpacks one.
  */
-async function readFiles(files: File[]): Promise<SkillFilePayload[]> {
+async function readFiles(files: File[], encodingError: string): Promise<SkillFilePayload[]> {
   return Promise.all(
     files.map(async (file) => ({
       path: relativePath(file),
-      content: await file.text(),
+      content: await readUtf8(file).catch(() => { throw new Error(`${file.name}: ${encodingError}`); }),
     })),
   );
 }
@@ -47,6 +50,7 @@ function relativePath(file: File): string {
 }
 
 export function SkillsPage() {
+  const { writer } = useWorkspacePermissions();
   const t = useT();
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
@@ -56,6 +60,7 @@ export function SkillsPage() {
   const [note, setNote] = useState<string | null>(null);
   const [adding, setAdding] = useState<"upload" | "import" | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [search, setSearch] = useState("");
   const selectionProblem = selectedFiles.length === 0 ? null
     : !selectedFiles.some((file) => relativePath(file) === "SKILL.md") ? t("skillMissingMain")
     : selectedFiles.length > 64 || selectedFiles.reduce((size, file) => size + file.size, 0) > 1024 * 1024 ||
@@ -81,7 +86,7 @@ export function SkillsPage() {
       api<SkillResponse>("/api/v1/skills", {
         ...scope,
         method: "POST",
-        body: JSON.stringify({ scope: "workspace", files: await readFiles(files) }),
+        body: JSON.stringify({ scope: "workspace", files: await readFiles(files, t("skillInvalidEncoding")) }),
       }),
     onSuccess: () => {
       setNote(null);
@@ -119,13 +124,14 @@ export function SkillsPage() {
     );
   }
 
-  const skills = listed.data ?? [];
+  const skills = (listed.data ?? []).filter((skill) => skill.name.toLowerCase().includes(search.trim().toLowerCase()));
   const platform = skills.filter((skill) => skill.scope === "platform");
   const mine = skills.filter((skill) => skill.scope === "workspace");
 
   return (
     <>
       {contextHolder}
+      <Input.Search className="page-alert" aria-label={t("catalogSearch")} placeholder={t("catalogSearch")} value={search} onChange={(event) => setSearch(event.target.value)} allowClear />
       {error === null ? null : (
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}
@@ -134,8 +140,8 @@ export function SkillsPage() {
       )}
 
       <Space wrap className="page-alert">
-        <Button type="primary" onClick={() => setAdding("upload")}>{t("uploadSkill")}</Button>
-        <Button onClick={() => setAdding("import")}>{t("importSkill")}</Button>
+        <Button disabled={!writer} type="primary" onClick={() => setAdding("upload")}>{t("uploadSkill")}</Button>
+        <Button disabled={!writer} onClick={() => setAdding("import")}>{t("importSkill")}</Button>
       </Space>
       <Modal title={t("uploadSkill")} open={adding === "upload"} okText={t("confirmUpload")} cancelText={t("cancel")}
         confirmLoading={upload.isPending} okButtonProps={{ disabled: selectedFiles.length === 0 || selectionProblem !== null }}
@@ -199,7 +205,7 @@ export function SkillsPage() {
             <SkillRow
               key={skill.id}
               skill={skill}
-              editable
+              editable={writer}
               onChanged={refresh}
               onError={setError}
               onNote={setNote}
@@ -324,6 +330,8 @@ function SkillRow({ skill, editable, onChanged, onError, onNote, confirm }: RowP
             <Typography.Text>
               {t("skillVersion").replace("{number}", String(version.version_number))}
             </Typography.Text>
+            <CapabilityUsage kind="skills" versionId={version.id} />
+            <SkillPreview skillId={skill.id} versionId={version.id} />
             <Tag>{t(SOURCES[version.source] ?? "skillSourceUpload")}</Tag>
             <Typography.Text type="secondary">{version.description}</Typography.Text>
             {version.id === skill.current_version_id ? (

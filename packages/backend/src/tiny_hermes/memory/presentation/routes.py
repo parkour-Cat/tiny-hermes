@@ -11,11 +11,11 @@ delete, export — are the plan's §6 and land with the erasure flow.
 """
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Cookie, Depends, Header, Query, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.identity.application.auth_service import AuthService
@@ -37,6 +37,7 @@ from tiny_hermes.memory.application.service import (
     UnknownMemory,
 )
 from tiny_hermes.memory.domain.policy import MAX_BODY_LENGTH
+from tiny_hermes.memory.domain.scope import MemoryKind, MemoryStatus
 from tiny_hermes.memory.domain.search import (
     MAX_QUERY_CHARS,
     SearchHit,
@@ -80,6 +81,18 @@ class CreateSharedRequest(BaseModel):
     body: str = Field(min_length=1, max_length=MAX_BODY_LENGTH)
 
 
+class UpdateSharedRequest(BaseModel):
+    expected_updated_at: datetime
+    body: str | None = Field(default=None, min_length=1, max_length=MAX_BODY_LENGTH)
+    status: Literal["rejected"] | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> "UpdateSharedRequest":
+        if self.body is None and self.status is None:
+            raise ValueError("provide a corrected body or retire this memory")
+        return self
+
+
 class MemoryResponse(BaseModel):
     id: UUID
     workspace_id: UUID
@@ -106,19 +119,87 @@ class MemoryResponse(BaseModel):
         )
 
 
+class MemoryListResponse(BaseModel):
+    items: list[MemoryResponse]
+    has_more: bool
+
+
 def memory_router(resources: ApplicationResources) -> APIRouter:
     router = APIRouter(prefix="/api/v1/memories", tags=["memories"])
     auth_dependency = resources.auth_service
     service_dependency = resources.memory_service
     search_dependency = resources.session_search
 
+    @router.get("", response_model=MemoryListResponse)
+    async def list_library(  # pyright: ignore[reportUnusedFunction]
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        service: Annotated[MemoryService, Depends(service_dependency, scope="function")],
+        status: MemoryStatus | None = None,
+        kind: MemoryKind | None = None,
+        agent_id: UUID | None = None,
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+    ) -> MemoryListResponse:
+        user = await authenticate_browser_user(auth, session_token)
+        try:
+            rows = await service.list_records(
+                _actor(user),
+                require_workspace_id(selected_workspace),
+                status=status,
+                kind=kind,
+                agent_id=agent_id,
+                limit=limit + 1,
+                offset=offset,
+            )
+        except ForbiddenMemoryAction as error:
+            raise forbidden() from error
+        return MemoryListResponse(
+            items=[MemoryResponse.from_domain(row) for row in rows[:limit]],
+            has_more=len(rows) > limit,
+        )
+
+    @router.patch("/shared/{memory_id}", response_model=MemoryResponse)
+    async def update_shared(  # pyright: ignore[reportUnusedFunction]
+        memory_id: UUID,
+        payload: UpdateSharedRequest,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        service: Annotated[MemoryService, Depends(service_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> MemoryResponse:
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        try:
+            row = await service.update_shared(
+                _actor(user),
+                require_workspace_id(selected_workspace),
+                memory_id,
+                expected=payload.expected_updated_at,
+                body=payload.body,
+                status=MemoryStatus.REJECTED if payload.status else None,
+                request_id=request.state.request_id,
+            )
+        except ForbiddenMemoryAction as error:
+            raise forbidden() from error
+        except UnknownMemory as error:
+            raise _not_found() from error
+        except MemoryAlreadyDecided as error:
+            raise _already_decided(error) from error
+        except InvalidMemoryBody as error:
+            raise AppError(
+                code="invalid_memory_body", title="Invalid memory", status=422, detail=str(error)
+            ) from error
+        return MemoryResponse.from_domain(row)
+
     @router.get("/pending", response_model=list[MemoryResponse])
     async def list_pending(  # pyright: ignore[reportUnusedFunction]
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        service: Annotated[
-            MemoryService, Depends(service_dependency, scope="function")
-        ],
+        service: Annotated[MemoryService, Depends(service_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
     ) -> list[MemoryResponse]:
@@ -137,9 +218,7 @@ def memory_router(resources: ApplicationResources) -> APIRouter:
         memory_id: UUID,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        service: Annotated[
-            MemoryService, Depends(service_dependency, scope="function")
-        ],
+        service: Annotated[MemoryService, Depends(service_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
@@ -163,9 +242,7 @@ def memory_router(resources: ApplicationResources) -> APIRouter:
         memory_id: UUID,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        service: Annotated[
-            MemoryService, Depends(service_dependency, scope="function")
-        ],
+        service: Annotated[MemoryService, Depends(service_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
@@ -187,12 +264,8 @@ def memory_router(resources: ApplicationResources) -> APIRouter:
     @router.get("/search", response_model=list[SearchHitResponse])
     async def search_sessions(  # pyright: ignore[reportUnusedFunction]
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        searches: Annotated[
-            SqlSessionSearch, Depends(search_dependency, scope="function")
-        ],
-        service: Annotated[
-            MemoryService, Depends(service_dependency, scope="function")
-        ],
+        searches: Annotated[SqlSessionSearch, Depends(search_dependency, scope="function")],
+        service: Annotated[MemoryService, Depends(service_dependency, scope="function")],
         request: Request,
         q: str = Query(min_length=1, max_length=MAX_QUERY_CHARS),
         limit: int | None = None,
@@ -212,9 +285,7 @@ def memory_router(resources: ApplicationResources) -> APIRouter:
             # Borrowed rather than duplicated: one definition of who may look
             # at somebody else's conversations, and it lives with the rest of
             # §4.6's answers.
-            await service.list_pending(
-                _actor(user), workspace_id, request.state.request_id
-            )
+            await service.list_pending(_actor(user), workspace_id, request.state.request_id)
         except ForbiddenMemoryAction as error:
             raise forbidden() from error
         try:
@@ -238,9 +309,7 @@ def memory_router(resources: ApplicationResources) -> APIRouter:
         payload: CreateSharedRequest,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        service: Annotated[
-            MemoryService, Depends(service_dependency, scope="function")
-        ],
+        service: Annotated[MemoryService, Depends(service_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
@@ -272,6 +341,25 @@ def memory_router(resources: ApplicationResources) -> APIRouter:
                 detail=str(error),
             ) from error
         return MemoryResponse.from_domain(created)
+
+    @router.get("/{memory_id}", response_model=MemoryResponse)
+    async def get_record(  # pyright: ignore[reportUnusedFunction]
+        memory_id: UUID,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        service: Annotated[MemoryService, Depends(service_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+    ) -> MemoryResponse:
+        user = await authenticate_browser_user(auth, session_token)
+        try:
+            record = await service.get_record(
+                _actor(user), require_workspace_id(selected_workspace), memory_id
+            )
+        except ForbiddenMemoryAction as error:
+            raise forbidden() from error
+        except UnknownMemory as error:
+            raise _not_found() from error
+        return MemoryResponse.from_domain(record)
 
     return router
 

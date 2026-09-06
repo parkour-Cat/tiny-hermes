@@ -26,6 +26,9 @@ class SecretRow(IdMixin, CreatedAtMixin, Base):
 
     __tablename__ = "secrets"
     __table_args__ = (
+        CheckConstraint(
+            "purpose IN ('general', 'model', 'tool', 'channel', 'login')", name="ck_secrets_purpose"
+        ),
         CheckConstraint(_in_enum("scope", SecretScope), name="ck_secrets_scope"),
         CheckConstraint(_in_enum("status", SecretStatus), name="ck_secrets_status"),
         CheckConstraint(
@@ -48,6 +51,7 @@ class SecretRow(IdMixin, CreatedAtMixin, Base):
         ),
     )
 
+    purpose: Mapped[str] = mapped_column(String(32), default="general", server_default="general")
     name: Mapped[str] = mapped_column(String(120))
     scope: Mapped[str] = mapped_column(String(32))
     workspace_id: Mapped[UUID | None] = mapped_column(

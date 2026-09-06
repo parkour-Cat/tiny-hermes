@@ -48,7 +48,7 @@ const HISTORY_CHOICES: { key: string; statuses: string[] }[] = [
   { key: "expired", statuses: ["expired"] },
 ];
 
-export function ApprovalsPage() {
+export function ApprovalsPage({ focusId }: { focusId?: string }) {
   const t = useT();
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
@@ -67,8 +67,9 @@ export function ApprovalsPage() {
   const scope = { workspace: workspaceId ?? "" };
 
   const approvals = useQuery({
-    queryKey: ["approvals", workspaceId, pendingType, pendingOffset] as const,
-    queryFn: () => {
+    queryKey: ["approvals", workspaceId, pendingType, pendingOffset, focusId] as const,
+    queryFn: async () => {
+      if (focusId) return { items: [await api<ApprovalResponse>(`/api/v1/approvals/${focusId}`, scope)], has_more: false };
       const query = new URLSearchParams({ limit: "20", offset: String(pendingOffset) });
       if (pendingType !== null) query.set("approval_type", pendingType);
       return api<ApprovalsPageResponse>(`/api/v1/approvals?${query}`, scope);
@@ -112,7 +113,7 @@ export function ApprovalsPage() {
     onError: (caught) => setError(problemMessage(caught, t)),
   });
 
-  const waiting = (approvals.data?.items ?? []).filter((item) => item.status === "pending" && (pendingType === null || item.approval_type === pendingType));
+  const waiting = (approvals.data?.items ?? []).filter((item) => focusId ? item.id === focusId : item.status === "pending" && (pendingType === null || item.approval_type === pendingType));
 
   function card(approval: ApprovalResponse) {
     return (
@@ -121,6 +122,7 @@ export function ApprovalsPage() {
           size="small"
           column={1}
           items={[
+            { key: "outcome", label: t("approvalOutcome"), children: statusLabel(approval.status, t) },
             { key: "tool", label: t("approvalTool"), children: <Typography.Text code>{approval.tool}</Typography.Text> },
             {
               key: "permission",
@@ -148,7 +150,7 @@ export function ApprovalsPage() {
             an empty object. A reviewer who cannot see the request cannot
             approve it. */}
         <details className="approval-details"><summary>{t("approvalFullRequest")}</summary><pre className="skill-file-body">{JSON.stringify(approval.document, null, 2)}</pre></details>
-        {canReview && approval.approval_type === "governance_approval" && view === "actionable" ? <Space wrap>
+        {canReview && approval.status === "pending" && approval.approval_type === "governance_approval" && view === "actionable" ? <Space wrap>
           <Button
             type="primary"
             loading={decide.isPending}
@@ -168,7 +170,7 @@ export function ApprovalsPage() {
           <Button danger onClick={() => setRejecting(approval)}>
             {t("approvalReject")}
           </Button>
-        </Space> : <Typography.Paragraph type="secondary">{t(approval.approval_type === "user_confirmation" ? "approvalWaitUser" : "approvalWaitAdmin")}</Typography.Paragraph>}
+        </Space> : <Typography.Paragraph type="secondary">{approval.status !== "pending" ? statusLabel(approval.status, t) : t(approval.approval_type === "user_confirmation" ? "approvalWaitUser" : "approvalWaitAdmin")}</Typography.Paragraph>}
       </Card>
     );
   }
@@ -180,7 +182,7 @@ export function ApprovalsPage() {
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}
 
-      <Radio.Group
+      {!focusId && <Radio.Group
         aria-label={t("approvalQueueView")} value={view}
         onChange={(event) => { setChosenView(String(event.target.value)); setPendingOffset(0); }}
         className="page-alert"
@@ -189,10 +191,10 @@ export function ApprovalsPage() {
           { value: "waiting", label: t("approvalOthersQueue") },
           { value: "history", label: t("approvalHistoryQueue") },
         ]}
-      />
+      />}
       {!canReview && role === null && !roleLoading ? <Alert type="warning" title={t("approvalRoleUnknown")} /> : null}
       {view !== "history" && <Card variant="borderless" loading={approvals.isLoading || (!canReview && roleLoading)}>
-        <Typography.Paragraph type="secondary">{t(view === "actionable" ? "approvalMyQueueHint" : "approvalOthersQueueHint")}</Typography.Paragraph>
+        {!focusId && <Typography.Paragraph type="secondary">{t(view === "actionable" ? "approvalMyQueueHint" : "approvalOthersQueueHint")}</Typography.Paragraph>}
         {approvals.isError ? <Alert type="error" title={problemMessage(approvals.error, t)} action={<Button onClick={() => void approvals.refetch()}>{t("retry")}</Button>} /> : !canReview && role === null ? null : waiting.length === 0 ? <EmptyState title={t("emptyApprovals")} /> : waiting.map(card)}
         {(pendingOffset > 0 || approvals.data?.has_more) && <Space className="page-alert">
           <Button disabled={pendingOffset === 0 || approvals.isFetching} onClick={() => setPendingOffset(Math.max(0, pendingOffset - 20))}>{t("approvalPreviousPage")}</Button>

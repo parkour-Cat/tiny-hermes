@@ -32,6 +32,7 @@ export function LoginPage() {
     queryFn: () => api<OfferableProviderResponse[]>("/api/v1/auth/oidc/available"),
   });
   const offered = providers.data ?? [];
+  const bootstrap = useQuery({ queryKey: ["bootstrap-status"], queryFn: () => api<{ initialized: boolean }>("/api/v1/bootstrap/status") });
 
   // A refused callback redirects back here. Without saying so, that is
   // indistinguishable from arriving at the login page normally, and the
@@ -98,7 +99,7 @@ export function LoginPage() {
               </Space>
             </>
           )}
-          <Link to="/bootstrap">{t("bootstrapLink")}</Link>
+          {bootstrap.data?.initialized === false && <Link to="/bootstrap">{t("bootstrapLink")}</Link>}
         </Space>
       </Card>
     </PublicShell>

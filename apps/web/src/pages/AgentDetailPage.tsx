@@ -35,12 +35,15 @@ import type {
   WritePolicy,
 } from "../api/types";
 import { IMPLEMENTED_TOOLS, MODEL_SCENARIOS } from "../api/types";
+import { UnsavedChangesGuard } from "../forms/UnsavedChangesGuard";
+import { specDiff } from "./specDiff";
 import { SharedMemoryButton } from "./SharedMemoryButton";
 import { FormSection } from "../forms/FormSection";
 import { PageHeading } from "../ui/PageHeading";
 import { useT } from "../i18n/locale";
 import type { MessageKey } from "../i18n/zh-CN";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
+import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
 
 type DraftValues = {
   personality: string;
@@ -256,29 +259,8 @@ function exposureSummary(t: (key: MessageKey) => string, values: DraftValues): s
   ].join(" · ");
 }
 
-function summarizeSpec(spec: AgentSpecDocument): Record<string, string> {
-  const delivery = spec.delivery ?? DEFAULT_DELIVERY;
-  return {
-    personality: spec.personality,
-    model: JSON.stringify(spec.model_policy),
-    tools: spec.tools.join(", ") || "—",
-    skills: (spec.skills ?? []).map((binding) => binding.skill_version_id).join(", ") || "—",
-    network: (spec.network?.allow ?? []).join(", ") || "—",
-    http_tools:
-      (spec.http_tools ?? []).flatMap((binding) => binding.operations).join(", ") || "—",
-    mcp_tools: (spec.mcp_tools ?? []).flatMap((binding) => binding.tools).join(", ") || "—",
-    max_execution_seconds: String(spec.limits.max_execution_seconds),
-    max_elapsed_seconds: String(spec.limits.max_elapsed_seconds),
-    max_model_calls: String(spec.limits.max_model_calls),
-    max_tool_calls: String(spec.limits.max_tool_calls),
-    max_derived_retries: String(spec.limits.max_derived_retries),
-    delivery: delivery.enabled
-      ? `chat_completions/${delivery.sync_timeout_seconds}s`
-      : "off",
-  };
-}
-
 export function AgentDetailPage() {
+  const { writer } = useWorkspacePermissions();
   const t = useT();
   const workspaceId = useWorkspaceId();
   const { agentId = "" } = useParams();
@@ -562,21 +544,27 @@ export function AgentDetailPage() {
     watched !== undefined && watched.personality !== undefined
       ? watched
       : valuesOf(draft.data);
-  const draftSummary = summarizeSpec(specOf(draftValues));
   const dirty = JSON.stringify(specOf(draftValues)) !== JSON.stringify(specOf(valuesOf(loadedDraft))) ||
     (watched?.name !== undefined && watched.name !== loadedAgent.name) ||
     (watched?.alias !== undefined && watched.alias !== loadedAgent.alias);
   const saving = saveDraft.isPending || rename.isPending || publish.isPending;
-  const publishedSummary =
-    published.data === undefined ? null : summarizeSpec(published.data.spec);
-  const diffEntries =
-    publishedSummary === null
-      ? []
-      : Object.entries(draftSummary).filter(([key, value]) => publishedSummary[key] !== value);
+  const diffEntries = published.data ? specDiff(published.data.spec, specOf(draftValues)) : [];
+  const fieldLabels: Record<string, MessageKey> = {
+    personality: "personality", model_policy: "modelEndpoints", endpoint_id: "modelEndpoint",
+    tools: "toolsSection", skills: "skills", http_tools: "httpTools", mcp_tools: "mcpServers",
+    network: "agentNetwork", limits: "budgetSection", delivery: "deliverySection", end_user_access: "agentSummaryEndUserOn",
+    max_execution_seconds: "maxExecutionSeconds", max_elapsed_seconds: "maxElapsedSeconds",
+    max_model_calls: "maxModelCalls", max_tool_calls: "maxToolCalls", max_derived_retries: "maxDerivedRetries",
+    temperature: "diffTemperature", max_output_tokens: "endpointMaxOutput", write_policy: "agentWritePolicy",
+    http_tool_version_id: "currentVersion", mcp_server_version_id: "currentVersion", skill_version_id: "currentVersion",
+    enabled: "diffEnabled", operations: "diffOperations", allow: "diffAllowed", sync_timeout_seconds: "syncTimeoutSeconds",
+    provider: "modelProvider", scenario: "modelScenario",
+  };
 
   return (
     <>
       {contextHolder}
+      <UnsavedChangesGuard dirty={dirty} />
       <PageHeading
         kicker={t("agents")}
         title={agent.data.name}
@@ -587,22 +575,21 @@ export function AgentDetailPage() {
           <Link to={`/workspaces/${workspaceId}/agents/${agentId}/playground`}>
             <Button>{t("openPlayground")}</Button>
           </Link>
-          <Button
-            type="primary"
-            loading={saving}
-            onClick={() => askToPublish(draft.data?.revision ?? 0)}
-          >
-            {t("publish")}
-          </Button>
+
           </Space>
         }
       />
+      <Space wrap className="editor-actions page-alert">
+        <Button type="primary" loading={saving} disabled={!writer} onClick={() => form.submit()}>{t("saveDraft")}</Button>
+        <Button loading={saving} disabled={!writer} onClick={() => askToPublish(loadedDraft.revision)}>{t("publish")}</Button>
+        <Button loading={draft.isFetching} onClick={reload}>{t("reloadDraft")}</Button>
+        {dirty && <Typography.Text type="warning">{t("draftUnsaved")}</Typography.Text>}
+      </Space>
       <Card variant="borderless" className="page-alert">
         <Space size="large" wrap>
           <Typography.Text strong>
             {`${t("draftRevision")} ${draft.data.revision}`}
           </Typography.Text>
-          {dirty ? <Typography.Text type="warning">{t("draftUnsaved")}</Typography.Text> : null}
           {agent.data.current_version_id === null ? (
             <Typography.Text>{t("agentUnpublished")}</Typography.Text>
           ) : (
@@ -611,30 +598,23 @@ export function AgentDetailPage() {
             </Typography.Text>
           )}
         </Space>
-        {currentVersion === undefined ? null : (
-          <Typography.Paragraph className="fact-note">
-            <Typography.Text code>{currentVersion.content_hash}</Typography.Text>
-          </Typography.Paragraph>
-        )}
         <Typography.Title level={5}>{t("diffSection")}</Typography.Title>
-        {publishedSummary === null ? (
+        {published.data === undefined ? (
           <Typography.Paragraph type="secondary">{t("diffUnpublished")}</Typography.Paragraph>
         ) : diffEntries.length === 0 ? (
           <Typography.Paragraph type="secondary">{t("diffNone")}</Typography.Paragraph>
         ) : (
           <ul>
-            {diffEntries.map(([key, value]) => (
-              <li key={key}>
-                <Typography.Text>{key}</Typography.Text>
-                {": "}
-                <Typography.Text delete>{publishedSummary[key]}</Typography.Text>
-                {" → "}
-                <Typography.Text>{value}</Typography.Text>
+            {diffEntries.map(({ path, before, after }) => (
+              <li key={path} className="spec-change">
+                <Typography.Text strong>{path.split(".").map((part) => fieldLabels[part] ? t(fieldLabels[part]) : /^\d+$/.test(part) ? `#${Number(part) + 1}` : part).join(" · ")}</Typography.Text>
+                <div><Typography.Text delete>{before.startsWith('"') ? String(JSON.parse(before)) : before}</Typography.Text>{" → "}<Typography.Text>{after.startsWith('"') ? String(JSON.parse(after)) : after}</Typography.Text></div>
               </li>
             ))}
           </ul>
         )}
       </Card>
+      <details className="page-alert"><summary>{t("diffTechnical")}</summary><pre className="skill-file-body">{JSON.stringify({ published: published.data?.spec ?? null, draft: specOf(draftValues), content_hash: currentVersion?.content_hash ?? null }, null, 2)}</pre></details>
       {publishNote === null ? null : (
         <Alert className="page-alert" type="info" title={publishNote} showIcon />
       )}
@@ -665,7 +645,7 @@ export function AgentDetailPage() {
       <Card title={t("draftSection")} variant="borderless">
         <Form<FormValues>
           form={form}
-          disabled={saving}
+          disabled={saving || !writer}
           layout="vertical"
           requiredMark={false}
           initialValues={{ ...valuesOf(loadedDraft), name: loadedAgent.name, alias: loadedAgent.alias }}
@@ -793,6 +773,7 @@ export function AgentDetailPage() {
             fields={[]}
             collapsible
           >
+          <Space wrap className="page-alert"><Link to={`/workspaces/${workspaceId}/tooling#skills`}>{t("skills")}</Link><Link to={`/workspaces/${workspaceId}/tooling#http-tools`}>{t("httpTools")}</Link><Link to={`/workspaces/${workspaceId}/tooling#mcp-servers`}>{t("mcpServers")}</Link></Space>
           <Typography.Title level={5}>{t("toolsSection")}</Typography.Title>
           <Typography.Paragraph type="secondary">{t("toolsHint")}</Typography.Paragraph>
           <Form.Item name="tools">
@@ -932,14 +913,7 @@ export function AgentDetailPage() {
             </Form.Item>
           ) : null}
           </FormSection>
-          <Space>
-            <Button type="primary" htmlType="submit" loading={saveDraft.isPending}>
-              {t("saveDraft")}
-            </Button>
-            <Button onClick={() => void reload()} loading={draft.isFetching}>
-              {t("reloadDraft")}
-            </Button>
-          </Space>
+
         </Form>
       </Card>
       {(versions.data ?? []).length === 0 ? null : (
@@ -952,6 +926,7 @@ export function AgentDetailPage() {
                 <Typography.Text type="secondary">{t("agentPublished")}</Typography.Text>
               ) : (
                 <Button
+                  disabled={!writer}
                   loading={rollback.isPending}
                   onClick={() => askToRollback(version.id, version.version_number)}
                 >

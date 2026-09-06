@@ -198,7 +198,7 @@ export function SettingsPage() {
       <section>
         <h2>{t("defaultAgent")}</h2>
         <p className="settings-hint">{t("defaultAgentHint")}</p>
-        {(agents.data ?? []).length < 2 ? (
+        {agents.isPending ? <p>{t("loading")}</p> : agents.isError ? <p role="alert">{t("requestFailed")} <button onClick={() => void agents.refetch()}>{t("retry")}</button></p> : (agents.data ?? []).length === 0 ? <p>{t("noAvailableAgents")}</p> : (agents.data ?? []).length === 1 ? (
           <p className="settings-hint">{t("defaultAgentEmpty")}</p>
         ) : (
           <div className="agent-cards" role="group" aria-label={t("defaultAgent")}>

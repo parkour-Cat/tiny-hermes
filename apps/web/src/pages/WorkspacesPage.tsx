@@ -73,7 +73,7 @@ export function WorkspacesPage() {
           title={t("workspaceTitle")}
           intro={t("workspaceIntro")}
           extra={
-            <Button type="primary" onClick={() => setOpen(true)}>
+            <Button disabled={auth.user?.is_platform_admin !== true} type="primary" onClick={() => setOpen(true)}>
               {t("newWorkspace")}
             </Button>
           }

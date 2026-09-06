@@ -11,6 +11,14 @@ class SecretScope(StrEnum):
     PLATFORM = "platform"
 
 
+class SecretPurpose(StrEnum):
+    GENERAL = "general"
+    MODEL = "model"
+    TOOL = "tool"
+    CHANNEL = "channel"
+    LOGIN = "login"
+
+
 class SecretStatus(StrEnum):
     ACTIVE = "active"
     DISABLED = "disabled"
@@ -28,6 +36,7 @@ class SecretView:
     mask: str
     created_at: datetime
     updated_at: datetime
+    purpose: SecretPurpose = SecretPurpose.GENERAL
 
 
 @dataclass(frozen=True)
@@ -47,6 +56,7 @@ class SecretRecord:
     key_id: str
     created_at: datetime
     updated_at: datetime
+    purpose: SecretPurpose = SecretPurpose.GENERAL
 
     def envelope(self) -> Envelope:
         return Envelope(

@@ -27,6 +27,7 @@ import { artifactIdsIn, mergeArtifacts, toolsOf, transcriptLineOf } from "../run
 import { ToolOutput } from "../runs/ToolOutput";
 import { runQueryOptions, useRunEvents } from "../runs/useRunEvents";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
+import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
 
 /** Consumed against its limit, in the unit the limit is written in. */
 function against(consumed: number, limit: number | null, unlimited: string): string {
@@ -124,6 +125,7 @@ function relationKey(
 }
 
 export function RunDetailPage() {
+  const { admin } = useWorkspacePermissions();
   const t = useT();
   const workspaceId = useWorkspaceId();
   const { runId = "" } = useParams();
@@ -250,7 +252,8 @@ export function RunDetailPage() {
   }
 
   const run = snapshot.data;
-  const turns = messages.data ?? [];
+  const turns = (messages.data ?? []).filter((message) => message.source_run_id === undefined || message.source_run_id === runId);
+  const finalAnswer = [...turns].reverse().find((message) => message.role === "assistant" && message.author !== "platform" && message.withdrawn_at == null && !message.parts.some((part) => part.type === "tool_call") && message.parts.some((part) => part.type === "text" && part.text?.trim()));
   const rounds = toolsOf(turns);
   const files = mergeArtifacts(
     artifacts.data ?? [],
@@ -327,7 +330,7 @@ export function RunDetailPage() {
       label: t("runCheckpointEffect"),
       children: run.checkpoint_effect_status,
     },
-    { key: "session", label: t("runSession"), children: run.session_id },
+    { key: "session", label: t("runSession"), children: <Space wrap>{run.session_id}{admin && <Link to={`/workspaces/${workspaceId}/records?session=${run.session_id}#subjects`}>{t("sessionSubject")}</Link>}</Space> },
     { key: "agent-version", label: t("runAgentVersion"), children: run.agent_version_id },
     { key: "budget-root", label: t("budgetRootRun"), children: runLink(run.budget_root_run_id) },
     { key: "created", label: t("runCreatedAt"), children: moment(run.created_at) },
@@ -460,6 +463,30 @@ export function RunDetailPage() {
       {situation === null ? null : (
         <Alert className="page-alert" type="info" title={t(situation)} showIcon />
       )}
+      {messages.isError && <Alert type="error" className="page-alert" title={problemMessage(messages.error, t)} action={<Button onClick={() => void messages.refetch()}>{t("retry")}</Button>} />}
+      <Card title={t("taskResult")} variant="borderless" className="page-alert" loading={messages.isPending}>
+        {finalAnswer ? <Typography.Paragraph className="transcript-line">{finalAnswer.parts.filter((part) => part.type === "text").map((part) => part.text).join("\n")}</Typography.Paragraph> : <Typography.Paragraph type="secondary">{t("taskNoAnswer")}</Typography.Paragraph>}
+      </Card>
+      <Card title={t("filesSection")} variant="borderless" className="page-alert">
+        <SavedFiles key={runId} workspaceId={workspaceId ?? ""} runId={runId} refreshToken={snapshot.data?.state_version} />
+        {files.length > 0 && <Typography.Title level={5}>{t("toolAttachments")}</Typography.Title>}
+        {files.length > 0 && (
+          files.map((file) => (
+            <Space key={file.id} className="workspace-row">
+              <Typography.Text>{file.filename}</Typography.Text>
+              <Button
+                onClick={() =>
+                  void downloadArtifact(file.id, file.filename, workspaceId ?? "").catch((caught) =>
+                    setActionError(problemMessage(caught, t)),
+                  )
+                }
+              >
+                {t("downloadArtifact")}
+              </Button>
+            </Space>
+          ))
+        )}
+      </Card>
       <Card title={t("summarySection")} variant="borderless" className="page-alert">
         <Descriptions column={{ xs: 1, sm: 2 }} size="small" items={facts} />
         <Typography.Title level={5}>{t("budgetSection")}</Typography.Title>
@@ -495,6 +522,7 @@ export function RunDetailPage() {
           </Space>
         </Card>
       )}
+      <details className="page-alert"><summary>{t("messagesSection")}</summary>
       <Card title={t("messagesSection")} variant="borderless" className="page-alert">
         {turns.length === 0 ? (
           <EmptyState title={t("emptyMessages")} />
@@ -503,9 +531,9 @@ export function RunDetailPage() {
              read-only, append-only and never reordered, and a message
              carries no id of its own. It stops being safe the moment a turn
              can be edited or inserted. */
-          turns.map((message, index) => (
+          turns.filter((message) => message !== finalAnswer).map((message, index) => (
             <article className="workspace-row" key={`${message.role}-${index}`}>
-              <Tag>{message.role}</Tag>
+              <Tag>{message.author === "platform" ? t("platformFeedback") : message.role}</Tag>
               {message.withdrawn_at == null ? null : (
                 /* The row stays in the transcript because the person said it;
                    this tag is the only thing separating it from a turn the
@@ -519,6 +547,8 @@ export function RunDetailPage() {
           ))
         )}
       </Card>
+      </details>
+      <details className="page-alert"><summary>{t("toolsCallsSection")}</summary>
       <Card title={t("toolsCallsSection")} variant="borderless" className="page-alert">
         {rounds.length === 0 ? (
           <EmptyState title={t("emptyTools")} />
@@ -548,26 +578,7 @@ export function RunDetailPage() {
           ))
         )}
       </Card>
-      <Card title={t("filesSection")} variant="borderless" className="page-alert">
-        <SavedFiles key={runId} workspaceId={workspaceId ?? ""} runId={runId} refreshToken={snapshot.data?.state_version} />
-        {files.length > 0 && <Typography.Title level={5}>{t("toolAttachments")}</Typography.Title>}
-        {files.length > 0 && (
-          files.map((file) => (
-            <Space key={file.id} className="workspace-row">
-              <Typography.Text>{file.filename}</Typography.Text>
-              <Button
-                onClick={() =>
-                  void downloadArtifact(file.id, file.filename, workspaceId ?? "").catch((caught) =>
-                    setActionError(problemMessage(caught, t)),
-                  )
-                }
-              >
-                {t("downloadArtifact")}
-              </Button>
-            </Space>
-          ))
-        )}
-      </Card>
+      </details>
       <Card title={t("timelineSection")} variant="borderless">
         {timeline.length === 0 ? (
           <EmptyState title={t("emptyTimeline")} />

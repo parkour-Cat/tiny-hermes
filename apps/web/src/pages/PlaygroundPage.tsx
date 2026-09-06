@@ -22,6 +22,7 @@ import { artifactIdsIn, mergeArtifacts, toolsOf, transcriptLineOf } from "../run
 import { ToolOutput } from "../runs/ToolOutput";
 import { runQueryOptions, useRunEvents } from "../runs/useRunEvents";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
+import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
 
 function matchingSessions(
   listed: SessionResponse[],
@@ -38,6 +39,7 @@ function matchingSessions(
 }
 
 export function PlaygroundPage() {
+  const { writer } = useWorkspacePermissions();
   const t = useT();
   const workspaceId = useWorkspaceId();
   const { agentId = "" } = useParams();
@@ -65,6 +67,7 @@ export function PlaygroundPage() {
       if (mine.length > 0) {
         return mine[mine.length - 1];
       }
+      if (!writer) return null;
       return api<SessionResponse>("/api/v1/sessions", {
         ...scope,
         method: "POST",
@@ -191,6 +194,7 @@ export function PlaygroundPage() {
   if (agent.data === undefined || session.data === undefined) {
     return <Card loading variant="borderless" />;
   }
+  if (session.data === null) return <Alert type="info" title={t("playgroundReadOnly")} />;
 
   const run = snapshot.data;
   const blocked = run?.queue.status === "session_blocked";
@@ -219,7 +223,7 @@ export function PlaygroundPage() {
             <Typography.Text>{session.data.id}</Typography.Text>
           </Typography.Paragraph>
         </div>
-        <Button loading={openSession.isPending} onClick={() => openSession.mutate()}>
+        <Button disabled={!writer} loading={openSession.isPending} onClick={() => openSession.mutate()}>
           {t("newSession")}
         </Button>
       </div>
@@ -342,7 +346,7 @@ export function PlaygroundPage() {
         <Button
           type="primary"
           className="page-alert"
-          disabled={input.trim() === "" || sessionId === null}
+          disabled={!writer || input.trim() === "" || sessionId === null}
           loading={send.isPending}
           onClick={() => send.mutate(input.trim())}
         >

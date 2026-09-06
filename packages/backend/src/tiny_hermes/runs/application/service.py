@@ -241,9 +241,7 @@ class RunCoordination:
             )
         )
 
-    async def list_sessions(
-        self, workspace_id: UUID, actor: Actor
-    ) -> Sequence[SessionSnapshot]:
+    async def list_sessions(self, workspace_id: UUID, actor: Actor) -> Sequence[SessionSnapshot]:
         await self._require_role(workspace_id, actor, READERS)
         return await self._store.list_sessions(workspace_id)
 
@@ -509,7 +507,11 @@ class RunCoordination:
         return await self._store.list_runs(workspace_id, session_id, _capabilities(role))
 
     async def usage_summary(
-        self, workspace_id: UUID, actor: Actor
+        self,
+        workspace_id: UUID,
+        actor: Actor,
+        since: datetime | None = None,
+        until: datetime | None = None,
     ) -> WorkspaceUsageSummary:
         """§6's usage half. Gated exactly like `list_runs` on purpose — the
         plan names no separate rule for who may see a workspace's spend, and
@@ -517,7 +519,7 @@ class RunCoordination:
         asked to design.
         """
         await self._require_role(workspace_id, actor, READERS)
-        return await self._store.usage_summary(workspace_id)
+        return await self._store.usage_summary(workspace_id, since, until)
 
     async def open_event_stream(
         self, workspace_id: UUID, actor: Actor, run_id: UUID, after_sequence: int
@@ -536,9 +538,7 @@ class RunCoordination:
             )
         return window
 
-    async def event_window(
-        self, workspace_id: UUID, actor: Actor, run_id: UUID
-    ) -> RunEventWindow:
+    async def event_window(self, workspace_id: UUID, actor: Actor, run_id: UUID) -> RunEventWindow:
         await self._require_role(workspace_id, actor, READERS)
         window = await self._store.event_window(workspace_id, run_id)
         if window is None:
@@ -554,9 +554,7 @@ class RunCoordination:
         limit: int,
     ) -> Sequence[RunEventRecord]:
         await self._require_role(workspace_id, actor, READERS)
-        return await self._store.list_events_after(
-            workspace_id, run_id, after_sequence, limit
-        )
+        return await self._store.list_events_after(workspace_id, run_id, after_sequence, limit)
 
     async def control_run(
         self,
@@ -691,13 +689,9 @@ class RunCoordination:
             if ended == 0:
                 return None
             return Withdrawal(messages=0, turns=0, echoed_text="", runs_ended=ended)
-        return Withdrawal(
-            messages=changed, turns=taken, echoed_text=text, runs_ended=ended
-        )
+        return Withdrawal(messages=changed, turns=taken, echoed_text=text, runs_ended=ended)
 
-    async def _end_stopped_runs(
-        self, stopped: Sequence[StoppedRun], escape: EndUserEscape
-    ) -> int:
+    async def _end_stopped_runs(self, stopped: Sequence[StoppedRun], escape: EndUserEscape) -> int:
         """结束这个 Session 全部未了结的工作，返回结束了几个。
 
         走 `cancel_end_user_run`，不另开一条路：它的 docstring 描述的就是这一种
@@ -777,9 +771,7 @@ class RunCoordination:
             document,
         )
 
-    async def _require_role(
-        self, workspace_id: UUID, actor: Actor, allowed: set[Role]
-    ) -> Role:
+    async def _require_role(self, workspace_id: UUID, actor: Actor, allowed: set[Role]) -> Role:
         if actor.is_service_account:
             if actor.role is None or actor.role not in allowed:
                 raise ForbiddenRunAction
