@@ -203,3 +203,24 @@ def test_an_unauthenticated_caller_is_refused(client: TestClient, scope: dict[st
     )
 
     assert response.status_code == 401
+
+
+async def test_usage_window_selects_root_tasks_by_creation_time(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, session_for: Any,
+) -> None:
+    agent_id = _agent(client, scope)
+    older = _run(client, scope, session_for(agent_id))
+    newer = _run(client, scope, session_for(agent_id))
+    await _stamp_budget(engine, older["id"], quality="provider", cost="2", currency="USD")
+    await _stamp_budget(engine, newer["id"], quality="unknown", cost=None, currency=None)
+    async with engine.begin() as connection:
+        await connection.execute(text("UPDATE runs SET created_at='2026-08-01T00:00:00Z' WHERE id=:id"), {"id": UUID(older["id"])})
+        await connection.execute(text("UPDATE runs SET created_at='2026-08-02T00:00:00Z' WHERE id=:id"), {"id": UUID(newer["id"])})
+    response = client.get("/api/v1/usage", headers=scope,
+        params={"since": "2026-08-01T00:00:00Z", "until": "2026-08-02T00:00:00Z"})
+    assert response.status_code == 200, response.text
+    assert response.json()["total_run_count"] == 1
+    assert response.json()["window"] == "root_created_at"
+    assert response.json()["by_cost_quality"][0]["cost_quality"] == "provider"
+    assert client.get("/api/v1/usage", headers=scope,
+        params={"since": "2026-08-03T00:00:00Z", "until": "2026-08-02T00:00:00Z"}).status_code == 422

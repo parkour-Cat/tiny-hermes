@@ -298,3 +298,13 @@ test("a run that has not failed shows no reason", async () => {
   expect(await screen.findByText(t("statusRunning"))).toBeVisible();
   expect(screen.queryByText("model_provider_unreachable")).toBeNull();
 });
+
+
+test("tasks can be found by request text while keeping their full identifier accessible", async () => {
+  listing([runRow({ input_preview: "Summarize September notes", agent_id: AGENT }), runRow({ id: QUEUED_RUN, input_preview: "Organize receipts", agent_id: AGENT })]);
+  renderRuns();
+  expect(await screen.findByText("Summarize September notes")).toBeVisible();
+  await userEvent.type(screen.getByRole("textbox", { name: "查找任务" }), "receipts");
+  expect(screen.queryByText("Summarize September notes")).toBeNull();
+  expect(screen.getByText("Organize receipts")).toBeVisible();
+});

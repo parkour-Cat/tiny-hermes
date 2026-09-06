@@ -12,11 +12,11 @@ test("unsaved edits survive a cancelled link and history navigation", async () =
   ], { initialEntries: ["/away", "/edit"] });
   render(<TestTheme><RouterProvider router={router} /></TestTheme>);
   await userEvent.click(screen.getByRole("link", { name: "Leave" }));
-  expect(await screen.findByRole("dialog")).toBeVisible();
+  await waitFor(() => expect(screen.getByRole("dialog")).toBeVisible());
   await userEvent.click(screen.getByRole("button", { name: "继续编辑" }));
   expect(screen.getByLabelText("Draft")).toHaveValue("Keep this");
   await router.navigate(-1);
-  expect(await screen.findByRole("dialog")).toBeVisible();
+  await waitFor(() => expect(screen.getByRole("dialog")).toBeVisible());
   await userEvent.click(screen.getByRole("button", { name: "放弃修改并离开" }));
   await waitFor(() => expect(screen.getByText("Destination")).toBeVisible());
 });

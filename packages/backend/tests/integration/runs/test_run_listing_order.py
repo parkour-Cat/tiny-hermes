@@ -108,3 +108,14 @@ def test_a_session_filtered_listing_stays_in_queue_order(
     body = listed.json()
     assert [str(entry["id"]) for entry in body][:2] == [first, second]
     assert [entry["queue"]["position"] for entry in body][:2] == [1, 2]
+
+
+def test_console_tasks_are_identifiable_by_their_request_and_agent(
+    client: TestClient, scope: dict[str, str], session_id: str,
+) -> None:
+    run_id = _submit(client, scope, session_id, "readable-title")
+    listing = client.get("/api/v1/runs", headers=scope).json()
+    row = next(item for item in listing if item["id"] == run_id)
+    assert row["input_preview"] == "message readable-title"
+    session = client.get(f"/api/v1/sessions/{session_id}", headers=scope).json()
+    assert row["agent_id"] == session["agent_id"]
