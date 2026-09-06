@@ -34,7 +34,7 @@ function renderGrouped(groupKey: string, isPlatformAdmin = false, hash = ""): vo
             <Routes>
               <Route
                 path="/workspaces/:workspaceId/:group"
-                element={<GroupedPage groupKey={groupKey} render={(key) => <p>section {key}</p>} />}
+                element={<GroupedPage groupKey={groupKey} render={(key) => <><p>section {key}</p><input aria-label={`entry ${key}`} /></>} />}
               />
             </Routes>
           </AuthProvider>
@@ -84,9 +84,12 @@ test("shows one section at a time and switches through navigable links", async (
   renderGrouped("records");
   expect(await screen.findByText("section audit")).toBeVisible();
   expect(screen.queryByText("section usage")).toBeNull();
+  await userEvent.type(screen.getByLabelText("entry audit"), "unsaved filter");
   await userEvent.click(screen.getByRole("link", { name: t("usage") }));
   expect(await screen.findByText("section usage")).toBeVisible();
-  expect(screen.queryByText("section audit")).toBeNull();
+  expect(screen.getByText("section audit")).not.toBeVisible();
+  await userEvent.click(screen.getByRole("link", { name: t("audit") }));
+  expect(screen.getByLabelText("entry audit")).toHaveValue("unsaved filter");
 });
 
 test("a forbidden or obsolete hash falls back to a visible section", async () => {

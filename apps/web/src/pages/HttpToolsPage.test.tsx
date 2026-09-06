@@ -119,6 +119,7 @@ test("a host the workspace never approved is refused with the host named", async
 
   renderTools();
 
+  await userEvent.click(await screen.findByRole("button", { name: "添加 HTTP 工具" }));
   await userEvent.type(await screen.findByLabelText("名称"), "orders");
   await userEvent.type(screen.getByLabelText("基础地址"), "https://api.example.com");
   await userEvent.type(screen.getByLabelText("OpenAPI 文档"), "{{}}");
@@ -164,4 +165,5 @@ test("nothing registered says so", async () => {
   renderTools();
 
   expect(await screen.findByText("还没有登记 HTTP 工具。")).toBeInTheDocument();
+  expect(screen.queryByLabelText("OpenAPI 文档")).toBeNull();
 });
