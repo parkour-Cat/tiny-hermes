@@ -80,27 +80,25 @@ async function choose(page: Page, label: string, value: string): Promise<void> {
 /** Approves the host at both levels. A workspace may only choose inside the
  *  platform's, so the platform entry has to exist first. */
 async function approveHost(page: Page): Promise<void> {
-  const outbound = await openSection(page, "设置", "出站范围", "outbound");
-  // The two forms by position rather than by their cards' text: each card's
-  // prose mentions the other level — that is the point of the page, each layer
-  // narrowing the one above — so a text filter matches both. The platform's
-  // form is first because that is the order the rule runs in.
-  const forms = outbound.locator("form");
-  await expect(forms).toHaveCount(2);
-  for (const index of [0, 1]) {
-    const form = forms.nth(index);
+  for (const group of ["平台管理", "设置"]) {
+    const outbound = await openSection(page, group, "出站范围", "outbound");
+    const form = outbound.locator("form");
+    await expect(form).toHaveCount(1);
     await form.getByLabel("目标").fill(TOOL_HOST);
     await form.getByRole("button", { name: "批准" }).click();
-    await expect(outbound.getByText(TOOL_HOST, { exact: true })).toHaveCount(index + 1);
+    await expect(outbound.getByText(TOOL_HOST, { exact: true })).toBeVisible();
   }
 }
 
 async function registerTool(page: Page): Promise<void> {
   const tools = await openSection(page, "工具与技能", "HTTP 工具", "http-tools");
-  await tools.getByLabel("名称").fill("health");
-  await tools.getByLabel("基础地址").fill(TOOL_BASE);
-  await tools.getByLabel("OpenAPI 文档").fill(DOCUMENT);
-  await tools.getByRole("button", { name: "登记" }).click();
+  await tools.getByRole("button", { name: "添加 HTTP 工具" }).click();
+  const registration = page.getByRole("dialog");
+  await registration.getByLabel("名称").fill("health");
+  await registration.getByLabel("基础地址").fill(TOOL_BASE);
+  await registration.getByLabel("OpenAPI 文档").fill(DOCUMENT);
+  await registration.getByRole("button", { name: "登记", exact: true }).click();
+  await expect(registration).toBeHidden();
   // Both operations, with the write marked where somebody is choosing.
   await expect(tools.getByText(/GET readLiveness/)).toBeVisible({ timeout: 30_000 });
   await expect(tools.getByText(/POST pokeLiveness · 会改数据/)).toBeVisible();

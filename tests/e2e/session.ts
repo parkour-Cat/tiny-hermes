@@ -24,19 +24,18 @@ export const CONSOLE_STATE = path.join(__dirname, ".auth", "console.json");
 /**
  * Walks to one section of a grouped page the way a person does since the
  * console went from eighteen entries to seven: the group's entry in the
- * navigation, then the section's anchor. Returns the section, so a spec can
- * scope its labels to it — every section of a group is on the same page, and
- * 「名称」 alone now matches three forms.
+ * navigation, then the section tab. The accessible region remains stable
+ * when anchor ids are removed to prevent scroll jumps.
  */
 export async function openSection(
   page: Page,
   group: string,
   section: string,
-  id: string,
+  _id: string,
 ): Promise<Locator> {
   await page.getByRole("link", { name: group, exact: true }).click();
   await page.getByRole("link", { name: section, exact: true }).click();
-  const found = page.locator(`section#${id}`);
+  const found = page.getByRole("region", { name: section, exact: true });
   await found.waitFor();
   return found;
 }

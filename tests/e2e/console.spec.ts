@@ -44,7 +44,7 @@ async function openWorkspace(page: Page): Promise<void> {
  * option near the bottom either.
  */
 async function choose(page: Page, label: string, value: string): Promise<void> {
-  const field = page.getByLabel(label);
+  const field = page.getByLabel(label, { exact: true });
   await field.evaluate((element) => element.scrollIntoView({ block: "center" }));
   await field.click();
   // Typing only where the select accepts it. A non-search Ant select renders a
@@ -265,7 +265,7 @@ test("the builder binds a tool, playground sends, and rollback restores v1", asy
   await page.getByRole("button", { name: "新建 Agent" }).click();
   await page.getByLabel("名称").fill(name);
   await page.getByLabel("别名").fill(name.toLowerCase().replace(/_/g, "-"));
-  await page.getByRole("button", { name: "创建" }).click();
+  await page.getByRole("button", { name: "创建", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "新建 Agent" })).toBeHidden();
   await expect(page).toHaveURL(/\/agents\/[0-9a-f-]{36}$/);
 

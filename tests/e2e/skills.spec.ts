@@ -74,11 +74,15 @@ async function bindTool(page: Page, name: string): Promise<void> {
 /** Uploads one SKILL.md through the picker. No archive is ever built. */
 async function uploadSkill(page: Page, line: string): Promise<void> {
   const skills = await openSection(page, "工具与技能", "技能", "skills");
-  await skills.getByLabel("选择文件").setInputFiles({
+  await skills.getByRole("button", { name: "上传技能目录" }).click();
+  const upload = page.getByRole("dialog", { name: "上传技能目录" });
+  await upload.getByLabel("选择文件").setInputFiles({
     name: "SKILL.md",
     mimeType: "text/markdown",
     buffer: Buffer.from(skillDocument(line), "utf-8"),
   });
+  await upload.getByRole("button", { name: "确认上传" }).click();
+  await expect(upload).toBeHidden();
   await expect(skills.getByRole("heading", { name: SKILL_NAME })).toBeVisible();
 }
 

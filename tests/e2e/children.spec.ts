@@ -255,6 +255,6 @@ test("the console shows the tree and each child is a link", async ({ page }) => 
   // The tree is the claim worth making here: from the child, the sibling it
   // was delegated alongside is reachable — which was the whole gap §952
   // named. Two children were delegated, so exactly one is not this one.
-  const treeCard = page.locator(".ant-card", { hasText: "任务树" });
+  const treeCard = page.locator('.ant-card:has(> .ant-card-head .ant-card-head-title:text-is("任务树"))');
   await expect(treeCard.getByRole("link", { name: runId })).toBeVisible();
 });
