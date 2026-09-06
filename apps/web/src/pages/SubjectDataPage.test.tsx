@@ -173,3 +173,17 @@ test("a memory can be corrected in place, and the correction is what is sent", a
 
   await waitFor(() => expect(sent).toEqual({ body: "They prefer afternoons." }));
 });
+
+
+test("a partial external identifier can locate a person before opening their data", async () => {
+  server.use(
+    http.get("/api/v1/subjects/search", () => HttpResponse.json({ items: [resolved()], has_more: false })),
+    http.get("/api/v1/subjects/lookup", () => HttpResponse.json(resolved())),
+    http.get(`/api/v1/subjects/${SUBJECT}/export`, () => HttpResponse.json(exported())),
+  );
+  renderSubjects();
+  await userEvent.type(screen.getByLabelText(t("subjectExternalId")), "alice");
+  await userEvent.click(screen.getByRole("button", { name: "按部分标识查找" }));
+  await userEvent.click(await screen.findByRole("button", { name: "alice@example.com" }));
+  expect(await screen.findByText(SUBJECT)).toBeVisible();
+});
