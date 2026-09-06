@@ -264,6 +264,8 @@
 - 涉及工作：前后端接入流程。
 - 定位：[ChannelsPage.tsx](D:/projects/products/tiny-hermes/apps/web/src/pages/ChannelsPage.tsx)。
 
+2026-09-06 后续实施：新建和编辑现在都可一次提交应用配置与长连接设置；新建后台直接保存所选接入方式，共用编辑的凭据检查，不再先创建 Webhook 再切换。保持旧调用默认 Webhook。保存后的重启提示与实际连接状态分开，尚未实现自动收发验证向导。见 [飞书新建流程验收](../verification/2026-09-06-channel-create-ux.md)。
+
 <a id="ux-15"></a>
 
 ### UX-15 · 凭据用途和填写方式不统一

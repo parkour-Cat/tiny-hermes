@@ -1169,6 +1169,8 @@ Web Chat 不展示模型密钥、内部系统提示词、工作空间审计和�
 
 接入方式依据[飞书官方 Python SDK Channel Quickstart](https://github.com/larksuite/oapi-sdk-python/blob/8d6402635d0a9314ddae765ae64931aabca30f79/doc/channel/quickstart.md)；该文档同时说明 WebSocket 和 Webhook transport。
 
+2026-09-06 控制台接入流程调整：新建时一次提交 Agent、应用配置和接入方式，不要求先保存 Webhook 再打开编辑切换。新建和编辑共用长连接检查：应用 ID 不能空白，应用密钥必须引用当前工作空间的有效凭据。已有调用未指定接入方式时仍默认 Webhook。新增长连接或修改接入方式后，需要部署管理员重启 scheduler；界面区分配置已保存与实际连接状态，凭据检查或连接心跳均不等于已验证消息收发。
+
 两种模式都使用 `channel_binding_id + channel_event_id` 去重，并把消息转换为统一 Run。平台不提供默认内网穿透服务；选择 Webhook 的企业负责域名、公网入口和证书。
 
 飞书中 Session 被暂停或等待的 head Run 阻塞时，适配器发送包含原因、排队位置和当前可用审批、继续、取消或新建会话入口的状态卡片，不能静默吞入新消息。

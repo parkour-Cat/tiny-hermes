@@ -42,7 +42,7 @@ export function ChannelsPage() {
   const queryClient = useQueryClient();
   const scope = { workspace: workspaceId ?? "" };
   const [open, setOpen] = useState(false);
-  const [form] = Form.useForm<{ agentId: string; encryptKeyRef: string; appId: string }>();
+  const [form] = Form.useForm<{ agentId: string; encryptKeyRef: string; appId: string; appSecretRef?: string; transport: string }>();
   // Which binding the edit dialog is open on, or null. The row rather than
   // its id, because the dialog seeds its fields from the current values —
   // an edit form that started empty would look like it was about to clear
@@ -54,10 +54,8 @@ export function ChannelsPage() {
     appSecretRef?: string;
     transport: string;
   }>();
-  // Set once a PATCH actually changed `transport`, and left up rather than a
-  // toast: the platform does not hot-reload transports (Task 4's deliberate
-  // choice), so a person who switched this and stopped looking at the screen
-  // a second later must still find the warning there.
+  // Creating a long connection and changing transport both need a restart.
+  // Keep that next step visible after the configuration dialog closes.
   const [transportRestartHint, setTransportRestartHint] = useState(false);
 
 
@@ -156,6 +154,7 @@ export function ChannelsPage() {
       encryptKeyRef: string;
       appId: string;
       appSecretRef?: string;
+      transport: string;
     }) =>
       api<ChannelBindingResponse>("/api/v1/channel-bindings", {
         ...scope,
@@ -165,13 +164,15 @@ export function ChannelsPage() {
           agent_id: values.agentId,
           app_id: values.appId,
           encrypt_key_ref: values.encryptKeyRef,
+          ...(values.transport === "long_connection" ? { transport: values.transport } : {}),
           // Omitted, not sent as null, when unset: a binding with no app
           // secret is receive-only (§929's drill), and the key's absence is
           // what says so.
           ...(values.appSecretRef ? { app_secret_ref: values.appSecretRef } : {}),
         }),
       }),
-    onSuccess: () => {
+    onSuccess: (created) => {
+      if (created.transport === "long_connection") setTransportRestartHint(true);
       setOpen(false);
       form.resetFields();
       void queryClient.invalidateQueries({ queryKey: bindingsQuery });
@@ -238,6 +239,8 @@ export function ChannelsPage() {
 
   const editedAppId = Form.useWatch("appId", editForm) as string | undefined;
   const editedAppSecret = Form.useWatch("appSecretRef", editForm) as string | undefined;
+  const newAppId = Form.useWatch("appId", form) as string | undefined;
+  const newAppSecret = Form.useWatch("appSecretRef", form) as string | undefined;
 
   const rows = bindings.data ?? [];
   const named = new Map((agents.data ?? []).map((agent) => [agent.id, agent.name]));
@@ -564,12 +567,13 @@ export function ChannelsPage() {
         ) : null}
         <Form
           form={form}
+          initialValues={{ transport: "webhook" }}
           layout="vertical"
           requiredMark={false}
           onFinish={(values) => bind.mutate(values)}
         >
           <Typography.Paragraph type="secondary">{t("channelCreateTransportHint")}</Typography.Paragraph>
-          <BindingFields mode="create" agents={agents.data ?? []} usable={usable} canHoldLongConnection={false} />
+          <BindingFields mode="create" agents={agents.data ?? []} usable={usable} canHoldLongConnection={Boolean(newAppId?.trim() && newAppSecret)} />
         </Form>
       </Modal>
 
@@ -598,9 +602,7 @@ export function ChannelsPage() {
   );
 }
 
-/** 绑定的字段，新建与编辑共用一份定义。三个弹窗里抄三遍的后果是：改了其中
- *  一处，另外两处不知道。新建多一个 Agent 字段，编辑多一个接入方式——两处差异
- *  各有理由，写在各自的注释里。 */
+/** 新建与编辑共用配置和校验；已绑定的 Agent 不能被静默替换。 */
 function BindingFields({
   mode,
   agents,
@@ -613,11 +615,13 @@ function BindingFields({
   canHoldLongConnection: boolean;
 }) {
   const t = useT();
+  const bindingForm = Form.useFormInstance();
+  const longConnection = Form.useWatch("transport", bindingForm) === "long_connection";
   return (
     <FormSection
       title={t("channelSectionBinding")}
       summary=""
-      fields={mode === "create" ? ["agentId", "encryptKeyRef"] : ["encryptKeyRef", "transport"]}
+      fields={mode === "create" ? ["agentId", "encryptKeyRef", "transport"] : ["encryptKeyRef", "transport"]}
       collapsible={false}
     >
       {mode === "create" ? (
@@ -647,15 +651,18 @@ function BindingFields({
                 cleanly and then failed at the first delivery. */}
             <Select options={usable.map((secret) => ({ value: secret.id, label: secret.name }))} />
           </Form.Item>
-          <Form.Item name="appId" label={t("channelAppId")}>
+          <Form.Item name="appId" label={t("channelAppId")} dependencies={["transport"]}
+            rules={[{ required: longConnection, whitespace: true, message: t("channelTransportNeedsCredentials") }]}>
             <Input />
           </Form.Item>
           <Form.Item
             name="appSecretRef"
             label={t("channelAppSecretRef")}
             extra={t("channelAppSecretRefHint")}
+            dependencies={["transport"]}
+            rules={[{ required: longConnection, message: t("channelTransportNeedsCredentials") }]}
           >
-            {/* Optional — a receive-only binding needs none. The same Select
+            {/* Optional for receive-only Webhook bindings. The same Select
                 of stored secrets, so an unknown reference cannot be typed.
                 No placeholder: on an antd Select a placeholder becomes the
                 combobox's accessible name and hides the field's label. */}
@@ -664,7 +671,6 @@ function BindingFields({
               options={usable.map((secret) => ({ value: secret.id, label: secret.name }))}
             />
           </Form.Item>
-      {mode === "edit" ? (
         <>
               {/* The restart warning is not here as `extra`: it needs to survive
                   this dialog closing (`onSuccess` closes it immediately), so it
@@ -698,7 +704,6 @@ function BindingFields({
                 />
               </Form.Item>
         </>
-      ) : null}
     </FormSection>
   );
 }
