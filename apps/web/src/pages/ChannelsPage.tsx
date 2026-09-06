@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Button, Card, Form, Input, Modal, Radio, Select, Space, Table, Tag, Typography } from "antd";
 import { useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 
 import { api } from "../api/client";
 import { problemMessage } from "../api/messages";
@@ -36,6 +37,8 @@ import { useWorkspaceId } from "../workspace/useWorkspaceId";
 export function ChannelsPage() {
   const t = useT();
   const workspaceId = useWorkspaceId();
+  const location = useLocation();
+  const web = location.hash === "#web";
   const queryClient = useQueryClient();
   const scope = { workspace: workspaceId ?? "" };
   const [open, setOpen] = useState(false);
@@ -62,7 +65,7 @@ export function ChannelsPage() {
   const bindings = useQuery({
     queryKey: bindingsQuery,
     queryFn: () => api<ChannelBindingResponse[]>("/api/v1/channel-bindings", scope),
-    enabled: workspaceId !== null,
+    enabled: workspaceId !== null && !web,
   });
   const agents = useQuery({
     queryKey: ["agents", workspaceId] as const,
@@ -77,17 +80,15 @@ export function ChannelsPage() {
   const secrets = useQuery({
     queryKey: ["secrets", workspaceId] as const,
     queryFn: () => api<SecretResponse[]>("/api/v1/secrets", scope),
-    enabled: workspaceId !== null && (open || editing !== null || nothingBound),
+    enabled: workspaceId !== null && !web && (open || editing !== null || nothingBound),
   });
 
-  // A binding says which Agent is published; an issuer says whose word this
-  // platform takes for who a person is. Neither is usable without the other,
-  // so they belong on one page rather than in two nav entries.
+  // Web identity belongs to the workspace, independently of Feishu bindings.
   const issuersQuery = ["channel-issuers", workspaceId] as const;
   const issuers = useQuery({
     queryKey: issuersQuery,
     queryFn: () => api<ChannelIssuerResponse[]>("/api/v1/channel-issuers", scope),
-    enabled: workspaceId !== null,
+    enabled: workspaceId !== null && web,
   });
   const [registering, setRegistering] = useState(false);
   const [issuerForm] =
@@ -235,35 +236,15 @@ export function ChannelsPage() {
       editForm.setFields([{ name: "appSecretRef", errors: [problemMessage(caught, t)] }]),
   });
 
-  if (bindings.isError) {
-    // §4.6 gives a viewer `否` here, so a refusal is an ordinary outcome on
-    // this page rather than a fault. An empty table would tell them this
-    // workspace publishes nothing, which is a different and false statement.
-    return (
-      <Alert
-        type="warning"
-        showIcon
-        message={problemMessage(bindings.error, t)}
-        description={t("channelsForbiddenHint")}
-      />
-    );
-  }
+  const editedAppId = Form.useWatch("appId", editForm) as string | undefined;
+  const editedAppSecret = Form.useWatch("appSecretRef", editForm) as string | undefined;
 
   const rows = bindings.data ?? [];
   const named = new Map((agents.data ?? []).map((agent) => [agent.id, agent.name]));
   const usable = (secrets.data ?? []).filter(
     (secret) => secret.status === "active" && secret.scope === "workspace",
   );
-  // Read off the binding as **stored**, not off what is currently typed in
-  // the dialog: an administrator who adds an app secret and switches
-  // transport in one save still has to save twice, because this does not
-  // track the unsaved fields. The API validates the resulting binding
-  // either way — this control only keeps the common case from having to be
-  // refused to learn why. `channelTransportNeedsCredentials` is where that
-  // second save is spelled out, because a disabled option that does not
-  // un-disable when you fill the field it names looks broken otherwise.
-  const canHoldLongConnection =
-    editing !== null && editing.app_id !== null && editing.app_secret_ref !== null;
+  const canHoldLongConnection = Boolean(editedAppId?.trim() && editedAppSecret);
 
   return (
     <>
@@ -272,13 +253,32 @@ export function ChannelsPage() {
         title={t("channels")}
         intro={t("channelsIntro")}
         extra={
-          <Button type="primary" onClick={() => setOpen(true)}>
+          !web && <Button type="primary" onClick={() => setOpen(true)}>
             {t("bindChannel")}
           </Button>
         }
       />
 
-      {transportRestartHint ? (
+      <nav className="section-links" aria-label={t("channelScenario")}>
+        <Link to="#feishu" aria-current={!web ? "page" : undefined}>{t("channelFeishu")}</Link>
+        <Link to="#web" aria-current={web ? "page" : undefined}>{t("channelWeb")}</Link>
+      </nav>
+
+      {!web && <Typography.Paragraph>{t("channelFeishuIntro")}</Typography.Paragraph>}
+      {web && <Card title={t("channelWebGuide")} variant="borderless" className="page-alert">
+        <ol className="setup-steps">
+          <li><strong>{t("channelWebStepAgent")}</strong><p>{t("channelWebAgentHint")}</p>
+            {agents.isError ? <Alert type="error" title={problemMessage(agents.error, t)} /> : null}
+            <Space wrap>{(agents.data ?? []).filter((agent) => agent.current_version_id !== null).map((agent) => (
+              <Link key={agent.id} to={`/workspaces/${workspaceId}/agents/${agent.id}`}>{t("channelConfigureAgent")} {agent.name}</Link>
+            ))}<Link to={`/workspaces/${workspaceId}/agents`}>{t("channelManageAgents")}</Link></Space>
+          </li>
+          <li><strong>{t("channelWebStepIdentity")}</strong><p>{t("channelWebIdentityHint")}</p></li>
+          <li><strong>{t("channelWebStepConnect")}</strong><p>{t("channelWebConnectHint")}</p></li>
+        </ol>
+      </Card>}
+
+      {transportRestartHint && !web ? (
         // Left up until dismissed, not a toast: the scheduler does not
         // hot-reload transports, so the moment this matters is after the
         // dialog has already closed and the person has moved on.
@@ -292,8 +292,8 @@ export function ChannelsPage() {
         />
       ) : null}
 
-      <Card loading={bindings.isPending} variant="borderless">
-        {rows.length === 0 ? (
+      {!web && <Card loading={bindings.isPending} variant="borderless">
+        {bindings.isError ? <Alert type="warning" showIcon title={problemMessage(bindings.error, t)} action={<Button onClick={() => void bindings.refetch()}>{t("retry")}</Button>} /> : rows.length === 0 ? (
           <Space direction="vertical" size="middle" style={{ width: "100%" }}>
             <EmptyState title={t("channelsEmpty")} />
             {usable.length === 0 && !secrets.isPending ? (
@@ -301,15 +301,17 @@ export function ChannelsPage() {
               // nothing is actually standing.
               <Alert type="info" showIcon message={t("channelsNeedSecret")} />
             ) : null}
+            <Link to={`/workspaces/${workspaceId}/settings#secrets`}>{t("channelManageSecrets")}</Link>
           </Space>
         ) : (
           <Table<ChannelBindingResponse>
             rowKey="id"
             size="small"
             pagination={false}
+            scroll={{ x: 1000 }}
             dataSource={rows}
             columns={[
-              { title: t("channelKind"), dataIndex: "channel", render: (v: string) => <Tag>{v}</Tag> },
+              { title: t("channelKind"), dataIndex: "channel", render: () => t("channelFeishu") },
               {
                 title: t("channelAgent"),
                 dataIndex: "agent_id",
@@ -469,9 +471,9 @@ export function ChannelsPage() {
             ]}
           />
         )}
-      </Card>
+      </Card>}
 
-      <Card
+      {web && <Card
         title={t("channelIssuers")}
         variant="borderless"
         className="page-alert"
@@ -482,7 +484,7 @@ export function ChannelsPage() {
       >
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
           <Typography.Paragraph type="secondary">{t("channelIssuersIntro")}</Typography.Paragraph>
-          {(issuers.data ?? []).length === 0 ? (
+          {issuers.isError ? <Alert type="error" title={problemMessage(issuers.error, t)} action={<Button onClick={() => void issuers.refetch()}>{t("retry")}</Button>} /> : (issuers.data ?? []).length === 0 ? (
             <EmptyState title={t("channelIssuersEmpty")} />
           ) : (
             <Table<ChannelIssuerResponse>
@@ -491,7 +493,7 @@ export function ChannelsPage() {
               pagination={false}
               dataSource={issuers.data ?? []}
               columns={[
-                { title: t("channelKind"), dataIndex: "channel", render: (v: string) => <Tag>{v}</Tag> },
+                { title: t("channelKind"), dataIndex: "channel", render: () => t("channelWeb") },
                 { title: t("issuerName"), dataIndex: "issuer" },
                 {
                   title: t("issuerOrigins"),
@@ -521,7 +523,7 @@ export function ChannelsPage() {
             />
           )}
         </Space>
-      </Card>
+      </Card>}
 
       <Modal
         open={registering}
@@ -566,6 +568,7 @@ export function ChannelsPage() {
           requiredMark={false}
           onFinish={(values) => bind.mutate(values)}
         >
+          <Typography.Paragraph type="secondary">{t("channelCreateTransportHint")}</Typography.Paragraph>
           <BindingFields mode="create" agents={agents.data ?? []} usable={usable} canHoldLongConnection={false} />
         </Form>
       </Modal>
@@ -621,7 +624,7 @@ function BindingFields({
         <>
               <Form.Item name="agentId" label={t("channelAgent")} rules={[{ required: true }]}>
                 <Select
-                  options={agents.map((agent) => ({ value: agent.id, label: agent.name }))}
+                  options={agents.map((agent) => ({ value: agent.id, label: agent.name, disabled: agent.current_version_id === null }))}
                 />
               </Form.Item>
         </>

@@ -1,4 +1,8 @@
 export const zhCN = {
+  approvalTarget: "操作目标",
+  approvalTargetUnspecified: "此请求未提供目标信息，请核对下方参数。",
+  approvalRequestParameters: "本次调用参数",
+  approvalFullRequest: "查看完整请求",
   savedFilesTitle: "已保存的文件",
   savedFilesHint: "当前会话保存的工作文件。",
   savedFilesChanged: "文件已更新，请从刷新后的列表重新下载。",

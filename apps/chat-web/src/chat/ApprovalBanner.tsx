@@ -41,6 +41,10 @@ export function ApprovalBanner({ approval }: { approval: ApprovalResponse }) {
     <div className="banner banner-warn approval-banner">
       <p>{t("approvalPendingTitle")}</p>
       <p className="approval-tool">{approval.tool}</p>
+      <p><strong>{t("approvalTarget")}: </strong>{typeof approval.document.target === "string" ? approval.document.target : t("approvalTargetUnspecified")}</p>
+      <p>{t("approvalRequestParameters")}</p>
+      <pre className="approval-request-body">{JSON.stringify(approval.document.arguments ?? {}, null, 2)}</pre>
+      <details className="approval-details"><summary>{t("approvalFullRequest")}</summary><pre className="approval-request-body">{JSON.stringify(approval.document, null, 2)}</pre></details>
       {error === null ? null : <p className="auth-error">{error}</p>}
       {rejecting ? (
         <div className="approval-reject">

@@ -1,6 +1,10 @@
 import type { MessageKey } from "./zh-CN";
 
 export const enUS: Record<MessageKey, string> = {
+  approvalTarget: "Target",
+  approvalTargetUnspecified: "No target was provided. Review the parameters below.",
+  approvalRequestParameters: "Parameters for this call",
+  approvalFullRequest: "View full request",
   savedFilesTitle: "Saved files",
   savedFilesHint: "Working files saved in this conversation.",
   savedFilesChanged: "Files have changed. Download again from the refreshed list.",

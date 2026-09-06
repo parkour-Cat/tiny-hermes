@@ -605,3 +605,12 @@ html[data-theme="dark"] .th-tag-interrupted {
 .saved-file-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; flex-wrap: wrap; border-bottom: 1px solid rgba(128, 128, 128, .18); }
 .saved-file-name { min-width: 0; flex: 1 1 180px; overflow-wrap: anywhere; }
 .saved-file-row button { flex-shrink: 0; }
+
+.setup-steps { margin: 0; padding-left: 20px; }
+.setup-steps li + li { margin-top: 20px; }
+.setup-steps p { margin: 8px 0; }
+.approval-details { margin: 12px 0 16px; }
+.approval-details summary { cursor: pointer; }
+
+.approval-request { overflow-wrap: anywhere; }
+.approval-request pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; padding: 12px; background: rgba(128, 128, 128, .1); border-radius: 8px; }

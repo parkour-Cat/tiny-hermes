@@ -4,6 +4,8 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
+import { useAuth } from "../auth/AuthProvider";
+import { useMyRole } from "../workspace/useMyRole";
 import { problemMessage } from "../api/messages";
 import type { ApprovalResponse, ApprovalsPageResponse } from "../api/types";
 import { moment } from "../i18n/moment";
@@ -12,40 +14,7 @@ import { EmptyState } from "../ui/EmptyState";
 import { shortenId } from "../tables/ShortId";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
-/**
- * What is waiting for a person, with the two kinds kept apart.
- *
- * They are separated on the page because they are two different powers, not
- * two categories of one thing. §16.3 gives a `user_confirmation` to the end
- * user who started the Run and to nobody else; a `governance_approval` belongs
- * to an administrator and an end user may never answer one. A single merged
- * list would invite the reader to think of them as one queue they work
- * through, which is exactly the habit the section exists to prevent.
- *
- * Every row shows the **normalized call**, as the platform hashed it. A
- * reviewer deciding from a summary this console rewrote would be approving
- * something nobody can prove matches what runs.
- *
- * §26's queue adds the third thing: reading back what was decided. It is a
- * section of its own rather than a status column on the cards above, because
- * an answered approval is not work — mixing it into a list a person works
- * through is how a decided row gets a second decision aimed at it.
- *
- * History is narrowed by the server, never here. Filtering a page the browser
- * happens to hold answers "none of the rows I fetched match" to somebody who
- * asked "did this ever happen", and those two look identical.
- *
- * There is no assignment: the product design names no assignee, and §4.6
- * already fixes who may decide. See `approval_routes.py`.
- */
-/**
- * What "history" means by default: everything that is no longer waiting.
- *
- * `expired` belongs here as much as the two answers do. Nobody decided it,
- * and that is the fact worth reading — a queue that showed only approvals and
- * rejections would quietly drop the rows that timed out, which are the ones
- * §26's 审批负担 question is about.
- */
+/** Expired requests belong in history even though nobody decided them. */
 const DECIDED = ["approved", "rejected", "expired"];
 
 /**
@@ -83,6 +52,14 @@ export function ApprovalsPage() {
   const t = useT();
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
+  const auth = useAuth();
+  const { role, loading: roleLoading } = useMyRole();
+  const canReview = auth.user?.is_platform_admin === true || role === "workspace_admin" || role === "platform_admin";
+  const [chosenView, setChosenView] = useState<string | null>(null);
+  const view = chosenView ?? (canReview ? "actionable" : "waiting");
+  const [pendingOffset, setPendingOffset] = useState(0);
+  const [historyOffset, setHistoryOffset] = useState(0);
+  const pendingType = view === "actionable" ? "governance_approval" : canReview ? "user_confirmation" : null;
   const [modal, contextHolder] = Modal.useModal();
   const [rejecting, setRejecting] = useState<ApprovalResponse | null>(null);
   const [form] = Form.useForm<{ reason: string }>();
@@ -90,23 +67,29 @@ export function ApprovalsPage() {
   const scope = { workspace: workspaceId ?? "" };
 
   const approvals = useQuery({
-    queryKey: ["approvals", workspaceId] as const,
-    queryFn: () => api<ApprovalsPageResponse>("/api/v1/approvals", scope),
-    enabled: workspaceId !== null,
+    queryKey: ["approvals", workspaceId, pendingType, pendingOffset] as const,
+    queryFn: () => {
+      const query = new URLSearchParams({ limit: "20", offset: String(pendingOffset) });
+      if (pendingType !== null) query.set("approval_type", pendingType);
+      return api<ApprovalsPageResponse>(`/api/v1/approvals?${query}`, scope);
+    },
+    enabled: workspaceId !== null && view !== "history" && (canReview || role !== null),
   });
 
   const [historyChoice, setHistoryChoice] = useState("all");
   const historyStatus =
     HISTORY_CHOICES.find((choice) => choice.key === historyChoice)?.statuses ?? DECIDED;
   const history = useQuery({
-    queryKey: ["approvals", "history", workspaceId, historyStatus] as const,
+    queryKey: ["approvals", "history", workspaceId, historyStatus, historyOffset] as const,
     queryFn: () => {
       const query = new URLSearchParams();
       for (const status of historyStatus) query.append("status", status);
       query.set("order", "newest_first");
+      query.set("limit", "20");
+      query.set("offset", String(historyOffset));
       return api<ApprovalsPageResponse>(`/api/v1/approvals?${query.toString()}`, scope);
     },
-    enabled: workspaceId !== null,
+    enabled: workspaceId !== null && view === "history",
   });
 
   const decide = useMutation({
@@ -128,24 +111,11 @@ export function ApprovalsPage() {
     onError: (caught) => setError(problemMessage(caught, t)),
   });
 
-  if (approvals.isError) {
-    return (
-      <Alert
-        type="error"
-        title={problemMessage(approvals.error, t)}
-        action={<Button onClick={() => void approvals.refetch()}>{t("retry")}</Button>}
-        showIcon
-      />
-    );
-  }
-
-  const waiting = approvals.data?.items ?? [];
-  const user = waiting.filter((item) => item.approval_type === "user_confirmation");
-  const governance = waiting.filter((item) => item.approval_type === "governance_approval");
+  const waiting = (approvals.data?.items ?? []).filter((item) => item.status === "pending" && (pendingType === null || item.approval_type === pendingType));
 
   function card(approval: ApprovalResponse) {
     return (
-      <Card key={approval.id} variant="borderless" className="page-alert">
+      <Card key={approval.id} variant="borderless" className="page-alert approval-request">
         <Descriptions
           size="small"
           column={1}
@@ -168,16 +138,16 @@ export function ApprovalsPage() {
             },
           ]}
         />
-        <Typography.Paragraph type="secondary">
-          {t("approvalArgumentsHint")}
-        </Typography.Paragraph>
+        <Typography.Paragraph><strong>{t("approvalTarget")}: </strong>{typeof approval.document.target === "string" ? approval.document.target : t("approvalTargetUnspecified")}</Typography.Paragraph>
+        <Typography.Paragraph>{t("approvalRequestParameters")}</Typography.Paragraph>
+        <pre className="skill-file-body">{JSON.stringify(approval.document.arguments ?? {}, null, 2)}</pre>
         {/* The whole normalized document, not just its arguments. What is
             hashed includes the target and the permission, and a call with no
             arguments — which is most of them — would otherwise be reviewed as
             an empty object. A reviewer who cannot see the request cannot
             approve it. */}
-        <pre className="skill-file-body">{JSON.stringify(approval.document, null, 2)}</pre>
-        <Space wrap>
+        <details className="approval-details"><summary>{t("approvalFullRequest")}</summary><pre className="skill-file-body">{JSON.stringify(approval.document, null, 2)}</pre></details>
+        {canReview && approval.approval_type === "governance_approval" && view === "actionable" ? <Space wrap>
           <Button
             type="primary"
             loading={decide.isPending}
@@ -197,7 +167,7 @@ export function ApprovalsPage() {
           <Button danger onClick={() => setRejecting(approval)}>
             {t("approvalReject")}
           </Button>
-        </Space>
+        </Space> : <Typography.Paragraph type="secondary">{t(approval.approval_type === "user_confirmation" ? "approvalWaitUser" : "approvalWaitAdmin")}</Typography.Paragraph>}
       </Card>
     );
   }
@@ -209,42 +179,27 @@ export function ApprovalsPage() {
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}
 
-      <Card
-        title={
-          <Space>
-            {t("approvalsUser")}
-            <Tag>{user.length}</Tag>
-          </Space>
-        }
-        variant="borderless"
+      <Radio.Group
+        aria-label={t("approvalQueueView")} value={view}
+        onChange={(event) => { setChosenView(String(event.target.value)); setPendingOffset(0); }}
         className="page-alert"
-        loading={approvals.isPending}
-      >
-        <Typography.Paragraph type="secondary">{t("approvalsUserIntro")}</Typography.Paragraph>
-        {user.length === 0 ? <EmptyState title={t("emptyApprovals")} /> : user.map(card)}
-      </Card>
+        options={[
+          ...(canReview ? [{ value: "actionable", label: t("approvalMyQueue") }] : []),
+          { value: "waiting", label: t("approvalOthersQueue") },
+          { value: "history", label: t("approvalHistoryQueue") },
+        ]}
+      />
+      {!canReview && role === null && !roleLoading ? <Alert type="warning" title={t("approvalRoleUnknown")} /> : null}
+      {view !== "history" && <Card variant="borderless" loading={approvals.isLoading || (!canReview && roleLoading)}>
+        <Typography.Paragraph type="secondary">{t(view === "actionable" ? "approvalMyQueueHint" : "approvalOthersQueueHint")}</Typography.Paragraph>
+        {approvals.isError ? <Alert type="error" title={problemMessage(approvals.error, t)} action={<Button onClick={() => void approvals.refetch()}>{t("retry")}</Button>} /> : !canReview && role === null ? null : waiting.length === 0 ? <EmptyState title={t("emptyApprovals")} /> : waiting.map(card)}
+        {(pendingOffset > 0 || approvals.data?.has_more) && <Space className="page-alert">
+          <Button disabled={pendingOffset === 0 || approvals.isFetching} onClick={() => setPendingOffset(Math.max(0, pendingOffset - 20))}>{t("approvalPreviousPage")}</Button>
+          <Button disabled={!approvals.data?.has_more || approvals.isFetching} onClick={() => setPendingOffset(pendingOffset + 20)}>{t("approvalNextPage")}</Button>
+        </Space>}
+      </Card>}
 
-      <Card
-        title={
-          <Space>
-            {t("approvalsGovernance")}
-            <Tag>{governance.length}</Tag>
-          </Space>
-        }
-        variant="borderless"
-        loading={approvals.isPending}
-      >
-        <Typography.Paragraph type="secondary">
-          {t("approvalsGovernanceIntro")}
-        </Typography.Paragraph>
-        {governance.length === 0 ? (
-          <EmptyState title={t("emptyApprovals")} />
-        ) : (
-          governance.map(card)
-        )}
-      </Card>
-
-      <Card
+      {view === "history" && <Card
         title={t("approvalsHistory")}
         variant="borderless"
         className="page-alert"
@@ -258,22 +213,23 @@ export function ApprovalsPage() {
             aria-label={t("approvalsHistoryStatus")}
             optionType="button"
             value={historyChoice}
-            onChange={(event) => setHistoryChoice(String(event.target.value))}
+            onChange={(event) => { setHistoryChoice(String(event.target.value)); setHistoryOffset(0); }}
             options={HISTORY_CHOICES.map((choice) => ({
               value: choice.key,
               label: choice.key === "all" ? t("approvalsHistoryAll") : statusLabel(choice.key, t),
             }))}
           />
           {history.isError ? (
-            <Alert type="error" showIcon title={problemMessage(history.error, t)} />
+            <Alert type="error" showIcon title={problemMessage(history.error, t)} action={<Button onClick={() => void history.refetch()}>{t("retry")}</Button>} />
           ) : null}
-          {(history.data?.items ?? []).length === 0 && !history.isPending ? (
+          {(history.data?.items ?? []).length === 0 && history.isSuccess ? (
             <EmptyState title={t("approvalsHistoryEmpty")} />
           ) : (
             <Table<ApprovalResponse>
               rowKey="id"
               size="small"
               pagination={false}
+              scroll={{ x: 800 }}
               dataSource={history.data?.items ?? []}
               columns={[
                 {
@@ -317,15 +273,12 @@ export function ApprovalsPage() {
               ]}
             />
           )}
-          {history.data?.has_more === true ? (
-            // Said, not paged over: a table that ends at the page boundary
-            // without a word reads as "that is all there was".
-            <Typography.Paragraph type="secondary">
-              {t("approvalsHistoryMore")}
-            </Typography.Paragraph>
-          ) : null}
+          {(historyOffset > 0 || history.data?.has_more) && <Space>
+            <Button disabled={historyOffset === 0 || history.isFetching} onClick={() => setHistoryOffset(Math.max(0, historyOffset - 20))}>{t("approvalPreviousPage")}</Button>
+            <Button disabled={!history.data?.has_more || history.isFetching} onClick={() => setHistoryOffset(historyOffset + 20)}>{t("approvalNextPage")}</Button>
+          </Space>}
         </Space>
-      </Card>
+      </Card>}
 
       <Modal
         open={rejecting !== null}
