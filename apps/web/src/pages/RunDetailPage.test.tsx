@@ -818,7 +818,7 @@ test("results belong to this task and platform instructions have a distinct auth
   renderRun();
   expect(await screen.findByText("任务结果")).toBeVisible();
   const result = screen.getByText("任务结果").closest(".ant-card")!;
-  expect(within(result as HTMLElement).getByText("Current task result")).toBeVisible();
+  expect(await within(result as HTMLElement).findByText("Current task result")).toBeVisible();
   expect(within(result as HTMLElement).queryByText("Earlier task result")).toBeNull();
   expect(screen.queryByText("Earlier task result")).toBeNull();
   expect(screen.getByText("平台反馈")).toBeInTheDocument();

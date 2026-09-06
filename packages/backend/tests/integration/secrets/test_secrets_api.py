@@ -331,3 +331,16 @@ async def test_a_database_backup_without_the_kek_cannot_be_decrypted(
     )
     with pytest.raises(UnwrapFailed):
         unseal(envelope, decode_kek(NEXT_KEK))
+
+
+def test_credential_purpose_is_saved_without_exposing_its_value(
+    client: TestClient, scope: dict[str, str],
+) -> None:
+    created = client.post("/api/v1/secrets", headers=scope,
+        json={"name": "robot credential", "scope": "workspace", "plaintext": "private-value", "purpose": "channel"})
+    assert created.status_code == 201, created.text
+    assert created.json()["purpose"] == "channel"
+    listed = client.get("/api/v1/secrets", headers=scope).json()
+    assert next(row for row in listed if row["id"] == created.json()["id"])["purpose"] == "channel"
+    assert "private-value" not in str(listed)
+    assert _create(client, scope, name="unclassified").json()["purpose"] == "general"
