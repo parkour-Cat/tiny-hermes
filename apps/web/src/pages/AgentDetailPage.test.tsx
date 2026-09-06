@@ -702,7 +702,7 @@ test("a published version is compared field by field against the form", async ()
   await userEvent.clear(personality);
   await userEvent.type(personality, "A different voice.");
 
-  expect(await screen.findByText("personality")).toBeInTheDocument();
+  expect(screen.getAllByText("人格").length).toBeGreaterThan(1);
   expect(screen.getByText("You answer support questions.")).toBeInTheDocument();
   expect(screen.getAllByText("A different voice.").length).toBeGreaterThan(0);
 });

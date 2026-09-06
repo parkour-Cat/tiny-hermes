@@ -801,3 +801,25 @@ test("the dialog will not send a ceiling that is not a rise", async () => {
 
   expect(await screen.findByText(t("widenBudgetMustRise"))).toBeVisible();
 });
+
+
+test("results belong to this task and platform instructions have a distinct author", async () => {
+  stream();
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run({ status: "completed" }))),
+    http.get(`/api/v1/runs/${RUN}/files`, () => HttpResponse.json({ revision_id: "rev", items: [] })),
+    http.get(`/api/v1/runs/${RUN}/tree`, () => HttpResponse.json({ root_run_id: RUN, nodes: [] })),
+    http.get(`/api/v1/sessions/${SESSION}/messages`, () => HttpResponse.json([
+      { role: "assistant", source_run_id: OTHER_RUN, parts: [{ type: "text", text: "Earlier task result" }] },
+      { role: "user", author: "platform", source_run_id: RUN, parts: [{ type: "text", text: "Completion check feedback" }] },
+      { role: "assistant", source_run_id: RUN, parts: [{ type: "text", text: "Current task result" }] },
+    ])),
+  );
+  renderRun();
+  expect(await screen.findByText("任务结果")).toBeVisible();
+  const result = screen.getByText("任务结果").closest(".ant-card")!;
+  expect(within(result as HTMLElement).getByText("Current task result")).toBeVisible();
+  expect(within(result as HTMLElement).queryByText("Earlier task result")).toBeNull();
+  expect(screen.queryByText("Earlier task result")).toBeNull();
+  expect(screen.getByText("平台反馈")).toBeInTheDocument();
+});

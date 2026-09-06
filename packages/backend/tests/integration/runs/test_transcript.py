@@ -113,6 +113,9 @@ async def test_the_assistant_message_names_the_run_that_produced_it(
     await _worker(engine, Recording()).run_once()
     rows = await _messages(engine, session_id)
     assert [str(row.source_run_id) for row in rows] == [run_id, run_id]
+    response = client.get(f"/api/v1/sessions/{session_id}/messages", headers=scope)
+    assert response.status_code == 200, response.text
+    assert [message["source_run_id"] for message in response.json()] == [run_id, run_id]
     # Allocated by the Session's own counter, the same mechanism the user
     # message already uses, so no new concurrency reasoning is introduced.
     assert [row.sequence for row in rows] == [1, 2]
