@@ -45,10 +45,14 @@ def _rsa_keypair() -> tuple[str, str]:
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
     ).decode()
-    public_pem = private_key.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    ).decode()
+    public_pem = (
+        private_key.public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        .decode()
+    )
     return private_pem, public_pem
 
 
@@ -56,8 +60,13 @@ RSA_PRIVATE_PEM, RSA_PUBLIC_PEM = _rsa_keypair()
 
 
 async def test_saved_session_files_are_only_available_to_the_owner(
-    client: TestClient, scope: dict[str, str], workspace_id: str,
-    engine: AsyncEngine, settings: Settings, registered_issuer: None, published_agent: None,
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+    engine: AsyncEngine,
+    settings: Settings,
+    registered_issuer: None,
+    published_agent: None,
 ) -> None:
     del registered_issuer, published_agent
     _sign_in(client, workspace_id, "file-owner")
@@ -67,12 +76,16 @@ async def test_saved_session_files_are_only_available_to_the_owner(
     base = f"/api/v1/end-user/sessions/{session_id}/files"
     result = client.get(base)
     assert result.status_code == 200, result.text
-    assert result.json() == {"revision_id": str(revision), "items": [
-        {"path": "notes/summary.md", "size_bytes": len(body)},
-    ]}
+    assert result.json() == {
+        "revision_id": str(revision),
+        "items": [
+            {"path": "notes/summary.md", "size_bytes": len(body)},
+        ],
+    }
     params = {"revision_id": str(revision), "path": "notes/summary.md"}
     assert client.get(f"{base}/content", params=params).content == body
     from tiny_hermes.identity.presentation.dependencies import SESSION_COOKIE
+
     client.cookies.delete(SESSION_COOKIE)
     assert client.get(f"/api/v1/runs/{run_id}/files", headers=scope).status_code == 403
     _sign_in(client, workspace_id, "another-reader")
@@ -495,9 +508,7 @@ async def test_an_unknown_session_id_is_refused_not_found_shaped(
     del registered_issuer, published_agent
     _sign_in(client, workspace_id, "zhang")
 
-    read = client.get(
-        "/api/v1/end-user/sessions/00000000-0000-4000-8000-000000000000/messages"
-    )
+    read = client.get("/api/v1/end-user/sessions/00000000-0000-4000-8000-000000000000/messages")
 
     assert read.status_code == 404, read.text
 
