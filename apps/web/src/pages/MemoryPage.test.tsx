@@ -64,6 +64,27 @@ test("a pending memory is shown as the Agent proposed it, word for word", async 
   expect(screen.getByText("Support")).toBeVisible();
 });
 
+test("shared memory history can be opened and corrected with its loaded revision", async () => {
+  let sent: unknown;
+  server.use(
+    http.get("/api/v1/memories/pending", () => HttpResponse.json([])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/memories", () => HttpResponse.json({ items: [memory({ status: "active" })], has_more: false })),
+    http.patch("/api/v1/memories/shared/m1", async ({ request }) => {
+      sent = await request.json();
+      return HttpResponse.json(memory({ status: "active", body: "Updated" }));
+    }),
+  );
+  renderMemory();
+  await userEvent.click(await screen.findByRole("radio", { name: "生效中" }));
+  await userEvent.click(await screen.findByRole("button", { name: "修改内容" }));
+  const input = screen.getByRole("textbox");
+  await userEvent.clear(input);
+  await userEvent.type(input, "Updated");
+  await userEvent.click(screen.getByRole("button", { name: "保存" }));
+  await waitFor(() => expect(sent).toEqual({ body: "Updated", expected_updated_at: "2026-08-22T00:00:00Z" }));
+});
+
 test("approving sends the decision and nothing else", async () => {
   // Deliberately not an edit-then-approve: §16.3's approval binds to what
   // was proposed, and the same principle holds here. A console that could
