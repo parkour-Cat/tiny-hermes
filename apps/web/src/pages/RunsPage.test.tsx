@@ -120,6 +120,8 @@ test("a row states the Run's status, its place in the session, and its times", a
   const row = await rowOf(HEAD_RUN);
 
   expect(within(row).getByText(t("statusCompleted"))).toBeInTheDocument();
+  expect(within(row).queryByText(/排队第/)).not.toBeInTheDocument();
+  expect(within(row).queryByText("terminal")).not.toBeInTheDocument();
   expect(within(row).getByText("1")).toBeInTheDocument();
   expect(within(row).getByText(moment("2026-08-10T02:00:00Z"))).toBeInTheDocument();
   expect(within(row).getByText(moment("2026-08-10T02:04:00Z"))).toBeInTheDocument();
@@ -153,15 +155,12 @@ test("a running Run has no end time, and the column says so", async () => {
   expect(within(await rowOf(HEAD_RUN)).getByText("—")).toBeInTheDocument();
 });
 
-test("the page neither pages the list nor hides that it cannot", async () => {
+test("the full list has no misleading pagination control", async () => {
   listing([runRow({})]);
 
   renderRuns();
   await rowOf(HEAD_RUN);
 
-  expect(
-    screen.getByText("接口一次返回全部任务记录，没有分页，也没有筛选。记录很多时列表会变慢。"),
-  ).toBeInTheDocument();
   // A pager over a list that arrived whole would be a control that pretends to
   // ask the platform for something.
   expect(screen.queryByRole("listitem", { name: /page/i })).not.toBeInTheDocument();

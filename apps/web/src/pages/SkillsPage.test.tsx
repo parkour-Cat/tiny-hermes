@@ -122,17 +122,40 @@ test("uploading a directory sends a file list, never an archive", async () => {
   );
 
   renderSkills();
-  await userEvent.upload(await screen.findByLabelText("选择文件"), [
-    new File([SKILL_MD], "SKILL.md", { type: "text/markdown" }),
-    new File(["Drain it slowly."], "reference.md", { type: "text/markdown" }),
-  ]);
+  await userEvent.click(await screen.findByRole("button", { name: "上传技能目录" }));
+  const picker = screen.getByLabelText("选择文件");
+  expect(picker).toHaveAttribute("webkitdirectory");
+  const main = new File([SKILL_MD], "SKILL.md", { type: "text/markdown" });
+  const reference = new File(["Drain it slowly."], "reference.md", { type: "text/markdown" });
+  Object.defineProperty(main, "webkitRelativePath", { value: "rollout/SKILL.md" });
+  Object.defineProperty(reference, "webkitRelativePath", { value: "rollout/references/reference.md" });
+  await userEvent.upload(picker, [main, reference]);
+  expect(sent).toBeNull();
+  expect(screen.getByText("references/reference.md")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "确认上传" }));
 
   await waitFor(() => expect(sent).not.toBeNull());
   const body = sent as unknown as { scope: string; files: { path: string; content: string }[] };
   expect(body.scope).toBe("workspace");
-  expect(body.files.map((file) => file.path)).toEqual(["SKILL.md", "reference.md"]);
+  expect(body.files.map((file) => file.path)).toEqual(["SKILL.md", "references/reference.md"]);
   expect(body.files[0]?.content).toContain("name: rollout");
   expect(await screen.findByText("rollout")).toBeInTheDocument();
+});
+
+test("an invalid directory is explained before upload and cancelling submits nothing", async () => {
+  let writes = 0;
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(USER)),
+    http.get("/api/v1/skills", () => HttpResponse.json([])),
+    http.post("/api/v1/skills", () => { writes += 1; return HttpResponse.json({}); }),
+  );
+  renderSkills();
+  await userEvent.click(await screen.findByRole("button", { name: "上传技能目录" }));
+  await userEvent.upload(screen.getByLabelText("选择文件"), new File(["note"], "note.md"));
+  expect(await screen.findByText("目录根部需要包含 SKILL.md。")).toBeVisible();
+  expect(screen.getByRole("button", { name: "确认上传" })).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: "取消" }));
+  expect(writes).toBe(0);
 });
 
 test("importing the same content again says no version was created", async () => {
@@ -184,7 +207,7 @@ test("withdrawing a version warns that bound agents keep running", async () => {
 
   // The warning is the point: the version stops being bindable, and nothing
   // that already binds it changes.
-  expect(await screen.findByText(/已经绑定它的 Agent 不受影响/)).toBeInTheDocument();
+  expect(await screen.findByText(/已有 Agent 的绑定仍然有效/)).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "确定" }));
   expect(await screen.findByText("已停用")).toBeInTheDocument();
 });
