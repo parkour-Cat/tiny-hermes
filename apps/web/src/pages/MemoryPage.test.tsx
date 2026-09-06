@@ -188,3 +188,16 @@ test("a shared memory can be written directly, against a named Agent", async () 
     expect(sent).toEqual({ agent_id: AGENT, body: "Ship notes on Fridays." }),
   );
 });
+
+test("memory review offers links instead of unrelated search and creation forms", async () => {
+  server.use(
+    http.get("/api/v1/memories/pending", () => HttpResponse.json([])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+  );
+  renderMemory();
+  await screen.findByText(/没有等待|Nothing is waiting/i);
+  expect(screen.queryByRole("textbox", { name: t("searchSessions") })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: t("writeShared") })).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: t("searchSessions") })).toHaveAttribute("href", `/workspaces/${WORKSPACE}/records#sessions`);
+  expect(screen.getByRole("link", { name: "前往 Agent 添加共享记忆" })).toHaveAttribute("href", `/workspaces/${WORKSPACE}/agents`);
+});
