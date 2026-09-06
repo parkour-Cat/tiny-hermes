@@ -172,7 +172,11 @@ async def test_the_person_deciding_is_shown_the_request_that_would_be_sent(
     matches what runs."""
     await _stopped_run(client, scope, engine, session_for, api, proxy)
 
-    document = _pending(client, scope)[0]["document"]
+    pending = _pending(client, scope)[0]
+    detail = client.get(f"/api/v1/approvals/{pending['id']}", headers=scope)
+    assert detail.status_code == 200, detail.text
+    assert detail.json() == pending
+    document = detail.json()["document"]
 
     assert document["tool"] == "http.orders.createOrder"
     assert document["target"].endswith("/orders")

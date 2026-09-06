@@ -1,11 +1,12 @@
 from uuid import UUID, uuid4
+from typing import Any
 
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 
-def create(client: TestClient, scope: dict[str, str], agent: str) -> dict:
+def create(client: TestClient, scope: dict[str, str], agent: str) -> dict[str, Any]:
     response = client.post(
         "/api/v1/memories/shared",
         headers=scope,
