@@ -558,7 +558,7 @@ test("Key 可以就地存一条：先进保管箱，端点拿到的是它的 id"
   await waitFor(() => expect(sent).toHaveLength(2));
   expect(sent[0]).toEqual({
     path: "secrets",
-    body: { name: "deepseek-api-key", scope: "platform", plaintext: "sk-live-secret" },
+    body: { name: "deepseek-api-key", scope: "platform", purpose: "model", plaintext: "sk-live-secret" },
   });
   expect(sent[1]!.path).toBe("endpoints");
   expect(sent[1]!.body.credential_ref).toBe("99999999-8888-4777-8666-555555555555");

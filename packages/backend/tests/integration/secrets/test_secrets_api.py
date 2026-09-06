@@ -157,6 +157,7 @@ def test_create_response_shape_has_no_envelope_fields(
 ) -> None:
     body = cast(dict[str, Any], _create(client, scope).json())
     assert set(body) == {
+        "purpose",
         "id",
         "name",
         "scope",

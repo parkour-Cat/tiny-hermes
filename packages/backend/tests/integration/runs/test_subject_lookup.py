@@ -188,3 +188,24 @@ async def test_a_viewer_cannot_resolve_anybody(
     )
 
     assert refused.status_code == 403, refused.text
+
+
+async def test_subject_search_is_bounded_audited_and_workspace_scoped(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, workspace_id: str,
+) -> None:
+    subject = await _seed_subject(engine, workspace_id=workspace_id)
+    await _seed_subject(engine, workspace_id=workspace_id, external_user_id="alice-two@example.com")
+    response = client.get("/api/v1/subjects/search", headers=scope, params={"q": "alice", "channel": "web", "limit": 1})
+    assert response.status_code == 200, response.text
+    assert response.json()["has_more"] is True
+    assert len(response.json()["items"]) == 1
+    exact = client.get("/api/v1/subjects/search", headers=scope, params={"q": "alice@example.com", "channel": "web"})
+    assert exact.json()["items"][0]["subject_id"] == str(subject)
+    assert client.get("/api/v1/subjects/search", headers=scope, params={"q": "a"}).status_code == 422
+    elsewhere = {**scope, "X-Workspace-Id": str(uuid4())}
+    assert client.get("/api/v1/subjects/search", headers=elsewhere, params={"q": "alice"}).json()["items"] == []
+    async with engine.begin() as db:
+        assert await db.scalar(text("SELECT count(*) FROM audit_events WHERE action='subject.searched'")) >= 2
+        await db.execute(text("UPDATE users SET is_platform_admin=false"))
+        await db.execute(text("UPDATE memberships SET role='developer'"))
+    assert client.get("/api/v1/subjects/search", headers=scope, params={"q": "alice"}).status_code == 403

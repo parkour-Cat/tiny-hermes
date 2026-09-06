@@ -25,6 +25,7 @@ async def test_bootstrap_login_me_and_logout(engine: AsyncEngine, database_url: 
     )
 
     with TestClient(create_app(settings=settings)) as api_client:
+        assert api_client.get("/api/v1/bootstrap/status").json() == {"initialized": False}
         denied_bootstrap = api_client.post(
             "/api/v1/bootstrap",
             headers={"X-Bootstrap-Token": "b" * 32},
@@ -46,6 +47,7 @@ async def test_bootstrap_login_me_and_logout(engine: AsyncEngine, database_url: 
             },
         )
         assert bootstrap.status_code == 201
+        assert api_client.get("/api/v1/bootstrap/status").json() == {"initialized": True}
         assert bootstrap.json()["is_platform_admin"] is True
 
         closed = api_client.post(

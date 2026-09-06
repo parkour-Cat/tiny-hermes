@@ -89,6 +89,7 @@ test("the form sends a reference, never a client secret", async () => {
   await userEvent.click(await screen.findByRole("button", { name: /注册身份提供方|Register/i }));
   await userEvent.type(screen.getByLabelText(/签发者|Issuer/i), "https://idp.example.com");
   await userEvent.type(screen.getByLabelText(/客户端 ID|Client ID/i), "th");
+  await userEvent.click(screen.getByRole("button", { name: "手动填写引用" }));
   await userEvent.type(screen.getByLabelText(/客户端密钥引用|Client secret reference/i), "IDP_SECRET");
   await userEvent.type(
     screen.getByLabelText(/发现地址|Discovery/i),

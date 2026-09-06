@@ -17,7 +17,7 @@ test("selects a saved credential by name and offers unclassified legacy credenti
   ])));
   render(<TestTheme><QueryClientProvider client={new QueryClient()}><MemoryRouter initialEntries={["/workspaces/11111111-2222-4333-8444-555555555555"]}><Routes><Route path="/workspaces/:workspaceId" element={<CredentialPicker purpose="tool" onChange={changed} />} /></Routes></MemoryRouter></QueryClientProvider></TestTheme>);
   await userEvent.click(screen.getByRole("combobox"));
-  await userEvent.click(await screen.findByText("Order service · 当前工作空间"));
+  await userEvent.click(await screen.findByText("Order service · 工作空间"));
   expect(changed).toHaveBeenCalledWith("tool-key");
-  expect(screen.queryByText("Model only · 全平台")).toBeNull();
+  expect(screen.queryByText("Model only · 平台")).toBeNull();
 });
