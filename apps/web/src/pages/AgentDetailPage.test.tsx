@@ -6,6 +6,8 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, expect, test } from "vitest";
 
 import { AuthProvider } from "../auth/AuthProvider";
+import { WorkspacePermissions } from "../workspace/WorkspacePermissions";
+import type { Role } from "../workspace/useMyRole";
 import { AgentDetailPage } from "./AgentDetailPage";
 import { TestTheme } from "../test/TestTheme";
 import { t } from "../i18n/zh-CN";
@@ -198,18 +200,18 @@ function loadedCatalog(): void {
   );
 }
 
-function renderDetail(): QueryClient {
+function renderDetail(role: Role = "developer", platform = false): QueryClient {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <TestTheme>
       <QueryClientProvider client={client}>
         <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE}/agents/${AGENT}`]}>
-          <AuthProvider><Routes>
+          <AuthProvider><WorkspacePermissions role={role} platform={platform}><Routes>
             <Route
               path="/workspaces/:workspaceId/agents/:agentId"
               element={<AgentDetailPage />}
             />
-          </Routes></AuthProvider>
+          </Routes></WorkspacePermissions></AuthProvider>
         </MemoryRouter>
       </QueryClientProvider>
     </TestTheme>,
@@ -1020,7 +1022,7 @@ test("a platform administrator can add shared memory even with viewer membership
     http.get("/api/v1/auth/me", () => HttpResponse.json({ id: "u1", is_platform_admin: true })),
     http.get(`/api/v1/workspaces/${WORKSPACE}/members/me`, () => HttpResponse.json({ role: "viewer" })),
   );
-  renderDetail();
+  renderDetail("viewer", true);
   expect(await screen.findByRole("button", { name: t("writeShared") })).toBeVisible();
 });
 

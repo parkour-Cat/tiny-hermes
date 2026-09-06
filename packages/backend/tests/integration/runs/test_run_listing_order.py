@@ -12,6 +12,7 @@ worklist, where the thing you came to look at is the thing that just
 happened and every new row pushes it further from the top.
 """
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -54,6 +55,23 @@ def test_filters_are_applied_before_pagination(
     )
     assert [row["id"] for row in older.json()] == [first]
     assert client.get("/api/v1/runs", headers=scope, params={"limit": 101}).status_code == 422
+
+
+@pytest.mark.parametrize("request_text", [r"C:\temp\report.txt", 'find "quarterly report"'])
+def test_search_matches_literal_request_text(
+    client: TestClient, scope: dict[str, str], session_id: str, request_text: str
+) -> None:
+    created = client.post(
+        "/api/v1/runs",
+        headers={**scope, "Idempotency-Key": "literal-search"},
+        json={"session_id": session_id, "input": request_text},
+    )
+    assert created.status_code == 201, created.text
+    found = client.get(
+        "/api/v1/runs", headers=scope, params={"q": request_text, "limit": 20}
+    )
+    assert found.status_code == 200, found.text
+    assert any(row["id"] == created.json()["id"] for row in found.json())
 
 
 async def test_runs_sharing_a_timestamp_still_have_one_order(
