@@ -101,7 +101,7 @@ test("catalog search finds a tool by its address", async () => {
   server.use(http.get("/api/v1/http-tools", () => HttpResponse.json([tool()])), http.get("/api/v1/http-tools/t1/versions", () => HttpResponse.json([version()])));
   renderTools();
   await screen.findByText(/GET listOrders/);
-  await userEvent.type(screen.getByRole("textbox", { name: "查找能力" }), "no-such-tool");
+  await userEvent.type(screen.getByRole("searchbox", { name: "查找能力" }), "no-such-tool");
   expect(screen.queryByText(/GET listOrders/)).toBeNull();
 });
 

@@ -87,9 +87,7 @@ async def test_bootstrap_login_me_and_logout(engine: AsyncEngine, database_url: 
         assert missing_csrf.json()["code"] == "csrf_failed"
         assert api_client.get("/api/v1/auth/me").status_code == 200
 
-        logout = api_client.delete(
-            "/api/v1/auth/sessions/current", headers={"X-CSRF-Token": csrf}
-        )
+        logout = api_client.delete("/api/v1/auth/sessions/current", headers={"X-CSRF-Token": csrf})
         assert logout.status_code == 204
         assert api_client.get("/api/v1/auth/me").status_code == 401
 

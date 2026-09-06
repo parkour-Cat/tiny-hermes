@@ -197,7 +197,7 @@ function emptyQueues() {
 test("平台管理员看到七个工作入口和独立平台管理", async () => {
   renderShell(`/workspaces/${WORKSPACE}/agents`);
   const nav = await screen.findByRole("navigation");
-  expect(within(nav).getAllByRole("link")).toHaveLength(8);
+  expect(within(nav).getAllByRole("link")).toHaveLength(9);
 });
 
 test("每个入口都带着它自己那句说明", async () => {
