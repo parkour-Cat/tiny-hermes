@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -192,7 +192,7 @@ function loadedCatalog(): void {
   );
 }
 
-function renderDetail(): void {
+function renderDetail(): QueryClient {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <TestTheme>
@@ -208,6 +208,7 @@ function renderDetail(): void {
       </QueryClientProvider>
     </TestTheme>,
   );
+  return client;
 }
 
 test("the loaded draft fills every field the console can edit", async () => {
@@ -415,6 +416,24 @@ test("publishing saves edited fields first and publishes the returned revision",
     { expected_revision: 3, spec: { ...SPEC, personality: "Changed before publishing." } },
     { expected_revision: 4 },
   ]);
+});
+
+test("publication keeps the confirmed revision if the draft refreshes while the dialog is open", async () => {
+  loadedAgent(3);
+  const revisions: number[] = [];
+  server.use(http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+    revisions.push((await request.json() as { expected_revision: number }).expected_revision);
+    return HttpResponse.json({ code: "draft_revision_conflict", title: "Conflict" }, { status: 409 });
+  }));
+  const client = renderDetail();
+  const personality = await screen.findByLabelText("人格");
+  await userEvent.type(personality, " My changes.");
+  await userEvent.click(screen.getByRole("button", { name: "发布" }));
+  server.use(http.get(`/api/v1/agents/${AGENT}/draft`, () => HttpResponse.json(draftBody(4, "Someone else's changes."))));
+  await act(async () => { await client.refetchQueries({ queryKey: ["agent-draft", WORKSPACE, AGENT] }); });
+  await userEvent.click(await screen.findByRole("button", { name: "确定" }));
+  await screen.findByText("草稿已被改动，你的修改仍在表单中。请重新载入后再保存。");
+  expect(revisions).toEqual([3]);
 });
 
 test("a failed save blocks publication and retains edited fields", async () => {
