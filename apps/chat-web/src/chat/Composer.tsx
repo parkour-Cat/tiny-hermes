@@ -24,7 +24,7 @@ export function Composer({
   sending: boolean;
   live: boolean;
   canExport: boolean;
-  onSend: (text: string) => void;
+  onSend: (text: string) => void | Promise<void>;
   onStop: () => void;
   onExport: () => void;
 }) {
@@ -41,9 +41,11 @@ export function Composer({
   const [menu, setMenu] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [dictating, setDictating] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const submitLock = useRef(false);
   const closeMenu = useCallback(() => setMenu(false), []);
   useDismiss(menu, closeMenu, plus);
-  const busy = disabled || sending || live;
+  const busy = disabled || sending || live || submitting;
   const ready = (input.trim() !== "" || files.length > 0) && !busy;
   const voice = canDictate();
 
@@ -64,26 +66,35 @@ export function Composer({
   }
 
   async function submit(): Promise<void> {
-    if (!ready) {
+    if (!ready || submitLock.current) {
       return;
     }
-    stopVoice();
-    const composed = await composeWithAttachments(input, files);
-    if (composed.text.trim() === "") {
-      setNote(t("attachBinary"));
-      return;
-    }
-    if (composed.skipped.length > 0) {
-      setNote(`${t("attachBinary")} ${composed.skipped.join("、")}`);
-    } else {
-      setNote(null);
-    }
-    onSend(composed.text);
-    draft.current = "";
-    setInput("");
-    setFiles([]);
-    if (area.current !== null) {
-      area.current.style.height = "";
+    submitLock.current = true;
+    setSubmitting(true);
+    try {
+      stopVoice();
+      const composed = await composeWithAttachments(input, files);
+      if (composed.text.trim() === "") {
+        setNote(t("attachBinary"));
+        return;
+      }
+      if (composed.skipped.length > 0) {
+        setNote(`${t("attachBinary")} ${composed.skipped.join("、")}`);
+      } else {
+        setNote(null);
+      }
+      await onSend(composed.text);
+      draft.current = "";
+      setInput("");
+      setFiles([]);
+      if (area.current !== null) {
+        area.current.style.height = "";
+      }
+    } catch {
+      // The caller shows the request error; retain the draft and files for retry.
+    } finally {
+      submitLock.current = false;
+      setSubmitting(false);
     }
   }
 
@@ -157,7 +168,7 @@ export function Composer({
         event.preventDefault();
         dragDepth.current = 0;
         setDragging(false);
-        addFiles(stagedFromList(event.dataTransfer.files));
+        if (!busy) addFiles(stagedFromList(event.dataTransfer.files));
       }}
     >
       {dragging ? <p className="composer-drop">{t("dropFiles")}</p> : null}
@@ -169,6 +180,7 @@ export function Composer({
               <button
                 type="button"
                 aria-label={`${t("removeFile")} ${item.name}`}
+                disabled={submitting || sending}
                 onClick={() => setFiles((current) => current.filter((_, i) => i !== index))}
               >
                 ×
@@ -183,7 +195,7 @@ export function Composer({
         placeholder={t("composerPlaceholder")}
         rows={1}
         value={input}
-        disabled={disabled}
+        disabled={disabled || submitting || sending}
         onChange={(event) => {
           draft.current = event.target.value;
           setInput(event.target.value);

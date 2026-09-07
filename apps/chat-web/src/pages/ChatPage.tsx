@@ -315,7 +315,7 @@ export function ChatPage() {
           sending={send.isPending}
           live={Boolean(live)}
           canExport={(messages.data ?? []).length > 0}
-          onSend={(text) => send.mutate(text)}
+          onSend={async (text) => { await send.mutateAsync(text); }}
           onExport={() => {
             const turns = messages.data ?? [];
             if (turns.length === 0) {
