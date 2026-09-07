@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { expect, test } from "vitest";
+import { beforeEach, expect, test } from "vitest";
 
 import { ChatPage } from "./ChatPage";
 import { rememberSessionId } from "../chat/localSessions";
@@ -16,6 +16,31 @@ const ALIAS = "darwin";
 const SESSION = "33333333-4444-4555-8666-777777777777";
 const RUN = "55555555-6666-4777-8888-999999999999";
 const APPROVAL = "77777777-8888-4999-a000-111111111111";
+
+const IDENTITY = { end_user_id: "draft-user-a", workspace_id: "draft-workspace" };
+beforeEach(() => {
+  window.sessionStorage.clear();
+  server.use(http.get("/api/v1/end-user/me", () => HttpResponse.json(IDENTITY)));
+});
+
+test("a refreshed conversation restores its draft only after confirming the same identity", async () => {
+  rememberSessionId(ALIAS, SESSION);
+  server.use(http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([])));
+  const first = renderChat(`/${ALIAS}/${SESSION}`);
+  await userEvent.type(await screen.findByLabelText("写给智能体"), "只给当前用户恢复");
+  first.unmount();
+  const second = renderChat(`/${ALIAS}/${SESSION}`);
+  expect(await screen.findByLabelText("写给智能体")).toHaveValue("只给当前用户恢复");
+  second.unmount();
+  server.use(http.get("/api/v1/end-user/me", () => HttpResponse.json({ ...IDENTITY, end_user_id: "draft-user-b" })));
+  const other = renderChat(`/${ALIAS}/${SESSION}`);
+  expect(await screen.findByLabelText("写给智能体")).toHaveValue("");
+  other.unmount();
+  server.use(http.get("/api/v1/end-user/me", () => HttpResponse.json({ detail: "Session expired" }, { status: 401 })));
+  renderChat(`/${ALIAS}/${SESSION}`);
+  expect(await screen.findByText("Session expired")).toBeInTheDocument();
+  expect(screen.queryByLabelText("写给智能体")).toBeNull();
+});
 
 test("reopening a conversation exposes its saved files without an active run", async () => {
   rememberSessionId(ALIAS, SESSION);
@@ -95,9 +120,9 @@ function finishedRun(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderChat(path: string): void {
+function renderChat(path: string): ReturnType<typeof render> {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
+  return render(
     <ChatTheme>
       <LocaleProvider>
         <QueryClientProvider client={client}>
