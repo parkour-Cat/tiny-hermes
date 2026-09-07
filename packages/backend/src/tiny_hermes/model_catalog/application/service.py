@@ -282,6 +282,15 @@ class ModelEndpointService:
             endpoint.spec.credential_ref
         )
 
+    async def discovery_credential(self, actor: Actor, reference: str) -> str:
+        if not actor.is_platform_admin:
+            raise _forbidden()
+        try:
+            return await CredentialResolver(self._secrets, self._kek).resolve(reference)
+        except credentials.CredentialMissing:
+            raise AppError(code="credential_missing", title="Credential missing", status=422,
+                detail="The selected credential is not available.") from None
+
     @staticmethod
     def _since(started: float) -> int:
         return int((time.monotonic() - started) * 1000)

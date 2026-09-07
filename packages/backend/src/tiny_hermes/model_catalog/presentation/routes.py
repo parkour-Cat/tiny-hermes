@@ -1,7 +1,8 @@
 from typing import Annotated
+from urllib.parse import urlsplit
 from uuid import UUID
 
-from fastapi import APIRouter, Cookie, Depends, Header, status
+from fastapi import APIRouter, Cookie, Depends, Header, Request, status
 from pydantic import BaseModel, Field
 
 from tiny_hermes.api.resources import ApplicationResources
@@ -12,12 +13,19 @@ from tiny_hermes.identity.presentation.dependencies import (
     authenticate_browser_user,
     verify_browser_write,
 )
+from tiny_hermes.model_catalog.application.discovery import (
+    DiscoveryRequest,
+    DiscoveryResponse,
+    discover_models,
+    discovery_error,
+)
 from tiny_hermes.model_catalog.application.service import CheckResult, ModelEndpointService
 from tiny_hermes.model_catalog.domain.models import (
     EndpointStatus,
     ModelEndpoint,
     ModelEndpointSpec,
 )
+from tiny_hermes.shared.errors import AppError
 from tiny_hermes.tenancy.domain.models import Actor
 
 CsrfHeader = Annotated[str | None, Header(alias="X-CSRF-Token")]
@@ -135,6 +143,30 @@ def model_endpoint_router(resources: ApplicationResources) -> APIRouter:
     router = APIRouter(prefix="/api/v1/model-endpoints", tags=["model-endpoints"])
     auth_dependency = resources.auth_service
     endpoints_dependency = resources.model_endpoints
+
+    @router.post("/discover", response_model=DiscoveryResponse)
+    async def discover(  # pyright: ignore[reportUnusedFunction]
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        endpoints: Annotated[ModelEndpointService, Depends(endpoints_dependency, scope="function")],
+        session_token: SessionCookie = None,
+        csrf_token: CsrfHeader = None,
+    ) -> DiscoveryResponse:
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        if not user.is_platform_admin:
+            raise AppError(code="forbidden", title="Forbidden", status=403,
+                detail="Only a platform administrator can discover models.")
+        # A normal validation error includes the offending input. This body
+        # contains a key, so return a fixed error instead of echoing it.
+        try:
+            payload = DiscoveryRequest.model_validate_json(await request.body())
+        except ValueError:
+            raise discovery_error("model_discovery_invalid_request") from None
+        token = payload.api_key.get_secret_value() if payload.api_key is not None else (
+            await endpoints.discovery_credential(_actor(user), payload.credential_ref or ""))
+        host = urlsplit(payload.base_url).hostname or ""
+        async with resources.model_discovery_client(host) as client:
+            return await discover_models(client, payload.base_url, token)
 
     @router.get("", response_model=list[EndpointSummary])
     async def list_endpoints(  # pyright: ignore[reportUnusedFunction]

@@ -97,6 +97,7 @@ class EgressRoute:
     workspace_id: UUID | None = None
     agent_version_id: UUID | None = None
     run_id: UUID | None = None
+    discovery_id: UUID | None = None
 
     def headers(self) -> dict[str, str]:
         """What the proxy needs, and nothing a target should ever see.
@@ -111,6 +112,7 @@ class EgressRoute:
                 ("workspace", self.workspace_id),
                 ("agent", self.agent_version_id),
                 ("run", self.run_id),
+                ("discovery", self.discovery_id),
             )
             if value is not None
         ]

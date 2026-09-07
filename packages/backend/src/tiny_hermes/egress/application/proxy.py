@@ -384,6 +384,7 @@ def _claimed_layers(header: str | None) -> CallerClaim:
         workspace_id=found.get("workspace"),
         agent_version_id=found.get("agent"),
         run_id=found.get("run"),
+        discovery_id=found.get("discovery"),
     )
 
 

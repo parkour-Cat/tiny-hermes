@@ -71,6 +71,7 @@ class CallerClaim:
     workspace_id: UUID | None = None
     agent_version_id: UUID | None = None
     run_id: UUID | None = None
+    discovery_id: UUID | None = None
 
 
 @dataclass(frozen=True)

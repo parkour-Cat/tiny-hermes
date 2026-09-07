@@ -14,14 +14,14 @@ whatever the Agent says today.
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tiny_hermes.agents.infrastructure.tables import AgentVersionRow
 from tiny_hermes.egress.domain.decision import CallerClaim, CallerKind, ScopeLayers
 from tiny_hermes.outbound.domain.address_policy import Address
 from tiny_hermes.outbound.domain.scope import OutboundScope
-from tiny_hermes.outbound.infrastructure.tables import OutboundScopeRow
+from tiny_hermes.outbound.infrastructure.tables import ModelDiscoveryGrantRow, OutboundScopeRow
 from tiny_hermes.runs.infrastructure.tables import RunRow
 from tiny_hermes.sandbox.infrastructure.tables import SandboxEgressAddressRow
 
@@ -32,6 +32,19 @@ class SqlScopeDirectory:
 
     async def layers_for(self, claim: CallerClaim) -> ScopeLayers:
         async with self._sessions() as session:
+            if claim.discovery_id is not None:
+                # Only this expiring lookup may use the grant. It never widens
+                # the normal platform scope or any workspace / Agent request.
+                host = None
+                if claim.kind == CallerKind.PLATFORM and all(value is None for value in (
+                    claim.workspace_id, claim.agent_version_id, claim.run_id,
+                )):
+                    host = await session.scalar(select(ModelDiscoveryGrantRow.host).where(
+                        ModelDiscoveryGrantRow.id == claim.discovery_id,
+                        ModelDiscoveryGrantRow.expires_at > func.now(),
+                    ))
+                return ScopeLayers(
+                    platform=OutboundScope.of([host]) if host else OutboundScope.nothing())
             return ScopeLayers(
                 platform=await _level(session, "platform", None),
                 workspace=(

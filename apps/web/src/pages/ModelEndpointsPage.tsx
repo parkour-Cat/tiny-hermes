@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Button, Card, Form, Input, InputNumber, Modal, Select, Space, Switch, Tag, Typography } from "antd";
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { QuickModelConnect } from "./QuickModelConnect";
 
 import { ApiError, api } from "../api/client";
 import { problemMessage } from "../api/messages";
@@ -80,6 +82,9 @@ export function ModelEndpointsPage({ readOnly = false }: { readOnly?: boolean })
   const [error, setError] = useState<string | null>(null);
   const [checkNote, setCheckNote] = useState<string | null>(null);
   const [preset, setPreset] = useState<string | null>(null);
+  const [searchParams] = useSearchParams();
+  const [fullConfig, setFullConfig] = useState(searchParams.get('mode') === 'advanced');
+  const [connected, setConnected] = useState<string | null>(null);
   const admin = !readOnly && auth.user?.is_platform_admin === true;
   const listQuery = ["model-endpoints"] as const;
 
@@ -342,11 +347,21 @@ export function ModelEndpointsPage({ readOnly = false }: { readOnly?: boolean })
       {checkNote === null ? null : (
         <Alert className="page-alert" type="info" title={checkNote} showIcon />
       )}
-      {admin ? (
+      {connected === null ? null : <Alert className="page-alert" type="success" showIcon
+        title={t('quickConnected').replace('{name}', connected)} />}
+      {admin && editing === null && !fullConfig ? <QuickModelConnect
+        workspaceId={workspaceId ?? ''} secrets={secrets.data ?? []}
+        onManual={() => { setFullConfig(true); setConnected(null); }}
+        onConnected={(entry) => { setConnected(entry.name); void queryClient.invalidateQueries({ queryKey: listQuery }); }}
+      /> : null}
+      {admin && (editing !== null || fullConfig) ? (
         <Card
           title={editing === null ? t("registerEndpoint") : `${t("edit")}：${editing.name}`}
           variant="borderless"
           className="page-alert"
+          extra={editing === null ? <Button type="link" onClick={() => {
+            form.resetFields(); setFullConfig(false); setError(null);
+          }}>{t('quickBack')}</Button> : undefined}
         >
           <Form<EndpointValues>
             form={form}
