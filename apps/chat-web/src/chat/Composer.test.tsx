@@ -89,6 +89,21 @@ test("dropping or pasting a file stages it on the composer", async () => {
   expect(screen.getByText("extra.md")).toBeInTheDocument();
 });
 
+test("an unreadable attachment reports the error and retains the draft for correction", async () => {
+  const sent: string[] = [];
+  renderComposer({ onSend: (text) => { sent.push(text); } });
+  const file = new File(["notes"], "unreadable.txt", { type: "text/plain" });
+  Object.defineProperty(file, "text", { value: async () => { throw new Error("File unreadable"); } });
+  fireEvent.drop(document.querySelector(".composer")!, { dataTransfer: { files: [file] } });
+  const input = screen.getByLabelText("写给智能体");
+  await userEvent.type(input, "保留附件和说明");
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  expect(await screen.findByText("附件读取失败，请重新选择文件后重试。")).toBeInTheDocument();
+  expect(input).toHaveValue("保留附件和说明");
+  expect(screen.getByText("unreadable.txt")).toBeInTheDocument();
+  expect(sent).toEqual([]);
+});
+
 test("voice input appears only when the browser can dictate", async () => {
   const first = renderComposer();
   expect(screen.queryByRole("button", { name: "语音输入" })).toBeNull();
