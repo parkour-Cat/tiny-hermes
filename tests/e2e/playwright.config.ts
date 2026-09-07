@@ -34,6 +34,7 @@ function assertEverySpecIsClaimed(projects: { testMatch: RegExp }[]): void {
 
 const PROJECTS = [
     { name: "setup", testMatch: /.*\.setup\.ts$/ },
+    { name: "roles", testMatch: /roles\.spec\.ts$/, dependencies: ["setup"] },
     // Signing in is what this one is about, so it starts signed out and does it
     // through the form; it only needs the account to exist.
     {

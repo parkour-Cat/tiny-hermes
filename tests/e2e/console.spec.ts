@@ -12,6 +12,7 @@ for (const appearance of ["浅色", "深色"]) {
     if (await toggle.count()) await toggle.click();
     await expect(page.locator("html")).toHaveAttribute("data-theme", appearance === "深色" ? "dark" : "light");
     await expectReadableControl(page.getByRole("button", { name: "新建工作空间", exact: true }));
+    await expectReadableControl(page.getByText("每个工作空间独立保存成员、Agent 与任务数据。", { exact: true }));
   });
 }
 
@@ -104,11 +105,11 @@ test("failed draft saves preserve input and narrow dialogs return keyboard focus
   const draftPath = "**/api/v1/agents/*/draft";
   await page.route(draftPath, (route) => route.request().method() === "PUT" ?
     route.abort("connectionfailed") : route.continue());
-  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
+  await page.getByRole("button", { name: /保存草稿$/ }).click();
   await expect(page.locator(".ant-alert-error")).toBeVisible();
   await expect(input).toHaveValue("服务失败后仍然保留的草稿内容");
   await page.unroute(draftPath);
-  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
+  await page.getByRole("button", { name: /保存草稿$/ }).click();
   await expect(page.getByText("草稿修订 3", { exact: true })).toBeVisible();
   await page.reload();
   await expect(input).toHaveValue("服务失败后仍然保留的草稿内容");
