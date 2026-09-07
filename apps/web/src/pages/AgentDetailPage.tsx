@@ -407,6 +407,14 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
     enabled: enabled && publishedId !== null,
   });
 
+  function rememberEdits(values: FormValues, baseDraft: AgentDraftResponse, baseAgent: AgentResponse): void {
+    const unchanged = JSON.stringify(specOf(values)) === JSON.stringify(specOf(valuesOf(baseDraft))) &&
+      values.name === baseAgent.name && values.alias === baseAgent.alias;
+    const next = unchanged ? null : { revision: baseDraft.revision, name: baseAgent.name, alias: baseAgent.alias, values };
+    setLocalDraft(next);
+    writeAgentDraft(storageKey, next);
+  }
+
   const saveDraft = useMutation({
     mutationFn: ({ values, revision }: { values: DraftValues; revision: number }) =>
       api<AgentDraftResponse>(`/api/v1/agents/${agentId}/draft`, {
@@ -418,6 +426,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
         }),
       }),
     onSuccess: (saved) => {
+      if (agent.data) rememberEdits(form.getFieldsValue(true), saved, agent.data);
       queryClient.setQueryData(draftQuery, saved);
       setSaveError(null);
     },
@@ -432,6 +441,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
         body: JSON.stringify(values),
       }),
     onSuccess: (updated) => {
+      if (draft.data) rememberEdits(form.getFieldsValue(true), draft.data, updated);
       queryClient.setQueryData(agentQuery, updated);
       setSaveError(null);
     },
