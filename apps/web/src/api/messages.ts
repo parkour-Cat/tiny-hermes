@@ -15,6 +15,7 @@ const NAMED: Partial<Record<string, MessageKey>> = {
   model_discovery_invalid: "quickInvalidModels",
   model_discovery_invalid_request: "quickInvalidRequest",
   endpoint_name_taken: "quickNameTaken",
+  context_budget_unsatisfied: "contextBudgetDoesNotFit",
   agent_alias_taken: "agentAliasTaken",
   invalid_agent_alias: "invalidAgentAlias",
   invalid_agent_name: "invalidAgentName",

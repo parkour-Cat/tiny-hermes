@@ -88,7 +88,7 @@ export function QuickModelConnect({ workspaceId, secrets, onConnected, onManual 
     extra={<Button type="link" onClick={onManual} disabled={busy !== null}>{t('quickFullConfig')}</Button>}>
     <Typography.Paragraph type="secondary">{t('quickConnectIntro')}</Typography.Paragraph>
     <Form form={form} layout="vertical" requiredMark={false} onFinish={(values) => void save(values)}
-      initialValues={{ context_window: 8192, max_output_tokens: 1024 }}
+      initialValues={{ context_window: 16384, max_output_tokens: 1024 }}
       onValuesChange={(changed) => {
         if ('base_url' in changed || 'api_key' in changed || 'credential_ref' in changed) resetConnection();
         if ('api_key' in changed) stored.current = null;
@@ -122,7 +122,7 @@ export function QuickModelConnect({ workspaceId, secrets, onConnected, onManual 
           {manualModel ? <Input disabled={busy !== null} /> : <Select disabled={busy !== null} showSearch options={(models ?? []).map((id) => ({ value: id, label: id }))} />}
         </Form.Item>
         <FormSection title={t('quickOptions')} summary={t('quickDefaults')
-          .replace('{context}', String(contextLimit ?? 8192)).replace('{output}', String(outputLimit ?? 1024))}
+          .replace('{context}', String(contextLimit ?? 16384)).replace('{output}', String(outputLimit ?? 1024))}
           fields={['context_window', 'max_output_tokens']} collapsible>
           <Typography.Paragraph type="secondary">{t('quickLimitsHint')}</Typography.Paragraph>
           <Form.Item name="name" label={t('endpointName')} extra={t('quickNameHint')} rules={[{ max: 120 }]}><Input disabled={busy !== null} /></Form.Item>
