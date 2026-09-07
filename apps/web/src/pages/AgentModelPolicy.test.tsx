@@ -3,11 +3,17 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { expect, test } from "vitest";
+import { beforeEach, expect, test } from "vitest";
 
 import { AgentDetailPage } from "./AgentDetailPage";
 import { TestTheme } from "../test/TestTheme";
 import { server } from "../test/server";
+import { AuthProvider } from "../auth/AuthProvider";
+
+beforeEach(() => {
+  sessionStorage.clear();
+  server.use(http.get("/api/v1/auth/me", () => HttpResponse.json({ id: "u1", is_platform_admin: false })));
+});
 
 /**
  * Choosing what an Agent talks to.
@@ -79,12 +85,12 @@ function renderDetail(): void {
     <TestTheme>
       <QueryClientProvider client={client}>
         <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE}/agents/${AGENT}`]}>
-          <Routes>
+          <AuthProvider><Routes>
             <Route
               path="/workspaces/:workspaceId/agents/:agentId"
               element={<AgentDetailPage />}
             />
-          </Routes>
+          </Routes></AuthProvider>
         </MemoryRouter>
       </QueryClientProvider>
     </TestTheme>,
