@@ -93,6 +93,24 @@ test("cached identity cannot reveal a draft while a returning page checks the cu
   expect(await screen.findByLabelText("写给智能体")).toHaveValue("");
 });
 
+test("changing identity cannot display the previous owner's cached conversation", async () => {
+  rememberSessionId(ALIAS, SESSION);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  server.use(http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([
+    { role: "assistant", parts: [{ type: "text", text: "旧账号的私有对话内容" }] },
+  ])));
+  const first = renderChat(`/${ALIAS}/${SESSION}`, client);
+  expect(await screen.findByText("旧账号的私有对话内容")).toBeInTheDocument();
+  first.unmount();
+  server.use(
+    http.get("/api/v1/end-user/me", () => HttpResponse.json({ ...IDENTITY, end_user_id: "other-owner" })),
+    http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json({ detail: "Forbidden" }, { status: 403 })),
+  );
+  renderChat(`/${ALIAS}/${SESSION}`, client);
+  await screen.findByLabelText("写给智能体");
+  expect(screen.queryByText("旧账号的私有对话内容")).toBeNull();
+});
+
 test("clearing a failed message makes an identical later message a new request", async () => {
   rememberSessionId(ALIAS, SESSION);
   const keys: (string | null)[] = [];
