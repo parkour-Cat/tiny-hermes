@@ -17,6 +17,7 @@ import type {
 import { useAuth } from "../auth/AuthProvider";
 import { useT } from "../i18n/locale";
 import { EmptyState } from "../ui/EmptyState";
+import { StatusTag } from "../ui/StatusTag";
 import { RUN_ACTIONS } from "../runs/actions";
 import { artifactIdsIn, mergeArtifacts, toolsOf, transcriptLineOf } from "../runs/transcript";
 import { ToolOutput } from "../runs/ToolOutput";
@@ -241,7 +242,7 @@ export function PlaygroundPage() {
           title={t("sessionBlocked")}
           description={
             <Space wrap>
-              {run.queue.head_status === undefined ? null : <Tag>{run.queue.head_status}</Tag>}
+              {run.queue.head_status === undefined ? null : <StatusTag code={run.queue.head_status} />}
               {headActions.map((action) => {
                 const offer = RUN_ACTIONS[action];
                 return offer === undefined || headId === null ? null : (
@@ -261,8 +262,8 @@ export function PlaygroundPage() {
       ) : null}
       {run === undefined ? null : (
         <Space wrap className="page-alert">
-          <Tag>{run.status}</Tag>
-          <Tag>{run.queue.status}</Tag>
+          <StatusTag code={run.status} />
+          {run.queue.status === "terminal" ? null : <StatusTag code={run.queue.status} />}
           {run.available_actions.map((action) => {
             const offer = RUN_ACTIONS[action];
             return offer === undefined ? null : (

@@ -160,7 +160,16 @@ export function RunDetailPage() {
     queryKey: ["run-tree", workspaceId, runId] as const,
     queryFn: () => api<RunTreeResponse>(`/api/v1/runs/${runId}/tree`, scope),
     enabled,
+    refetchInterval: (query) => query.state.data?.nodes.some((node) =>
+      !["completed", "failed", "cancelled"].includes(node.status),
+    ) ? 2_000 : false,
   });
+
+  useEffect(() => {
+    if (snapshot.data?.state_version !== undefined) {
+      void queryClient.invalidateQueries({ queryKey: ["run-tree", workspaceId, runId], exact: true });
+    }
+  }, [snapshot.data?.state_version, queryClient, workspaceId, runId]);
 
   const [widening, setWidening] = useState(false);
   const [widenForm] = Form.useForm<{ maxModelCalls: number }>();
