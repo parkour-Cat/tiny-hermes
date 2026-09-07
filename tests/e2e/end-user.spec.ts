@@ -61,6 +61,21 @@ test("chat keeps a failed draft and its menus remain usable with a keyboard", as
     await expect(chat.locator(".turn-agent")).toHaveCount(1);
     await chat.reload();
     await expect(chat.locator(".bubble-user")).toHaveCount(1);
+    await chat.route(runPath, async (route) => {
+      const accepted = await route.fetch();
+      expect(accepted.ok()).toBeTruthy();
+      await route.abort("connectionfailed");
+    });
+    await input.fill("成功响应丢失时也只执行一次。");
+    await chat.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(chat.locator(".banner-warn")).toBeVisible();
+    await expect(input).toHaveValue("成功响应丢失时也只执行一次。");
+    await chat.unroute(runPath);
+    await chat.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(input).toHaveValue("");
+    await expect(chat.locator(".turn-agent")).toHaveCount(2);
+    await chat.reload();
+    await expect(chat.locator(".bubble-user")).toHaveCount(2);
     const actions = chat.getByRole("button", { name: "会话操作", exact: true });
     await actions.focus();
     await chat.keyboard.press("Enter");
