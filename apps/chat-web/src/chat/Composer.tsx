@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { composeWithAttachments, mergeStaged, stagedFromList, type StagedFile } from "./attachments";
 import { readClipboardPayload } from "./clipboard";
-import { loadDraftText, saveDraftText } from "./drafts";
+import { loadDraftFiles, loadDraftText, saveDraftFiles, saveDraftText } from "./drafts";
 import { canDictate, startDictation } from "./speech";
 import { useDismiss } from "./useDismiss";
 import { useLocale } from "../i18n/locale";
@@ -40,6 +40,7 @@ export function Composer({
   const [input, setInput] = useState(() => loadDraftText(draftKey));
   const draft = useRef(input);
   const [files, setFiles] = useState<StagedFile[]>([]);
+  const [missingFiles, setMissingFiles] = useState(() => loadDraftFiles(draftKey));
   const [note, setNote] = useState<string | null>(null);
   const [menu, setMenu] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -50,18 +51,22 @@ export function Composer({
   const closeMenu = useCallback(() => setMenu(false), []);
   useDismiss(menu, closeMenu, plus);
   const busy = disabled || sending || live || submitting;
-  const ready = (input.trim() !== "" || files.length > 0) && !busy;
+  const ready = (input.trim() !== "" || files.length > 0) && !busy && missingFiles.length === 0;
   const voice = canDictate();
 
   useEffect(() => {
-    if (draftKey !== undefined) setDraftSaved(saveDraftText(draftKey, input));
-  }, [draftKey, input]);
+    if (draftKey === undefined) return;
+    const textSaved = saveDraftText(draftKey, input);
+    const filesSaved = saveDraftFiles(draftKey, [...missingFiles, ...files.map((file) => file.name)]);
+    setDraftSaved(textSaved && filesSaved);
+  }, [draftKey, input, files, missingFiles]);
 
   function addFiles(incoming: StagedFile[]): void {
     if (incoming.length === 0) {
       return;
     }
     setFiles((current) => mergeStaged(current, incoming));
+    setMissingFiles((current) => current.filter((name) => !incoming.some((file) => file.name === name)));
   }
 
   function appendText(chunk: string): void {
@@ -189,6 +194,10 @@ export function Composer({
       }}
     >
       {dragging ? <p className="composer-drop">{t("dropFiles")}</p> : null}
+      {missingFiles.length === 0 ? null : <div className="composer-note" role="status">
+        <p>{t("draftAttachmentsMissing")}{missingFiles.join("、")}</p>
+        <button type="button" disabled={busy} onClick={() => setMissingFiles([])}>{t("draftAttachmentsRemove")}</button>
+      </div>}
       {files.length > 0 ? (
         <ul className="composer-files">
           {files.map((item, index) => (

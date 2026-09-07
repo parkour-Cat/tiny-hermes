@@ -1,5 +1,30 @@
 const PREFIX = "tiny-hermes-chat-draft:";
 const PENDING = "tiny-hermes-chat-pending:";
+const FILES = "tiny-hermes-chat-draft-files:";
+
+export function loadDraftFiles(key: string | undefined): string[] {
+  if (key === undefined) return [];
+  try {
+    const value: unknown = JSON.parse(window.sessionStorage.getItem(FILES + key) ?? "[]");
+    return Array.isArray(value) ? value.filter((name): name is string => typeof name === "string").slice(0, 8) : [];
+  } catch { return []; }
+}
+
+export function saveDraftFiles(key: string, names: string[]): boolean {
+  try {
+    if (names.length === 0) window.sessionStorage.removeItem(FILES + key);
+    else window.sessionStorage.setItem(FILES + key, JSON.stringify(names));
+    return true;
+  } catch { return false; }
+}
+
+export function clearAllDrafts(): void {
+  try {
+    for (const key of Object.keys(window.sessionStorage)) {
+      if ([PREFIX, PENDING, FILES].some((prefix) => key.startsWith(prefix))) window.sessionStorage.removeItem(key);
+    }
+  } catch { /* Clearing this tab must remain possible when storage is unavailable. */ }
+}
 
 export type PendingSend = { text: string; key: string };
 
@@ -21,12 +46,15 @@ export function clearDraft(key: string): void {
   try {
     window.sessionStorage.removeItem(PREFIX + key);
     window.sessionStorage.removeItem(PENDING + key);
+    window.sessionStorage.removeItem(FILES + key);
   } catch { /* Storage failures must not prevent chatting. */ }
 }
 
 export function moveDraft(from: string, to: string): void {
   if (from === to) return;
-  if (saveDraftText(to, loadDraftText(from))) clearDraft(from);
+  const textSaved = saveDraftText(to, loadDraftText(from));
+  const filesSaved = saveDraftFiles(to, loadDraftFiles(from));
+  if (textSaved && filesSaved) clearDraft(from);
 }
 
 export function loadDraftText(key: string | undefined): string {

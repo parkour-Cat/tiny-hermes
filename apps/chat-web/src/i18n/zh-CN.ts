@@ -106,6 +106,8 @@ export const zhCN = {
   attachReadFailed: "附件读取失败，请重新选择文件后重试。",
   draftStorageFailed: "当前无法保存输入，刷新页面会丢失这段文字。请先复制保留。",
   draftIdentityChanged: "登录身份已改变，请确认当前对话后重新发送。",
+  draftAttachmentsMissing: "附件需重新选择：",
+  draftAttachmentsRemove: "移除未恢复附件",
   greeting: "你好",
   emptyIntro: "有什么需要帮忙的？",
   invalidAddress: "对话地址无效，请从企业入口重新打开。",

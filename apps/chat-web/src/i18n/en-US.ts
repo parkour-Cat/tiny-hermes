@@ -108,6 +108,8 @@ export const enUS: Record<MessageKey, string> = {
   attachReadFailed: "Could not read the attachment. Select the file again and retry.",
   draftStorageFailed: "Your draft could not be saved. Copy it before refreshing this page.",
   draftIdentityChanged: "Your sign-in identity changed. Check the current conversation before sending again.",
+  draftAttachmentsMissing: "Select these attachments again: ",
+  draftAttachmentsRemove: "Remove unrestored attachments",
   greeting: "Hello",
   emptyIntro: "What can I help you with?",
   invalidAddress: "This chat address is invalid. Reopen it from your organization’s entry page.",
