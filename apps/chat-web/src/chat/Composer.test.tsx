@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 
 import { Composer } from "./Composer";
 import { LocaleProvider } from "../i18n/locale";
@@ -37,6 +37,7 @@ test("Enter confirms an IME candidate without sending, then ordinary Enter sends
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   window.sessionStorage.clear();
   delete (window as Window & { webkitSpeechRecognition?: unknown }).webkitSpeechRecognition;
 });
@@ -61,6 +62,28 @@ test("refresh restores a text draft only in its own conversation", async () => {
   other.unmount();
   renderComposer({ draftKey: "user-a:agent-a:session-a" });
   expect(screen.getByLabelText("写给智能体")).toHaveValue("刷新后继续编辑");
+});
+
+test("refresh explains missing attachments and requires reselection or removal before sending", async () => {
+  const first = renderComposer({ draftKey: "attachment-draft" });
+  await userEvent.type(screen.getByLabelText("写给智能体"), "带上这份说明");
+  fireEvent.drop(document.querySelector(".composer")!, {
+    dataTransfer: { files: [new File(["notes"], "notes.txt", { type: "text/plain" })] },
+  });
+  first.unmount();
+  renderComposer({ draftKey: "attachment-draft" });
+  expect(screen.getByText(/附件需重新选择：notes.txt/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "发送", exact: true })).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: "移除未恢复附件" }));
+  expect(screen.getByRole("button", { name: "发送", exact: true })).toBeEnabled();
+});
+
+test("blocked browser storage reports the loss of refresh recovery without blocking typing", async () => {
+  renderComposer({ draftKey: "blocked-draft" });
+  vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("Quota exceeded"); });
+  await userEvent.type(screen.getByLabelText("写给智能体"), "仍然可以输入");
+  expect(screen.getByLabelText("写给智能体")).toHaveValue("仍然可以输入");
+  expect(screen.getByText("当前无法保存输入，刷新页面会丢失这段文字。请先复制保留。")).toBeInTheDocument();
 });
 
 test("the composer menu supports keyboard entry, arrows and Escape focus return", async () => {
