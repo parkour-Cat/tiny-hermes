@@ -12,6 +12,9 @@ const CREDENTIAL = "header.payload.signature";
 test("a credential in the URL exchanges a session and opens the chat", async () => {
   const exchanges: { authorization: string | null; workspace: string | null }[] = [];
   server.use(
+    http.get("/api/v1/end-user/me", () => HttpResponse.json({
+      end_user_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", workspace_id: WORKSPACE,
+    })),
     // The chat page asks which Agents the new session may open, for its title.
     http.get("/api/v1/end-user/agents", () => HttpResponse.json([])),
     http.post("/api/v1/end-user/sessions", ({ request }) => {

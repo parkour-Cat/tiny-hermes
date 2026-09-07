@@ -73,9 +73,9 @@ test("refresh explains missing attachments and requires reselection or removal b
   first.unmount();
   renderComposer({ draftKey: "attachment-draft" });
   expect(screen.getByText(/附件需重新选择：notes.txt/)).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "发送", exact: true })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
   await userEvent.click(screen.getByRole("button", { name: "移除未恢复附件" }));
-  expect(screen.getByRole("button", { name: "发送", exact: true })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
 });
 
 test("blocked browser storage reports the loss of refresh recovery without blocking typing", async () => {

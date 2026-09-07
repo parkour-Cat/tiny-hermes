@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
 import { ChatPage } from "./ChatPage";
 import { rememberSessionId } from "../chat/localSessions";
@@ -55,13 +55,13 @@ test("a lost first-send response survives refresh and retries once with the orig
   );
   const first = renderChat(`/${ALIAS}`);
   await userEvent.type(await screen.findByLabelText("写给智能体"), "首次发送后响应丢失");
-  await userEvent.click(screen.getByRole("button", { name: "发送", exact: true }));
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
   await waitFor(() => expect(keys).toHaveLength(1));
-  await waitFor(() => expect(screen.getByRole("button", { name: "发送", exact: true })).toBeEnabled());
+  await waitFor(() => expect(screen.getByRole("button", { name: "发送" })).toBeEnabled());
   first.unmount();
   const restored = renderChat(`/${ALIAS}/${SESSION}`);
   expect(await screen.findByLabelText("写给智能体")).toHaveValue("首次发送后响应丢失");
-  await userEvent.click(screen.getByRole("button", { name: "发送", exact: true }));
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
   await waitFor(() => expect(keys).toHaveLength(2));
   expect(keys[1]).toBe(keys[0]);
   await waitFor(() => expect(screen.getByLabelText("写给智能体")).toHaveValue(""));
@@ -91,6 +91,28 @@ test("cached identity cannot reveal a draft while a returning page checks the cu
   try { expect(screen.queryByLabelText("写给智能体")).toBeNull(); }
   finally { release(); }
   expect(await screen.findByLabelText("写给智能体")).toHaveValue("");
+});
+
+test("clearing a failed message makes an identical later message a new request", async () => {
+  rememberSessionId(ALIAS, SESSION);
+  const keys: (string | null)[] = [];
+  server.use(
+    http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([])),
+    http.post(`/api/v1/end-user/sessions/${SESSION}/runs`, ({ request }) => {
+      keys.push(request.headers.get("Idempotency-Key"));
+      return HttpResponse.error();
+    }),
+  );
+  renderChat(`/${ALIAS}/${SESSION}`);
+  const input = await screen.findByLabelText("写给智能体");
+  await userEvent.type(input, "重新提出同样的问题");
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(input).toBeEnabled());
+  await userEvent.clear(input);
+  await userEvent.type(input, "重新提出同样的问题");
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(keys).toHaveLength(2));
+  expect(keys[1]).not.toBe(keys[0]);
 });
 
 test("reopening a conversation exposes its saved files without an active run", async () => {
