@@ -125,6 +125,26 @@ test("failed draft saves preserve input and narrow dialogs return keyboard focus
   await expect(page).toHaveURL(/\/agents$/);
   await page.goto(editorUrl);
   await expect(input).toHaveValue("服务失败后仍然保留的草稿内容");
+  const localEdit = `保留这段尚未提交的修改 ${"x".repeat(300)}`;
+  await input.fill(localEdit);
+  const otherTab = await page.context().newPage();
+  await otherTab.goto(editorUrl);
+  await otherTab.getByLabel("人格", { exact: true }).fill("另一页面保存的新配置");
+  await otherTab.getByRole("button", { name: "保存草稿", exact: true }).click();
+  await expect(otherTab.getByText("草稿修订 4", { exact: true })).toBeVisible();
+  await otherTab.close();
+  await page.reload();
+  await expect(input).toHaveValue("另一页面保存的新配置");
+  await expect(page.getByRole("button", { name: "保存草稿", exact: true })).toBeDisabled();
+  await page.getByText("查看暂存差异", { exact: true }).click();
+  await expect(page.getByText(localEdit, { exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const size = await page.evaluate(() => ({ width: innerWidth, scroll: document.documentElement.scrollWidth }));
+  expect(size.scroll).toBeLessThanOrEqual(size.width);
+  await page.screenshot({ path: ".superpowers/agent-draft-conflict-mobile.png", fullPage: true });
+  await page.getByRole("button", { name: "重新载入草稿", exact: true }).click();
+  await page.getByRole("button", { name: "确定", exact: true }).click();
+  await expect(page.getByRole("button", { name: "保存草稿", exact: true })).toBeEnabled();
 });
 
 /**
