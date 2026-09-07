@@ -698,7 +698,9 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
           layout="vertical"
           requiredMark={false}
           initialValues={canRestore ? localDraft.values : { ...valuesOf(loadedDraft), name: loadedAgent.name, alias: loadedAgent.alias }}
-          onValuesChange={(_, values: FormValues) => {
+          onValuesChange={() => {
+            // Conditional fields still have meaningful defaults in the form store.
+            const values = form.getFieldsValue(true) as FormValues;
             const next = { revision: localDraft?.revision ?? loadedDraft.revision, name: localDraft?.name ?? loadedAgent.name, alias: localDraft?.alias ?? loadedAgent.alias, values };
             setLocalDraft(next);
             setStorageFailed(!writeAgentDraft(storageKey, next));
