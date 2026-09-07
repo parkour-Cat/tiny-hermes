@@ -73,6 +73,26 @@ test("a lost first-send response survives refresh and retries once with the orig
   expect(await screen.findByLabelText("写给智能体")).toHaveValue("");
 });
 
+test("cached identity cannot reveal a draft while a returning page checks the current cookie", async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const first = renderChat(`/${ALIAS}`, client);
+  await userEvent.type(await screen.findByLabelText("写给智能体"), "不要显示旧身份的草稿");
+  first.unmount();
+  let release!: () => void;
+  let checking = false;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  server.use(http.get("/api/v1/end-user/me", async () => {
+    checking = true;
+    await pending;
+    return HttpResponse.json({ ...IDENTITY, end_user_id: "new-cookie-owner" });
+  }));
+  renderChat(`/${ALIAS}`, client);
+  await waitFor(() => expect(checking).toBe(true));
+  try { expect(screen.queryByLabelText("写给智能体")).toBeNull(); }
+  finally { release(); }
+  expect(await screen.findByLabelText("写给智能体")).toHaveValue("");
+});
+
 test("reopening a conversation exposes its saved files without an active run", async () => {
   rememberSessionId(ALIAS, SESSION);
   server.use(
@@ -151,8 +171,7 @@ function finishedRun(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderChat(path: string): ReturnType<typeof render> {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+function renderChat(path: string, client = new QueryClient({ defaultOptions: { queries: { retry: false } } })): ReturnType<typeof render> {
   return render(
     <ChatTheme>
       <LocaleProvider>
