@@ -367,7 +367,7 @@ test("an enterprise credential opens a conversation that survives closing the ta
   await chatPage.getByLabel("写给智能体").fill("Hello from the enterprise's own page.");
   await chatPage.getByRole("button", { name: "发送" }).click();
 
-  await expect(chatPage.getByText("Hello from the enterprise's own page.")).toBeVisible();
+  await expect(chatPage.locator(".bubble-user")).toHaveText("Hello from the enterprise's own page.");
   // The deterministic model's own "complete" scenario replies promptly; the
   // frontend polls GET .../runs/{id} rather than subscribing to a stream
   // (a reduction from the console's SSE, noted in this task's report), so
@@ -386,7 +386,7 @@ test("an enterprise credential opens a conversation that survives closing the ta
   chatPage = await context.newPage();
   await chatPage.goto(conversationUrl);
 
-  await expect(chatPage.getByText("Hello from the enterprise's own page.")).toBeVisible();
+  await expect(chatPage.locator(".bubble-user")).toHaveText("Hello from the enterprise's own page.");
   await expect(chatPage.locator(".turn-agent").first()).toBeVisible();
 
   // Design §4.6's self-service door: the subject's own export, off the
