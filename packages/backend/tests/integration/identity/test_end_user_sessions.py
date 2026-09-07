@@ -125,12 +125,17 @@ def test_current_identity_follows_the_cookie_and_rejects_revoked_sessions(
     first = _exchange(client, workspace_id, _credential(workspace_id=workspace_id, sub="draft-a"))
     identity = client.get("/api/v1/end-user/me", headers={"X-Workspace-Id": str(uuid4())})
     assert identity.status_code == 200
-    assert identity.json() == {"end_user_id": first.json()["end_user_id"], "workspace_id": workspace_id}
+    assert identity.json() == {
+        "end_user_id": first.json()["end_user_id"], "workspace_id": workspace_id,
+    }
     assert identity.headers["cache-control"] == "no-store"
     second = _exchange(client, workspace_id, _credential(workspace_id=workspace_id, sub="draft-b"))
     assert client.get("/api/v1/end-user/me").json()["end_user_id"] == second.json()["end_user_id"]
     client.cookies.delete(END_USER_SESSION_COOKIE)
-    assert client.delete(f"/api/v1/end-user/sessions/{second.json()['end_user_id']}", headers=scope).status_code == 204
+    revoked = client.delete(
+        f"/api/v1/end-user/sessions/{second.json()['end_user_id']}", headers=scope,
+    )
+    assert revoked.status_code == 204
     client.cookies.set(END_USER_SESSION_COOKIE, second.cookies[END_USER_SESSION_COOKIE])
     assert client.get("/api/v1/end-user/me").status_code == 401
 

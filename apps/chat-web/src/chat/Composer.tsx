@@ -1,7 +1,8 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { composeWithAttachments, mergeStaged, stagedFromList, type StagedFile } from "./attachments";
 import { readClipboardPayload } from "./clipboard";
+import { loadDraftText, saveDraftText } from "./drafts";
 import { canDictate, startDictation } from "./speech";
 import { useDismiss } from "./useDismiss";
 import { useLocale } from "../i18n/locale";
@@ -19,6 +20,7 @@ export function Composer({
   onSend,
   onStop,
   onExport,
+  draftKey,
 }: {
   disabled: boolean;
   sending: boolean;
@@ -27,6 +29,7 @@ export function Composer({
   onSend: (text: string) => void | Promise<void>;
   onStop: () => void;
   onExport: () => void;
+  draftKey?: string;
 }) {
   const { t, locale } = useLocale();
   const area = useRef<HTMLTextAreaElement>(null);
@@ -34,20 +37,25 @@ export function Composer({
   const plus = useRef<HTMLDivElement>(null);
   const dragDepth = useRef(0);
   const listening = useRef<{ stop: () => void } | null>(null);
-  const draft = useRef("");
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState(() => loadDraftText(draftKey));
+  const draft = useRef(input);
   const [files, setFiles] = useState<StagedFile[]>([]);
   const [note, setNote] = useState<string | null>(null);
   const [menu, setMenu] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [dictating, setDictating] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [draftSaved, setDraftSaved] = useState(true);
   const submitLock = useRef(false);
   const closeMenu = useCallback(() => setMenu(false), []);
   useDismiss(menu, closeMenu, plus);
   const busy = disabled || sending || live || submitting;
   const ready = (input.trim() !== "" || files.length > 0) && !busy;
   const voice = canDictate();
+
+  useEffect(() => {
+    if (draftKey !== undefined) setDraftSaved(saveDraftText(draftKey, input));
+  }, [draftKey, input]);
 
   function addFiles(incoming: StagedFile[]): void {
     if (incoming.length === 0) {
@@ -226,6 +234,7 @@ export function Composer({
         }}
       />
       {note === null ? null : <p className="composer-note" role="status">{note}</p>}
+      {draftSaved ? null : <p className="composer-note" role="status">{t("draftStorageFailed")}</p>}
       <div className="composer-bar">
         <div className="composer-tools">
           <input
