@@ -11,7 +11,6 @@ import os
 from pwdlib import PasswordHash
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
 from tiny_hermes.identity.infrastructure.tables import AuthIdentityRow, UserRow
 
 
