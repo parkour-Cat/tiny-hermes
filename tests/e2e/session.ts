@@ -57,7 +57,12 @@ export async function selectAntOption(page: Page, label: string, value: string):
   if (await field.evaluate((element) => !(element as HTMLInputElement).readOnly)) {
     await field.fill(value);
   }
-  const popup = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)");
+  // A previous popup can remain mounted during its closing animation.
+  const listId = await field.getAttribute("aria-controls");
+  expect(listId).toBeTruthy();
+  const popup = page.locator(".ant-select-dropdown").filter({
+    has: page.locator(`[id="${listId}"]`),
+  });
   await expect(popup.locator(`.ant-select-item-option[title="${value}"]`)).toBeVisible();
   const active = popup.locator(".ant-select-item-option-active");
   const count = await popup.locator(".ant-select-item-option").count();
