@@ -221,6 +221,24 @@ function renderDetail(role: Role = "developer", platform = false,
   return client;
 }
 
+test("successful saving releases both action buttons after the returned draft arrives", async () => {
+  loadedAgent();
+  document.cookie = "tiny_hermes_csrf=token-value";
+  server.use(http.put(`/api/v1/agents/${AGENT}/draft`, () => HttpResponse.json(draftBody(4, "Saved edit."))));
+  renderDetail();
+  const user = userEvent.setup();
+  await user.clear(await screen.findByLabelText("人格"));
+  await user.paste("Saved edit.");
+  await user.click(screen.getByRole("button", { name: "保存草稿" }));
+  await screen.findByText("草稿修订 4");
+  await waitFor(() => {
+    expect(screen.getByRole("button", { name: "保存草稿" })).not.toHaveClass("ant-btn-loading");
+    expect(screen.getByRole("button", { name: "发布" })).not.toHaveClass("ant-btn-loading");
+  });
+  await user.click(screen.getByRole("button", { name: "发布" }));
+  await waitFor(() => expect(screen.getByRole("dialog")).toBeVisible());
+});
+
 test("refresh restores unsaved Agent edits without saving or publishing them", async () => {
   const user = userEvent.setup();
   loadedAgent();
