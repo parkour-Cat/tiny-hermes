@@ -161,6 +161,31 @@ test("sending the first message creates a session and the reply appears", async 
   expect(await screen.findByText("Hi there.")).toBeInTheDocument();
 });
 
+test("a failed send keeps the draft and can be retried after the service recovers", async () => {
+  rememberSessionId(ALIAS, SESSION);
+  let recovered = false;
+  const submitted: unknown[] = [];
+  server.use(
+    http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([])),
+    http.post(`/api/v1/end-user/sessions/${SESSION}/runs`, async ({ request }) => {
+      if (!recovered) return HttpResponse.json({ detail: "Temporarily unavailable" }, { status: 503 });
+      submitted.push(await request.json());
+      return HttpResponse.json(finishedRun(), { status: 201 });
+    }),
+    http.get(`/api/v1/end-user/runs/${RUN}`, () => HttpResponse.json(finishedRun())),
+  );
+  renderChat(`/${ALIAS}/${SESSION}`);
+  const input = await screen.findByLabelText("写给智能体");
+  await userEvent.type(input, "请保留这段输入");
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  expect(await screen.findByText("Temporarily unavailable")).toBeInTheDocument();
+  expect(input).toHaveValue("请保留这段输入");
+  recovered = true;
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(submitted).toEqual([{ input: "请保留这段输入" }]));
+  await waitFor(() => expect(input).toHaveValue(""));
+});
+
 test("reopening the address for a known session shows the same conversation", async () => {
   rememberSessionId(ALIAS, SESSION);
   server.use(
