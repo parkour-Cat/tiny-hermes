@@ -51,6 +51,25 @@ test("the plus menu holds attach, paste, and export", async () => {
   expect(exported).toEqual(["ok"]);
 });
 
+test("the composer menu supports keyboard entry, arrows and Escape focus return", async () => {
+  renderComposer();
+  const user = userEvent.setup();
+  await user.tab();
+  expect(screen.getByLabelText("写给智能体")).toHaveFocus();
+  await user.tab();
+  const trigger = screen.getByRole("button", { name: "更多" });
+  expect(trigger).toHaveFocus();
+  await user.keyboard("{Enter}");
+  expect(screen.getByRole("menuitem", { name: "附件" })).toHaveFocus();
+  await user.keyboard("{ArrowDown}");
+  expect(screen.getByRole("menuitem", { name: "从剪贴板粘贴" })).toHaveFocus();
+  await user.keyboard("{End}");
+  expect(screen.getByRole("menuitem", { name: "导出对话" })).toHaveFocus();
+  await user.keyboard("{Escape}");
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect(trigger).toHaveFocus();
+});
+
 test("export stays off when the thread is empty", async () => {
   renderComposer({ canExport: false });
   await userEvent.click(screen.getByRole("button", { name: "更多" }));
