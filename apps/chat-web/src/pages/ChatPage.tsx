@@ -274,8 +274,10 @@ function ChatConversation({ identity }: { identity: EndUserIdentity }) {
           go(unused ?? null);
         }}
         onHidden={(id) => {
+          clearDraft(JSON.stringify([identity.workspace_id, identity.end_user_id, alias, id]));
           forgetSessionId(alias, id);
           if (id === activeSessionId) {
+            setOpenedId(null);
             go(null);
           }
         }}

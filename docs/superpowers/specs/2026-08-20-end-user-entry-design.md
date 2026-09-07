@@ -125,6 +125,12 @@ cookie（`HttpOnly`、`SameSite=None`、`Secure`，因为要跨域嵌在企业�
 
 ### 4.3 撤销
 
+补充（2026-09-07，聊天草稿恢复）：`GET /api/v1/end-user/me` 使用当前终端用户会话
+cookie，仅返回 `end_user_id` 与 `workspace_id`，不接受客户端指定其他主体，也不返回
+凭据。响应 `Cache-Control: no-store`；无效或撤销会话返回 401。聊天页据此隔离本标签页
+保存的文字草稿，未核实身份前不恢复；刷新可恢复文字及失败请求标识，附件文件需重新
+选择。不自动提交，不承诺关闭标签或跨设备恢复，不改变会话权限和已发布版本。
+
 停用 `channel_issuers` 的一行，该签发方的**新**凭证立刻无效。已换出的会话 cookie
 不受影响，需要单独撤销：`DELETE /api/v1/end-user/sessions/{end_user_id}`，工作空间
 管理员可调。
