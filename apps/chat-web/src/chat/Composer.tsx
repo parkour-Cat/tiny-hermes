@@ -73,7 +73,13 @@ export function Composer({
     setSubmitting(true);
     try {
       stopVoice();
-      const composed = await composeWithAttachments(input, files);
+      let composed: Awaited<ReturnType<typeof composeWithAttachments>>;
+      try {
+        composed = await composeWithAttachments(input, files);
+      } catch {
+        setNote(t("attachReadFailed"));
+        return;
+      }
       if (composed.text.trim() === "") {
         setNote(t("attachBinary"));
         return;
@@ -83,15 +89,18 @@ export function Composer({
       } else {
         setNote(null);
       }
-      await onSend(composed.text);
+      try {
+        await onSend(composed.text);
+      } catch {
+        // The caller shows the request error; retain the draft and files for retry.
+        return;
+      }
       draft.current = "";
       setInput("");
       setFiles([]);
       if (area.current !== null) {
         area.current.style.height = "";
       }
-    } catch {
-      // The caller shows the request error; retain the draft and files for retry.
     } finally {
       submitLock.current = false;
       setSubmitting(false);
@@ -216,7 +225,7 @@ export function Composer({
           }
         }}
       />
-      {note === null ? null : <p className="composer-note">{note}</p>}
+      {note === null ? null : <p className="composer-note" role="status">{note}</p>}
       <div className="composer-bar">
         <div className="composer-tools">
           <input

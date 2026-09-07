@@ -103,6 +103,7 @@ export const zhCN = {
   removeFile: "移除附件",
   stopReply: "停止",
   attachBinary: "现在只能把文本附件发给智能体。已跳过",
+  attachReadFailed: "附件读取失败，请重新选择文件后重试。",
   greeting: "你好",
   emptyIntro: "有什么需要帮忙的？",
   invalidAddress: "对话地址无效，请从企业入口重新打开。",
