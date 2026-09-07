@@ -757,6 +757,7 @@ test("binding a skill puts its version id on the draft, never its name", async (
 
   renderDetail();
   await userEvent.click(await screen.findByLabelText("技能"));
+  await userEvent.type(screen.getByLabelText("技能"), "rollout v1");
   await userEvent.click(await screen.findByTitle("rollout v1"));
   await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
 
@@ -875,6 +876,7 @@ test("binding an HTTP operation stores the version id and the operation, and the
 
   renderDetail();
   await userEvent.click(await screen.findByLabelText("HTTP 操作"));
+  await userEvent.type(screen.getByLabelText("HTTP 操作"), "POST createOrder");
   await userEvent.click(await screen.findByTitle("POST createOrder · 会改数据"));
   // §16.3's choice, made in the builder rather than discovered at publish.
   await userEvent.click(screen.getByLabelText("HTTP 写操作怎么办"));
@@ -912,6 +914,7 @@ test("an MCP binding names every tool, because there is no way to say all", asyn
 
   renderDetail();
   await userEvent.click(await screen.findByLabelText("MCP 工具"));
+  await userEvent.type(screen.getByLabelText("MCP 工具"), "search");
   await userEvent.click(await screen.findByTitle("search"));
   await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
 
