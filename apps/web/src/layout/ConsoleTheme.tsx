@@ -12,7 +12,7 @@ export type ThemeChoice = "light" | "dark";
 const INK = "#1a1612";
 const PAPER = "#f6f1e8";
 const PAPER_RAISED = "#fbf7f0";
-const COPPER = "#c45c26";
+const COPPER = "#9a4318";
 const LINE = "#ddd4c6";
 const INK_DARK = "#f3ece3";
 const PAPER_DARK = "#161310";
@@ -132,6 +132,7 @@ export function ConsoleTheme({ children }: { children: ReactNode }) {
         theme={{
           algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm,
           token: consoleDesignToken(dark),
+          components: { Button: { primaryColor: dark ? INK : "#fff" } },
         }}
       >
         {children}

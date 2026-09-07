@@ -1171,8 +1171,8 @@ button:disabled {
   border: 0;
   border-radius: 999px;
   padding: 7px 14px;
-  background: var(--th-copper);
-  color: #fff;
+  background: var(--th-copper-deep);
+  color: var(--th-paper-raised);
   font-weight: 650;
 }
 

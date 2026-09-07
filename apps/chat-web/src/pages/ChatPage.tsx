@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueries, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { api } from "../api/client";
@@ -62,6 +62,7 @@ export function ChatPage() {
   const [error, setError] = useState<string | null>(null);
   const [prefs, setPrefs] = useState(loadSessionPrefs);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const pendingSend = useRef<{ sessionId: string; text: string; key: string } | null>(null);
 
   const knownSessions = alias === null ? [] : loadKnownSessions(alias);
   const known = knownSessions.map((session) => session.id);
@@ -149,14 +150,19 @@ export function ChatPage() {
         setOpenedId(created.id);
         go(created.id);
       }
+      // A lost response may hide an accepted Run; retry the same request identity.
+      if (pendingSend.current?.sessionId !== sessionId || pendingSend.current.text !== text) {
+        pendingSend.current = { sessionId, text, key: crypto.randomUUID() };
+      }
       return api<EndUserRunResponse>(`/api/v1/end-user/sessions/${sessionId}/runs`, {
         method: "POST",
-        headers: { "Idempotency-Key": crypto.randomUUID() },
+        headers: { "Idempotency-Key": pendingSend.current.key },
         body: JSON.stringify({ input: text }),
       });
     },
     onMutate: (text) => setOptimistic(text),
     onSuccess: (created) => {
+      pendingSend.current = null;
       setRunId(created.id);
       queryClient.setQueryData(["end-user-run", created.id], created);
       setError(null);
