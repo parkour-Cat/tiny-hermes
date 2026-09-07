@@ -10,6 +10,7 @@ import { WorkspacePermissions } from "../workspace/WorkspacePermissions";
 import type { Role } from "../workspace/useMyRole";
 import { AgentDetailPage } from "./AgentDetailPage";
 import { TestTheme } from "../test/TestTheme";
+import { ConsoleLayout } from "../layout/ConsoleLayout";
 import { t } from "../i18n/zh-CN";
 import { server } from "../test/server";
 
@@ -380,6 +381,33 @@ test("cached Agent data cannot reveal recovered edits while fresh access is bein
   expect(screen.queryByLabelText("人格")).not.toBeInTheDocument();
   await screen.findByRole("alert");
   expect(screen.queryByDisplayValue("Wait for authorization.")).not.toBeInTheDocument();
+});
+
+test("a developer's edits restore after the real layout finishes loading their role", async () => {
+  const user = userEvent.setup();
+  loadedAgent();
+  renderDetail();
+  await user.clear(await screen.findByLabelText("人格"));
+  await user.paste("Restore after role check.");
+  cleanup();
+  server.use(
+    http.get(`/api/v1/workspaces/${WORKSPACE}/members/me`, async () => {
+      await delay(300);
+      return HttpResponse.json({ role: "developer" });
+    }),
+    http.get("/api/v1/workspaces", () => HttpResponse.json([{ id: WORKSPACE, name: "Acme", status: "active" }])),
+    http.get("/api/v1/approvals", () => HttpResponse.json({ items: [], has_more: false })),
+    http.get("/api/v1/memories/pending", () => HttpResponse.json([])),
+    http.get("/api/v1/skill-proposals", () => HttpResponse.json([])),
+  );
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<TestTheme><QueryClientProvider client={client}><MemoryRouter initialEntries={[`/workspaces/${WORKSPACE}/agents/${AGENT}`]}>
+    <AuthProvider><Routes><Route path="/workspaces/:workspaceId" element={<ConsoleLayout />}>
+      <Route path="agents/:agentId" element={<AgentDetailPage />} />
+    </Route></Routes></AuthProvider>
+  </MemoryRouter></QueryClientProvider></TestTheme>);
+  await waitFor(() => expect(screen.getByRole("button", { name: "保存草稿" })).toBeEnabled());
+  expect(screen.getByLabelText("人格")).toHaveValue("Restore after role check.");
 });
 
 test("the loaded draft fills every field the console can edit", async () => {

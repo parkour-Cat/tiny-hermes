@@ -37,6 +37,20 @@ for (const role of ["workspace_admin", "developer", "viewer"] as const) {
         headers: await headers(actor, workspace), data: { name: "Role check", alias: `role-check-${Date.now()}` },
       });
       expect(operation.status()).toBe(role === "viewer" ? 403 : 201);
+      if (role !== "viewer") {
+        const agent = await operation.json() as { id: string };
+        page.on("dialog", (dialog) => dialog.type() === "beforeunload" ? dialog.accept() : dialog.dismiss());
+        await page.goto(`/workspaces/${workspace}/agents/${agent.id}`);
+        await expect(page.getByRole("button", { name: "保存草稿", exact: true })).toBeEnabled();
+        const personality = page.getByLabel("人格", { exact: true });
+        await personality.fill(`${role} 的未保存修改`);
+        await page.reload();
+        await expect(page.getByRole("button", { name: "保存草稿", exact: true })).toBeEnabled();
+        await expect(personality).toHaveValue(`${role} 的未保存修改`);
+        await page.getByRole("button", { name: "重新载入草稿", exact: true }).click();
+        await page.getByRole("button", { name: "确定", exact: true }).click();
+        await expect(personality).not.toHaveValue(`${role} 的未保存修改`);
+      }
       await page.getByRole("link", { name: "设置", exact: true }).click();
       await page.getByRole("link", { name: "成员", exact: true }).click();
       const invite = page.getByRole("button", { name: "邀请成员", exact: true });
