@@ -37,6 +37,7 @@ test("Enter confirms an IME candidate without sending, then ordinary Enter sends
 });
 
 afterEach(() => {
+  window.sessionStorage.clear();
   delete (window as Window & { webkitSpeechRecognition?: unknown }).webkitSpeechRecognition;
 });
 
@@ -49,6 +50,17 @@ test("the plus menu holds attach, paste, and export", async () => {
   expect(screen.getByRole("menuitem", { name: "从剪贴板粘贴" })).toBeInTheDocument();
   await userEvent.click(screen.getByRole("menuitem", { name: "导出对话" }));
   expect(exported).toEqual(["ok"]);
+});
+
+test("refresh restores a text draft only in its own conversation", async () => {
+  const first = renderComposer({ draftKey: "user-a:agent-a:session-a" });
+  await userEvent.type(screen.getByLabelText("写给智能体"), "刷新后继续编辑");
+  first.unmount();
+  const other = renderComposer({ draftKey: "user-a:agent-a:session-b" });
+  expect(screen.getByLabelText("写给智能体")).toHaveValue("");
+  other.unmount();
+  renderComposer({ draftKey: "user-a:agent-a:session-a" });
+  expect(screen.getByLabelText("写给智能体")).toHaveValue("刷新后继续编辑");
 });
 
 test("the composer menu supports keyboard entry, arrows and Escape focus return", async () => {
