@@ -42,7 +42,8 @@ test("address, key and a discovered model are enough; only save persists the key
   await userEvent.click(screen.getByRole("button", { name: "添加模型" }));
   await waitFor(() => expect(done).toHaveBeenCalledOnce());
   expect(stored).toHaveLength(1);
-  expect(endpoints[0]).toMatchObject({ model: "acme-large", credential_ref: "saved-key", context_window: 8192, max_output_tokens: 1024 });
+  // A real publish rejected 8192: the default Agent segments need 9472 input tokens.
+  expect(endpoints[0]).toMatchObject({ model: "acme-large", credential_ref: "saved-key", context_window: 16384, max_output_tokens: 1024 });
   expect(JSON.stringify(endpoints)).not.toContain("test-key");
 });
 
