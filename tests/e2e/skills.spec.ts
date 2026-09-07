@@ -112,7 +112,7 @@ async function publishAgent(page: Page, scenario: string, tool: string): Promise
   // wrong scenario once travelled three steps before showing up as a missing
   // event on a timeline.
   await expect(page.getByText(scenario, { exact: true }).first()).toBeVisible();
-  await expect(page.getByText(`${SKILL_NAME} v1`, { exact: true }).first()).toBeVisible();
+  await expect(page.locator(`.ant-select-selection-item[title="${SKILL_NAME} v1"]`)).toBeVisible();
   await page.getByRole("button", { name: "保存草稿" }).click();
   await expect(page.getByText("草稿修订 2")).toBeVisible();
   await page.getByRole("button", { name: "发布" }).click();
