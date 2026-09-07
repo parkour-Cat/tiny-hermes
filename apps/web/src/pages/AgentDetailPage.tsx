@@ -788,6 +788,7 @@ export function AgentDetailPage() {
               mode="multiple"
               allowClear
               loading={skills.isLoading || skillVersions.isLoading}
+              optionFilterProp="label"
               placeholder={t("agentSkillsEmpty")}
               // Grouped by skill, so choosing is "which skill, then which
               // version of it" even though what is stored is one version id.
@@ -809,6 +810,7 @@ export function AgentDetailPage() {
               mode="multiple"
               allowClear
               loading={httpTools.isLoading || httpVersions.isLoading}
+              optionFilterProp="label"
               placeholder={t("emptyHttpTools")}
               // Grouped by tool and version, and the label carries whether the
               // operation writes: what an author needs while choosing is
@@ -845,6 +847,7 @@ export function AgentDetailPage() {
               mode="multiple"
               allowClear
               loading={mcpServers.isLoading || mcpVersions.isLoading}
+              optionFilterProp="label"
               placeholder={t("emptyMcpServers")}
               options={(mcpVersions.data ?? []).flatMap((entry) =>
                 entry.versions
