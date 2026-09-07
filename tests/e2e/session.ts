@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import type { Locator, Page } from "@playwright/test";
+import { expect, type Locator, type Page } from "@playwright/test";
 
 /**
  * The one account a stack is bootstrapped with, and where its cookies are kept.
@@ -48,4 +48,24 @@ export async function openSection(
 export async function unfold(page: Page, title: string): Promise<void> {
   const header = page.getByRole("button", { name: new RegExp(title) }).first();
   if ((await header.getAttribute("aria-expanded")) !== "true") await header.click();
+}
+
+/** Keyboard selection avoids clicking an option while the popup is moving. */
+export async function selectAntOption(page: Page, label: string, value: string): Promise<void> {
+  const field = page.getByLabel(label, { exact: true });
+  await field.click();
+  if (await field.evaluate((element) => !(element as HTMLInputElement).readOnly)) {
+    await field.fill(value);
+  }
+  const popup = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)");
+  await expect(popup.locator(`.ant-select-item-option[title="${value}"]`)).toBeVisible();
+  const active = popup.locator(".ant-select-item-option-active");
+  const count = await popup.locator(".ant-select-item-option").count();
+  for (let step = 0; step <= count; step++) {
+    if (await active.count() > 0 && await active.getAttribute("title") === value) break;
+    await field.press("ArrowDown");
+  }
+  await expect(active).toHaveAttribute("title", value);
+  await field.press("Enter");
+  await expect(field).toHaveAttribute("aria-expanded", "false");
 }

@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
-import { openSection, unfold } from "./session";
+import { openSection, selectAntOption, unfold } from "./session";
 
 /**
  * An external tool's whole life, driven through the console against the real
@@ -70,11 +70,7 @@ async function openWorkspace(page: Page): Promise<string> {
  * rc-select renders a second, screen-reader-only list carrying the same role.
  */
 async function choose(page: Page, label: string, value: string): Promise<void> {
-  await page.getByLabel(label, { exact: true }).click();
-  await page
-    .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
-    .locator(`.ant-select-item-option[title="${value}"]`)
-    .click();
+  await selectAntOption(page, label, value);
 }
 
 /** Approves the host at both levels. A workspace may only choose inside the
@@ -188,7 +184,8 @@ test("register an HTTP tool, call it, and let a person approve the write", async
   // is the assertion the whole page exists for — a reviewer who cannot see the
   // request cannot approve it. The URL appears only in the document.
   await expect(governance.getByText("http.health.pokeLiveness").first()).toBeVisible();
-  await expect(governance.getByText(TOOL_BASE, { exact: false })).toBeVisible();
+  await governance.getByText("查看完整请求", { exact: true }).click();
+  await expect(governance.getByText(TOOL_BASE, { exact: false }).first()).toBeVisible();
   await governance.getByRole("button", { name: "批准" }).click();
   await page.getByRole("button", { name: "确定" }).click();
 

@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { openSection, unfold } from "./session";
+import { openSection, selectAntOption, unfold } from "./session";
 
 /**
  * A skill's whole life, driven through the console against the real stack.
@@ -59,11 +59,7 @@ async function openWorkspace(page: Page): Promise<void> {
  * finds that one first.
  */
 async function choose(page: Page, label: string, value: string): Promise<void> {
-  await page.getByLabel(label, { exact: true }).click();
-  await page
-    .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
-    .locator(`.ant-select-item-option[title="${value}"]`)
-    .click();
+  await selectAntOption(page, label, value);
 }
 
 async function bindTool(page: Page, name: string): Promise<void> {

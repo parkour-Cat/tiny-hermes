@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
-import { unfold } from "./session";
+import { selectAntOption, unfold } from "./session";
 
 /**
  * The console, driven the way a person drives it, against the real stack.
@@ -62,25 +62,7 @@ async function openWorkspace(page: Page): Promise<void> {
  * option near the bottom either.
  */
 async function choose(page: Page, label: string, value: string): Promise<void> {
-  const field = page.getByLabel(label, { exact: true });
-  await field.evaluate((element) => element.scrollIntoView({ block: "center" }));
-  await field.click();
-  // Typing only where the select accepts it. A non-search Ant select renders a
-  // readonly input, and `fill` on one fails outright — so this asks the field
-  // rather than assuming which selects on the page are searchable.
-  const searchable = await field.evaluate(
-    (element) => !(element as HTMLInputElement).readOnly,
-  );
-  if (searchable) {
-    await field.fill(value);
-  }
-  const option = page
-    .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
-    .locator(`.ant-select-item-option[title="${value}"]`);
-  await expect(option).toBeVisible();
-  await option.click();
-  await expect(field).toHaveAttribute("aria-expanded", "false");
-  await expect(field.locator('xpath=ancestor::div[contains(concat(" ", normalize-space(@class), " "), " ant-select ")][1]')).toContainText(value);
+  await selectAntOption(page, label, value);
 }
 
 /**
