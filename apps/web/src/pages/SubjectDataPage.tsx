@@ -171,6 +171,7 @@ export function SubjectDataPage() {
             size="small"
             column={{ xs: 1, sm: 2 }}
             items={[
+              { key: "external", label: t("subjectExternalId"), children: subject.data.external_user_id },
               {
                 key: "id",
                 label: t("subjectId"),
@@ -186,7 +187,7 @@ export function SubjectDataPage() {
               {
                 key: "sessions",
                 label: t("subjectSessions"),
-                children: String((held.data?.sessions ?? []).length),
+                children: held.isError || held.data === undefined ? "—" : String(held.data.sessions.length),
               },
             ]}
           />
@@ -198,7 +199,7 @@ export function SubjectDataPage() {
                 onClick={() =>
                   void modal.confirm({
                     title: t("subjectErase"),
-                    content: t("subjectEraseWarning"),
+                    content: <><Typography.Paragraph>{subject.data?.external_user_id} · {subject.data?.channel} · {workspaceId}</Typography.Paragraph>{t("subjectEraseWarning")}</>,
                     okText: t("confirm"),
                     cancelText: t("cancel"),
                     onOk: () => erase.mutateAsync().catch(() => undefined),
@@ -232,7 +233,9 @@ export function SubjectDataPage() {
 
       {subjectId === null ? null : (
         <Card title={t("subjectMemories")} variant="borderless" loading={held.isPending}>
-          {memories.length === 0 ? (
+          {held.isError ? (
+            <Alert type="error" showIcon title={problemMessage(held.error, t)} action={<Button onClick={() => void held.refetch()}>{t("retry")}</Button>} />
+          ) : memories.length === 0 ? (
             <EmptyState title={t("subjectNoMemories")} />
           ) : (
             <Space direction="vertical" size="middle" style={{ width: "100%" }}>

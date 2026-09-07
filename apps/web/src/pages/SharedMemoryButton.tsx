@@ -3,17 +3,15 @@ import { Alert, Button, Form, Input, Modal, Typography } from "antd";
 import { useState } from "react";
 import { api } from "../api/client";
 import { problemMessage } from "../api/messages";
-import { useAuth } from "../auth/AuthProvider";
 import { useT } from "../i18n/locale";
-import { useMyRole } from "../workspace/useMyRole";
+import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 import { MemoryPage } from "./MemoryPage";
 
 export function SharedMemoryButton({ agentId, agentName }: { agentId: string; agentName: string }) {
   const t = useT();
-  const { user } = useAuth();
+  const { admin } = useWorkspacePermissions();
   const workspaceId = useWorkspaceId();
-  const { role } = useMyRole();
   const [open, setOpen] = useState(false);
   const [managing, setManaging] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -25,7 +23,7 @@ export function SharedMemoryButton({ agentId, agentName }: { agentId: string; ag
     onSuccess: () => { form.resetFields(); setSaved(true); setOpen(false); },
     onError: (error) => form.setFields([{ name: "body", errors: [problemMessage(error, t)] }]),
   });
-  if (!user?.is_platform_admin && role !== "workspace_admin" && role !== "platform_admin") return null;
+  if (!admin) return null;
   return <>
     <Button onClick={() => setManaging(true)}>{t("memoryManage")}</Button>
     <Modal open={managing} title={`${t("memoryManage")} · ${agentName}`} footer={null} onCancel={() => setManaging(false)} width={760} destroyOnHidden>{managing && <MemoryPage agentId={agentId} />}</Modal>

@@ -48,6 +48,11 @@ export function AuditPage() {
     "secret.created": t("newSecret"), "secret.disabled": t("disableSecret"),
     "memory.shared_created": t("memorySharedCreatedAction"), "memory.shared_updated": t("memorySharedUpdatedAction"),
     "workspace.created": t("auditWorkspaceCreated"),
+    "agent.created": t("newAgent"), "agent.draft_replaced": t("saveDraft"), "agent.published": t("publish"),
+    "channel.binding_created": t("bindChannel"), "channel.binding_disabled": t("channelDisable"),
+    "http_tool.registered": t("addHttpTool"), "mcp_server.registered": t("addMcpServer"),
+    "service_account.created": t("newServiceAccount"),
+    "subject.looked_up": t("subjectFind"), "subject.searched": t("subjectPartialFind"), "subject.erased": t("subjectErase"),
   };
 
 

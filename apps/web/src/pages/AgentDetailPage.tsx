@@ -773,7 +773,7 @@ export function AgentDetailPage() {
             fields={[]}
             collapsible
           >
-          <Space wrap className="page-alert"><Link to={`/workspaces/${workspaceId}/tooling#skills`}>{t("skills")}</Link><Link to={`/workspaces/${workspaceId}/tooling#http-tools`}>{t("httpTools")}</Link><Link to={`/workspaces/${workspaceId}/tooling#mcp-servers`}>{t("mcpServers")}</Link></Space>
+          <Space wrap className="page-alert"><Link target="_blank" rel="noopener noreferrer" to={`/workspaces/${workspaceId}/tooling#skills`}>{t("skills")}</Link><Link target="_blank" rel="noopener noreferrer" to={`/workspaces/${workspaceId}/tooling#http-tools`}>{t("httpTools")}</Link><Link target="_blank" rel="noopener noreferrer" to={`/workspaces/${workspaceId}/tooling#mcp-servers`}>{t("mcpServers")}</Link></Space>
           <Typography.Title level={5}>{t("toolsSection")}</Typography.Title>
           <Typography.Paragraph type="secondary">{t("toolsHint")}</Typography.Paragraph>
           <Form.Item name="tools">

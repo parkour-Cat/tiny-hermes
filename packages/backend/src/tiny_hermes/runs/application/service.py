@@ -13,6 +13,7 @@ from tiny_hermes.runs.domain.models import (
     EndUserEscape,
     ImageBlock,
     RunCapabilities,
+    RunListQuery,
     RunPurpose,
     RunSignal,
     RunSnapshot,
@@ -501,10 +502,14 @@ class RunCoordination:
         return tree
 
     async def list_runs(
-        self, workspace_id: UUID, actor: Actor, session_id: UUID | None
+        self,
+        workspace_id: UUID,
+        actor: Actor,
+        session_id: UUID | None,
+        query: RunListQuery | None = None,
     ) -> Sequence[RunSnapshot]:
         role = await self._require_role(workspace_id, actor, READERS)
-        return await self._store.list_runs(workspace_id, session_id, _capabilities(role))
+        return await self._store.list_runs(workspace_id, session_id, _capabilities(role), query)
 
     async def usage_summary(
         self,

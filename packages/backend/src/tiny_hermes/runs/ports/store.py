@@ -20,6 +20,7 @@ from tiny_hermes.runs.domain.models import (
     RunCapabilities,
     RunEvent,
     RunEventType,
+    RunListQuery,
     RunPurpose,
     RunSignal,
     RunSnapshot,
@@ -565,7 +566,11 @@ class RunStore(Protocol):
     ) -> RunSnapshot | None: ...
 
     async def list_runs(
-        self, workspace_id: UUID, session_id: UUID | None, capabilities: RunCapabilities
+        self,
+        workspace_id: UUID,
+        session_id: UUID | None,
+        capabilities: RunCapabilities,
+        query: RunListQuery | None = None,
     ) -> Sequence[RunSnapshot]: ...
 
     async def run_tree(

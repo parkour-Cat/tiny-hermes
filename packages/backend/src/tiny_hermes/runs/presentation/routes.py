@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Cookie, Depends, Header, Request, Response, status
+from fastapi import APIRouter, Cookie, Depends, Header, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_serializer
 
@@ -21,8 +21,10 @@ from tiny_hermes.runs.application.service import (
     RunCoordinationError,
 )
 from tiny_hermes.runs.domain.models import (
+    RunListQuery,
     RunSignal,
     RunSnapshot,
+    RunState,
     SessionMode,
     SessionSnapshot,
     StoredMessage,
@@ -386,6 +388,13 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         session_id: UUID | None = None,
+        limit: int | None = Query(default=None, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        q: str = Query(default="", max_length=255),
+        agent_id: UUID | None = None,
+        run_status: Annotated[RunState | None, Query(alias="status")] = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         authorization: AuthorizationHeader = None,
@@ -401,7 +410,31 @@ def run_router(resources: ApplicationResources) -> APIRouter:
             required_scope="runs.read",
         )
         try:
-            found = await runs.list_runs(caller.workspace_id, caller.actor, session_id)
+            if (
+                (since is not None and since.tzinfo is None)
+                or (until is not None and until.tzinfo is None)
+                or (since is not None and until is not None and since >= until)
+            ):
+                raise AppError(
+                    code="invalid_time_range",
+                    title="Invalid time range",
+                    status=422,
+                    detail="Use timezone-aware times with since before until.",
+                )
+            found = await runs.list_runs(
+                caller.workspace_id,
+                caller.actor,
+                session_id,
+                RunListQuery(
+                    limit=limit,
+                    offset=offset,
+                    text=q.strip(),
+                    agent_id=agent_id,
+                    status=run_status.value if run_status else None,
+                    since=since,
+                    until=until,
+                ),
+            )
         except RunCoordinationError as error:
             raise as_app_error(error) from error
         return [RunResponse.from_domain(item) for item in found]

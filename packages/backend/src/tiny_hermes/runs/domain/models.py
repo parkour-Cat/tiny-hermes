@@ -8,6 +8,17 @@ from typing import Any, Literal, cast
 from uuid import UUID
 
 
+@dataclass(frozen=True)
+class RunListQuery:
+    limit: int | None = None
+    offset: int = 0
+    text: str = ""
+    agent_id: UUID | None = None
+    status: str | None = None
+    since: datetime | None = None
+    until: datetime | None = None
+
+
 class RunState(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"

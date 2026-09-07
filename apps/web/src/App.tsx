@@ -1,5 +1,5 @@
 import { Alert, Button, Spin } from "antd";
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useState } from "react";
 import { createBrowserRouter, RouterProvider, Navigate, Route, Routes } from "react-router-dom";
 
 import { QueryProvider } from "./api/QueryProvider";
@@ -124,9 +124,10 @@ function AppRoutes() {
   );
 }
 
-const router = createBrowserRouter([{ path: "*", element: <AuthProvider><QueryProvider><AppRoutes /></QueryProvider></AuthProvider> }]);
+const createAppRouter = () => createBrowserRouter([{ path: "*", element: <AuthProvider><QueryProvider><AppRoutes /></QueryProvider></AuthProvider> }]);
 
 export function App() {
+  const [router] = useState(createAppRouter);
   return (
     <ConsoleTheme>
       <LocaleProvider>

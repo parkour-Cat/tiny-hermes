@@ -340,6 +340,11 @@ h4,
   margin-bottom: 16px;
 }
 
+.form-section .ant-collapse-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 /* ---------------------------------------------------------------- lists */
 
 .workspace-list {
@@ -570,6 +575,11 @@ html[data-theme="dark"] .th-tag-interrupted {
 
   .th-shell.ant-layout {
     flex-direction: column;
+  }
+
+  /* Ant Layout keeps its sider sibling at width: 0 after the shell stacks. */
+  .th-shell.ant-layout > .th-main.ant-layout {
+    width: 100%;
   }
 
   .th-sider.ant-layout-sider {

@@ -7,6 +7,7 @@ import { problemMessage } from "../api/messages";
 import type { ApprovalsPageResponse, MemoryResponse, ProposalResponse } from "../api/types";
 import { useT } from "../i18n/locale";
 import { moment } from "../i18n/moment";
+import { StatusTag } from "../ui/StatusTag";
 import { useProposalAccess } from "../workspace/useProposalAccess";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
@@ -43,8 +44,8 @@ export function InboxQueue() {
       const rows = await api<MemoryResponse[]>("/api/v1/memories/pending", scope);
       return { items: rows.map((row) => ({ id: row.id, kind, title: row.body, detail: row.kind, time: row.created_at, status: row.status })), more: false, next: 0 };
     }
-    const result = await api<{ items: MemoryResponse[]; has_more: boolean }>(`/api/v1/memories?limit=20&offset=${offset}`, scope);
-    return { items: result.items.filter((row) => row.status !== "pending").map((row) => ({ id: row.id, kind, title: row.body, detail: row.kind, time: row.updated_at, status: row.status })), more: result.has_more, next: offset + 20 };
+    const pages = await Promise.all(["active", "rejected"].map((status) => api<{ items: MemoryResponse[]; has_more: boolean }>(`/api/v1/memories?status=${status}&limit=20&offset=${offset}`, scope)));
+    return { items: pages.flatMap((result) => result.items).map((row) => ({ id: row.id, kind, title: row.body, detail: row.kind, time: row.updated_at, status: row.status })), more: pages.some((result) => result.has_more), next: offset + 20 };
   }
 
   function useQueue(kind: Kind, allowed: boolean) {
@@ -72,7 +73,7 @@ export function InboxQueue() {
     <Card loading={access.loading || active.some((query) => query.isPending)} variant="borderless">
       {rows.length === 0 && !access.unknown && !active.some((query) => query.isError) ? <Typography.Paragraph>{t("inboxNoItems")}</Typography.Paragraph> : null}
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>{rows.map((row) => <article key={`${row.kind}:${row.id}`} className="workspace-row">
-        <div className="workspace-summary"><Tag>{labels[row.kind]}</Tag><Typography.Text type="secondary">{row.kind === "approvals" && row.status === "pending" ? `${t("approvalExpires")} · ` : ""}{moment(row.time)}</Typography.Text><Typography.Paragraph strong>{row.title}</Typography.Paragraph><Typography.Paragraph type="secondary">{row.detail}</Typography.Paragraph>
+        <div className="workspace-summary"><Tag>{labels[row.kind]}</Tag><StatusTag code={row.status} /><Typography.Text type="secondary">{row.kind === "approvals" && row.status === "pending" ? `${t("approvalExpires")} · ` : ""}{moment(row.time)}</Typography.Text><Typography.Paragraph strong>{row.title}</Typography.Paragraph><Typography.Paragraph type="secondary">{row.detail}</Typography.Paragraph>
           <Link to={`?item=${encodeURIComponent(row.id)}#${row.kind}`}>{t(view === "actionable" ? "inboxOpen" : "inboxView")}</Link>
         </div>
       </article>)}</Space>

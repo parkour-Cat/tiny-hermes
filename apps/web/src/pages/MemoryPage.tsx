@@ -110,12 +110,13 @@ export function MemoryPage({ agentId, focusId }: { agentId?: string; focusId?: s
                 <Space direction="vertical" size="small" style={{ width: "100%" }}>
                   <Space wrap>
                     <Tag>{row.kind}</Tag>
+                    <Tag>{t(row.status === "pending" ? "memoryPending" : row.status === "active" ? "memoryActive" : "memoryRetired")}</Tag>
                     {/* Whose memory this becomes. An Agent's shared memory is
                         read by every Run of that Agent, so which Agent is
                         half of what is being decided. */}
                     <Typography.Text strong>{named.get(row.agent_id) ?? row.agent_id}</Typography.Text>
                     <Typography.Text type="secondary">{row.origin}</Typography.Text>
-                    <Typography.Text type="secondary">{moment(row.created_at)}</Typography.Text>
+                    <Typography.Text type="secondary">{moment(row.updated_at)}</Typography.Text>
                   </Space>
                   {/* The proposal itself, unedited and uneditable. */}
                   <pre className="skill-file-body">{row.body}</pre>

@@ -6,7 +6,9 @@ from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, exists, func, select, text, update
+from sqlalchemy import Text, column, delete, exists, func, or_, select, text, update
+from sqlalchemy import cast as sql_cast
+from sqlalchemy.dialects.postgresql import JSONB, JSONPATH
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,6 +79,7 @@ from tiny_hermes.runs.domain.models import (
     RunCapabilities,
     RunEvent,
     RunEventType,
+    RunListQuery,
     RunPurpose,
     RunSignal,
     RunSnapshot,
@@ -425,11 +428,65 @@ class SqlRunStore:
         return None if row is None else await self._snapshot(row, capabilities)
 
     async def list_runs(
-        self, workspace_id: UUID, session_id: UUID | None, capabilities: RunCapabilities
+        self,
+        workspace_id: UUID,
+        session_id: UUID | None,
+        capabilities: RunCapabilities,
+        query: RunListQuery | None = None,
     ) -> Sequence[RunSnapshot]:
         statement = select(RunRow).where(RunRow.workspace_id == workspace_id)
         if session_id is not None:
             statement = statement.where(RunRow.session_id == session_id)
+        if query is not None:
+            if query.agent_id is not None or query.text:
+                statement = statement.join(SessionRow, SessionRow.id == RunRow.session_id).join(
+                    AgentRow, AgentRow.id == SessionRow.agent_id
+                )
+            if query.agent_id is not None:
+                statement = statement.where(SessionRow.agent_id == query.agent_id)
+            if query.status is not None:
+                statement = statement.where(RunRow.status == query.status)
+            if query.since is not None:
+                statement = statement.where(RunRow.created_at >= query.since)
+            if query.until is not None:
+                statement = statement.where(RunRow.created_at < query.until)
+            if query.text:
+                # Search only visible user text, never tool payloads or reasoning.
+                parts = func.jsonb_array_elements_text(
+                    func.jsonb_path_query_array(
+                        sql_cast(SessionMessageRow.content, JSONB),
+                        sql_cast('$.parts[*] ? (@.type == "text").text', JSONPATH),
+                    )
+                ).table_valued(column("value", Text), joins_implicitly=True)
+                request_text = (
+                    select(func.string_agg(parts.c.value, " "))
+                    .correlate(SessionMessageRow)
+                    .scalar_subquery()
+                )
+                first_text = (
+                    select(request_text)
+                    .where(
+                        SessionMessageRow.source_run_id == RunRow.id,
+                        SessionMessageRow.workspace_id == workspace_id,
+                        SessionMessageRow.role == "user",
+                        SessionMessageRow.redacted.is_(False),
+                        SessionMessageRow.withdrawn_at.is_(None),
+                    )
+                    .order_by(SessionMessageRow.sequence)
+                    .limit(1)
+                    .correlate(RunRow)
+                    .scalar_subquery()
+                )
+                statement = statement.where(
+                    or_(
+                        first_text.icontains(query.text, autoescape=True),
+                        sql_cast(RunRow.id, Text).icontains(query.text, autoescape=True),
+                        AgentRow.name.icontains(query.text, autoescape=True),
+                    )
+                )
+            if query.limit is not None:
+                statement = statement.limit(query.limit)
+            statement = statement.offset(query.offset)
         # Two different questions, and they want opposite orders.
         #
         # Filtered to one Session, this list **is** the queue: `queue.position`
