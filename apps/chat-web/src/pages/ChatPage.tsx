@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { api } from "../api/client";
+import { currentEndUserIdentity, type EndUserIdentity } from "../api/session";
 import { problemMessage } from "../api/messages";
 import type { CanonicalMessage, EndUserRunResponse, EndUserSessionResponse } from "../api/types";
 import { AgentPicker } from "../chat/AgentPicker";
@@ -49,6 +50,17 @@ import { isLiveStatus, statusLabel } from "../status";
  */
 export function ChatPage() {
   const t = useT();
+  const identity = useQuery({ queryKey: ["end-user-identity"], queryFn: currentEndUserIdentity, retry: false });
+  if (identity.isError) return <main className="auth">
+    <p role="alert">{problemMessage(identity.error, t)}</p>
+    <button onClick={() => { void identity.refetch(); }}>{t("retry")}</button>
+  </main>;
+  if (identity.data === undefined) return <p className="centered">{t("loading")}</p>;
+  return <ChatConversation key={`${identity.data.workspace_id}:${identity.data.end_user_id}`} identity={identity.data} />;
+}
+
+function ChatConversation({ identity }: { identity: EndUserIdentity }) {
+  const t = useT();
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
@@ -74,6 +86,7 @@ export function ChatPage() {
       : null);
   const activeSessionId =
     routedSession !== null && !prefs.hidden.includes(routedSession) ? routedSession : null;
+  const draftKey = JSON.stringify([identity.workspace_id, identity.end_user_id, alias, activeSessionId]);
 
   function go(sessionId?: string | null): void {
     if (alias === null) {
@@ -317,6 +330,8 @@ export function ChatPage() {
           <SavedFiles key={activeSessionId} sessionId={activeSessionId} refreshToken={snapshot.data?.state_version} />
         </div>
         <Composer
+          key={draftKey}
+          draftKey={draftKey}
           disabled={false}
           sending={send.isPending}
           live={Boolean(live)}

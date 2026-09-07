@@ -18,6 +18,12 @@ export type EndUserSession = {
   expires_at: string;
 };
 
+export type EndUserIdentity = { end_user_id: string; workspace_id: string };
+
+export function currentEndUserIdentity(): Promise<EndUserIdentity> {
+  return api<EndUserIdentity>("/api/v1/end-user/me");
+}
+
 export function exchangeEndUserSession(
   credential: string,
   workspaceId: string,
