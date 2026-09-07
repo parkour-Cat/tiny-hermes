@@ -268,7 +268,7 @@ test("saving the configuration keeps an unsaved name until that name is saved to
   renderDetail();
   expect(await screen.findByLabelText("人格")).toHaveValue("Saved instruction.");
   expect(screen.getByLabelText("名称")).toHaveValue("Still unsaved name");
-  await user.click(screen.getByRole("button", { name: "保存", exact: true }));
+  await user.click(screen.getByRole("button", { name: "保存" }));
   await screen.findByRole("heading", { name: "Still unsaved name" });
   cleanup();
   renderDetail();
@@ -289,7 +289,7 @@ test("a newer server draft exposes the local differences before an explicit disc
   expect(screen.getByText("服务端内容已更新，暂存修改未恢复。请查看差异并复制需要的内容，再重新载入草稿。"))
     .toBeInTheDocument();
   expect(screen.getByRole("button", { name: "保存草稿" })).toBeDisabled();
-  expect(screen.getByRole("button", { name: "发布", exact: true })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "发布" })).toBeDisabled();
   await user.click(screen.getByText("查看暂存差异"));
   expect(screen.getByText("My older unsaved instruction.")).toBeVisible();
   await user.click(screen.getByRole("button", { name: "重新载入草稿" }));
