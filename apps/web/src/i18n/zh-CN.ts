@@ -250,6 +250,7 @@ export const zhCN = {
   publishSaveWarning: "将先保存当前修改，再发布保存后的版本。保存失败时不会发布。",
   draftUnsaved: "有未保存的修改",
   agentEditsRestored: "已恢复此标签页未保存的修改，请检查后保存。",
+  agentEditsStorageFailed: "暂存不可用。请手动保存修改，或复制内容后再刷新。",
   agentEditsConflict: "服务端内容已更新，暂存修改未恢复。请查看差异并复制需要的内容，再重新载入草稿。",
   agentEditsDifferences: "查看暂存差异",
   agentEditsServer: "服务端",

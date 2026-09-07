@@ -254,6 +254,7 @@ export const enUS: Record<MessageKey, string> = {
   publishSaveWarning: "Save the current changes, then publish the saved version. Publication stops if saving fails.",
   draftUnsaved: "Unsaved changes",
   agentEditsRestored: "Unsaved edits from this tab were restored. Review them before saving.",
+  agentEditsStorageFailed: "Local recovery is unavailable. Save your edits manually, or copy them before refreshing.",
   agentEditsConflict: "The server content changed, so local edits were not restored. Review and copy any needed differences, then reload the draft.",
   agentEditsDifferences: "Review local differences",
   agentEditsServer: "Server",

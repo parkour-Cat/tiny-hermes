@@ -281,7 +281,9 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
   const [modal, contextHolder] = Modal.useModal();
   const [saveError, setSaveError] = useState<string | null>(null);
   const [publishNote, setPublishNote] = useState<string | null>(null);
-  const [localDraft, setLocalDraft] = useState<LocalAgentDraft | null>(() => readAgentDraft(storageKey));
+  const [recovery] = useState(() => writer ? readAgentDraft(storageKey) : { draft: null, failed: false });
+  const [localDraft, setLocalDraft] = useState<LocalAgentDraft | null>(recovery.draft);
+  const [storageFailed, setStorageFailed] = useState(recovery.failed);
   const [restored] = useState(localDraft !== null);
   // Per-summary estimates from a refused publish. Shown as themselves rather
   // than summed, so an author can see which description is the expensive one
@@ -412,7 +414,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
       values.name === baseAgent.name && values.alias === baseAgent.alias;
     const next = unchanged ? null : { revision: baseDraft.revision, name: baseAgent.name, alias: baseAgent.alias, values };
     setLocalDraft(next);
-    writeAgentDraft(storageKey, next);
+    setStorageFailed(!writeAgentDraft(storageKey, next));
   }
 
   const saveDraft = useMutation({
@@ -523,7 +525,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
         if (fresh.isSuccess && freshAgent.isSuccess) {
           form.setFieldsValue({ ...valuesOf(fresh.data), name: freshAgent.data.name, alias: freshAgent.data.alias });
           setLocalDraft(null);
-          writeAgentDraft(storageKey, null);
+          setStorageFailed(!writeAgentDraft(storageKey, null));
           setSaveError(null);
         }
       },
@@ -601,6 +603,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
       {contextHolder}
       <UnsavedChangesGuard dirty={dirty} />
       {restored && canRestore && <Alert className="page-alert" type="info" showIcon title={t("agentEditsRestored")} />}
+      {storageFailed && <Alert className="page-alert" type="warning" showIcon title={t("agentEditsStorageFailed")} />}
       {recoveryConflict && <Alert className="page-alert" type="warning" showIcon title={t("agentEditsConflict")}
         description={<details><summary>{t("agentEditsDifferences")}</summary><ul>
           {localDiff.map(({ path, before, after }) => <li key={path}>
@@ -698,7 +701,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
           onValuesChange={(_, values: FormValues) => {
             const next = { revision: localDraft?.revision ?? loadedDraft.revision, name: localDraft?.name ?? loadedAgent.name, alias: localDraft?.alias ?? loadedAgent.alias, values };
             setLocalDraft(next);
-            writeAgentDraft(storageKey, next);
+            setStorageFailed(!writeAgentDraft(storageKey, next));
           }}
           // `specOf` reads the draft fields by name, so the two name fields
           // sharing this form never reach the spec.
