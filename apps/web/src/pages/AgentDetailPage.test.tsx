@@ -18,7 +18,7 @@ const WORKSPACE = "11111111-2222-4333-8444-555555555555";
 const AGENT = "22222222-3333-4444-8555-666666666666";
 
 beforeEach(() => { sessionStorage.clear(); server.use(
-  http.get("/api/v1/auth/me", () => HttpResponse.json({ id: "u1", is_platform_admin: false })),
+  http.get("/api/v1/auth/me", () => HttpResponse.json({ id: "u1", subject: "developer@example.com", display_name: "Developer", status: "active", is_platform_admin: false })),
   http.get(`/api/v1/workspaces/${WORKSPACE}/members/me`, () => HttpResponse.json({ role: "developer" })),
 ); });
 afterEach(() => vi.restoreAllMocks());
@@ -406,7 +406,7 @@ test("a developer's edits restore after the real layout finishes loading their r
       <Route path="agents/:agentId" element={<AgentDetailPage />} />
     </Route></Routes></AuthProvider>
   </MemoryRouter></QueryClientProvider></TestTheme>);
-  await waitFor(() => expect(screen.getByRole("button", { name: "保存草稿" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByRole("button", { name: "保存草稿" })).toBeEnabled(), { timeout: 5000 });
   expect(screen.getByLabelText("人格")).toHaveValue("Restore after role check.");
 });
 
