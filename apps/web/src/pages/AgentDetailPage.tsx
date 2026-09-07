@@ -264,11 +264,12 @@ function exposureSummary(t: (key: MessageKey) => string, values: DraftValues): s
 
 export function AgentDetailPage() {
   const auth = useAuth();
+  const { writer } = useWorkspacePermissions();
   const workspaceId = useWorkspaceId();
   const { agentId = "" } = useParams();
   if (auth.loading || auth.error || !auth.user) return <Card loading variant="borderless" />;
   const key = agentDraftKey(auth.user.id, workspaceId ?? "", agentId);
-  return <AgentEditor key={key} storageKey={key} />;
+  return <AgentEditor key={`${key}:${writer}`} storageKey={key} />;
 }
 
 function AgentEditor({ storageKey }: { storageKey: string }) {

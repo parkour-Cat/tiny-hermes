@@ -3,7 +3,7 @@ import { useContext } from "react";
 import { UNSAFE_DataRouterContext, useBeforeUnload, useBlocker } from "react-router-dom";
 import { useT } from "../i18n/locale";
 
-type GuardProps = { dirty: boolean; onDiscard?: () => boolean };
+type GuardProps = { dirty: boolean; onDiscard?: (() => boolean) | undefined };
 
 function NavigationGuard({ dirty, onDiscard }: GuardProps) {
   const t = useT();
