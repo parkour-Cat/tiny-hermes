@@ -37,12 +37,12 @@ function user(admin: boolean) {
   };
 }
 
-function renderEndpoints(): void {
+function renderEndpoints(advanced = true): void {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <TestTheme>
       <QueryClientProvider client={client}>
-        <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE}/model-endpoints`]}>
+        <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE}/model-endpoints${advanced ? '?mode=advanced' : ''}`]}>
           <AuthProvider>
             <Routes>
               <Route
@@ -56,6 +56,21 @@ function renderEndpoints(): void {
     </TestTheme>,
   );
 }
+
+test("the default page starts with address and key, with full configuration optional", async () => {
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(user(true))),
+    http.get("/api/v1/model-endpoints", () => HttpResponse.json([])),
+    http.get("/api/v1/secrets", () => HttpResponse.json([])),
+  );
+  renderEndpoints(false);
+  expect(await screen.findByLabelText('服务地址')).toBeVisible();
+  expect(screen.getByLabelText('API Key')).toBeVisible();
+  expect(screen.queryByLabelText(t('endpointContextWindow'))).toBeNull();
+  expect(screen.queryByLabelText(t('endpointNewCredentialName'))).toBeNull();
+  await userEvent.click(screen.getByRole('button', { name: '完整配置' }));
+  expect(await screen.findByLabelText(t('endpointContextWindow'))).toBeVisible();
+});
 
 test("a platform administrator sees the base url and whether a credential exists", async () => {
   let details = 0;

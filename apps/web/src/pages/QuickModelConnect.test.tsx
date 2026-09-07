@@ -79,3 +79,25 @@ test("a failed model registration reuses the saved credential on retry", async (
   await waitFor(() => expect(done).toHaveBeenCalledOnce());
   expect(keys).toBe(1);
 });
+
+test("a service without model listing still allows a model name and optional limits", async () => {
+  let saved: Record<string, unknown> | undefined;
+  server.use(
+    http.post('/api/v1/model-endpoints/discover', () => HttpResponse.json({ code: 'model_discovery_unsupported' }, { status: 422 })),
+    http.post('/api/v1/secrets', () => HttpResponse.json({ id: 'key' })),
+    http.post('/api/v1/model-endpoints', async ({ request }) => { saved = await request.json() as Record<string, unknown>; return HttpResponse.json({ id: 'ok' }); }),
+  );
+  const done = setup();
+  await userEvent.type(screen.getByLabelText('服务地址'), 'https://models.example.com/v1');
+  await userEvent.type(screen.getByLabelText('API Key'), 'test-key');
+  await userEvent.click(screen.getByRole('button', { name: '获取模型列表' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('服务不支持读取模型列表');
+  await userEvent.click(screen.getByRole('button', { name: '直接填写模型名' }));
+  await userEvent.type(screen.getByLabelText('模型'), 'custom-model');
+  await userEvent.click(screen.getByRole('button', { name: /可选设置/ }));
+  await userEvent.clear(screen.getByLabelText('上下文运行限额'));
+  await userEvent.type(screen.getByLabelText('上下文运行限额'), '65536');
+  await userEvent.click(screen.getByRole('button', { name: '添加模型' }));
+  await waitFor(() => expect(done).toHaveBeenCalledOnce());
+  expect(saved).toMatchObject({ model: 'custom-model', context_window: 65536 });
+});
