@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { http, HttpResponse } from "msw";
+import { delay, http, HttpResponse } from "msw";
 import { createMemoryRouter, Link, MemoryRouter, Route, RouterProvider, Routes } from "react-router-dom";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
@@ -201,8 +201,8 @@ function loadedCatalog(): void {
   );
 }
 
-function renderDetail(role: Role = "developer", platform = false): QueryClient {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+function renderDetail(role: Role = "developer", platform = false,
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } })): QueryClient {
   render(
     <TestTheme>
       <QueryClientProvider client={client}>
@@ -346,6 +346,40 @@ test("explicitly discarding edits when leaving prevents them from returning", as
   await user.click(await screen.findByRole("button", { name: "放弃修改并离开" }));
   await user.click(await screen.findByRole("link", { name: "Return to editor" }));
   expect(await screen.findByLabelText("人格")).toHaveValue(SPEC.personality);
+});
+
+test.each(["another-user", "read-only"])("%s cannot restore the writer's local Agent edits", async (identity) => {
+  const user = userEvent.setup();
+  loadedAgent();
+  renderDetail();
+  await user.clear(await screen.findByLabelText("人格"));
+  await user.paste("Private unsaved edits.");
+  cleanup();
+  if (identity === "another-user") server.use(http.get("/api/v1/auth/me", () => HttpResponse.json({ id: "u2", is_platform_admin: false })));
+  renderDetail(identity === "read-only" ? "viewer" : "developer");
+  expect(await screen.findByLabelText("人格")).toHaveValue(SPEC.personality);
+  expect(screen.queryByText("已恢复此标签页未保存的修改，请检查后保存。")).not.toBeInTheDocument();
+  cleanup();
+  server.use(http.get("/api/v1/auth/me", () => HttpResponse.json({ id: "u1", is_platform_admin: false })));
+  renderDetail();
+  expect(await screen.findByLabelText("人格")).toHaveValue("Private unsaved edits.");
+});
+
+test("cached Agent data cannot reveal recovered edits while fresh access is being checked", async () => {
+  const user = userEvent.setup();
+  loadedAgent();
+  const client = renderDetail();
+  await user.clear(await screen.findByLabelText("人格"));
+  await user.paste("Wait for authorization.");
+  cleanup();
+  server.use(http.get(`/api/v1/agents/${AGENT}/draft`, async () => {
+    await delay(250);
+    return HttpResponse.json({ code: "forbidden", detail: "Access removed" }, { status: 403 });
+  }));
+  renderDetail("developer", false, client);
+  expect(screen.queryByLabelText("人格")).not.toBeInTheDocument();
+  await screen.findByRole("alert");
+  expect(screen.queryByDisplayValue("Wait for authorization.")).not.toBeInTheDocument();
 });
 
 test("the loaded draft fills every field the console can edit", async () => {

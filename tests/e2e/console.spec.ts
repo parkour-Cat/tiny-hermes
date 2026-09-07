@@ -79,6 +79,7 @@ async function choose(page: Page, label: string, value: string): Promise<void> {
 }
 
 test("failed draft saves preserve input and narrow dialogs return keyboard focus", async ({ page }) => {
+  page.on("dialog", (dialog) => dialog.type() === "beforeunload" ? dialog.accept() : dialog.dismiss());
   await openWorkspace(page);
   for (const width of [320, 390, 768, 1280]) {
     await page.setViewportSize({ width, height: 844 });
@@ -108,10 +109,21 @@ test("failed draft saves preserve input and narrow dialogs return keyboard focus
   await page.getByRole("button", { name: /保存草稿$/ }).click();
   await expect(page.locator(".ant-alert-error")).toBeVisible();
   await expect(input).toHaveValue("服务失败后仍然保留的草稿内容");
+  await page.reload();
+  await expect(input).toHaveValue("服务失败后仍然保留的草稿内容");
+  await expect(page.getByText("已恢复此标签页未保存的修改，请检查后保存。", { exact: true })).toBeVisible();
   await page.unroute(draftPath);
   await page.getByRole("button", { name: /保存草稿$/ }).click();
   await expect(page.getByText("草稿修订 3", { exact: true })).toBeVisible();
   await page.reload();
+  await expect(input).toHaveValue("服务失败后仍然保留的草稿内容");
+  await expect(page.getByText("已恢复此标签页未保存的修改，请检查后保存。", { exact: true })).toHaveCount(0);
+  await input.fill("离开时明确放弃的修改");
+  const editorUrl = page.url();
+  await page.getByRole("link", { name: "Agent", exact: true }).click();
+  await page.getByRole("button", { name: "放弃修改并离开", exact: true }).click();
+  await expect(page).toHaveURL(/\/agents$/);
+  await page.goto(editorUrl);
   await expect(input).toHaveValue("服务失败后仍然保留的草稿内容");
 });
 

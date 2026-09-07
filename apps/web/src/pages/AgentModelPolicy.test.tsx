@@ -13,6 +13,9 @@ import { AuthProvider } from "../auth/AuthProvider";
 beforeEach(() => {
   sessionStorage.clear();
   server.use(http.get("/api/v1/auth/me", () => HttpResponse.json({ id: "u1", is_platform_admin: false })));
+  for (const path of ["skills", "http-tools", "mcp-servers", "outbound-scopes/workspace"]) {
+    server.use(http.get(`/api/v1/${path}`, () => HttpResponse.json([])));
+  }
 });
 
 /**
