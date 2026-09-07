@@ -510,6 +510,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
   const loadedDraft = draft.data;
   const canRestore = writer && localDraft?.revision === loadedDraft.revision &&
     localDraft.name === loadedAgent.name && localDraft.alias === loadedAgent.alias;
+  const recoveryConflict = writer && localDraft !== null && !canRestore;
 
   function reload(): void {
     void modal.confirm({
@@ -518,11 +519,13 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
       okText: t("confirm"),
       cancelText: t("cancel"),
       onOk: async () => {
-        const fresh = await draft.refetch();
-        if (fresh.data !== undefined) {
-          form.setFieldsValue(valuesOf(fresh.data));
+        const [fresh, freshAgent] = await Promise.all([draft.refetch(), agent.refetch()]);
+        if (fresh.isSuccess && freshAgent.isSuccess) {
+          form.setFieldsValue({ ...valuesOf(fresh.data), name: freshAgent.data.name, alias: freshAgent.data.alias });
+          setLocalDraft(null);
+          writeAgentDraft(storageKey, null);
+          setSaveError(null);
         }
-        setSaveError(null);
       },
     });
   }
@@ -576,6 +579,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
   const saving = saveDraft.isPending || rename.isPending || publish.isPending;
   const diffEntries = published.data ? specDiff(published.data.spec, specOf(draftValues)) : [];
   const fieldLabels: Record<string, MessageKey> = {
+    name: "agentName", alias: "agentAlias",
     personality: "personality", model_policy: "modelEndpoints", endpoint_id: "modelEndpoint",
     tools: "toolsSection", skills: "skills", http_tools: "httpTools", mcp_tools: "mcpServers",
     network: "agentNetwork", limits: "budgetSection", delivery: "deliverySection", end_user_access: "agentSummaryEndUserOn",
@@ -586,12 +590,27 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
     enabled: "diffEnabled", operations: "diffOperations", allow: "diffAllowed", sync_timeout_seconds: "syncTimeoutSeconds",
     provider: "modelProvider", scenario: "modelScenario",
   };
+  const localDiff = localDraft === null ? [] : [
+    ...specDiff(loadedDraft.spec, specOf(localDraft.values)),
+    ...(["name", "alias"] as const).filter((field) => loadedAgent[field] !== localDraft.values[field])
+      .map((field) => ({ path: field, before: JSON.stringify(loadedAgent[field]), after: JSON.stringify(localDraft.values[field]) })),
+  ];
 
   return (
     <>
       {contextHolder}
       <UnsavedChangesGuard dirty={dirty} />
       {restored && canRestore && <Alert className="page-alert" type="info" showIcon title={t("agentEditsRestored")} />}
+      {recoveryConflict && <Alert className="page-alert" type="warning" showIcon title={t("agentEditsConflict")}
+        description={<details><summary>{t("agentEditsDifferences")}</summary><ul>
+          {localDiff.map(({ path, before, after }) => <li key={path}>
+            <Typography.Text strong>{path.split(".").map((part) => fieldLabels[part] ? t(fieldLabels[part]) : part).join(" · ")}</Typography.Text>
+            <div>{t("agentEditsServer")}:</div>
+            <Typography.Paragraph>{before.startsWith('"') ? String(JSON.parse(before)) : before}</Typography.Paragraph>
+            <div>{t("agentEditsLocal")}:</div>
+            <Typography.Paragraph copyable>{after.startsWith('"') ? String(JSON.parse(after)) : after}</Typography.Paragraph>
+          </li>)}
+        </ul></details>} />}
       <PageHeading
         kicker={t("agents")}
         title={agent.data.name}
@@ -607,8 +626,8 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
         }
       />
       <Space wrap className="editor-actions page-alert">
-        <Button type="primary" loading={saving} disabled={!writer} onClick={() => form.submit()}>{t("saveDraft")}</Button>
-        <Button loading={saving} disabled={!writer} onClick={() => askToPublish(loadedDraft.revision)}>{t("publish")}</Button>
+        <Button type="primary" loading={saving} disabled={!writer || recoveryConflict} onClick={() => form.submit()}>{t("saveDraft")}</Button>
+        <Button loading={saving} disabled={!writer || recoveryConflict} onClick={() => askToPublish(localDraft?.revision ?? loadedDraft.revision)}>{t("publish")}</Button>
         <Button loading={draft.isFetching} onClick={reload}>{t("reloadDraft")}</Button>
         {dirty && <Typography.Text type="warning">{t("draftUnsaved")}</Typography.Text>}
       </Space>
@@ -672,7 +691,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
       <Card title={t("draftSection")} variant="borderless">
         <Form<FormValues>
           form={form}
-          disabled={saving || !writer}
+          disabled={saving || !writer || recoveryConflict}
           layout="vertical"
           requiredMark={false}
           initialValues={canRestore ? localDraft.values : { ...valuesOf(loadedDraft), name: loadedAgent.name, alias: loadedAgent.alias }}
@@ -683,7 +702,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
           }}
           // `specOf` reads the draft fields by name, so the two name fields
           // sharing this form never reach the spec.
-          onFinish={(values) => saveDraft.mutate({ values, revision: loadedDraft.revision })}
+          onFinish={(values) => { if (!recoveryConflict) saveDraft.mutate({ values, revision: localDraft?.revision ?? loadedDraft.revision }); }}
         >
           <FormSection
             title={t("agentSectionIdentity")}
