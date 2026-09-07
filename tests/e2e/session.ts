@@ -75,6 +75,9 @@ export async function selectAntOption(page: Page, label: string, value: string):
   const select = field.locator('xpath=ancestor::div[contains(concat(" ", normalize-space(@class), " "), " ant-select ")][1]');
   await expect(select).toContainText(value);
   // Multiple-select controls keep the list open after accepting one value.
-  await field.press("Escape");
+  // Esc on an already closed single select would dismiss its containing dialog.
+  if (await field.getAttribute("aria-expanded") === "true") {
+    await field.press("Escape");
+  }
   await expect(field).toHaveAttribute("aria-expanded", "false");
 }
