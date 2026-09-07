@@ -4,6 +4,7 @@ import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { api } from "../api/client";
 import { currentEndUserIdentity, type EndUserIdentity } from "../api/session";
+import { QueryProvider } from "../api/QueryProvider";
 import { problemMessage } from "../api/messages";
 import type { CanonicalMessage, EndUserRunResponse, EndUserSessionResponse } from "../api/types";
 import { AgentPicker } from "../chat/AgentPicker";
@@ -60,12 +61,17 @@ export function ChatPage() {
   return <>
     {identity.isFetching ? <p className="centered">{t("loading")}</p> : null}
     <div hidden={identity.isFetching}>
-      <ChatConversation key={`${identity.data.workspace_id}:${identity.data.end_user_id}`} identity={identity.data} />
+      <QueryProvider key={`${identity.data.workspace_id}:${identity.data.end_user_id}`}>
+        <ChatConversation identity={identity.data} onIdentityChanged={async () => { await identity.refetch(); }} />
+      </QueryProvider>
     </div>
   </>;
 }
 
-function ChatConversation({ identity }: { identity: EndUserIdentity }) {
+function ChatConversation({ identity, onIdentityChanged }: {
+  identity: EndUserIdentity;
+  onIdentityChanged: () => Promise<void>;
+}) {
   const t = useT();
   const navigate = useNavigate();
   const location = useLocation();
@@ -160,7 +166,7 @@ function ChatConversation({ identity }: { identity: EndUserIdentity }) {
     mutationFn: async ({ text, source }: { text: string; source: string }) => {
       const current = await currentEndUserIdentity();
       if (current.end_user_id !== identity.end_user_id || current.workspace_id !== identity.workspace_id) {
-        void queryClient.invalidateQueries({ queryKey: ["end-user-identity"] });
+        await onIdentityChanged();
         throw new Error(t("draftIdentityChanged"));
       }
       if (alias === null) {
