@@ -275,6 +275,31 @@ test("saving the configuration keeps an unsaved name until that name is saved to
   expect(screen.queryByText("已恢复此标签页未保存的修改，请检查后保存。")).not.toBeInTheDocument();
 });
 
+test("a newer server draft exposes the local differences before an explicit discard", async () => {
+  const user = userEvent.setup();
+  loadedAgent();
+  renderDetail();
+  await user.clear(await screen.findByLabelText("人格"));
+  await user.paste("My older unsaved instruction.");
+  cleanup();
+  server.use(http.get(`/api/v1/agents/${AGENT}/draft`, () => HttpResponse.json(draftBody(7, "New shared instruction."))));
+  renderDetail();
+  expect(await screen.findByLabelText("人格")).toHaveValue("New shared instruction.");
+  expect(screen.getByText("服务端内容已更新，暂存修改未恢复。请查看差异并复制需要的内容，再重新载入草稿。"))
+    .toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "保存草稿" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "发布", exact: true })).toBeDisabled();
+  await user.click(screen.getByText("查看暂存差异"));
+  expect(screen.getByText("My older unsaved instruction.")).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "重新载入草稿" }));
+  await user.click(await screen.findByRole("button", { name: "确定" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "保存草稿" })).toBeEnabled());
+  cleanup();
+  renderDetail();
+  expect(await screen.findByLabelText("人格")).toHaveValue("New shared instruction.");
+  expect(screen.queryByText("查看暂存差异")).not.toBeInTheDocument();
+});
+
 test("the loaded draft fills every field the console can edit", async () => {
   loadedAgent();
 
