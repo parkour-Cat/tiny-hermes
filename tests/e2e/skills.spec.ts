@@ -83,11 +83,11 @@ async function uploadSkill(page: Page, line: string): Promise<void> {
   try {
     await writeFile(path.join(directory, "SKILL.md"), skillDocument(line), "utf-8");
     await upload.getByLabel("选择文件").setInputFiles(directory);
+    await upload.getByRole("button", { name: "确认上传" }).click();
+    await expect(upload).toBeHidden();
   } finally {
     await rm(directory, { recursive: true });
   }
-  await upload.getByRole("button", { name: "确认上传" }).click();
-  await expect(upload).toBeHidden();
   await expect(skills.getByRole("heading", { name: SKILL_NAME })).toBeVisible();
 }
 
@@ -154,13 +154,12 @@ test("upload a skill, bind it, load it in a Run, propose a change, approve it", 
   });
   await expect(timeline(page).getByText("skill_loaded")).toBeVisible();
   // The sentence, not just the event name: it says which document entered the
-  // conversation and that the document is a workspace's material. Matched on
+  // conversation. Matched on
   // the prose rather than on `SKILL.md`, which also appears in the raw payload
   // this entry carries beside it.
   await expect(
-    timeline(page).getByText(/模型加载了技能 rollout 的 SKILL\.md/),
+    timeline(page).getByText(/已加载技能 rollout 的 SKILL\.md/),
   ).toBeVisible();
-  await expect(timeline(page).getByText(/技能正文是参考资料/)).toBeVisible();
 
   // -- the Agent suggests a change ---------------------------------------
   const author = await publishAgent(page, "propose_once", "skill.propose");

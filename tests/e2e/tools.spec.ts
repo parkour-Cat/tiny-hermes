@@ -176,14 +176,14 @@ test("register an HTTP tool, call it, and let a person approve the write", async
   // -- and the write stops ------------------------------------------------
   const writer = await publishAgent(page, "POST pokeLiveness · 会改数据");
   const writeRun = await submitRun(page, writer, "http.health.pokeLiveness");
-  await expect(page.getByText("waiting_approval", { exact: true }).first()).toBeVisible({
+  await expect(page.getByText("等待审批", { exact: true }).first()).toBeVisible({
     timeout: 120_000,
   });
-  await expect(timeline(page).getByText(/这次运行在等人/)).toBeVisible();
+  await expect(timeline(page).getByText("任务正在等待审批。", { exact: true })).toBeVisible();
 
   // -- a person reads exactly what would be sent, and decides -------------
   const inbox = await openSection(page, "待办", "审批", "approvals");
-  const governance = inbox.locator(".ant-card", { hasText: "工作空间的决定" }).first();
+  const governance = inbox.locator(".approval-request").filter({ hasText: "http.health.pokeLiveness" });
   // Named twice: once in the summary row and once inside the document, which
   // is the assertion the whole page exists for — a reviewer who cannot see the
   // request cannot approve it. The URL appears only in the document.

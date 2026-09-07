@@ -16,15 +16,17 @@ test("responsive workspace pages retain a usable content width", async ({ page }
   await openWorkspace(page);
   for (const width of [320, 390, 768, 1280]) {
     await page.setViewportSize({ width, height: 844 });
-    await page.getByRole("link", { name: "待办", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "待办", exact: true })).toBeVisible();
-    const dimensions = await page.locator("main").evaluate((element) => ({
-      content: element.getBoundingClientRect().width,
-      viewport: innerWidth,
-      scroll: document.documentElement.scrollWidth,
-    }));
-    expect(dimensions.content).toBeGreaterThan(Math.min(width - 64, 600));
-    expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.viewport);
+    for (const name of ["待办", "平台管理"]) {
+      await page.getByRole("link", { name, exact: true }).click();
+      await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
+      const dimensions = await page.locator("main").evaluate((element) => ({
+        content: element.getBoundingClientRect().width,
+        viewport: innerWidth,
+        scroll: document.documentElement.scrollWidth,
+      }));
+      expect(dimensions.content).toBeGreaterThan(Math.min(width - 64, 600));
+      expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.viewport);
+    }
   }
 });
 
@@ -258,7 +260,7 @@ test("a run that has not finished says which round it is on and why", async ({ p
   // A status word says the Run stopped; this says who it is stopped on. A
   // timer is the platform's own deadline, so nobody has to do anything — the
   // opposite of what a generic "等待中" would leave a reader assuming.
-  await expect(page.getByText("这次任务自己要求稍后再继续", { exact: false })).toBeVisible();
+  await expect(page.getByText("任务将在指定时间自动继续，无需操作。", { exact: true })).toBeVisible();
 
   // Woken by the Scheduler when the deadline passed, then finished on the next
   // round. The wait is a minute and the wake is a scan behind it, so this one

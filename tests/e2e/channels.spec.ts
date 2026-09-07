@@ -66,19 +66,27 @@ test("an administrator binds a channel, and the delivery path knows about it", a
         credentials: "include",
         body: JSON.stringify({ name: "Greeter", alias: agentAlias }),
       });
-      return ((await created.json()) as { id: string }).id;
+      const agent = (await created.json()) as { id: string };
+      const draft = await fetch(`/api/v1/agents/${agent.id}/draft`, {
+        method: "PUT", headers, credentials: "include",
+        body: JSON.stringify({ expected_revision: 1, spec: {
+          schema_version: 1, personality: "A channel acceptance Agent.",
+          model_policy: { provider: "deterministic", scenario: "complete" }, tools: [],
+          limits: { max_execution_seconds: 600, max_elapsed_seconds: 3600, max_model_calls: 20, max_tool_calls: 10, max_derived_retries: 2 },
+        } }),
+      });
+      if (!draft.ok) throw new Error(`Channel fixture draft failed: ${draft.status}`);
+      const revision = ((await draft.json()) as { revision: number }).revision;
+      const published = await fetch(`/api/v1/agents/${agent.id}/publish`, {
+        method: "POST", headers, credentials: "include",
+        body: JSON.stringify({ expected_revision: revision }),
+      });
+      if (!published.ok) throw new Error(`Channel fixture publish failed: ${published.status}`);
+      return agent.id;
     },
     { workspaceId, agentAlias, secretName },
   );
   expect(agentId).toBeTruthy();
-
-  await page.goto(`/workspaces/${workspaceId}/agents/${agentId}`);
-  await page.getByLabel("人格").fill("A published channel acceptance Agent.");
-  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
-  await expect(page.getByText("草稿修订 2")).toBeVisible();
-  await page.getByRole("button", { name: "发布", exact: true }).click();
-  await page.getByRole("button", { name: "确定", exact: true }).click();
-  await expect(page.getByText("当前版本 v1")).toBeVisible();
 
   await page.goto(`/workspaces/${workspaceId}/channels`);
   await page.getByRole("button", { name: "接入飞书机器人" }).click();
