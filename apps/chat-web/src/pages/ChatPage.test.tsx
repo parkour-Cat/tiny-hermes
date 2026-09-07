@@ -42,6 +42,37 @@ test("a refreshed conversation restores its draft only after confirming the same
   expect(screen.queryByLabelText("写给智能体")).toBeNull();
 });
 
+test("a lost first-send response survives refresh and retries once with the original key", async () => {
+  const keys: (string | null)[] = [];
+  server.use(
+    http.post(`/api/v1/end-user/agents/${ALIAS}/sessions`, () => HttpResponse.json(sessionRow(), { status: 201 })),
+    http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([])),
+    http.post(`/api/v1/end-user/sessions/${SESSION}/runs`, ({ request }) => {
+      keys.push(request.headers.get("Idempotency-Key"));
+      return keys.length === 1 ? HttpResponse.error() : HttpResponse.json(finishedRun(), { status: 201 });
+    }),
+    http.get(`/api/v1/end-user/runs/${RUN}`, () => HttpResponse.json(finishedRun())),
+  );
+  const first = renderChat(`/${ALIAS}`);
+  await userEvent.type(await screen.findByLabelText("写给智能体"), "首次发送后响应丢失");
+  await userEvent.click(screen.getByRole("button", { name: "发送", exact: true }));
+  await waitFor(() => expect(keys).toHaveLength(1));
+  await waitFor(() => expect(screen.getByRole("button", { name: "发送", exact: true })).toBeEnabled());
+  first.unmount();
+  const restored = renderChat(`/${ALIAS}/${SESSION}`);
+  expect(await screen.findByLabelText("写给智能体")).toHaveValue("首次发送后响应丢失");
+  await userEvent.click(screen.getByRole("button", { name: "发送", exact: true }));
+  await waitFor(() => expect(keys).toHaveLength(2));
+  expect(keys[1]).toBe(keys[0]);
+  await waitFor(() => expect(screen.getByLabelText("写给智能体")).toHaveValue(""));
+  restored.unmount();
+  const afterSuccess = renderChat(`/${ALIAS}/${SESSION}`);
+  expect(await screen.findByLabelText("写给智能体")).toHaveValue("");
+  afterSuccess.unmount();
+  renderChat(`/${ALIAS}`);
+  expect(await screen.findByLabelText("写给智能体")).toHaveValue("");
+});
+
 test("reopening a conversation exposes its saved files without an active run", async () => {
   rememberSessionId(ALIAS, SESSION);
   server.use(
