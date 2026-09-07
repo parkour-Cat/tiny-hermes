@@ -237,6 +237,44 @@ test("refresh restores unsaved Agent edits without saving or publishing them", a
   expect(screen.getByText("已恢复此标签页未保存的修改，请检查后保存。")).toBeInTheDocument();
 });
 
+test("saving the configuration keeps an unsaved name until that name is saved too", async () => {
+  const user = userEvent.setup();
+  loadedAgent();
+  let savedDraft = draftBody(3);
+  let savedAgent = AGENT_ROW;
+  server.use(
+    http.get(`/api/v1/agents/${AGENT}/draft`, () => HttpResponse.json(savedDraft)),
+    http.get(`/api/v1/agents/${AGENT}`, () => HttpResponse.json(savedAgent)),
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      const body = await request.json() as { spec: typeof SPEC };
+      savedDraft = { ...draftBody(4), spec: body.spec };
+      return HttpResponse.json(savedDraft);
+    }),
+    http.patch(`/api/v1/agents/${AGENT}`, async ({ request }) => {
+      const body = await request.json() as { name: string; alias: string };
+      savedAgent = { ...AGENT_ROW, ...body };
+      return HttpResponse.json(savedAgent);
+    }),
+  );
+  renderDetail();
+  await user.clear(await screen.findByLabelText("人格"));
+  await user.paste("Saved instruction.");
+  await user.clear(screen.getByLabelText("名称"));
+  await user.paste("Still unsaved name");
+  await user.click(screen.getByRole("button", { name: "保存草稿" }));
+  await screen.findByText("草稿修订 4");
+  cleanup();
+  renderDetail();
+  expect(await screen.findByLabelText("人格")).toHaveValue("Saved instruction.");
+  expect(screen.getByLabelText("名称")).toHaveValue("Still unsaved name");
+  await user.click(screen.getByRole("button", { name: "保存", exact: true }));
+  await screen.findByRole("heading", { name: "Still unsaved name" });
+  cleanup();
+  renderDetail();
+  expect(await screen.findByLabelText("名称")).toHaveValue("Still unsaved name");
+  expect(screen.queryByText("已恢复此标签页未保存的修改，请检查后保存。")).not.toBeInTheDocument();
+});
+
 test("the loaded draft fills every field the console can edit", async () => {
   loadedAgent();
 
