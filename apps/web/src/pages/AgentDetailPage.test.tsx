@@ -284,7 +284,10 @@ test("a newer server draft exposes the local differences before an explicit disc
   await user.clear(await screen.findByLabelText("人格"));
   await user.paste("My older unsaved instruction.");
   cleanup();
-  server.use(http.get(`/api/v1/agents/${AGENT}/draft`, () => HttpResponse.json(draftBody(7, "New shared instruction."))));
+  server.use(http.get(`/api/v1/agents/${AGENT}/draft`, () => HttpResponse.json({
+    ...draftBody(7, "New shared instruction."),
+    spec: { ...SPEC, personality: "New shared instruction.", completion: null, context_budget: null, delegation: null },
+  })));
   renderDetail();
   expect(await screen.findByLabelText("人格")).toHaveValue("New shared instruction.");
   expect(screen.getByText("服务端内容已更新，暂存修改未恢复。请查看差异并复制需要的内容，再重新载入草稿。"))
@@ -293,6 +296,9 @@ test("a newer server draft exposes the local differences before an explicit disc
   expect(screen.getByRole("button", { name: "发布" })).toBeDisabled();
   await user.click(screen.getByText("查看暂存差异"));
   expect(screen.getByText("My older unsaved instruction.")).toBeVisible();
+  for (const internal of ["completion", "context_budget", "delegation"]) {
+    expect(screen.queryByText(internal)).not.toBeInTheDocument();
+  }
   await user.click(screen.getByRole("button", { name: "重新载入草稿" }));
   await user.click(await screen.findByRole("button", { name: "确定" }));
   await waitFor(() => expect(screen.getByRole("button", { name: "保存草稿" })).toBeEnabled());
