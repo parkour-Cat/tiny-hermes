@@ -105,6 +105,11 @@ export function Composer({
         setNote(null);
       }
       try {
+        if (draftKey !== undefined) {
+          const textSaved = saveDraftText(draftKey, input);
+          const filesSaved = saveDraftFiles(draftKey, files.map((file) => file.name));
+          setDraftSaved(textSaved && filesSaved);
+        }
         await onSend(composed.text);
       } catch {
         // The caller shows the request error; retain the draft and files for retry.

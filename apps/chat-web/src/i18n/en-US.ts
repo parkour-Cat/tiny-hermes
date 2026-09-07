@@ -110,6 +110,7 @@ export const enUS: Record<MessageKey, string> = {
   draftIdentityChanged: "Your sign-in identity changed. Check the current conversation before sending again.",
   draftAttachmentsMissing: "Select these attachments again: ",
   draftAttachmentsRemove: "Remove unrestored attachments",
+  draftRetryStorageFailed: "Could not save the send state. Nothing was sent. Copy your draft, reopen the page, and retry.",
   greeting: "Hello",
   emptyIntro: "What can I help you with?",
   invalidAddress: "This chat address is invalid. Reopen it from your organization’s entry page.",

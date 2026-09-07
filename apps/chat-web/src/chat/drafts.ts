@@ -37,9 +37,11 @@ export function loadPendingSend(key: string): PendingSend | null {
   } catch { return null; }
 }
 
-export function savePendingSend(key: string, pending: PendingSend): void {
-  try { window.sessionStorage.setItem(PENDING + key, JSON.stringify(pending)); }
-  catch { /* The in-memory request identity still protects retries in this page. */ }
+export function savePendingSend(key: string, pending: PendingSend): boolean {
+  try {
+    window.sessionStorage.setItem(PENDING + key, JSON.stringify(pending));
+    return true;
+  } catch { return false; }
 }
 
 export function clearDraft(key: string): void {
@@ -50,11 +52,18 @@ export function clearDraft(key: string): void {
   } catch { /* Storage failures must not prevent chatting. */ }
 }
 
-export function moveDraft(from: string, to: string): void {
-  if (from === to) return;
+export function moveDraft(from: string, to: string): boolean {
+  if (from === to) return true;
   const textSaved = saveDraftText(to, loadDraftText(from));
   const filesSaved = saveDraftFiles(to, loadDraftFiles(from));
-  if (textSaved && filesSaved) clearDraft(from);
+  const pending = loadPendingSend(from);
+  const pendingSaved = pending === null || savePendingSend(to, pending);
+  if (textSaved && filesSaved && pendingSaved) {
+    clearDraft(from);
+    return true;
+  }
+  clearDraft(to);
+  return false;
 }
 
 export function loadDraftText(key: string | undefined): string {

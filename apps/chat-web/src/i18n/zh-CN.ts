@@ -108,6 +108,7 @@ export const zhCN = {
   draftIdentityChanged: "登录身份已改变，请确认当前对话后重新发送。",
   draftAttachmentsMissing: "附件需重新选择：",
   draftAttachmentsRemove: "移除未恢复附件",
+  draftRetryStorageFailed: "无法保存发送状态，本次未发送。请复制输入，重新打开页面后重试。",
   greeting: "你好",
   emptyIntro: "有什么需要帮忙的？",
   invalidAddress: "对话地址无效，请从企业入口重新打开。",

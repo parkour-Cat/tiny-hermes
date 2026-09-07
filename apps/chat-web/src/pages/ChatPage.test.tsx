@@ -132,7 +132,7 @@ for (const limit of [0, 50]) {
     renderChat(`/${ALIAS}`);
     const input = await screen.findByLabelText("写给智能体");
     const original = Storage.prototype.setItem;
-    const storage = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (key, value) {
+    const storage = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
       if (value.length > limit) throw new DOMException("Quota exceeded", "QuotaExceededError");
       original.call(this, key, value);
     });

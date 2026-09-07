@@ -166,6 +166,10 @@ function ChatConversation({ identity }: { identity: EndUserIdentity }) {
       if (alias === null) {
         throw new Error(t("invalidAddress"));
       }
+      const stored = loadPendingSend(source);
+      const previous = pendingSend.current?.sessionId === (activeSessionId ?? "") ? pendingSend.current : stored;
+      const attempt = { text, key: previous?.text === text ? previous.key : crypto.randomUUID() };
+      if (!savePendingSend(source, attempt)) throw new Error(t("draftRetryStorageFailed"));
       let sessionId = activeSessionId;
       if (sessionId === null) {
         const created = await api<EndUserSessionResponse>(`/api/v1/end-user/agents/${alias}/sessions`, {
@@ -173,21 +177,19 @@ function ChatConversation({ identity }: { identity: EndUserIdentity }) {
           body: JSON.stringify({}),
         });
         sessionId = created.id;
-        moveDraft(source, JSON.stringify([identity.workspace_id, identity.end_user_id, alias, sessionId]));
+        if (!moveDraft(source, JSON.stringify([identity.workspace_id, identity.end_user_id, alias, sessionId]))) {
+          throw new Error(t("draftRetryStorageFailed"));
+        }
         rememberSessionId(alias, created.id);
         setOpenedId(created.id);
         go(created.id);
       }
       // A lost response may hide an accepted Run; retry the same request identity.
       const target = JSON.stringify([identity.workspace_id, identity.end_user_id, alias, sessionId]);
-      const stored = loadPendingSend(target);
-      if (pendingSend.current?.sessionId !== sessionId || pendingSend.current.text !== text) {
-        pendingSend.current = { sessionId, text, key: stored?.text === text ? stored.key : crypto.randomUUID() };
-      }
-      savePendingSend(target, pendingSend.current);
+      pendingSend.current = { sessionId, ...attempt };
       const run = await api<EndUserRunResponse>(`/api/v1/end-user/sessions/${sessionId}/runs`, {
         method: "POST",
-        headers: { "Idempotency-Key": pendingSend.current.key },
+        headers: { "Idempotency-Key": attempt.key },
         body: JSON.stringify({ input: text }),
       });
       return { run, target };
