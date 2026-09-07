@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { selectAntOption } from "./session";
 
 /**
  * A channel opened by a person, through the browser.
@@ -90,10 +91,8 @@ test("an administrator binds a channel, and the delivery path knows about it", a
 
   await page.goto(`/workspaces/${workspaceId}/channels`);
   await page.getByRole("button", { name: "接入飞书机器人" }).click();
-  await page.getByLabel("Agent").click();
-  await page.getByTitle("Greeter", { exact: true }).click();
-  await page.getByLabel("加密密钥").click();
-  await page.getByTitle(secretName, { exact: true }).click();
+  await selectAntOption(page, "Agent", "Greeter");
+  await selectAntOption(page, "加密密钥", secretName);
   await page.getByLabel("应用 ID").fill("cli_e2e");
   await page.getByRole("button", { name: "绑定", exact: true }).click();
 
