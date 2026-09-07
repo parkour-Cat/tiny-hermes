@@ -52,8 +52,12 @@ test("chat keeps a failed draft and its menus remain usable with a keyboard", as
     const runPath = "**/api/v1/end-user/sessions/*/runs";
     await chat.route(runPath, (route) => route.abort("connectionfailed"));
     await input.fill("断网后保留输入，恢复后只提交一次。");
+    await chat.reload();
+    await expect(input).toHaveValue("断网后保留输入，恢复后只提交一次。");
     await chat.getByRole("button", { name: "发送", exact: true }).click();
     await expect(chat.locator(".banner-warn")).toBeVisible();
+    await expect(input).toHaveValue("断网后保留输入，恢复后只提交一次。");
+    await chat.reload();
     await expect(input).toHaveValue("断网后保留输入，恢复后只提交一次。");
     await chat.unroute(runPath);
     await chat.getByRole("button", { name: "发送", exact: true }).click();
@@ -69,6 +73,8 @@ test("chat keeps a failed draft and its menus remain usable with a keyboard", as
     await input.fill("成功响应丢失时也只执行一次。");
     await chat.getByRole("button", { name: "发送", exact: true }).click();
     await expect(chat.locator(".banner-warn")).toBeVisible();
+    await expect(input).toHaveValue("成功响应丢失时也只执行一次。");
+    await chat.reload();
     await expect(input).toHaveValue("成功响应丢失时也只执行一次。");
     await chat.unroute(runPath);
     await chat.getByRole("button", { name: "发送", exact: true }).click();
@@ -89,6 +95,20 @@ test("chat keeps a failed draft and its menus remain usable with a keyboard", as
       await chat.keyboard.press("Escape");
       await expectReadableControl(chat.getByRole("button", { name: "发送", exact: true }));
     }
+    await chat.goto(`${CHAT_ORIGIN}/${alias}`);
+    await input.fill("用户 A 的私有草稿");
+    await chat.reload();
+    await expect(input).toHaveValue("用户 A 的私有草稿");
+    const otherCredential = signCredential({ iss: ISSUER, sub: "ux-draft-other", aud: workspace,
+      iat: now, exp: now + 600, agents: [alias] }, privateKey);
+    await chat.goto(`${CHAT_ORIGIN}/?workspace=${workspace}&agent=${alias}#credential=${encodeURIComponent(otherCredential)}`);
+    await expect(input).toHaveValue("");
+    await chat.goto(`${CHAT_ORIGIN}/?workspace=${workspace}&agent=${alias}#credential=${encodeURIComponent(credential)}`);
+    await expect(input).toHaveValue("用户 A 的私有草稿");
+    await chat.goto(`${CHAT_ORIGIN}/settings`);
+    await chat.getByRole("button", { name: "清空本机记录", exact: true }).click();
+    await chat.goto(`${CHAT_ORIGIN}/${alias}`);
+    await expect(input).toHaveValue("");
   } finally {
     await context.close();
   }
