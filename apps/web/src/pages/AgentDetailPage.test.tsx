@@ -1,17 +1,27 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { http, HttpResponse } from "msw";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { expect, test } from "vitest";
+import { delay, http, HttpResponse } from "msw";
+import { createMemoryRouter, Link, MemoryRouter, Route, RouterProvider, Routes } from "react-router-dom";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
+import { AuthProvider } from "../auth/AuthProvider";
+import { WorkspacePermissions } from "../workspace/WorkspacePermissions";
+import type { Role } from "../workspace/useMyRole";
 import { AgentDetailPage } from "./AgentDetailPage";
 import { TestTheme } from "../test/TestTheme";
+import { ConsoleLayout } from "../layout/ConsoleLayout";
 import { t } from "../i18n/zh-CN";
 import { server } from "../test/server";
 
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
 const AGENT = "22222222-3333-4444-8555-666666666666";
+
+beforeEach(() => { sessionStorage.clear(); server.use(
+  http.get("/api/v1/auth/me", () => HttpResponse.json({ id: "u1", subject: "developer@example.com", display_name: "Developer", status: "active", is_platform_admin: false })),
+  http.get(`/api/v1/workspaces/${WORKSPACE}/members/me`, () => HttpResponse.json({ role: "developer" })),
+); });
+afterEach(() => vi.restoreAllMocks());
 
 const SPEC = {
   schema_version: 1,
@@ -192,23 +202,219 @@ function loadedCatalog(): void {
   );
 }
 
-function renderDetail(): void {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+function renderDetail(role: Role = "developer", platform = false,
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } })): QueryClient {
   render(
     <TestTheme>
       <QueryClientProvider client={client}>
         <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE}/agents/${AGENT}`]}>
-          <Routes>
+          <AuthProvider><WorkspacePermissions role={role} platform={platform}><Routes>
             <Route
               path="/workspaces/:workspaceId/agents/:agentId"
               element={<AgentDetailPage />}
             />
-          </Routes>
+          </Routes></WorkspacePermissions></AuthProvider>
         </MemoryRouter>
       </QueryClientProvider>
     </TestTheme>,
   );
+  return client;
 }
+
+test("refresh restores unsaved Agent edits without saving or publishing them", async () => {
+  const user = userEvent.setup();
+  loadedAgent();
+  renderDetail();
+  const personality = await screen.findByLabelText("人格");
+  await user.clear(personality);
+  await user.paste("Keep this unsaved instruction.");
+  await user.clear(screen.getByLabelText("名称"));
+  await user.paste("Unsaved analyst");
+  cleanup();
+
+  renderDetail();
+  expect(await screen.findByLabelText("人格")).toHaveValue("Keep this unsaved instruction.");
+  expect(screen.getByLabelText("名称")).toHaveValue("Unsaved analyst");
+  expect(screen.getByText("草稿修订 3")).toBeInTheDocument();
+  expect(screen.getByText("已恢复此标签页未保存的修改，请检查后保存。")).toBeInTheDocument();
+});
+
+test("saving the configuration keeps an unsaved name until that name is saved too", async () => {
+  const user = userEvent.setup();
+  loadedAgent();
+  let savedDraft = draftBody(3);
+  let savedAgent = AGENT_ROW;
+  server.use(
+    http.get(`/api/v1/agents/${AGENT}/draft`, () => HttpResponse.json(savedDraft)),
+    http.get(`/api/v1/agents/${AGENT}`, () => HttpResponse.json(savedAgent)),
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      const body = await request.json() as { spec: typeof SPEC };
+      savedDraft = { ...draftBody(4), spec: body.spec };
+      return HttpResponse.json(savedDraft);
+    }),
+    http.patch(`/api/v1/agents/${AGENT}`, async ({ request }) => {
+      const body = await request.json() as { name: string; alias: string };
+      savedAgent = { ...AGENT_ROW, ...body };
+      return HttpResponse.json(savedAgent);
+    }),
+  );
+  renderDetail();
+  await user.clear(await screen.findByLabelText("人格"));
+  await user.paste("Saved instruction.");
+  await user.clear(screen.getByLabelText("名称"));
+  await user.paste("Still unsaved name");
+  await user.click(screen.getByRole("button", { name: "保存草稿" }));
+  await screen.findByText("草稿修订 4");
+  cleanup();
+  renderDetail();
+  expect(await screen.findByLabelText("人格")).toHaveValue("Saved instruction.");
+  expect(screen.getByLabelText("名称")).toHaveValue("Still unsaved name");
+  await user.click(screen.getByRole("button", { name: "保存" }));
+  await screen.findByRole("heading", { name: "Still unsaved name" });
+  cleanup();
+  renderDetail();
+  expect(await screen.findByLabelText("名称")).toHaveValue("Still unsaved name");
+  expect(screen.queryByText("已恢复此标签页未保存的修改，请检查后保存。")).not.toBeInTheDocument();
+});
+
+test("a newer server draft exposes the local differences before an explicit discard", async () => {
+  const user = userEvent.setup();
+  loadedAgent();
+  renderDetail();
+  await user.clear(await screen.findByLabelText("人格"));
+  await user.paste("My older unsaved instruction.");
+  cleanup();
+  server.use(http.get(`/api/v1/agents/${AGENT}/draft`, () => HttpResponse.json({
+    ...draftBody(7, "New shared instruction."),
+    spec: { ...SPEC, personality: "New shared instruction.", completion: null, context_budget: null, delegation: null },
+  })));
+  renderDetail();
+  expect(await screen.findByLabelText("人格")).toHaveValue("New shared instruction.");
+  expect(screen.getByText("服务端内容已更新，暂存修改未恢复。请查看差异并复制需要的内容，再重新载入草稿。"))
+    .toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "保存草稿" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "发布" })).toBeDisabled();
+  await user.click(screen.getByText("查看暂存差异"));
+  expect(screen.getByText("My older unsaved instruction.")).toBeVisible();
+  for (const internal of ["completion", "context_budget", "delegation"]) {
+    expect(screen.queryByText(internal)).not.toBeInTheDocument();
+  }
+  await user.click(screen.getByRole("button", { name: "重新载入草稿" }));
+  await user.click(await screen.findByRole("button", { name: "确定" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "保存草稿" })).toBeEnabled());
+  cleanup();
+  renderDetail();
+  expect(await screen.findByLabelText("人格")).toHaveValue("New shared instruction.");
+  expect(screen.queryByText("查看暂存差异")).not.toBeInTheDocument();
+});
+
+test.each(["unreadable", "quota", "invalid-json", "invalid-shape"])("%s tab storage still allows a manual Agent save with a visible warning", async (failure) => {
+  const user = userEvent.setup();
+  loadedAgent();
+  server.use(http.put(`/api/v1/agents/${AGENT}/draft`, () => HttpResponse.json(draftBody(4, "Manual save."))));
+  if (failure === "unreadable") vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new DOMException("Denied", "SecurityError"); });
+  if (failure === "quota") vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new DOMException("Full", "QuotaExceededError"); });
+  if (failure === "invalid-json" || failure === "invalid-shape") {
+    const getItem = Storage.prototype.getItem;
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(function (this: Storage, key) {
+      return key.startsWith("tiny-hermes:agent-edits:") ? (failure === "invalid-json" ? "{" : '{"revision":3,"name":"Analyst","alias":"analyst","values":{"personality":"broken"}}') : getItem.call(this, key);
+    });
+  }
+  renderDetail();
+  const personality = await screen.findByLabelText("人格");
+  expect(personality).toHaveValue(SPEC.personality);
+  if (failure !== "quota") expect(screen.getByText("暂存不可用。请手动保存修改，或复制内容后再刷新。")).toBeInTheDocument();
+  await user.clear(personality);
+  await user.paste("Manual save.");
+  if (failure === "quota") expect(screen.getByText("暂存不可用。请手动保存修改，或复制内容后再刷新。")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "保存草稿" }));
+  expect(await screen.findByText("草稿修订 4")).toBeInTheDocument();
+  expect(personality).toHaveValue("Manual save.");
+});
+
+test("explicitly discarding edits when leaving prevents them from returning", async () => {
+  const user = userEvent.setup();
+  loadedAgent();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const path = `/workspaces/${WORKSPACE}/agents/${AGENT}`;
+  const router = createMemoryRouter([
+    { path: "/workspaces/:workspaceId/agents/:agentId", element: <><AgentDetailPage /><Link to="/away">Leave editor</Link></> },
+    { path: "/away", element: <Link to={path}>Return to editor</Link> },
+  ], { initialEntries: [path] });
+  render(<TestTheme><QueryClientProvider client={client}><AuthProvider>
+    <WorkspacePermissions role="developer"><RouterProvider router={router} /></WorkspacePermissions>
+  </AuthProvider></QueryClientProvider></TestTheme>);
+  await user.clear(await screen.findByLabelText("人格"));
+  await user.paste("Discard this edit.");
+  await user.click(screen.getByRole("link", { name: "Leave editor" }));
+  await user.click(await screen.findByRole("button", { name: "继续编辑" }));
+  expect(screen.getByLabelText("人格")).toHaveValue("Discard this edit.");
+  await user.click(screen.getByRole("link", { name: "Leave editor" }));
+  await user.click(await screen.findByRole("button", { name: "放弃修改并离开" }));
+  await user.click(await screen.findByRole("link", { name: "Return to editor" }));
+  expect(await screen.findByLabelText("人格")).toHaveValue(SPEC.personality);
+});
+
+test.each(["another-user", "read-only"])("%s cannot restore the writer's local Agent edits", async (identity) => {
+  const user = userEvent.setup();
+  loadedAgent();
+  renderDetail();
+  await user.clear(await screen.findByLabelText("人格"));
+  await user.paste("Private unsaved edits.");
+  cleanup();
+  if (identity === "another-user") server.use(http.get("/api/v1/auth/me", () => HttpResponse.json({ id: "u2", is_platform_admin: false })));
+  renderDetail(identity === "read-only" ? "viewer" : "developer");
+  expect(await screen.findByLabelText("人格")).toHaveValue(SPEC.personality);
+  expect(screen.queryByText("已恢复此标签页未保存的修改，请检查后保存。")).not.toBeInTheDocument();
+  cleanup();
+  server.use(http.get("/api/v1/auth/me", () => HttpResponse.json({ id: "u1", is_platform_admin: false })));
+  renderDetail();
+  expect(await screen.findByLabelText("人格")).toHaveValue("Private unsaved edits.");
+});
+
+test("cached Agent data cannot reveal recovered edits while fresh access is being checked", async () => {
+  const user = userEvent.setup();
+  loadedAgent();
+  const client = renderDetail();
+  await user.clear(await screen.findByLabelText("人格"));
+  await user.paste("Wait for authorization.");
+  cleanup();
+  server.use(http.get(`/api/v1/agents/${AGENT}/draft`, async () => {
+    await delay(250);
+    return HttpResponse.json({ code: "forbidden", detail: "Access removed" }, { status: 403 });
+  }));
+  renderDetail("developer", false, client);
+  expect(screen.queryByLabelText("人格")).not.toBeInTheDocument();
+  await screen.findByRole("alert");
+  expect(screen.queryByDisplayValue("Wait for authorization.")).not.toBeInTheDocument();
+});
+
+test("a developer's edits restore after the real layout finishes loading their role", async () => {
+  const user = userEvent.setup();
+  loadedAgent();
+  renderDetail();
+  await user.clear(await screen.findByLabelText("人格"));
+  await user.paste("Restore after role check.");
+  cleanup();
+  server.use(
+    http.get(`/api/v1/workspaces/${WORKSPACE}/members/me`, async () => {
+      await delay(300);
+      return HttpResponse.json({ role: "developer" });
+    }),
+    http.get("/api/v1/workspaces", () => HttpResponse.json([{ id: WORKSPACE, name: "Acme", status: "active" }])),
+    http.get("/api/v1/approvals", () => HttpResponse.json({ items: [], has_more: false })),
+    http.get("/api/v1/memories/pending", () => HttpResponse.json([])),
+    http.get("/api/v1/skill-proposals", () => HttpResponse.json([])),
+  );
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<TestTheme><QueryClientProvider client={client}><MemoryRouter initialEntries={[`/workspaces/${WORKSPACE}/agents/${AGENT}`]}>
+    <AuthProvider><Routes><Route path="/workspaces/:workspaceId" element={<ConsoleLayout />}>
+      <Route path="agents/:agentId" element={<AgentDetailPage />} />
+    </Route></Routes></AuthProvider>
+  </MemoryRouter></QueryClientProvider></TestTheme>);
+  await waitFor(() => expect(screen.getByRole("button", { name: "保存草稿" })).toBeEnabled(), { timeout: 5000 });
+  expect(screen.getByLabelText("人格")).toHaveValue("Restore after role check.");
+});
 
 test("the loaded draft fills every field the console can edit", async () => {
   loadedAgent();
@@ -385,6 +591,78 @@ function version(number: number) {
     created_at: "2026-08-10T02:00:00Z",
   };
 }
+
+test("publishing saves edited fields first and publishes the returned revision", async () => {
+  loadedAgent(3);
+  const sent: unknown[] = [];
+  const published = version(1);
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4, "Changed before publishing."));
+    }),
+    http.post(`/api/v1/agents/${AGENT}/publish`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(published, { status: 201 });
+    }),
+    http.get(`/api/v1/agents/${AGENT}/versions/${published.id}`, () =>
+      HttpResponse.json({ ...published, spec: SPEC }),
+    ),
+  );
+  renderDetail();
+  const personality = await screen.findByLabelText("人格");
+  await userEvent.clear(personality);
+  await userEvent.type(personality, "Changed before publishing.");
+  await userEvent.click(screen.getByRole("button", { name: "发布" }));
+  expect(sent).toEqual([]);
+  await userEvent.click(await screen.findByRole("button", { name: "确定" }));
+  await screen.findByText("当前版本 v1");
+  expect(sent).toEqual([
+    { expected_revision: 3, spec: { ...SPEC, personality: "Changed before publishing." } },
+    { expected_revision: 4 },
+  ]);
+});
+
+test("publication keeps the confirmed revision if the draft refreshes while the dialog is open", async () => {
+  loadedAgent(3);
+  const revisions: number[] = [];
+  server.use(http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+    revisions.push((await request.json() as { expected_revision: number }).expected_revision);
+    return HttpResponse.json({ code: "draft_revision_conflict", title: "Conflict" }, { status: 409 });
+  }));
+  const client = renderDetail();
+  const personality = await screen.findByLabelText("人格");
+  await userEvent.type(personality, " My changes.");
+  await userEvent.click(screen.getByRole("button", { name: "发布" }));
+  server.use(http.get(`/api/v1/agents/${AGENT}/draft`, () => HttpResponse.json(draftBody(4, "Someone else's changes."))));
+  await act(async () => { await client.refetchQueries({ queryKey: ["agent-draft", WORKSPACE, AGENT] }); });
+  await userEvent.click(await screen.findByRole("button", { name: "确定" }));
+  await screen.findByText("草稿已被改动，你的修改仍在表单中。请重新载入后再保存。");
+  expect(revisions).toEqual([3]);
+});
+
+test("a failed save blocks publication and retains edited fields", async () => {
+  loadedAgent(3);
+  let published = false;
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, () => HttpResponse.json(
+      { code: "draft_revision_conflict", title: "Conflict" }, { status: 409 },
+    )),
+    http.post(`/api/v1/agents/${AGENT}/publish`, () => {
+      published = true;
+      return HttpResponse.json(version(1));
+    }),
+  );
+  renderDetail();
+  const personality = await screen.findByLabelText("人格");
+  await userEvent.clear(personality);
+  await userEvent.type(personality, "Keep this draft.");
+  await userEvent.click(screen.getByRole("button", { name: "发布" }));
+  await userEvent.click(await screen.findByRole("button", { name: "确定" }));
+  await screen.findByText("草稿已被改动，你的修改仍在表单中。请重新载入后再保存。");
+  expect(published).toBe(false);
+  expect(personality).toHaveValue("Keep this draft.");
+});
 
 test("publishing asks first, and sends nothing while the question is open", async () => {
   loadedAgent(3);
@@ -623,7 +901,7 @@ test("a published version is compared field by field against the form", async ()
   await userEvent.clear(personality);
   await userEvent.type(personality, "A different voice.");
 
-  expect(await screen.findByText("personality")).toBeInTheDocument();
+  expect(screen.getAllByText("人格").length).toBeGreaterThan(1);
   expect(screen.getByText("You answer support questions.")).toBeInTheDocument();
   expect(screen.getAllByText("A different voice.").length).toBeGreaterThan(0);
 });
@@ -676,6 +954,7 @@ test("binding a skill puts its version id on the draft, never its name", async (
 
   renderDetail();
   await userEvent.click(await screen.findByLabelText("技能"));
+  await userEvent.type(screen.getByLabelText("技能"), "rollout v1");
   await userEvent.click(await screen.findByTitle("rollout v1"));
   await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
 
@@ -794,6 +1073,7 @@ test("binding an HTTP operation stores the version id and the operation, and the
 
   renderDetail();
   await userEvent.click(await screen.findByLabelText("HTTP 操作"));
+  await userEvent.type(screen.getByLabelText("HTTP 操作"), "POST createOrder");
   await userEvent.click(await screen.findByTitle("POST createOrder · 会改数据"));
   // §16.3's choice, made in the builder rather than discovered at publish.
   await userEvent.click(screen.getByLabelText("HTTP 写操作怎么办"));
@@ -831,6 +1111,7 @@ test("an MCP binding names every tool, because there is no way to say all", asyn
 
   renderDetail();
   await userEvent.click(await screen.findByLabelText("MCP 工具"));
+  await userEvent.type(screen.getByLabelText("MCP 工具"), "search");
   await userEvent.click(await screen.findByTitle("search"));
   await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
 
@@ -919,4 +1200,35 @@ test("「能力」段折叠时说清楚绑了什么，不只是写「能力」",
   expect(
     screen.getByRole("button", { name: new RegExp(t("agentSectionIdentity")) }),
   ).toHaveAttribute("aria-disabled", "true");
+});
+
+test("shared memory is written for the Agent currently open", async () => {
+  loadedAgent();
+  let sent: unknown;
+  server.use(
+    http.get(`/api/v1/workspaces/${WORKSPACE}/members/me`, () => HttpResponse.json({ role: "workspace_admin" })),
+    http.post("/api/v1/memories/shared", async ({ request }) => { sent = await request.json(); return HttpResponse.json({ id: "m1" }); }),
+  );
+  renderDetail("workspace_admin");
+  await userEvent.click(await screen.findByRole("button", { name: t("writeShared") }));
+  await userEvent.type(await screen.findByLabelText(t("memoryBody")), "Ship notes on Fridays.");
+  await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: t("saveName") }));
+  await waitFor(() => expect(sent).toEqual({ agent_id: AGENT, body: "Ship notes on Fridays." }));
+});
+
+test("a platform administrator can add shared memory even with viewer membership", async () => {
+  loadedAgent();
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json({ id: "u1", is_platform_admin: true })),
+    http.get(`/api/v1/workspaces/${WORKSPACE}/members/me`, () => HttpResponse.json({ role: "viewer" })),
+  );
+  renderDetail("viewer", true);
+  expect(await screen.findByRole("button", { name: t("writeShared") })).toBeVisible();
+});
+
+test("a developer cannot add shared memory from the Agent page", async () => {
+  loadedAgent();
+  renderDetail();
+  await screen.findByLabelText("人格");
+  expect(screen.queryByRole("button", { name: t("writeShared") })).not.toBeInTheDocument();
 });

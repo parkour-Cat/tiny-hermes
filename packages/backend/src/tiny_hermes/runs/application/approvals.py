@@ -125,6 +125,15 @@ class ReasonRequired(ApprovalError):
 class ApprovalService:
     store: ApprovalStore
 
+    async def get_approval(self, actor: Actor, workspace_id: UUID, approval_id: UUID) -> Approval:
+        role = await self.store.user_role(workspace_id, actor.id)
+        if role is None and not actor.is_platform_admin:
+            raise ForbiddenApprovalAction
+        approval = await self.store.get(approval_id)
+        if approval is None or approval.workspace_id != workspace_id:
+            raise UnknownApproval
+        return approval
+
     async def list_approvals(
         self, actor: Actor, workspace_id: UUID, criteria: ApprovalFilter, request_id: str
     ) -> ApprovalPage:
@@ -226,9 +235,7 @@ class ApprovalService:
         )
         return decided
 
-    async def _decider(
-        self, actor: Actor, workspace_id: UUID, approval: Approval
-    ) -> Decider:
+    async def _decider(self, actor: Actor, workspace_id: UUID, approval: Approval) -> Decider:
         """This person, in the terms §16.3 cares about.
 
         Whether they are the Run's EndUser is read from the Run rather than
@@ -251,7 +258,5 @@ class ApprovalService:
             user_id=actor.id,
             is_workspace_admin=role is Role.WORKSPACE_ADMIN,
             is_platform_admin=actor.is_platform_admin,
-            is_run_end_user=(
-                actor.is_end_user and end_user is not None and end_user == actor.id
-            ),
+            is_run_end_user=(actor.is_end_user and end_user is not None and end_user == actor.id),
         )

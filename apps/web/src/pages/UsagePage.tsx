@@ -1,7 +1,10 @@
+import { useSearchParams } from "react-router-dom";
+import { TimeRangeFilter, timeBounds } from "../ui/TimeRangeFilter";
 import { useQuery } from "@tanstack/react-query";
-import { Card, Space, Statistic, Table, Tag, Typography } from "antd";
+import { Alert, Button, Card, Space, Statistic, Table, Tag } from "antd";
 
 import { api } from "../api/client";
+import { problemMessage } from "../api/messages";
 import type { UsageByQualityResponse, UsageSummaryResponse } from "../api/types";
 import { useT } from "../i18n/locale";
 import { EmptyState } from "../ui/EmptyState";
@@ -39,21 +42,36 @@ function costCell(bucket: UsageByQualityResponse, t: (key: MessageKey) => string
 export function UsagePage() {
   const t = useT();
   const workspaceId = useWorkspaceId();
+  const [params, setParams] = useSearchParams();
+  const from = params.get("from") ?? "";
+  const through = params.get("through") ?? "";
+  const query = new URLSearchParams(timeBounds(from, through)).toString();
 
   const usage = useQuery({
-    queryKey: ["usage-summary", workspaceId] as const,
+    queryKey: ["usage-summary", workspaceId, query] as const,
     queryFn: () =>
-      api<UsageSummaryResponse>("/api/v1/usage", { workspace: workspaceId ?? "" }),
+      api<UsageSummaryResponse>(`/api/v1/usage${query ? `?${query}` : ""}`, { workspace: workspaceId ?? "" }),
     enabled: workspaceId !== null,
   });
 
   const data = usage.data;
   const buckets = data?.by_cost_quality ?? [];
 
+  if (usage.isError) {
+    return <Alert type="error" showIcon title={problemMessage(usage.error, t)} action={
+      <Button onClick={() => void usage.refetch()}>{t("retry")}</Button>
+    } />;
+  }
+
   return (
-    <Card title={t("usage")} loading={usage.isPending}>
+    <Card loading={usage.isPending} extra={t(query ? "usageSelectedPeriod" : "usagePeriod")}>
+      <TimeRangeFilter from={from} through={through} onChange={(a, b) => {
+        const next = new URLSearchParams(params);
+        if (a) next.set("from", a); else next.delete("from");
+        if (b) next.set("through", b); else next.delete("through");
+        setParams(next, { replace: true });
+      }} />
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-        <Typography.Paragraph type="secondary">{t("usageIntro")}</Typography.Paragraph>
 
         {data === undefined ? null : (
           <Space size="large" wrap>

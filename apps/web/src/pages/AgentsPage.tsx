@@ -16,6 +16,7 @@ import { StatusTag } from "../ui/StatusTag";
 import { EmptyState } from "../ui/EmptyState";
 import { PageHeading } from "../ui/PageHeading";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
+import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
 
 type AgentValues = {
   name: string;
@@ -23,32 +24,31 @@ type AgentValues = {
 };
 
 export function AgentsPage() {
+  const { writer } = useWorkspacePermissions();
   const t = useT();
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [form] = Form.useForm<AgentValues>();
   const [open, setOpen] = useState(false);
+  const [showExamples, setShowExamples] = useState(false);
   const agentsQuery = ["agents", workspaceId] as const;
   const agents = useQuery({
     queryKey: agentsQuery,
     queryFn: () => api<AgentResponse[]>("/api/v1/agents", { workspace: workspaceId ?? "" }),
     enabled: workspaceId !== null,
   });
-  // Fetched only while the workspace is empty: §21 offers the example at the
-  // end of setup, and a workspace that already has Agents has passed that
-  // point. Two requests on every visit to a busy list would be paid forever
-  // for a card nobody sees.
+  // Existing workspaces fetch examples only when the chooser is opened.
   const nothingYet = (agents.data ?? []).length === 0 && !agents.isPending;
   const examples = useQuery({
     queryKey: ["agent-examples"] as const,
     queryFn: () => api<AgentExampleResponse[]>("/api/v1/agents/examples"),
-    enabled: nothingYet,
+    enabled: nothingYet || showExamples,
   });
   const endpoints = useQuery({
     queryKey: ["model-endpoints"] as const,
     queryFn: () => api<ModelEndpointSummary[]>("/api/v1/model-endpoints"),
-    enabled: nothingYet,
+    enabled: nothingYet || showExamples,
   });
   const [endpointId, setEndpointId] = useState<string | null>(null);
   const available = endpoints.data ?? [];
@@ -101,35 +101,7 @@ export function AgentsPage() {
     },
   });
 
-  if (agents.isError) {
-    return (
-      <Alert
-        type="error"
-        title={problemMessage(agents.error, t)}
-        action={<Button onClick={() => void agents.refetch()}>{t("retry")}</Button>}
-        showIcon
-      />
-    );
-  }
-
-  return (
-    <>
-      <PageHeading
-        kicker={t("workspaceTitle")}
-        title={t("agentsTitle")}
-        intro={t("agentsIntro")}
-        extra={
-          <Button type="primary" onClick={() => setOpen(true)}>
-            {t("newAgent")}
-          </Button>
-        }
-      />
-      <Card loading={agents.isPending} variant="borderless">
-        {(agents.data ?? []).length === 0 ? (
-          <Space direction="vertical" size="large" style={{ width: "100%" }}>
-            <EmptyState title={t("emptyAgents")} />
-            {(examples.data ?? []).length === 0 ? null : (
-              <Card variant="borderless" className="page-alert" title={t("exampleAgentTitle")}>
+  const examplePanel = (<Card variant="borderless" className="page-alert" title={t("exampleAgentTitle")}>
                 <Space direction="vertical" size="middle" style={{ width: "100%" }}>
                   <Typography.Paragraph type="secondary">
                     {t("exampleAgentIntro")}
@@ -159,6 +131,7 @@ export function AgentsPage() {
                           <Typography.Text strong>{example.name}</Typography.Text>
                           <Typography.Text type="secondary">{example.summary}</Typography.Text>
                           <Button
+                            disabled={!writer}
                             loading={createExample.isPending}
                             onClick={() => createExample.mutate(example.slug)}
                           >
@@ -169,7 +142,54 @@ export function AgentsPage() {
                     </>
                   )}
                 </Space>
-              </Card>
+              </Card>);
+
+  if (agents.isError) {
+    return (
+      <Alert
+        type="error"
+        title={problemMessage(agents.error, t)}
+        action={<Button onClick={() => void agents.refetch()}>{t("retry")}</Button>}
+        showIcon
+      />
+    );
+  }
+
+  return (
+    <>
+      <PageHeading
+        kicker={t("workspaceTitle")}
+        title={t("agentsTitle")}
+        intro={t("agentsIntro")}
+        extra={
+          <Space wrap><Button disabled={!writer} onClick={() => setShowExamples(true)}>{t("examplesBrowse")}</Button><Button disabled={!writer} type="primary" onClick={() => setOpen(true)}>{t("newAgent")}</Button></Space>
+        }
+      />
+      <Modal open={showExamples} title={t("examplesBrowse")} footer={null} onCancel={() => setShowExamples(false)}>{examples.isError || endpoints.isError ? <Alert type="error" title={problemMessage(examples.error ?? endpoints.error, t)} action={<Button onClick={() => { void examples.refetch(); void endpoints.refetch(); }}>{t("retry")}</Button>} /> : examplePanel}</Modal>
+      <Card loading={agents.isPending} variant="borderless">
+        {(agents.data ?? []).length === 0 ? (
+          <Space direction="vertical" size="large" style={{ width: "100%" }}>
+            <EmptyState title={t("emptyAgents")} />
+            {/* The path from nothing, said where a person with nothing is
+                standing. Step one links to where it happens and says whether
+                it is already done, because the example below cannot be
+                created without it. */}
+            <Card variant="borderless" className="page-alert" title={t("onboardingTitle")}>
+              <ol className="onboarding">
+                <li>
+                  <Link to={`/workspaces/${workspaceId}/settings#model-endpoints`}>
+                    {t("onboardingStep1")}
+                  </Link>{" "}
+                  <Typography.Text type="secondary">
+                    {available.length === 0 ? t("onboardingStep1Todo") : t("onboardingStep1Done")}
+                  </Typography.Text>
+                </li>
+                <li>{t("onboardingStep2")}</li>
+                <li>{t("onboardingStep3")}</li>
+              </ol>
+            </Card>
+            {showExamples || (examples.data ?? []).length === 0 ? null : (
+              examplePanel
             )}
           </Space>
         ) : (

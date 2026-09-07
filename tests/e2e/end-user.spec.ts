@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
+import { expectReadableControl } from "./contrast";
 
 /**
  * Design §7's own walk: an enterprise signs a credential, opens the chat
@@ -23,6 +24,95 @@ import type { Page } from "@playwright/test";
 
 const CHAT_ORIGIN = process.env.TINY_HERMES_E2E_CHAT_URL ?? "http://127.0.0.1:3001";
 const ISSUER = "https://idp.acme.example";
+
+test("chat keeps a failed draft and its menus remain usable with a keyboard", async ({ page, browser }) => {
+  const workspace = await openWorkspace(page);
+  const { alias } = await publishEndUserAgent(page, workspace);
+  const { publicKey, privateKey } = rsaKeyPair();
+  await registerIssuer(page, workspace, publicKey);
+  const now = Math.floor(Date.now() / 1000);
+  const credential = signCredential({ iss: ISSUER, sub: "ux-keyboard", aud: workspace,
+    iat: now, exp: now + 600, agents: [alias] }, privateKey);
+  const context = await browser.newContext();
+  try {
+    const chat = await context.newPage();
+    await chat.goto(`${CHAT_ORIGIN}/?workspace=${workspace}&agent=${alias}#credential=${encodeURIComponent(credential)}`);
+    const input = chat.getByLabel("写给智能体");
+    await expect(input).toBeVisible();
+    await input.focus();
+    await chat.keyboard.press("Tab");
+    const more = chat.getByRole("button", { name: "更多", exact: true });
+    await expect(more).toBeFocused();
+    await chat.keyboard.press("Enter");
+    await expect(chat.getByRole("menuitem", { name: "附件", exact: true })).toBeFocused();
+    await chat.keyboard.press("ArrowDown");
+    await expect(chat.getByRole("menuitem", { name: "从剪贴板粘贴", exact: true })).toBeFocused();
+    await chat.keyboard.press("Escape");
+    await expect(more).toBeFocused();
+    const runPath = "**/api/v1/end-user/sessions/*/runs";
+    await chat.route(runPath, (route) => route.abort("connectionfailed"));
+    await input.fill("断网后保留输入，恢复后只提交一次。");
+    await chat.reload();
+    await expect(input).toHaveValue("断网后保留输入，恢复后只提交一次。");
+    await chat.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(chat.locator(".banner-warn")).toBeVisible();
+    await expect(input).toHaveValue("断网后保留输入，恢复后只提交一次。");
+    await chat.reload();
+    await expect(input).toHaveValue("断网后保留输入，恢复后只提交一次。");
+    await chat.unroute(runPath);
+    await chat.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(input).toHaveValue("");
+    await expect(chat.locator(".turn-agent")).toHaveCount(1);
+    await chat.reload();
+    await expect(chat.locator(".bubble-user")).toHaveCount(1);
+    await chat.route(runPath, async (route) => {
+      const accepted = await route.fetch();
+      expect(accepted.ok()).toBeTruthy();
+      await route.abort("connectionfailed");
+    });
+    await input.fill("成功响应丢失时也只执行一次。");
+    await chat.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(chat.locator(".banner-warn")).toBeVisible();
+    await expect(input).toHaveValue("成功响应丢失时也只执行一次。");
+    await chat.reload();
+    await expect(input).toHaveValue("成功响应丢失时也只执行一次。");
+    await chat.unroute(runPath);
+    await chat.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(input).toHaveValue("");
+    await expect(chat.locator(".turn-agent")).toHaveCount(2);
+    await chat.reload();
+    await expect(chat.locator(".bubble-user")).toHaveCount(2);
+    const actions = chat.getByRole("button", { name: "会话操作", exact: true });
+    await actions.focus();
+    await chat.keyboard.press("Enter");
+    await expect(chat.getByRole("button", { name: "置顶", exact: true })).toBeFocused();
+    await chat.keyboard.press("Escape");
+    await expect(actions).toBeFocused();
+    await input.fill("检查按钮文字对比度");
+    for (const appearance of ["浅色", "深色"]) {
+      await chat.getByRole("button", { name: "访客", exact: true }).click();
+      await chat.getByRole("button", { name: appearance, exact: true }).click();
+      await chat.keyboard.press("Escape");
+      await expectReadableControl(chat.getByRole("button", { name: "发送", exact: true }));
+    }
+    await chat.goto(`${CHAT_ORIGIN}/${alias}`);
+    await input.fill("用户 A 的私有草稿");
+    await chat.reload();
+    await expect(input).toHaveValue("用户 A 的私有草稿");
+    const otherCredential = signCredential({ iss: ISSUER, sub: "ux-draft-other", aud: workspace,
+      iat: now, exp: now + 600, agents: [alias] }, privateKey);
+    await chat.goto(`${CHAT_ORIGIN}/?workspace=${workspace}&agent=${alias}#credential=${encodeURIComponent(otherCredential)}`);
+    await expect(input).toHaveValue("");
+    await chat.goto(`${CHAT_ORIGIN}/?workspace=${workspace}&agent=${alias}#credential=${encodeURIComponent(credential)}`);
+    await expect(input).toHaveValue("用户 A 的私有草稿");
+    await chat.goto(`${CHAT_ORIGIN}/settings`);
+    await chat.getByRole("button", { name: "清空本机记录", exact: true }).click();
+    await chat.goto(`${CHAT_ORIGIN}/${alias}`);
+    await expect(input).toHaveValue("");
+  } finally {
+    await context.close();
+  }
+});
 
 function unique(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1_000)}`;
@@ -297,7 +387,7 @@ test("an enterprise credential opens a conversation that survives closing the ta
   await chatPage.getByLabel("写给智能体").fill("Hello from the enterprise's own page.");
   await chatPage.getByRole("button", { name: "发送" }).click();
 
-  await expect(chatPage.getByText("Hello from the enterprise's own page.")).toBeVisible();
+  await expect(chatPage.locator(".bubble-user")).toHaveText("Hello from the enterprise's own page.");
   // The deterministic model's own "complete" scenario replies promptly; the
   // frontend polls GET .../runs/{id} rather than subscribing to a stream
   // (a reduction from the console's SSE, noted in this task's report), so
@@ -316,7 +406,7 @@ test("an enterprise credential opens a conversation that survives closing the ta
   chatPage = await context.newPage();
   await chatPage.goto(conversationUrl);
 
-  await expect(chatPage.getByText("Hello from the enterprise's own page.")).toBeVisible();
+  await expect(chatPage.locator(".bubble-user")).toHaveText("Hello from the enterprise's own page.");
   await expect(chatPage.locator(".turn-agent").first()).toBeVisible();
 
   // Design §4.6's self-service door: the subject's own export, off the

@@ -206,26 +206,17 @@ def feishu_webhook_router(resources: ApplicationResources) -> APIRouter:
 
 
 class CreateChannelBindingRequest(BaseModel):
-    """What a binding can be created with — and nothing else.
+    """Create a complete binding; reject fields that would be silently lost.
 
-    `extra="forbid"` (the same setting `agents/domain/models.py` uses)
-    because the alternative is not "harmless": `transport` is a field a
-    caller has every reason to send here, and without this it answered 201
-    with `transport: "webhook"` in the body — the request accepted, the
-    field dropped, the status code a success. Refusing it as 422 is the only
-    one of the three outcomes a caller can act on.
-
-    Not accepting `transport` here is deliberate. `update` validates the
-    binding a change *leaves behind* — app id present, app secret present
-    and still resolvable — and taking `transport` on create would mean
-    moving that check into `create` as well. Creating on `webhook` and
-    switching afterwards goes through the one place that already asks.
+    Transport credentials use the same service validation as updates, so
+    choosing a long connection does not require an intermediate Webhook row.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     channel: Literal["feishu"]
     agent_id: UUID
+    transport: Literal["webhook", "long_connection"] = "webhook"
     #: The tenant's own identifier for the app. Metadata: it names which app
     #: this binding belongs to, and is not a credential.
     app_id: str | None = Field(default=None, max_length=120)
@@ -417,6 +408,7 @@ def channel_binding_router(resources: ApplicationResources) -> APIRouter:
                 app_id=payload.app_id,
                 encrypt_key_ref=payload.encrypt_key_ref,
                 app_secret_ref=payload.app_secret_ref,
+                transport=payload.transport,
                 request_id=request.state.request_id,
             )
         except (
@@ -424,6 +416,7 @@ def channel_binding_router(resources: ApplicationResources) -> APIRouter:
             ChannelKeyRequired,
             ChannelKeyUnknown,
             ChannelAlreadyBound,
+            ChannelTransportUnusable,
             UnknownChannel,
         ) as error:
             raise _binding_error(error) from error

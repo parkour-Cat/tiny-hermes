@@ -52,6 +52,26 @@ test("a registered provider is listed by its issuer", async () => {
   expect(await screen.findByText("https://login.example.com")).toBeVisible();
 });
 
+test("disabling a login provider needs confirmation and shows failure without losing the row", async () => {
+  let calls = 0;
+  server.use(
+    http.get("/api/v1/oidc/providers", () => HttpResponse.json([provider()])),
+    http.post("/api/v1/oidc/providers/p1/disable", () => {
+      calls += 1;
+      return HttpResponse.json({ code: "forbidden" }, { status: 403 });
+    }),
+  );
+  renderProviders();
+  await userEvent.click(await screen.findByRole("button", { name: /停用/ }));
+  expect(calls).toBe(0);
+  const dialog = await screen.findByRole("dialog");
+  expect(dialog).toHaveTextContent("https://login.example.com");
+  await userEvent.click(screen.getByRole("button", { name: "确定" }));
+  await waitFor(() => expect(calls).toBe(1));
+  expect(await screen.findByRole("alert")).toBeInTheDocument();
+  expect(screen.getByText("https://login.example.com")).toBeVisible();
+});
+
 test("the form sends a reference, never a client secret", async () => {
   // The same rule `ModelEndpointRow.credential_ref` follows: this console
   // never holds the plaintext, so there is no field here that could carry
@@ -69,6 +89,7 @@ test("the form sends a reference, never a client secret", async () => {
   await userEvent.click(await screen.findByRole("button", { name: /注册身份提供方|Register/i }));
   await userEvent.type(screen.getByLabelText(/签发者|Issuer/i), "https://idp.example.com");
   await userEvent.type(screen.getByLabelText(/客户端 ID|Client ID/i), "th");
+  await userEvent.click(screen.getByRole("button", { name: "手动填写引用" }));
   await userEvent.type(screen.getByLabelText(/客户端密钥引用|Client secret reference/i), "IDP_SECRET");
   await userEvent.type(
     screen.getByLabelText(/发现地址|Discovery/i),

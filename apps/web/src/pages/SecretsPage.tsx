@@ -8,16 +8,19 @@ import type { RewrapResponse, SecretResponse } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
 import { useT } from "../i18n/locale";
 import { EmptyState } from "../ui/EmptyState";
+import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 type CreateValues = {
   name: string;
   scope: "workspace" | "platform";
   plaintext: string;
+  purpose: "general" | "model" | "tool" | "channel" | "login";
 };
 
-export function SecretsPage() {
+export function SecretsPage({ scopeOnly }: { scopeOnly?: "workspace" | "platform" }) {
   const t = useT();
+  const { admin: workspaceAdmin } = useWorkspacePermissions();
   const [modal, contextHolder] = Modal.useModal();
   const auth = useAuth();
   const workspaceId = useWorkspaceId();
@@ -96,7 +99,6 @@ export function SecretsPage() {
       {contextHolder}
       <div className="page-heading">
         <div>
-          <Typography.Paragraph type="secondary">{t("secretsIntro")}</Typography.Paragraph>
         </div>
       </div>
       {error === null ? null : (
@@ -110,7 +112,8 @@ export function SecretsPage() {
           form={form}
           layout="inline"
           requiredMark={false}
-          initialValues={{ scope: "workspace" }}
+          disabled={!workspaceAdmin}
+          initialValues={{ scope: scopeOnly ?? "workspace", purpose: "general" }}
           onFinish={(values) => create.mutate(values)}
         >
           <Form.Item
@@ -123,10 +126,13 @@ export function SecretsPage() {
           <Form.Item name="scope" label={t("secretScope")} rules={[{ required: true }]}>
             <Select
               options={[
-                { value: "workspace", label: t("secretScopeWorkspace") },
-                ...(admin ? [{ value: "platform" as const, label: t("secretScopePlatform") }] : []),
+                ...(scopeOnly !== "platform" ? [{ value: "workspace", label: t("secretScopeWorkspace") }] : []),
+                ...(admin && scopeOnly !== "workspace" ? [{ value: "platform" as const, label: t("secretScopePlatform") }] : []),
               ]}
             />
+          </Form.Item>
+          <Form.Item name="purpose" label={t("credentialPurpose")}>
+            <Select options={(["general", "model", "tool", "channel", "login"] as const).map((value) => ({ value, label: t(({ general: "purposeGeneral", model: "purposeModel", tool: "purposeTool", channel: "purposeChannel", login: "purposeLogin" } as const)[value]) }))} />
           </Form.Item>
           <Form.Item
             name="plaintext"
@@ -142,7 +148,7 @@ export function SecretsPage() {
           </Form.Item>
         </Form>
       </Card>
-      {admin ? (
+      {admin && scopeOnly !== "workspace" ? (
         <Card variant="borderless" className="page-alert">
           <Button
             loading={rewrap.isPending}
@@ -161,18 +167,19 @@ export function SecretsPage() {
         </Card>
       ) : null}
       <Card loading={listed.isPending} variant="borderless">
-        {(listed.data ?? []).length === 0 ? (
+        {(listed.data ?? []).filter((secret) => !scopeOnly || secret.scope === scopeOnly).length === 0 ? (
           <EmptyState title={t("emptySecrets")} />
         ) : (
-          (listed.data ?? []).map((secret) => (
+          (listed.data ?? []).filter((secret) => !scopeOnly || secret.scope === scopeOnly).map((secret) => (
             <article key={secret.id} className="workspace-row">
               <div className="workspace-summary">
                 <Typography.Title level={4}>{secret.name}</Typography.Title>
                 <Space wrap>
-                  <Tag>{secret.scope}</Tag>
+                  <Tag>{t(secret.scope === "platform" ? "secretScopePlatform" : "secretScopeWorkspace")}</Tag>
+                  <Tag>{t(({ general: "purposeGeneral", model: "purposeModel", tool: "purposeTool", channel: "purposeChannel", login: "purposeLogin" } as const)[secret.purpose ?? "general"])}</Tag>
                   <Tag>{secret.status}</Tag>
                   <Typography.Text code>{secret.mask}</Typography.Text>
-                  {secret.status === "active" ? (
+                  {secret.status === "active" && (secret.scope === "platform" ? admin : workspaceAdmin) ? (
                     <Button
                       loading={disable.isPending}
                       onClick={() =>

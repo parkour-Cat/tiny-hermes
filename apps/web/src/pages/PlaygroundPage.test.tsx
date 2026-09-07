@@ -9,6 +9,7 @@ import { PlaygroundPage } from "./PlaygroundPage";
 import { AuthProvider } from "../auth/AuthProvider";
 import { TestTheme } from "../test/TestTheme";
 import { server } from "../test/server";
+import { WorkspacePermissions } from "../workspace/WorkspacePermissions";
 
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
 const AGENT = "22222222-3333-4444-8555-666666666666";
@@ -111,7 +112,7 @@ function loadedPlayground(): void {
   );
 }
 
-function renderPlayground(): void {
+function renderPlayground(viewer = false): void {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <TestTheme>
@@ -121,7 +122,7 @@ function renderPlayground(): void {
             <Routes>
               <Route
                 path="/workspaces/:workspaceId/agents/:agentId/playground"
-                element={<PlaygroundPage />}
+                element={<WorkspacePermissions role={viewer ? "viewer" : "workspace_admin"}><PlaygroundPage /></WorkspacePermissions>}
               />
             </Routes>
           </AuthProvider>
@@ -130,6 +131,15 @@ function renderPlayground(): void {
     </TestTheme>,
   );
 }
+
+test("a viewer cannot send or automatically create a debugging session", async () => {
+  loadedPlayground();
+  let posts = 0;
+  server.use(http.get("/api/v1/sessions", () => HttpResponse.json([])), http.post("/api/v1/sessions", () => { posts += 1; return HttpResponse.json(sessionRow()); }));
+  renderPlayground(true);
+  expect(await screen.findByText("当前角色只能查看，不能在调试中创建或提交任务。")).toBeInTheDocument();
+  expect(posts).toBe(0);
+});
 
 test("sending a message posts a run with a fresh idempotency key", async () => {
   loadedPlayground();
@@ -192,7 +202,7 @@ test("a blocked queue offers the head run's actions, not a fake completions refu
   await userEvent.type(await screen.findByLabelText("输入要发给 Agent 的消息"), "Next");
   await userEvent.click(screen.getByRole("button", { name: "发送" }));
 
-  expect(await screen.findByText("当前 Session 被队列挡住")).toBeInTheDocument();
+  expect(await screen.findByText("当前会话有未完成任务")).toBeInTheDocument();
   expect(screen.getByText("paused")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "继续" }));
 
@@ -201,7 +211,7 @@ test("a blocked queue offers the head run's actions, not a fake completions refu
   expect(resumes[0]?.body).toEqual({ expected_state_version: 4 });
 });
 
-test("新 Session posts another persistent session and switches to it", async () => {
+test("新会话 posts another persistent session and switches to it", async () => {
   loadedPlayground();
   document.cookie = "tiny_hermes_csrf=token-value";
   const created = sessionRow({
@@ -219,7 +229,7 @@ test("新 Session posts another persistent session and switches to it", async ()
 
   renderPlayground();
   await screen.findByText(SESSION);
-  await userEvent.click(screen.getByRole("button", { name: "新 Session" }));
+  await userEvent.click(screen.getByRole("button", { name: "新会话" }));
 
   await waitFor(() => expect(posts).toEqual([{ agent_id: AGENT, session_mode: "persistent" }]));
   expect(await screen.findByText(created.id)).toBeInTheDocument();

@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import { Alert, Button, Card, Form, Input, Space, Typography } from "antd";
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
@@ -17,6 +18,7 @@ type BootstrapValues = {
 export function BootstrapPage() {
   const t = useT();
   const navigate = useNavigate();
+  const bootstrap = useQuery({ queryKey: ["bootstrap-status"], queryFn: () => api<{ initialized: boolean }>("/api/v1/bootstrap/status") });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -41,6 +43,9 @@ export function BootstrapPage() {
     }
   }
 
+  if (bootstrap.isPending) return <PublicShell><Card loading /></PublicShell>;
+  if (bootstrap.isError) return <PublicShell><Alert type="error" title={t("requestFailed")} action={<Button onClick={() => void bootstrap.refetch()}>{t("retry")}</Button>} /></PublicShell>;
+  if (bootstrap.data.initialized) return <PublicShell><Card><Alert type="info" title={t("bootstrapAlreadyReady")} /><Link to="/login">{t("backToLogin")}</Link></Card></PublicShell>;
   return (
     <PublicShell>
       <Card className="auth-card" variant="borderless">

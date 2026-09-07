@@ -127,15 +127,12 @@ class ChannelBindingStore(Protocol):
         app_id: str | None,
         encrypt_key_ref: str | None,
         app_secret_ref: str | None,
+        transport: str,
     ) -> ChannelBindingView | None: ...
 
-    async def list_bindings(
-        self, workspace_id: UUID
-    ) -> tuple[ChannelBindingView, ...]: ...
+    async def list_bindings(self, workspace_id: UUID) -> tuple[ChannelBindingView, ...]: ...
 
-    async def binding(
-        self, workspace_id: UUID, binding_id: UUID
-    ) -> ChannelBindingView | None: ...
+    async def binding(self, workspace_id: UUID, binding_id: UUID) -> ChannelBindingView | None: ...
 
     async def update_binding(
         self,
@@ -174,23 +171,24 @@ class ChannelBindingService:
         encrypt_key_ref: str | None,
         app_secret_ref: str | None,
         request_id: str,
+        transport: str = "webhook",
     ) -> ChannelBindingView:
         await self._require_role(
-            actor, workspace_id, request_id, allowed=MANAGERS,
+            actor,
+            workspace_id,
+            request_id,
+            allowed=MANAGERS,
             audit_as_platform="channel.binding_created_by_platform_admin",
         )
         if channel in ENCRYPTED_CHANNELS and not encrypt_key_ref:
             raise ChannelKeyRequired
-        if encrypt_key_ref and not await self.store.secret_exists(
-            workspace_id, encrypt_key_ref
-        ):
+        await self._validate_transport(workspace_id, transport, app_id, app_secret_ref)
+        if encrypt_key_ref and not await self.store.secret_exists(workspace_id, encrypt_key_ref):
             raise ChannelKeyUnknown
         # Same check for the app secret, and the same reason: a reference to
         # a secret that does not exist fails inside an outbound call nobody
         # is watching, not here where the person who typed it is.
-        if app_secret_ref and not await self.store.secret_exists(
-            workspace_id, app_secret_ref
-        ):
+        if app_secret_ref and not await self.store.secret_exists(workspace_id, app_secret_ref):
             raise ChannelKeyUnknown
         if not await self.store.agent_exists(workspace_id, agent_id):
             # Checked rather than left to the foreign key: an id from another
@@ -206,6 +204,7 @@ class ChannelBindingService:
             app_id=app_id,
             encrypt_key_ref=encrypt_key_ref,
             app_secret_ref=app_secret_ref,
+            transport=transport,
         )
         if created is None:
             raise ChannelAlreadyBound
@@ -222,7 +221,10 @@ class ChannelBindingService:
         self, actor: Actor, workspace_id: UUID, request_id: str
     ) -> tuple[ChannelBindingView, ...]:
         await self._require_role(
-            actor, workspace_id, request_id, allowed=LISTERS,
+            actor,
+            workspace_id,
+            request_id,
+            allowed=LISTERS,
             audit_as_platform="channel.bindings_read_by_platform_admin",
         )
         return await self.store.list_bindings(workspace_id)
@@ -251,7 +253,10 @@ class ChannelBindingService:
         a credential and should look like one.
         """
         await self._require_role(
-            actor, workspace_id, request_id, allowed=MANAGERS,
+            actor,
+            workspace_id,
+            request_id,
+            allowed=MANAGERS,
             audit_as_platform="channel.binding_updated_by_platform_admin",
         )
         existing = await self.store.binding(workspace_id, binding_id)
@@ -272,36 +277,12 @@ class ChannelBindingService:
         after_transport = changes.get("transport", existing.transport)
         after_app_id = changes.get("app_id", existing.app_id)
         after_app_secret = changes.get("app_secret_ref", existing.app_secret_ref)
-        if after_transport == "long_connection":
-            if not (after_app_id and after_app_secret):
-                raise ChannelTransportUnusable
-            # Non-empty is not the question the scheduler asks. It resolves
-            # the reference (`_long_connections` in `api/cli.py`), and
-            # `CredentialResolver.resolve` refuses a Secret that is missing
-            # *or* not `ACTIVE` — so a binding whose secret was disabled
-            # after it was named passes an is-it-set check and is then
-            # skipped at startup, which is the same dead configuration this
-            # branch exists to prevent. `secret_exists` asks by id and
-            # filters on `status = 'active'`, which is the same pair of
-            # conditions.
-            #
-            # Checked against the *result*, not against `changes`: the loop
-            # below only revalidates references this update mentions, so a
-            # reference that went stale while nobody was touching it is
-            # never looked at again. That reference is precisely the one a
-            # transport switch is about to depend on.
-            #
-            # `app_id` gets no equivalent check because there is nothing to
-            # check it against: it is the tenant's own identifier for the
-            # app, stored as metadata, and whether Feishu recognizes it is
-            # only answerable by the handshake itself.
-            if not await self.store.secret_exists(workspace_id, after_app_secret):
-                raise ChannelTransportUnusable
+        await self._validate_transport(
+            workspace_id, after_transport, after_app_id, after_app_secret
+        )
         for field in ("encrypt_key_ref", "app_secret_ref"):
             reference = changes.get(field)
-            if reference and not await self.store.secret_exists(
-                workspace_id, reference
-            ):
+            if reference and not await self.store.secret_exists(workspace_id, reference):
                 raise ChannelKeyUnknown
         updated = await self.store.update_binding(workspace_id, binding_id, changes)
         if updated is None:
@@ -315,11 +296,30 @@ class ChannelBindingService:
         )
         return updated
 
+    async def _validate_transport(
+        self,
+        workspace_id: UUID,
+        transport: str | None,
+        app_id: str | None,
+        app_secret_ref: str | None,
+    ) -> None:
+        # Both creation and updates must leave a configuration the scheduler
+        # can resolve. Recheck even an unchanged secret: it may be disabled.
+        # Whether Feishu accepts these credentials still requires a handshake.
+        if transport == "long_connection":
+            if not (app_id and app_id.strip() and app_secret_ref):
+                raise ChannelTransportUnusable
+            if not await self.store.secret_exists(workspace_id, app_secret_ref):
+                raise ChannelTransportUnusable
+
     async def disable(
         self, actor: Actor, workspace_id: UUID, binding_id: UUID, request_id: str
     ) -> ChannelBindingView:
         await self._require_role(
-            actor, workspace_id, request_id, allowed=MANAGERS,
+            actor,
+            workspace_id,
+            request_id,
+            allowed=MANAGERS,
             audit_as_platform="channel.binding_disabled_by_platform_admin",
         )
         # Disabled, never deleted: `channel_events` references this row, and

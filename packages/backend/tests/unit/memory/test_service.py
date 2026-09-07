@@ -10,7 +10,7 @@ asks for.
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -52,6 +52,39 @@ class FakeStore:
     rows: dict[UUID, MemoryRecord] = field(default_factory=dict[UUID, MemoryRecord])
     audit: list[str] = field(default_factory=list[str])
     agents: set[UUID] = field(default_factory=lambda: {AGENT})
+
+    async def list_records(
+        self,
+        workspace_id: UUID,
+        status: MemoryStatus | None,
+        kind: MemoryKind | None,
+        agent_id: UUID | None,
+        limit: int,
+        offset: int,
+    ) -> Sequence[MemoryRecord]:
+        return [
+            r
+            for r in self.rows.values()
+            if r.workspace_id == workspace_id
+            and (status is None or r.status == status)
+            and (kind is None or r.kind == kind)
+            and (agent_id is None or r.agent_id == agent_id)
+        ][offset : offset + limit]
+
+    async def update_shared(
+        self, memory_id: UUID, expected: datetime, body: str | None, status: MemoryStatus | None
+    ) -> MemoryRecord | None:
+        row = self.rows.get(memory_id)
+        if row is None or row.updated_at != expected or row.status is not MemoryStatus.ACTIVE:
+            return None
+        updated = replace(
+            row,
+            body=row.body if body is None else body,
+            status=row.status if status is None else status,
+            updated_at=datetime.now(UTC),
+        )
+        self.rows[memory_id] = updated
+        return updated
 
     async def user_role(self, workspace_id: UUID, user_id: UUID) -> Role | None:
         del workspace_id
@@ -209,7 +242,10 @@ async def test_an_admin_edit_writes_shared_memory_active() -> None:
     catalog, _ = service(store)
 
     created = await catalog.create_shared(
-        who, WORKSPACE, agent_id=AGENT, body="The deploy window is Tuesdays.",
+        who,
+        WORKSPACE,
+        agent_id=AGENT,
+        body="The deploy window is Tuesdays.",
         request_id="req-1",
     )
 
@@ -223,9 +259,7 @@ async def test_shared_memory_for_an_agent_elsewhere_is_refused() -> None:
     catalog, _ = service(store)
 
     with pytest.raises(UnknownAgent):
-        await catalog.create_shared(
-            who, WORKSPACE, agent_id=uuid4(), body="x", request_id="req-1"
-        )
+        await catalog.create_shared(who, WORKSPACE, agent_id=uuid4(), body="x", request_id="req-1")
 
 
 async def test_a_developer_may_not_edit_shared_memory() -> None:
@@ -234,6 +268,4 @@ async def test_a_developer_may_not_edit_shared_memory() -> None:
     catalog, _ = service(store)
 
     with pytest.raises(ForbiddenMemoryAction):
-        await catalog.create_shared(
-            who, WORKSPACE, agent_id=AGENT, body="x", request_id="req-1"
-        )
+        await catalog.create_shared(who, WORKSPACE, agent_id=AGENT, body="x", request_id="req-1")

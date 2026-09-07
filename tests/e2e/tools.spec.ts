@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
-import { openSection, unfold } from "./session";
+import { openSection, selectAntOption, unfold } from "./session";
 
 /**
  * An external tool's whole life, driven through the console against the real
@@ -70,37 +70,31 @@ async function openWorkspace(page: Page): Promise<string> {
  * rc-select renders a second, screen-reader-only list carrying the same role.
  */
 async function choose(page: Page, label: string, value: string): Promise<void> {
-  await page.getByLabel(label).click();
-  await page
-    .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
-    .locator(`.ant-select-item-option[title="${value}"]`)
-    .click();
+  await selectAntOption(page, label, value);
 }
 
 /** Approves the host at both levels. A workspace may only choose inside the
  *  platform's, so the platform entry has to exist first. */
 async function approveHost(page: Page): Promise<void> {
-  const outbound = await openSection(page, "设置", "出站范围", "outbound");
-  // The two forms by position rather than by their cards' text: each card's
-  // prose mentions the other level — that is the point of the page, each layer
-  // narrowing the one above — so a text filter matches both. The platform's
-  // form is first because that is the order the rule runs in.
-  const forms = outbound.locator("form");
-  await expect(forms).toHaveCount(2);
-  for (const index of [0, 1]) {
-    const form = forms.nth(index);
+  for (const group of ["平台管理", "设置"]) {
+    const outbound = await openSection(page, group, "出站范围", "outbound");
+    const form = outbound.locator("form");
+    await expect(form).toHaveCount(1);
     await form.getByLabel("目标").fill(TOOL_HOST);
     await form.getByRole("button", { name: "批准" }).click();
-    await expect(outbound.getByText(TOOL_HOST, { exact: true })).toHaveCount(index + 1);
+    await expect(outbound.getByText(TOOL_HOST, { exact: true })).toBeVisible();
   }
 }
 
 async function registerTool(page: Page): Promise<void> {
   const tools = await openSection(page, "工具与技能", "HTTP 工具", "http-tools");
-  await tools.getByLabel("名称").fill("health");
-  await tools.getByLabel("基础地址").fill(TOOL_BASE);
-  await tools.getByLabel("OpenAPI 文档").fill(DOCUMENT);
-  await tools.getByRole("button", { name: "登记" }).click();
+  await tools.getByRole("button", { name: "添加 HTTP 工具" }).click();
+  const registration = page.getByRole("dialog");
+  await registration.getByLabel("名称").fill("health");
+  await registration.getByLabel("基础地址").fill(TOOL_BASE);
+  await registration.getByLabel("OpenAPI 文档").fill(DOCUMENT);
+  await registration.getByRole("button", { name: "登记", exact: true }).click();
+  await expect(registration).toBeHidden();
   // Both operations, with the write marked where somebody is choosing.
   await expect(tools.getByText(/GET readLiveness/)).toBeVisible({ timeout: 30_000 });
   await expect(tools.getByText(/POST pokeLiveness · 会改数据/)).toBeVisible();
@@ -178,19 +172,20 @@ test("register an HTTP tool, call it, and let a person approve the write", async
   // -- and the write stops ------------------------------------------------
   const writer = await publishAgent(page, "POST pokeLiveness · 会改数据");
   const writeRun = await submitRun(page, writer, "http.health.pokeLiveness");
-  await expect(page.getByText("waiting_approval", { exact: true }).first()).toBeVisible({
+  await expect(page.getByText("等待审批", { exact: true }).first()).toBeVisible({
     timeout: 120_000,
   });
-  await expect(timeline(page).getByText(/这次运行在等人/)).toBeVisible();
+  await expect(timeline(page).getByText("任务正在等待审批。", { exact: true })).toBeVisible();
 
   // -- a person reads exactly what would be sent, and decides -------------
   const inbox = await openSection(page, "待办", "审批", "approvals");
-  const governance = inbox.locator(".ant-card", { hasText: "工作空间的决定" }).first();
+  const governance = inbox.locator(".approval-request").filter({ hasText: "http.health.pokeLiveness" });
   // Named twice: once in the summary row and once inside the document, which
   // is the assertion the whole page exists for — a reviewer who cannot see the
   // request cannot approve it. The URL appears only in the document.
   await expect(governance.getByText("http.health.pokeLiveness").first()).toBeVisible();
-  await expect(governance.getByText(TOOL_BASE, { exact: false })).toBeVisible();
+  await governance.getByText("查看完整请求", { exact: true }).click();
+  await expect(governance.getByText(TOOL_BASE, { exact: false }).first()).toBeVisible();
   await governance.getByRole("button", { name: "批准" }).click();
   await page.getByRole("button", { name: "确定" }).click();
 

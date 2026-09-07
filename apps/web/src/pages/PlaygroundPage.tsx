@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { downloadArtifact } from "../api/artifacts";
+import { SavedFiles } from "../runs/SavedFiles";
 import { api } from "../api/client";
 import { problemMessage } from "../api/messages";
 import type {
@@ -18,8 +19,10 @@ import { useT } from "../i18n/locale";
 import { EmptyState } from "../ui/EmptyState";
 import { RUN_ACTIONS } from "../runs/actions";
 import { artifactIdsIn, mergeArtifacts, toolsOf, transcriptLineOf } from "../runs/transcript";
+import { ToolOutput } from "../runs/ToolOutput";
 import { runQueryOptions, useRunEvents } from "../runs/useRunEvents";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
+import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
 
 function matchingSessions(
   listed: SessionResponse[],
@@ -36,6 +39,7 @@ function matchingSessions(
 }
 
 export function PlaygroundPage() {
+  const { writer } = useWorkspacePermissions();
   const t = useT();
   const workspaceId = useWorkspaceId();
   const { agentId = "" } = useParams();
@@ -63,6 +67,7 @@ export function PlaygroundPage() {
       if (mine.length > 0) {
         return mine[mine.length - 1];
       }
+      if (!writer) return null;
       return api<SessionResponse>("/api/v1/sessions", {
         ...scope,
         method: "POST",
@@ -189,6 +194,7 @@ export function PlaygroundPage() {
   if (agent.data === undefined || session.data === undefined) {
     return <Card loading variant="borderless" />;
   }
+  if (session.data === null) return <Alert type="info" title={t("playgroundReadOnly")} />;
 
   const run = snapshot.data;
   const blocked = run?.queue.status === "session_blocked";
@@ -217,7 +223,7 @@ export function PlaygroundPage() {
             <Typography.Text>{session.data.id}</Typography.Text>
           </Typography.Paragraph>
         </div>
-        <Button loading={openSession.isPending} onClick={() => openSession.mutate()}>
+        <Button disabled={!writer} loading={openSession.isPending} onClick={() => openSession.mutate()}>
           {t("newSession")}
         </Button>
       </div>
@@ -305,15 +311,15 @@ export function PlaygroundPage() {
               <Typography.Paragraph className="fact-note">
                 {JSON.stringify(round.arguments)}
               </Typography.Paragraph>
-              <Typography.Paragraph type="secondary">{round.output}</Typography.Paragraph>
+              <ToolOutput round={round} />
             </article>
           ))
         )}
       </Card>
       <Card title={t("filesSection")} variant="borderless" className="page-alert">
-        {files.length === 0 ? (
-          <EmptyState title={t("emptyFiles")} />
-        ) : (
+        <SavedFiles key={activeRunId} workspaceId={workspaceId ?? ""} runId={activeRunId} refreshToken={snapshot.data?.state_version} />
+        {files.length > 0 && <Typography.Title level={5}>{t("toolAttachments")}</Typography.Title>}
+        {files.length > 0 && (
           files.map((file) => (
             <Space key={file.id} className="workspace-row">
               <Typography.Text>{file.filename}</Typography.Text>
@@ -340,7 +346,7 @@ export function PlaygroundPage() {
         <Button
           type="primary"
           className="page-alert"
-          disabled={input.trim() === "" || sessionId === null}
+          disabled={!writer || input.trim() === "" || sessionId === null}
           loading={send.isPending}
           onClick={() => send.mutate(input.trim())}
         >

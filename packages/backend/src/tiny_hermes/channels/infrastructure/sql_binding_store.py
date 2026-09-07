@@ -77,6 +77,7 @@ class SqlChannelBindingStore:
         app_id: str | None,
         encrypt_key_ref: str | None,
         app_secret_ref: str | None,
+        transport: str = "webhook",
     ) -> ChannelBindingView | None:
         row = ChannelBindingRow(
             workspace_id=workspace_id,
@@ -87,6 +88,7 @@ class SqlChannelBindingStore:
             app_id=app_id,
             encrypt_key_ref=encrypt_key_ref,
             app_secret_ref=app_secret_ref,
+            transport=transport,
         )
         self._session.add(row)
         try:

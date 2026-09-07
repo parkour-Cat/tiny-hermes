@@ -93,6 +93,15 @@ test("a request names a person, not a uuid", async () => {
   await waitFor(() => expect(asked).not.toBeNull());
   expect(asked!.searchParams.get("external_user_id")).toBe("alice@example.com");
   expect(await screen.findByText("They prefer mornings.")).toBeVisible();
+  expect(screen.getByText("alice@example.com")).toBeVisible();
+});
+
+test("a failed user data read cannot look like an empty memory collection", async () => {
+  server.use(http.get("/api/v1/subjects/lookup", () => HttpResponse.json(resolved())), http.get(`/api/v1/subjects/${SUBJECT}/export`, () => HttpResponse.json({ detail: "Data lookup unavailable" }, { status: 503 })));
+  renderSubjects();
+  await lookUp();
+  expect(await screen.findByRole("button", { name: "重试" })).toBeVisible();
+  expect(screen.queryByText(t("subjectNoMemories"))).toBeNull();
 });
 
 test("a name nobody here uses says so, rather than showing an empty person", async () => {
@@ -172,4 +181,18 @@ test("a memory can be corrected in place, and the correction is what is sent", a
   await userEvent.click(screen.getByRole("button", { name: t("saveName") }));
 
   await waitFor(() => expect(sent).toEqual({ body: "They prefer afternoons." }));
+});
+
+
+test("a partial external identifier can locate a person before opening their data", async () => {
+  server.use(
+    http.get("/api/v1/subjects/search", () => HttpResponse.json({ items: [resolved()], has_more: false })),
+    http.get("/api/v1/subjects/lookup", () => HttpResponse.json(resolved())),
+    http.get(`/api/v1/subjects/${SUBJECT}/export`, () => HttpResponse.json(exported())),
+  );
+  renderSubjects();
+  await userEvent.type(screen.getByLabelText(t("subjectExternalId")), "alice");
+  await userEvent.click(screen.getByRole("button", { name: "按部分标识查找" }));
+  await userEvent.click(await screen.findByRole("button", { name: "alice@example.com" }));
+  expect(await screen.findByText(SUBJECT)).toBeVisible();
 });

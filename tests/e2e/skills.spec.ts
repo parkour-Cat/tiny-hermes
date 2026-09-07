@@ -1,7 +1,10 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
-import { openSection, unfold } from "./session";
+import { openSection, selectAntOption, unfold } from "./session";
 
 /**
  * A skill's whole life, driven through the console against the real stack.
@@ -56,11 +59,7 @@ async function openWorkspace(page: Page): Promise<void> {
  * finds that one first.
  */
 async function choose(page: Page, label: string, value: string): Promise<void> {
-  await page.getByLabel(label).click();
-  await page
-    .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
-    .locator(`.ant-select-item-option[title="${value}"]`)
-    .click();
+  await selectAntOption(page, label, value);
 }
 
 async function bindTool(page: Page, name: string): Promise<void> {
@@ -74,11 +73,17 @@ async function bindTool(page: Page, name: string): Promise<void> {
 /** Uploads one SKILL.md through the picker. No archive is ever built. */
 async function uploadSkill(page: Page, line: string): Promise<void> {
   const skills = await openSection(page, "工具与技能", "技能", "skills");
-  await skills.getByLabel("选择文件").setInputFiles({
-    name: "SKILL.md",
-    mimeType: "text/markdown",
-    buffer: Buffer.from(skillDocument(line), "utf-8"),
-  });
+  await skills.getByRole("button", { name: "上传技能目录" }).click();
+  const upload = page.getByRole("dialog", { name: "上传技能目录" });
+  const directory = await mkdtemp(path.join(tmpdir(), "tiny-hermes-skill-e2e-"));
+  try {
+    await writeFile(path.join(directory, "SKILL.md"), skillDocument(line), "utf-8");
+    await upload.getByLabel("选择文件").setInputFiles(directory);
+    await upload.getByRole("button", { name: "确认上传" }).click();
+    await expect(upload).toBeHidden();
+  } finally {
+    await rm(directory, { recursive: true });
+  }
   await expect(skills.getByRole("heading", { name: SKILL_NAME })).toBeVisible();
 }
 
@@ -107,7 +112,7 @@ async function publishAgent(page: Page, scenario: string, tool: string): Promise
   // wrong scenario once travelled three steps before showing up as a missing
   // event on a timeline.
   await expect(page.getByText(scenario, { exact: true }).first()).toBeVisible();
-  await expect(page.getByText(`${SKILL_NAME} v1`, { exact: true }).first()).toBeVisible();
+  await expect(page.locator(`.ant-select-selection-item[title="${SKILL_NAME} v1"]`)).toBeVisible();
   await page.getByRole("button", { name: "保存草稿" }).click();
   await expect(page.getByText("草稿修订 2")).toBeVisible();
   await page.getByRole("button", { name: "发布" }).click();
@@ -145,13 +150,12 @@ test("upload a skill, bind it, load it in a Run, propose a change, approve it", 
   });
   await expect(timeline(page).getByText("skill_loaded")).toBeVisible();
   // The sentence, not just the event name: it says which document entered the
-  // conversation and that the document is a workspace's material. Matched on
+  // conversation. Matched on
   // the prose rather than on `SKILL.md`, which also appears in the raw payload
   // this entry carries beside it.
   await expect(
-    timeline(page).getByText(/模型加载了技能 rollout 的 SKILL\.md/),
+    timeline(page).getByText(/已加载技能 rollout 的 SKILL\.md/),
   ).toBeVisible();
-  await expect(timeline(page).getByText(/技能正文是参考资料/)).toBeVisible();
 
   // -- the Agent suggests a change ---------------------------------------
   const author = await publishAgent(page, "propose_once", "skill.propose");

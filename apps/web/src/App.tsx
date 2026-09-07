@@ -1,6 +1,6 @@
 import { Alert, Button, Spin } from "antd";
-import { lazy, Suspense } from "react";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { lazy, Suspense, useState } from "react";
+import { createBrowserRouter, RouterProvider, Navigate, Route, Routes } from "react-router-dom";
 
 import { QueryProvider } from "./api/QueryProvider";
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
@@ -47,6 +47,8 @@ const RecordsPage = lazy(() =>
 const SettingsPage = lazy(() =>
   import("./pages/SettingsPage").then((module) => ({ default: module.SettingsPage })),
 );
+const PlatformPage = lazy(() => import("./pages/PlatformPage").then((module) => ({ default: module.PlatformPage })));
+const OverviewPage = lazy(() => import("./pages/OverviewPage").then((module) => ({ default: module.OverviewPage })));
 const ChannelsPage = lazy(() =>
   import("./pages/ChannelsPage").then((module) => ({
     default: module.ChannelsPage,
@@ -90,7 +92,8 @@ function AppRoutes() {
           path="/workspaces/:workspaceId"
           element={auth.user === null ? <Navigate to="/login" replace /> : <ConsoleLayout />}
         >
-          <Route index element={<Navigate to="agents" replace />} />
+          <Route index element={<Navigate to="overview" replace />} />
+          <Route path="overview" element={<OverviewPage />} />
           <Route path="agents" element={<AgentsPage />} />
           <Route path="agents/:agentId" element={<AgentDetailPage />} />
           <Route path="agents/:agentId/playground" element={<PlaygroundPage />} />
@@ -101,6 +104,7 @@ function AppRoutes() {
           <Route path="tooling" element={<ToolingPage />} />
           <Route path="records" element={<RecordsPage />} />
           <Route path="settings" element={<SettingsPage />} />
+          <Route path="platform" element={<PlatformPage />} />
           {/* 旧地址。**长期保留**：一个能打开的链接不会因为新导航上线就变得
               不该打开。锚点让它落在对应的段上，而不只是那一页的顶部。 */}
           {LEGACY_REDIRECTS.map(([from, to, anchor]) => (
@@ -120,17 +124,14 @@ function AppRoutes() {
   );
 }
 
+const createAppRouter = () => createBrowserRouter([{ path: "*", element: <AuthProvider><QueryProvider><AppRoutes /></QueryProvider></AuthProvider> }]);
+
 export function App() {
+  const [router] = useState(createAppRouter);
   return (
     <ConsoleTheme>
       <LocaleProvider>
-        <BrowserRouter>
-          <AuthProvider>
-            <QueryProvider>
-              <AppRoutes />
-            </QueryProvider>
-          </AuthProvider>
-        </BrowserRouter>
+        <RouterProvider router={router} />
       </LocaleProvider>
     </ConsoleTheme>
   );

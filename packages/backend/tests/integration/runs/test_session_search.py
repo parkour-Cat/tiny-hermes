@@ -76,14 +76,10 @@ async def _transcript(engine: AsyncEngine, run_id: str) -> str:
         # English one always does — the second time this file assumed ASCII,
         # after the `Idempotency-Key` above. Both were invisible for as long
         # as the suite only spoke English.
-        return " ".join(
-            json.dumps(json.loads(str(r[0])), ensure_ascii=False) for r in rows.all()
-        )
+        return " ".join(json.dumps(json.loads(str(r[0])), ensure_ascii=False) for r in rows.all())
 
 
-async def _reassign_session(
-    engine: AsyncEngine, session_id: str, caller_id: UUID
-) -> None:
+async def _reassign_session(engine: AsyncEngine, session_id: str, caller_id: UUID) -> None:
     """Move a Session to another subject.
 
     The console has one signed-in person, so a second subject is made by
@@ -99,9 +95,7 @@ async def _reassign_session(
 
 @pytest.fixture
 def searcher(agent_with_scenario: Callable[..., str]) -> str:
-    return agent_with_scenario(
-        "search_once", alias="searcher", tools=["session.search"]
-    )
+    return agent_with_scenario("search_once", alias="searcher", tools=["session.search"])
 
 
 async def test_a_run_finds_what_this_subject_said_before(
@@ -173,9 +167,7 @@ async def test_the_console_search_is_scoped_to_the_workspace(
     _run(client, scope, session_for(searcher), "the kingfisher deploy is delayed")
     await _worker(engine, workspace_id).run_once()
 
-    hits = client.get(
-        "/api/v1/memories/search", headers=scope, params={"q": "kingfisher"}
-    )
+    hits = client.get("/api/v1/memories/search", headers=scope, params={"q": "kingfisher"})
 
     assert hits.status_code == 200, hits.text
     assert any("kingfisher" in item["snippet"] for item in hits.json())
@@ -184,9 +176,7 @@ async def test_the_console_search_is_scoped_to_the_workspace(
 async def test_an_empty_console_query_is_refused(
     client: TestClient, scope: dict[str, str], searcher: str
 ) -> None:
-    refused = client.get(
-        "/api/v1/memories/search", headers=scope, params={"q": "   "}
-    )
+    refused = client.get("/api/v1/memories/search", headers=scope, params={"q": "   "})
 
     assert refused.status_code == 422
 
@@ -267,3 +257,70 @@ async def test_english_search_still_works_alongside_chinese(
     await _worker(engine, workspace_id).run_once()
 
     assert "pelican rollout" in await _transcript(engine, found)
+
+
+async def _reasoned_reply(engine: AsyncEngine, session_id: str, workspace_id: str) -> None:
+    from tiny_hermes.runs.domain.models import CanonicalMessage, ReasoningBlock, TextBlock
+    from tiny_hermes.runs.infrastructure.tables import SessionMessageRow
+
+    message = CanonicalMessage(
+        role="assistant",
+        blocks=(
+            ReasoningBlock(text="privatequartz 隐藏推演 pelican"),
+            TextBlock(text="The pelican rollout is on Tuesday. 鹈鹕项目定在下周二发布。"),
+        ),
+    )
+    async with async_sessionmaker(engine).begin() as db:
+        db.add(
+            SessionMessageRow(
+                session_id=UUID(session_id),
+                workspace_id=UUID(workspace_id),
+                sequence=1,
+                role=message.role,
+                content=message.document(),
+                redacted=False,
+            )
+        )
+
+
+@pytest.mark.parametrize("query", ["privatequartz", "隐藏推演"])
+async def test_reasoning_only_terms_do_not_match_console_search(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    searcher: str,
+    query: str,
+) -> None:
+    await _reasoned_reply(engine, session_for(searcher), scope["X-Workspace-Id"])
+    response = client.get("/api/v1/memories/search", headers=scope, params={"q": query})
+    assert response.status_code == 200, response.text
+    assert response.json() == []
+
+
+async def test_search_snippets_include_only_visible_text_parts(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    searcher: str,
+) -> None:
+    session_id = session_for(searcher)
+    await _reasoned_reply(engine, session_id, scope["X-Workspace-Id"])
+    response = client.get("/api/v1/memories/search", headers=scope, params={"q": "pelican"})
+    assert response.status_code == 200, response.text
+    hit = next(item for item in response.json() if item["session_id"] == session_id)
+    assert hit["snippet"] == "The pelican rollout is on Tuesday. 鹈鹕项目定在下周二发布。"
+
+
+async def test_run_search_does_not_retrieve_reasoning_from_earlier_sessions(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    searcher: str,
+) -> None:
+    await _reasoned_reply(engine, session_for(searcher), scope["X-Workspace-Id"])
+    found = _run(client, scope, session_for(searcher), "privatequartz")
+    await _worker(engine, scope["X-Workspace-Id"]).run_once()
+    assert "No past message matched" in await _transcript(engine, found)

@@ -64,6 +64,27 @@ test("a pending memory is shown as the Agent proposed it, word for word", async 
   expect(screen.getByText("Support")).toBeVisible();
 });
 
+test("shared memory history can be opened and corrected with its loaded revision", async () => {
+  let sent: unknown;
+  server.use(
+    http.get("/api/v1/memories/pending", () => HttpResponse.json([])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/memories", () => HttpResponse.json({ items: [memory({ status: "active" })], has_more: false })),
+    http.patch("/api/v1/memories/shared/m1", async ({ request }) => {
+      sent = await request.json();
+      return HttpResponse.json(memory({ status: "active", body: "Updated" }));
+    }),
+  );
+  renderMemory();
+  await userEvent.click(await screen.findByRole("radio", { name: "生效中" }));
+  await userEvent.click(await screen.findByRole("button", { name: "修改内容" }));
+  const input = screen.getByRole("textbox");
+  await userEvent.clear(input);
+  await userEvent.type(input, "Updated");
+  await userEvent.click(screen.getByRole("button", { name: "保存" }));
+  await waitFor(() => expect(sent).toEqual({ body: "Updated", expected_updated_at: "2026-08-22T00:00:00Z" }));
+});
+
 test("approving sends the decision and nothing else", async () => {
   // Deliberately not an edit-then-approve: §16.3's approval binds to what
   // was proposed, and the same principle holds here. A console that could
@@ -131,60 +152,15 @@ test("a role that may not review is told so", async () => {
   expect(await screen.findByText(/没有权限|not allowed|forbidden/i)).toBeVisible();
 });
 
-const HIT = {
-  session_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-  run_id: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
-  sequence: 4,
-  role: "assistant",
-  snippet: "…the rollout was moved to October…",
-  shortened: true,
-};
-
-test("a search asks the server, and a shortened hit says it is shortened", async () => {
-  // A snippet a reader does not know is partial gets read as the whole of a
-  // message — which is the one way a search result can mislead somebody
-  // reading a conversation they were not part of.
-  let asked: URL | null = null;
+test("memory review offers links instead of unrelated search and creation forms", async () => {
   server.use(
     http.get("/api/v1/memories/pending", () => HttpResponse.json([])),
     http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
-    http.get("/api/v1/memories/search", ({ request }) => {
-      asked = new URL(request.url);
-      return HttpResponse.json([HIT]);
-    }),
   );
-
   renderMemory();
-  await userEvent.type(await screen.findByLabelText(t("searchSessions")), "rollout");
-  await userEvent.click(screen.getByRole("button", { name: t("searchRun") }));
-
-  await waitFor(() => expect(asked).not.toBeNull());
-  expect(asked!.searchParams.get("q")).toBe("rollout");
-  expect(await screen.findByText(/rollout was moved/)).toBeVisible();
-  expect(screen.getByText(t("searchShortened"))).toBeVisible();
-});
-
-test("a shared memory can be written directly, against a named Agent", async () => {
-  // §14.2 gives shared memory two doors: an Agent proposing one, and a
-  // person writing one. Only the first had a way in.
-  let sent: unknown = null;
-  server.use(
-    http.get("/api/v1/memories/pending", () => HttpResponse.json([])),
-    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
-    http.post("/api/v1/memories/shared", async ({ request }) => {
-      sent = await request.json();
-      return HttpResponse.json(memory({ kind: "shared", status: "active" }), { status: 201 });
-    }),
-  );
-
-  renderMemory();
-  await userEvent.click(await screen.findByRole("button", { name: t("writeShared") }));
-  await userEvent.click(await screen.findByLabelText(t("memoryAgent")));
-  await userEvent.click(await screen.findByTitle("Support"));
-  await userEvent.type(await screen.findByLabelText(t("memoryBody")), "Ship notes on Fridays.");
-  await userEvent.click(screen.getByRole("button", { name: t("saveName") }));
-
-  await waitFor(() =>
-    expect(sent).toEqual({ agent_id: AGENT, body: "Ship notes on Fridays." }),
-  );
+  await screen.findByText(/没有等待|Nothing is waiting/i);
+  expect(screen.queryByRole("textbox", { name: t("searchSessions") })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: t("writeShared") })).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: t("searchSessions") })).toHaveAttribute("href", `/workspaces/${WORKSPACE}/records#sessions`);
+  expect(screen.getByRole("link", { name: "前往 Agent 添加共享记忆" })).toHaveAttribute("href", `/workspaces/${WORKSPACE}/agents`);
 });

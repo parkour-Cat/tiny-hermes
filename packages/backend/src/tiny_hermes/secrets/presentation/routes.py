@@ -24,7 +24,7 @@ from tiny_hermes.secrets.application.service import (
     SecretService,
     UnknownSecret,
 )
-from tiny_hermes.secrets.domain.models import SecretScope, SecretView
+from tiny_hermes.secrets.domain.models import SecretPurpose, SecretScope, SecretView
 from tiny_hermes.shared.errors import AppError
 from tiny_hermes.tenancy.domain.models import Actor
 
@@ -34,12 +34,14 @@ SessionCookie = Annotated[str | None, Cookie(alias=SESSION_COOKIE)]
 
 
 class CreateSecretRequest(BaseModel):
+    purpose: SecretPurpose = SecretPurpose.GENERAL
     name: str = Field(min_length=1, max_length=120)
     scope: Literal["workspace", "platform"]
     plaintext: str = Field(min_length=1, max_length=65_536)
 
 
 class SecretResponse(BaseModel):
+    purpose: SecretPurpose
     id: UUID
     name: str
     scope: str
@@ -54,6 +56,7 @@ class SecretResponse(BaseModel):
         return cls(
             id=secret.id,
             name=secret.name,
+            purpose=secret.purpose,
             scope=secret.scope.value,
             workspace_id=secret.workspace_id,
             status=secret.status.value,
@@ -102,6 +105,7 @@ def secret_router(resources: ApplicationResources) -> APIRouter:
                 SecretScope(payload.scope),
                 payload.plaintext,
                 request.state.request_id,
+                purpose=payload.purpose,
             )
         except ForbiddenSecretAction as error:
             raise forbidden() from error
@@ -141,9 +145,7 @@ def secret_router(resources: ApplicationResources) -> APIRouter:
         user = await authenticate_browser_user(auth, session_token)
         workspace_id = require_workspace_id(selected_workspace)
         try:
-            listed = await secrets.list(
-                _actor(user), workspace_id, request.state.request_id
-            )
+            listed = await secrets.list(_actor(user), workspace_id, request.state.request_id)
         except ForbiddenSecretAction as error:
             raise forbidden() from error
         return [SecretResponse.from_domain(item) for item in listed]
@@ -160,9 +162,7 @@ def secret_router(resources: ApplicationResources) -> APIRouter:
         user = await verify_browser_write(auth, session_token, csrf_token)
         workspace_id = require_workspace_id(selected_workspace)
         try:
-            result = await secrets.rewrap(
-                _actor(user), workspace_id, request.state.request_id
-            )
+            result = await secrets.rewrap(_actor(user), workspace_id, request.state.request_id)
         except ForbiddenSecretAction as error:
             raise forbidden() from error
         except KekMissing as error:

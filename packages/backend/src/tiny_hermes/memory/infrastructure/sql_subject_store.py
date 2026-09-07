@@ -88,9 +88,7 @@ class SqlSubjectStore:
                 MemoryRow.subject_type == subject.caller_type.value,
                 MemoryRow.subject_id == subject.caller_id,
             )
-        rows = (
-            await self._session.scalars(query.order_by(MemoryRow.created_at))
-        ).all()
+        rows = (await self._session.scalars(query.order_by(MemoryRow.created_at))).all()
         return [record_of(row) for row in rows]
 
     async def memories_of_subject(
@@ -125,13 +123,9 @@ class SqlSubjectStore:
             return None
         if row.subject_type is None or row.subject_id is None:  # pragma: no cover
             return None
-        return CallerIdentity(
-            caller_type=CallerType(row.subject_type), caller_id=row.subject_id
-        )
+        return CallerIdentity(caller_type=CallerType(row.subject_type), caller_id=row.subject_id)
 
-    async def replace(
-        self, memory_id: UUID, body: str, now: datetime
-    ) -> MemoryRecord:
+    async def replace(self, memory_id: UUID, body: str, now: datetime) -> MemoryRecord:
         """A new row saying the new thing, and the old one rejected.
 
         Two rows rather than an edit: "this was corrected" and "this was always
@@ -172,9 +166,7 @@ class SqlSubjectStore:
         await self._session.flush()
         return record_of(row)
 
-    async def sessions_of(
-        self, workspace_id: UUID, subject: CallerIdentity
-    ) -> Sequence[UUID]:
+    async def sessions_of(self, workspace_id: UUID, subject: CallerIdentity) -> Sequence[UUID]:
         rows = await self._session.scalars(
             select(SessionRow.id).where(
                 SessionRow.workspace_id == workspace_id,
@@ -183,6 +175,64 @@ class SqlSubjectStore:
             )
         )
         return list(rows.all())
+
+    async def search_external(
+        self, workspace_id: UUID, query: str, channel: str | None, limit: int, offset: int
+    ) -> Sequence[ResolvedSubject]:
+        statement = (
+            select(ExternalIdentityRow, EndUserRow.erased_at)
+            .join(EndUserRow, EndUserRow.id == ExternalIdentityRow.end_user_id)
+            .where(
+                ExternalIdentityRow.workspace_id == workspace_id,
+                EndUserRow.workspace_id == workspace_id,
+                ExternalIdentityRow.external_user_id.icontains(query, autoescape=True),
+            )
+        )
+        if channel is not None:
+            statement = statement.where(ExternalIdentityRow.channel == channel)
+        found = await self._session.execute(
+            statement.order_by(ExternalIdentityRow.external_user_id, ExternalIdentityRow.id)
+            .limit(limit)
+            .offset(offset)
+        )
+        return [
+            ResolvedSubject(
+                subject_id=identity.end_user_id,
+                channel=identity.channel,
+                external_user_id=identity.external_user_id,
+                erased_at=erased,
+                first_seen_at=identity.created_at,
+            )
+            for identity, erased in found
+        ]
+
+    async def resolve_session(self, workspace_id: UUID, session_id: UUID) -> ResolvedSubject | None:
+        found = (
+            await self._session.execute(
+                select(ExternalIdentityRow, EndUserRow.erased_at)
+                .join(EndUserRow, EndUserRow.id == ExternalIdentityRow.end_user_id)
+                .join(SessionRow, SessionRow.caller_id == EndUserRow.id)
+                .where(
+                    SessionRow.id == session_id,
+                    SessionRow.workspace_id == workspace_id,
+                    SessionRow.caller_type == CallerType.END_USER.value,
+                    EndUserRow.workspace_id == workspace_id,
+                    ExternalIdentityRow.workspace_id == workspace_id,
+                )
+                .order_by(ExternalIdentityRow.created_at, ExternalIdentityRow.id)
+                .limit(1)
+            )
+        ).first()
+        if found is None:
+            return None
+        identity, erased = found
+        return ResolvedSubject(
+            subject_id=identity.end_user_id,
+            channel=identity.channel,
+            external_user_id=identity.external_user_id,
+            erased_at=erased,
+            first_seen_at=identity.created_at,
+        )
 
     async def resolve_external(
         self, workspace_id: UUID, channel: str, external_user_id: str
@@ -221,9 +271,7 @@ class SqlSubjectStore:
             first_seen_at=found.created_at,
         )
 
-    async def subject_type_of(
-        self, workspace_id: UUID, subject_id: UUID
-    ) -> CallerType | None:
+    async def subject_type_of(self, workspace_id: UUID, subject_id: UUID) -> CallerType | None:
         """Which id space this id belongs to, within this workspace.
 
         `end_users` first because that is the subject an administrator acts
@@ -250,9 +298,7 @@ class SqlSubjectStore:
         )
         return CallerType.USER if as_member is not None else None
 
-    async def erase(
-        self, workspace_id: UUID, subject: CallerIdentity
-    ) -> ErasureReport:
+    async def erase(self, workspace_id: UUID, subject: CallerIdentity) -> ErasureReport:
         """Delete this subject's memories, sessions, messages, Runs and files.
 
         In the order the foreign keys allow, and counted before each delete so
@@ -297,9 +343,7 @@ class SqlSubjectStore:
                 delete(ArtifactRow).where(ArtifactRow.session_id.in_(sessions))
             )
             await self._session.execute(
-                delete(SessionMessageRow).where(
-                    SessionMessageRow.session_id.in_(sessions)
-                )
+                delete(SessionMessageRow).where(SessionMessageRow.session_id.in_(sessions))
             )
             # `fk_sessions_head_run` means a Session whose head still points
             # at one of these Runs blocks the delete below — and the head is
@@ -311,9 +355,7 @@ class SqlSubjectStore:
             # here, unconditionally, rather than leaning on the Run having
             # already finished.
             await self._session.execute(
-                update(SessionRow)
-                .where(SessionRow.id.in_(sessions))
-                .values(head_run_id=None)
+                update(SessionRow).where(SessionRow.id.in_(sessions)).values(head_run_id=None)
             )
             # A Run stopped on `waiting_approval` is exactly a Run with a
             # pending row here (`fk_approvals_run`, no cascade) — the same
@@ -321,17 +363,11 @@ class SqlSubjectStore:
             # before the Runs are, for the same reason.
             await self._session.execute(
                 delete(ApprovalRow).where(
-                    ApprovalRow.run_id.in_(
-                        select(RunRow.id).where(RunRow.session_id.in_(sessions))
-                    )
+                    ApprovalRow.run_id.in_(select(RunRow.id).where(RunRow.session_id.in_(sessions)))
                 )
             )
-            await self._session.execute(
-                delete(RunRow).where(RunRow.session_id.in_(sessions))
-            )
-            await self._session.execute(
-                delete(SessionRow).where(SessionRow.id.in_(sessions))
-            )
+            await self._session.execute(delete(RunRow).where(RunRow.session_id.in_(sessions)))
+            await self._session.execute(delete(SessionRow).where(SessionRow.id.in_(sessions)))
         if subject.caller_type is CallerType.END_USER:
             await self._erase_end_user(workspace_id, subject.caller_id)
         await self._session.flush()

@@ -66,10 +66,7 @@ async def _messages(engine: AsyncEngine, session_id: str) -> list[Row[Any]]:
 
 
 def _texts(rows: list[Row[Any]]) -> list[tuple[str, str]]:
-    return [
-        (row.role, "\n".join(part["text"] for part in row.content["parts"]))
-        for row in rows
-    ]
+    return [(row.role, "\n".join(part["text"] for part in row.content["parts"])) for row in rows]
 
 
 @pytest.fixture
@@ -113,6 +110,9 @@ async def test_the_assistant_message_names_the_run_that_produced_it(
     await _worker(engine, Recording()).run_once()
     rows = await _messages(engine, session_id)
     assert [str(row.source_run_id) for row in rows] == [run_id, run_id]
+    response = client.get(f"/api/v1/sessions/{session_id}/messages", headers=scope)
+    assert response.status_code == 200, response.text
+    assert [message["source_run_id"] for message in response.json()] == [run_id, run_id]
     # Allocated by the Session's own counter, the same mechanism the user
     # message already uses, so no new concurrency reasoning is introduced.
     assert [row.sequence for row in rows] == [1, 2]
@@ -159,9 +159,7 @@ async def test_the_second_round_is_told_what_the_first_one_said(
     )
     await _worker(engine, model).run_once()
 
-    assert [(entry.role, entry.text) for entry in model.seen[0].messages] == [
-        ("user", "hello")
-    ]
+    assert [(entry.role, entry.text) for entry in model.seen[0].messages] == [("user", "hello")]
     assert [(entry.role, entry.text) for entry in model.seen[1].messages] == [
         ("user", "hello"),
         ("assistant", "thinking"),
@@ -173,9 +171,9 @@ async def test_a_persistent_sessions_second_run_sees_the_first(
 ) -> None:
     """What `session_mode=persistent` has been promising since phase 2A."""
     _submit(client, scope, session_id, "hello")
-    await _worker(engine, Recording(
-        ModelResponse(stop_reason=StopReason.COMPLETED, text="the first answer")
-    )).run_once()
+    await _worker(
+        engine, Recording(ModelResponse(stop_reason=StopReason.COMPLETED, text="the first answer"))
+    ).run_once()
 
     _submit(client, scope, session_id, "and again")
     second = Recording()
@@ -206,9 +204,9 @@ async def test_an_ephemeral_sessions_second_run_does_not(
     session_id = str(created.json()["id"])
 
     _submit(client, scope, session_id, "hello")
-    await _worker(engine, Recording(
-        ModelResponse(stop_reason=StopReason.COMPLETED, text="the first answer")
-    )).run_once()
+    await _worker(
+        engine, Recording(ModelResponse(stop_reason=StopReason.COMPLETED, text="the first answer"))
+    ).run_once()
 
     _submit(client, scope, session_id, "and again")
     second = Recording()

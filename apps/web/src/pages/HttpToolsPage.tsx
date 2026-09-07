@@ -1,3 +1,5 @@
+import { CapabilityUsage } from "./CapabilityUsage";
+import { CredentialPicker } from "../forms/CredentialPicker";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Button, Card, Form, Input, Modal, Space, Tag, Typography } from "antd";
 import { useState } from "react";
@@ -8,6 +10,7 @@ import type { HttpToolResponse, HttpToolVersionResponse } from "../api/types";
 import { useT } from "../i18n/locale";
 import { EmptyState } from "../ui/EmptyState";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
+import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
 
 type ToolValues = {
   name: string;
@@ -30,12 +33,16 @@ type ToolValues = {
  * who can approve it.
  */
 export function HttpToolsPage() {
+  const { writer } = useWorkspacePermissions();
   const t = useT();
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
   const [modal, contextHolder] = Modal.useModal();
   const [form] = Form.useForm<ToolValues>();
   const [error, setError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [search, setSearch] = useState("");
+  const documentValue = Form.useWatch("document", form);
   const [missingHost, setMissingHost] = useState<string | null>(null);
   const scope = { workspace: workspaceId ?? "" };
 
@@ -83,6 +90,7 @@ export function HttpToolsPage() {
       }),
     onSuccess: () => {
       form.resetFields();
+      setAdding(false);
       refresh();
     },
     onError: (caught) => {
@@ -94,6 +102,11 @@ export function HttpToolsPage() {
       setError(problemMessage(caught, t));
     },
   });
+
+  const preview = useMutation({
+    mutationFn: (document: string) => api<{ title: string; operations: HttpToolVersionResponse["operations"] }>("/api/v1/http-tools/preview", { ...scope, method: "POST", body: JSON.stringify({ document }) }).then((data) => ({ ...data, document })),
+  });
+  const matching = (tools.data ?? []).filter((tool) => `${tool.name} ${tool.base_url}`.toLowerCase().includes(search.trim().toLowerCase()));
 
   const withdraw = useMutation({
     mutationFn: (input: { toolId: string; versionId: string }) =>
@@ -119,15 +132,12 @@ export function HttpToolsPage() {
   return (
     <>
       {contextHolder}
-      <div className="page-heading">
-        <div>
-          <Typography.Paragraph type="secondary">{t("httpToolsIntro")}</Typography.Paragraph>
-        </div>
-      </div>
-      {error === null ? null : (
+      <Input.Search className="page-alert" aria-label={t("catalogSearch")} placeholder={t("catalogSearch")} value={search} onChange={(event) => setSearch(event.target.value)} allowClear />
+      {versions.isError && <Alert type="error" title={problemMessage(versions.error, t)} action={<Button onClick={() => void versions.refetch()}>{t("retry")}</Button>} />}
+      {error === null || adding ? null : (
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}
-      {missingHost === null ? null : (
+      {missingHost === null || adding ? null : (
         <Alert
           className="page-alert"
           type="info"
@@ -136,7 +146,9 @@ export function HttpToolsPage() {
         />
       )}
 
-      <Card title={t("httpToolRegister")} variant="borderless" className="page-alert">
+      <Button disabled={!writer} type="primary" className="page-alert" onClick={() => { setError(null); setMissingHost(null); setAdding(true); }}>{t("addHttpTool")}</Button>
+      <Modal title={t("addHttpTool")} open={adding} footer={null} onCancel={() => { if (!register.isPending) setAdding(false); }}>
+        {error === null ? null : <Alert type="error" title={error} showIcon />}
         <Form<ToolValues>
           form={form}
           layout="vertical"
@@ -164,7 +176,7 @@ export function HttpToolsPage() {
             label={t("httpToolCredential")}
             extra={t("httpToolCredentialHint")}
           >
-            <Input />
+            <CredentialPicker purpose="tool" />
           </Form.Item>
           <Form.Item
             name="document"
@@ -175,17 +187,20 @@ export function HttpToolsPage() {
             <Input.TextArea rows={8} />
           </Form.Item>
           <Form.Item>
+            <Button onClick={() => preview.mutate(form.getFieldValue("document") ?? "")} loading={preview.isPending}>{t("httpPreview")}</Button>
+            {preview.isError && <Alert type="error" title={problemMessage(preview.error, t)} />}
+            {preview.data && preview.data.document === documentValue && <div><Typography.Paragraph>{t("httpPreviewHint")}</Typography.Paragraph>{preview.data.operations.map((operation) => <Tag key={operation.operation_id}>{operation.method} {operation.operation_id} · {t(operation.read_only ? "httpReadOnly" : "httpToolWrites")}</Tag>)}</div>}
             <Button type="primary" htmlType="submit" loading={register.isPending}>
               {t("httpToolRegister")}
             </Button>
           </Form.Item>
         </Form>
-      </Card>
+      </Modal>
 
-      {(tools.data ?? []).length === 0 ? (
+      {tools.isPending ? <Card loading /> : matching.length === 0 ? (
         <EmptyState title={t("emptyHttpTools")} />
       ) : (
-        (tools.data ?? []).map((tool) => (
+        matching.map((tool) => (
           <Card
             key={tool.id}
             title={
@@ -204,9 +219,10 @@ export function HttpToolsPage() {
               <div key={version.id} className="skill-version-row">
                 <Space wrap>
                   <Tag>v{version.version_number}</Tag>
+                  <CapabilityUsage kind="http_tools" versionId={version.id} />
                   <Typography.Text>{version.title}</Typography.Text>
                   {version.bindable ? null : <Tag color="default">{version.status}</Tag>}
-                  {version.bindable ? (
+                  {version.bindable && writer ? (
                     <Button
                       size="small"
                       loading={withdraw.isPending}

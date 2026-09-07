@@ -39,12 +39,15 @@ from tiny_hermes.runs.application.scheduler import (
     SchedulerSettings,
 )
 from tiny_hermes.runs.application.worker import WorkerRuntime, WorkerSettings
+from tiny_hermes.runs.domain.models import RunCapabilities
 from tiny_hermes.runs.infrastructure.deterministic_model import (
     DeterministicModelProvider,
 )
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 from tiny_hermes.runs.infrastructure.sql_children import SqlChildRuns
+from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.model import ModelRequest, ModelResponse
+from tiny_hermes.runs.ports.store import ClaimedRun, ClaimRunCommand
 
 from ..conftest import VALID_SPEC
 
@@ -227,6 +230,47 @@ async def test_one_delegation_creates_two_children_that_each_run(
     assert len(children) == 2
     assert [row.depth for row in children] == [1, 1]
     assert [row.status for row in children] == ["completed", "completed"]
+
+
+async def test_concurrent_children_spend_the_same_remaining_tool_call(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine,
+    session_for: Callable[[str], str], coordinator: str,
+) -> None:
+    workspace_id = scope["X-Workspace-Id"]
+    parent = client.post(
+        "/api/v1/runs", headers={**scope, "Idempotency-Key": "shared-tool-cap"},
+        json={"session_id": session_for(coordinator), "input": "reader,checker"},
+    ).json()["id"]
+    await _worker(engine, workspace_id, "parent").run_once()
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    children: list[ClaimedRun] = []
+    for n in range(2):
+        async with sessions.begin() as db:
+            child = await SqlRunStore(db).claim_head(ClaimRunCommand(
+                workspace_id=UUID(workspace_id), worker_id=f"child-{n}",
+                lease_seconds=30, request_id=f"claim-child-{n}",
+                capabilities=RunCapabilities(can_control=True, can_retry=True),
+            ))
+        assert child is not None
+        children.append(child)
+    assert all(child.run.budget_root_run_id == UUID(parent) for child in children)
+    async with sessions.begin() as db:
+        count = await db.scalar(text(
+            "UPDATE run_budget_scopes SET max_tool_calls = 2 "
+            "WHERE root_run_id = :r RETURNING consumed_tool_calls"
+        ), {"r": UUID(parent)})
+        assert count == 1  # The parent already delegated once.
+
+    async def reserve(index: int) -> bool:
+        child = children[index % 2]
+        async with sessions.begin() as db:
+            return await SqlRunStore(db).reserve_tool_call(
+                UUID(workspace_id), child.run.id, child.lease_id,
+            )
+
+    assert sum(await asyncio.gather(*(reserve(n) for n in range(8)))) == 1
+    snapshot = client.get(f"/api/v1/runs/{parent}", headers=scope).json()
+    assert snapshot["budget"]["consumed_tool_calls"] == 2
 
 
 async def test_a_child_holds_its_own_session_and_therefore_its_own_workspace(

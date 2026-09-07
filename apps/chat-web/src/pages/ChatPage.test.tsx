@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
 import { ChatPage } from "./ChatPage";
 import { rememberSessionId } from "../chat/localSessions";
@@ -16,6 +16,174 @@ const ALIAS = "darwin";
 const SESSION = "33333333-4444-4555-8666-777777777777";
 const RUN = "55555555-6666-4777-8888-999999999999";
 const APPROVAL = "77777777-8888-4999-a000-111111111111";
+
+const IDENTITY = { end_user_id: "draft-user-a", workspace_id: "draft-workspace" };
+beforeEach(() => {
+  window.sessionStorage.clear();
+  server.use(http.get("/api/v1/end-user/me", () => HttpResponse.json(IDENTITY)));
+});
+
+test("a refreshed conversation restores its draft only after confirming the same identity", async () => {
+  rememberSessionId(ALIAS, SESSION);
+  server.use(http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([])));
+  const first = renderChat(`/${ALIAS}/${SESSION}`);
+  await userEvent.type(await screen.findByLabelText("写给智能体"), "只给当前用户恢复");
+  first.unmount();
+  const second = renderChat(`/${ALIAS}/${SESSION}`);
+  expect(await screen.findByLabelText("写给智能体")).toHaveValue("只给当前用户恢复");
+  second.unmount();
+  server.use(http.get("/api/v1/end-user/me", () => HttpResponse.json({ ...IDENTITY, end_user_id: "draft-user-b" })));
+  const other = renderChat(`/${ALIAS}/${SESSION}`);
+  expect(await screen.findByLabelText("写给智能体")).toHaveValue("");
+  other.unmount();
+  server.use(http.get("/api/v1/end-user/me", () => HttpResponse.json({ detail: "Session expired" }, { status: 401 })));
+  renderChat(`/${ALIAS}/${SESSION}`);
+  expect(await screen.findByText("Session expired")).toBeInTheDocument();
+  expect(screen.queryByLabelText("写给智能体")).toBeNull();
+});
+
+test("a lost first-send response survives refresh and retries once with the original key", async () => {
+  const keys: (string | null)[] = [];
+  server.use(
+    http.post(`/api/v1/end-user/agents/${ALIAS}/sessions`, () => HttpResponse.json(sessionRow(), { status: 201 })),
+    http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([])),
+    http.post(`/api/v1/end-user/sessions/${SESSION}/runs`, ({ request }) => {
+      keys.push(request.headers.get("Idempotency-Key"));
+      return keys.length === 1 ? HttpResponse.error() : HttpResponse.json(finishedRun(), { status: 201 });
+    }),
+    http.get(`/api/v1/end-user/runs/${RUN}`, () => HttpResponse.json(finishedRun())),
+  );
+  const first = renderChat(`/${ALIAS}`);
+  await userEvent.type(await screen.findByLabelText("写给智能体"), "首次发送后响应丢失");
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(keys).toHaveLength(1));
+  await waitFor(() => expect(screen.getByRole("button", { name: "发送" })).toBeEnabled());
+  first.unmount();
+  const restored = renderChat(`/${ALIAS}/${SESSION}`);
+  expect(await screen.findByLabelText("写给智能体")).toHaveValue("首次发送后响应丢失");
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(keys).toHaveLength(2));
+  expect(keys[1]).toBe(keys[0]);
+  await waitFor(() => expect(screen.getByLabelText("写给智能体")).toHaveValue(""));
+  restored.unmount();
+  const afterSuccess = renderChat(`/${ALIAS}/${SESSION}`);
+  expect(await screen.findByLabelText("写给智能体")).toHaveValue("");
+  afterSuccess.unmount();
+  renderChat(`/${ALIAS}`);
+  expect(await screen.findByLabelText("写给智能体")).toHaveValue("");
+});
+
+test("cached identity cannot reveal a draft while a returning page checks the current cookie", async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const first = renderChat(`/${ALIAS}`, client);
+  await userEvent.type(await screen.findByLabelText("写给智能体"), "不要显示旧身份的草稿");
+  first.unmount();
+  let release!: () => void;
+  let checking = false;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  server.use(http.get("/api/v1/end-user/me", async () => {
+    checking = true;
+    await pending;
+    return HttpResponse.json({ ...IDENTITY, end_user_id: "new-cookie-owner" });
+  }));
+  renderChat(`/${ALIAS}`, client);
+  await waitFor(() => expect(checking).toBe(true));
+  try { expect(screen.queryByLabelText("写给智能体")).toBeNull(); }
+  finally { release(); }
+  expect(await screen.findByLabelText("写给智能体")).toHaveValue("");
+});
+
+test("changing identity cannot display the previous owner's cached conversation", async () => {
+  rememberSessionId(ALIAS, SESSION);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  server.use(http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([
+    { role: "assistant", parts: [{ type: "text", text: "旧账号的私有对话内容" }] },
+  ])));
+  const first = renderChat(`/${ALIAS}/${SESSION}`, client);
+  expect(await screen.findByText("旧账号的私有对话内容")).toBeInTheDocument();
+  first.unmount();
+  server.use(
+    http.get("/api/v1/end-user/me", () => HttpResponse.json({ ...IDENTITY, end_user_id: "other-owner" })),
+    http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json({ detail: "Forbidden" }, { status: 403 })),
+  );
+  renderChat(`/${ALIAS}/${SESSION}`, client);
+  await screen.findByLabelText("写给智能体");
+  expect(screen.queryByText("旧账号的私有对话内容")).toBeNull();
+});
+
+test("clearing a failed message makes an identical later message a new request", async () => {
+  rememberSessionId(ALIAS, SESSION);
+  const keys: (string | null)[] = [];
+  server.use(
+    http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([])),
+    http.post(`/api/v1/end-user/sessions/${SESSION}/runs`, ({ request }) => {
+      keys.push(request.headers.get("Idempotency-Key"));
+      return HttpResponse.error();
+    }),
+  );
+  renderChat(`/${ALIAS}/${SESSION}`);
+  const input = await screen.findByLabelText("写给智能体");
+  await userEvent.type(input, "重新提出同样的问题");
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(input).toBeEnabled());
+  await userEvent.clear(input);
+  await userEvent.type(input, "重新提出同样的问题");
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(keys).toHaveLength(2));
+  expect(keys[1]).not.toBe(keys[0]);
+});
+
+for (const limit of [0, 50]) {
+  test(`storage limited to ${limit} characters preserves first-send input and refuses unsafe submission`, async () => {
+    let created = 0;
+    let runs = 0;
+    server.use(
+      http.post(`/api/v1/end-user/agents/${ALIAS}/sessions`, () => {
+        created += 1; return HttpResponse.json(sessionRow(), { status: 201 });
+      }),
+      http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([])),
+      http.post(`/api/v1/end-user/sessions/${SESSION}/runs`, () => {
+        runs += 1; return HttpResponse.json(finishedRun(), { status: 201 });
+      }),
+      http.get(`/api/v1/end-user/runs/${RUN}`, () => HttpResponse.json(finishedRun())),
+    );
+    renderChat(`/${ALIAS}`);
+    const input = await screen.findByLabelText("写给智能体");
+    const original = Storage.prototype.setItem;
+    const storage = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+      if (value.length > limit) throw new DOMException("Quota exceeded", "QuotaExceededError");
+      original.call(this, key, value);
+    });
+    try {
+      await userEvent.type(input, "保留我的输入");
+      await userEvent.click(screen.getByRole("button", { name: "发送" }));
+      expect(await screen.findByText("无法保存发送状态，本次未发送。请复制输入，重新打开页面后重试。")).toBeInTheDocument();
+      expect(screen.getByLabelText("写给智能体")).toHaveValue("保留我的输入");
+      expect(created).toBe(0);
+      expect(runs).toBe(0);
+    } finally { storage.mockRestore(); }
+    await userEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(runs).toBe(1));
+  });
+}
+
+test("reopening a conversation exposes its saved files without an active run", async () => {
+  rememberSessionId(ALIAS, SESSION);
+  server.use(
+    http.get("/api/v1/end-user/agents", () => HttpResponse.json([])),
+    http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([])),
+    http.get(`/api/v1/end-user/sessions/${SESSION}/files`, () => HttpResponse.json({
+      revision_id: "revision-1", items: [{ path: "notes/summary.md", size_bytes: 42 }],
+    })),
+    http.get(`/api/v1/end-user/sessions/${SESSION}/files/content`, ({ request }) => {
+      expect(new URL(request.url).searchParams.get("revision_id")).toBe("revision-1");
+      return HttpResponse.json({ code: "workspace_files_changed" }, { status: 409 });
+    }),
+  );
+  renderChat(`/${ALIAS}/${SESSION}`);
+  await userEvent.click(await screen.findByRole("button", { name: "下载 notes/summary.md" }));
+  expect(await screen.findByText("文件已更新，请从刷新后的列表重新下载。")).toBeInTheDocument();
+});
 
 const BUDGET = {
   max_execution_seconds: 600,
@@ -77,9 +245,8 @@ function finishedRun(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderChat(path: string): void {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
+function renderChat(path: string, client = new QueryClient({ defaultOptions: { queries: { retry: false } } })): ReturnType<typeof render> {
+  return render(
     <ChatTheme>
       <LocaleProvider>
         <QueryClientProvider client={client}>
@@ -101,7 +268,7 @@ test("an empty conversation offers the composer and no console chrome", async ()
   renderChat(`/${ALIAS}`);
 
   expect(await screen.findByLabelText("写给智能体")).toBeInTheDocument();
-  expect(screen.getByText(/直接说要做什么/)).toBeInTheDocument();
+  expect(screen.getByText("有什么需要帮忙的？")).toBeInTheDocument();
   expect(screen.queryByText("成员")).toBeNull();
   expect(screen.queryByText("API 密钥")).toBeNull();
   expect(document.querySelector("select")).toBeNull();
@@ -141,6 +308,53 @@ test("sending the first message creates a session and the reply appears", async 
   expect(submitted[0]?.key).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
   expect(submitted[0]?.body).toEqual({ input: "Hello" });
   expect(await screen.findByText("Hi there.")).toBeInTheDocument();
+});
+
+test("a failed send keeps the draft and can be retried after the service recovers", async () => {
+  rememberSessionId(ALIAS, SESSION);
+  let recovered = false;
+  const submitted: unknown[] = [];
+  server.use(
+    http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([])),
+    http.post(`/api/v1/end-user/sessions/${SESSION}/runs`, async ({ request }) => {
+      if (!recovered) return HttpResponse.json({ detail: "Temporarily unavailable" }, { status: 503 });
+      submitted.push(await request.json());
+      return HttpResponse.json(finishedRun(), { status: 201 });
+    }),
+    http.get(`/api/v1/end-user/runs/${RUN}`, () => HttpResponse.json(finishedRun())),
+  );
+  renderChat(`/${ALIAS}/${SESSION}`);
+  const input = await screen.findByLabelText("写给智能体");
+  await userEvent.type(input, "请保留这段输入");
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  expect(await screen.findByText("Temporarily unavailable")).toBeInTheDocument();
+  expect(input).toHaveValue("请保留这段输入");
+  recovered = true;
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(submitted).toEqual([{ input: "请保留这段输入" }]));
+  await waitFor(() => expect(input).toHaveValue(""));
+});
+
+test("retrying a lost send response reuses the request key to avoid duplicate work", async () => {
+  rememberSessionId(ALIAS, SESSION);
+  const keys: (string | null)[] = [];
+  server.use(
+    http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([])),
+    http.post(`/api/v1/end-user/sessions/${SESSION}/runs`, ({ request }) => {
+      keys.push(request.headers.get("Idempotency-Key"));
+      return keys.length === 1 ? HttpResponse.error() : HttpResponse.json(finishedRun(), { status: 201 });
+    }),
+    http.get(`/api/v1/end-user/runs/${RUN}`, () => HttpResponse.json(finishedRun())),
+  );
+  renderChat(`/${ALIAS}/${SESSION}`);
+  await userEvent.type(await screen.findByLabelText("写给智能体"), "只执行一次");
+  const send = screen.getByRole("button", { name: "发送" });
+  await userEvent.click(send);
+  await waitFor(() => expect(send).toBeEnabled());
+  await userEvent.click(send);
+  await waitFor(() => expect(keys).toHaveLength(2));
+  expect(keys[0]).toBeTruthy();
+  expect(keys[1]).toBe(keys[0]);
 });
 
 test("reopening the address for a known session shows the same conversation", async () => {
@@ -293,8 +507,8 @@ test("session-rail actions stay behind the row menu, backed by this device's mem
   expect(await screen.findByRole("button", { name: "Summarize yesterday" })).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "会话操作" }));
   expect(screen.getByRole("dialog", { name: "会话操作" })).toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button", { name: "删除" }));
-  await userEvent.click(screen.getByRole("button", { name: "确认删除" }));
+  await userEvent.click(screen.getByRole("button", { name: "从列表移除" }));
+  await userEvent.click(screen.getByRole("button", { name: "确认移除" }));
 
   expect(screen.queryByRole("button", { name: "Summarize yesterday" })).toBeNull();
 });

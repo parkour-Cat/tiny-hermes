@@ -6,7 +6,9 @@ from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, exists, func, select, text, update
+from sqlalchemy import Text, column, delete, exists, func, or_, select, text, update
+from sqlalchemy import cast as sql_cast
+from sqlalchemy.dialects.postgresql import JSONB, JSONPATH
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,6 +79,7 @@ from tiny_hermes.runs.domain.models import (
     RunCapabilities,
     RunEvent,
     RunEventType,
+    RunListQuery,
     RunPurpose,
     RunSignal,
     RunSnapshot,
@@ -185,9 +188,7 @@ _PARKED_STATUSES = frozenset(state.value for state in WAITING_HEAD_STATES)
 #: 一份就等着两边哪天不一样。`unfinished_work` 用它做事前判断：`/new` 要么能
 #: 把整个 Session 清干净，要么一个 Run 都不动。
 _CANCELLABLE_STATUSES = frozenset(
-    state.value
-    for (state, signal) in TRANSITIONS
-    if signal is RunSignal.CANCEL_REQUESTED
+    state.value for (state, signal) in TRANSITIONS if signal is RunSignal.CANCEL_REQUESTED
 )
 
 
@@ -245,7 +246,6 @@ class SqlRunStore:
         )
         await self._session.flush()
 
-
     async def create_session(self, command: CreateSessionCommand) -> SessionSnapshot:
         agent = await self._session.scalar(
             select(AgentRow).where(
@@ -281,9 +281,7 @@ class SqlRunStore:
         )
         return _session_snapshot(row)
 
-    async def get_session(
-        self, workspace_id: UUID, session_id: UUID
-    ) -> SessionSnapshot | None:
+    async def get_session(self, workspace_id: UUID, session_id: UUID) -> SessionSnapshot | None:
         row = await self._session.scalar(
             select(SessionRow).where(
                 SessionRow.id == session_id, SessionRow.workspace_id == workspace_id
@@ -430,11 +428,65 @@ class SqlRunStore:
         return None if row is None else await self._snapshot(row, capabilities)
 
     async def list_runs(
-        self, workspace_id: UUID, session_id: UUID | None, capabilities: RunCapabilities
+        self,
+        workspace_id: UUID,
+        session_id: UUID | None,
+        capabilities: RunCapabilities,
+        query: RunListQuery | None = None,
     ) -> Sequence[RunSnapshot]:
         statement = select(RunRow).where(RunRow.workspace_id == workspace_id)
         if session_id is not None:
             statement = statement.where(RunRow.session_id == session_id)
+        if query is not None:
+            if query.agent_id is not None or query.text:
+                statement = statement.join(SessionRow, SessionRow.id == RunRow.session_id).join(
+                    AgentRow, AgentRow.id == SessionRow.agent_id
+                )
+            if query.agent_id is not None:
+                statement = statement.where(SessionRow.agent_id == query.agent_id)
+            if query.status is not None:
+                statement = statement.where(RunRow.status == query.status)
+            if query.since is not None:
+                statement = statement.where(RunRow.created_at >= query.since)
+            if query.until is not None:
+                statement = statement.where(RunRow.created_at < query.until)
+            if query.text:
+                # Search only visible user text, never tool payloads or reasoning.
+                parts = func.jsonb_array_elements_text(
+                    func.jsonb_path_query_array(
+                        sql_cast(SessionMessageRow.content, JSONB),
+                        sql_cast('$.parts[*] ? (@.type == "text").text', JSONPATH),
+                    )
+                ).table_valued(column("value", Text), joins_implicitly=True)
+                request_text = (
+                    select(func.string_agg(parts.c.value, " "))
+                    .correlate(SessionMessageRow)
+                    .scalar_subquery()
+                )
+                first_text = (
+                    select(request_text)
+                    .where(
+                        SessionMessageRow.source_run_id == RunRow.id,
+                        SessionMessageRow.workspace_id == workspace_id,
+                        SessionMessageRow.role == "user",
+                        SessionMessageRow.redacted.is_(False),
+                        SessionMessageRow.withdrawn_at.is_(None),
+                    )
+                    .order_by(SessionMessageRow.sequence)
+                    .limit(1)
+                    .correlate(RunRow)
+                    .scalar_subquery()
+                )
+                statement = statement.where(
+                    or_(
+                        first_text.icontains(query.text, autoescape=True),
+                        sql_cast(RunRow.id, Text).icontains(query.text, autoescape=True),
+                        AgentRow.name.icontains(query.text, autoescape=True),
+                    )
+                )
+            if query.limit is not None:
+                statement = statement.limit(query.limit)
+            statement = statement.offset(query.offset)
         # Two different questions, and they want opposite orders.
         #
         # Filtered to one Session, this list **is** the queue: `queue.position`
@@ -464,7 +516,9 @@ class SqlRunStore:
         rows = (await self._session.scalars(statement.order_by(*order))).all()
         return [await self._snapshot(row, capabilities) for row in rows]
 
-    async def usage_summary(self, workspace_id: UUID) -> WorkspaceUsageSummary:
+    async def usage_summary(
+        self, workspace_id: UUID, since: datetime | None = None, until: datetime | None = None
+    ) -> WorkspaceUsageSummary:
         """§6's usage half: a workspace's spend, grouped by `cost_quality`.
 
         Joined on `RunBudgetScopeRow.root_run_id == RunRow.id` rather than
@@ -492,6 +546,10 @@ class SqlRunStore:
             .group_by(RunBudgetScopeRow.cost_quality)
             .order_by(RunBudgetScopeRow.cost_quality)
         )
+        if since is not None:
+            statement = statement.where(RunRow.created_at >= since)
+        if until is not None:
+            statement = statement.where(RunRow.created_at < until)
         rows = (await self._session.execute(statement)).all()
         by_quality = tuple(
             WorkspaceUsageByQuality(
@@ -516,7 +574,7 @@ class SqlRunStore:
             ) in rows
         )
         return WorkspaceUsageSummary(
-            window=USAGE_WINDOW,
+            window=USAGE_WINDOW if since is None and until is None else "root_created_at",
             by_cost_quality=by_quality,
             total_run_count=sum(item.run_count for item in by_quality),
             total_model_calls=sum(item.consumed_model_calls for item in by_quality),
@@ -564,9 +622,7 @@ class SqlRunStore:
         await self._forget_cached_sequence(command.run_id)
         return tuple(written)
 
-    async def event_window(
-        self, workspace_id: UUID, run_id: UUID
-    ) -> RunEventWindow | None:
+    async def event_window(self, workspace_id: UUID, run_id: UUID) -> RunEventWindow | None:
         run = await self._session.scalar(
             select(RunRow).where(RunRow.id == run_id, RunRow.workspace_id == workspace_id)
         )
@@ -724,10 +780,7 @@ class SqlRunStore:
                 raise InvalidStateMetadata(
                     "the run's recorded cleanup intent does not match this confirmation"
                 )
-        if (
-            command.signal is RunSignal.RECOVERY_FAILED
-            and command.confirmed_sandbox_id is not None
-        ):
+        if command.signal is RunSignal.RECOVERY_FAILED and command.confirmed_sandbox_id is not None:
             # The conflict path's confirmation: same shape, different target.
             if (
                 run.workspace_cleanup_target != WorkspaceCleanupTarget.FAILED_CONFLICT.value
@@ -748,8 +801,7 @@ class SqlRunStore:
             payload=dict(command.payload),
         )
         if command.signal is RunSignal.LIMIT_CLEANUP_CONFIRMED or (
-            command.signal is RunSignal.RECOVERY_FAILED
-            and command.confirmed_sandbox_id is not None
+            command.signal is RunSignal.RECOVERY_FAILED and command.confirmed_sandbox_id is not None
         ):
             # Cleared only in the same transition that reaches the target.
             run.workspace_cleanup_target = None
@@ -833,9 +885,7 @@ class SqlRunStore:
             request_id,
         )
 
-    async def execution_context(
-        self, workspace_id: UUID, run_id: UUID
-    ) -> ExecutionContext | None:
+    async def execution_context(self, workspace_id: UUID, run_id: UUID) -> ExecutionContext | None:
         """Read everything one round needs, and nothing a Worker may write."""
         run = await self._session.scalar(
             select(RunRow).where(RunRow.id == run_id, RunRow.workspace_id == workspace_id)
@@ -1195,9 +1245,7 @@ class SqlRunStore:
 
     async def latest_summary(self, session_id: UUID) -> StoredSummary | None:
         row = await self._session.scalar(
-            select(SessionCompactionRow).where(
-                SessionCompactionRow.session_id == session_id
-            )
+            select(SessionCompactionRow).where(SessionCompactionRow.session_id == session_id)
         )
         if row is None:
             return None
@@ -1210,9 +1258,7 @@ class SqlRunStore:
             model=row.model,
         )
 
-    async def save_summary(
-        self, summary: StoredSummary, *, workspace_id: UUID
-    ) -> None:
+    async def save_summary(self, summary: StoredSummary, *, workspace_id: UUID) -> None:
         """Upsert on `session_id`, per `uq_session_compactions_session` — the
         constraint that makes "only the latest is kept" true rather than a
         claim this method merely intends.
@@ -1260,9 +1306,7 @@ class SqlRunStore:
             update(RunBudgetScopeRow)
             .where(RunBudgetScopeRow.root_run_id == command.root_run_id)
             .values(
-                consumed_model_calls=(
-                    RunBudgetScopeRow.consumed_model_calls + command.model_calls
-                ),
+                consumed_model_calls=(RunBudgetScopeRow.consumed_model_calls + command.model_calls),
                 consumed_tokens=RunBudgetScopeRow.consumed_tokens + command.tokens,
                 version=RunBudgetScopeRow.version + 1,
             )
@@ -1350,9 +1394,7 @@ class SqlRunStore:
             .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
             .where(SkillVersionRow.id.in_(wanted))
         )
-        rows = {
-            version_id: (manifest, name) for version_id, manifest, name in found.all()
-        }
+        rows = {version_id: (manifest, name) for version_id, manifest, name in found.all()}
         skills: list[BoundSkill] = []
         for version_id in wanted:
             row = rows.get(version_id)
@@ -1390,9 +1432,7 @@ class SqlRunStore:
         if session is None:  # pragma: no cover - the caller read it
             return ()
         agent_id = await self._session.scalar(
-            select(AgentVersionRow.agent_id).where(
-                AgentVersionRow.id == run.agent_version_id
-            )
+            select(AgentVersionRow.agent_id).where(AgentVersionRow.id == run.agent_version_id)
         )
         if agent_id is None:  # pragma: no cover - a Run always has a version
             return ()
@@ -1406,9 +1446,7 @@ class SqlRunStore:
                 caller_id=session.caller_id,
             ),
         ):
-            found.extend(
-                await library.relevant_in(scope, query, limit=MEMORY_READ_LIMIT)
-            )
+            found.extend(await library.relevant_in(scope, query, limit=MEMORY_READ_LIMIT))
         return tuple(found)
 
     async def _pinned_prices(self, version_id: UUID | None) -> TokenPrices | None:
@@ -1465,8 +1503,7 @@ class SqlRunStore:
                 continue
             _, documents, name, base_url, credential_ref = row
             declared = {
-                str(entry["operation_id"]): entry
-                for entry in cast(list[dict[str, Any]], documents)
+                str(entry["operation_id"]): entry for entry in cast(list[dict[str, Any]], documents)
             }
             for operation_id in binding.operations:
                 document = declared.get(operation_id)
@@ -1559,9 +1596,36 @@ class SqlRunStore:
             .values(last_heartbeat_at=now)
             .execution_options(synchronize_session=False)
         )
-        return RenewedLease(
-            lease_id=command.lease_id, version=renewed, expires_at=expires_at
+        return RenewedLease(lease_id=command.lease_id, version=renewed, expires_at=expires_at)
+
+    async def reserve_tool_call(self, workspace_id: UUID, run_id: UUID, lease_id: UUID) -> bool:
+        """Reserve an attempt before dispatch; children and retries share this row.
+
+        The reservation survives uncertain tool outcomes. Refunding after a
+        timeout would allow an operation that may have run to evade the limit.
+        """
+        run = await self._lock_run(workspace_id, run_id)
+        if run is None:
+            raise UnknownRun
+        lease = await self._lock_lease(lease_id, run_id)
+        now = datetime.now(UTC)
+        if lease is None or lease.released_at is not None or lease.expires_at <= now:
+            raise LeaseLost
+        reserved = await self._session.scalar(
+            update(RunBudgetScopeRow)
+            .where(
+                RunBudgetScopeRow.root_run_id == run.budget_root_run_id,
+                RunBudgetScopeRow.consumed_tool_calls < RunBudgetScopeRow.max_tool_calls,
+                RunBudgetScopeRow.elapsed_deadline_at > now,
+            )
+            .values(
+                consumed_tool_calls=RunBudgetScopeRow.consumed_tool_calls + 1,
+                version=RunBudgetScopeRow.version + 1,
+            )
+            .returning(RunBudgetScopeRow.root_run_id)
+            .execution_options(synchronize_session=False)
         )
+        return reserved is not None
 
     async def record_slice(self, command: RecordSliceCommand) -> RunSnapshot:
         """Persist one slice's checkpoint, accounting, state change, and lease."""
@@ -1880,9 +1944,7 @@ class SqlRunStore:
             lease_expires_at=expires_at,
         )
 
-    async def _select_claimable(
-        self, command: ClaimRunCommand, now: datetime
-    ) -> RunRow | None:
+    async def _select_claimable(self, command: ClaimRunCommand, now: datetime) -> RunRow | None:
         """Queued, Session Head, unblocked, and not already leased."""
         held = (
             select(WorkerLeaseRow.run_id)
@@ -1925,9 +1987,7 @@ class SqlRunStore:
             select(RunRow.id)
             .join(WorkerLeaseRow, WorkerLeaseRow.run_id == RunRow.id)
             .where(
-                RunRow.status.in_(
-                    [RunState.RUNNING.value, RunState.CANCELLING.value]
-                ),
+                RunRow.status.in_([RunState.RUNNING.value, RunState.CANCELLING.value]),
                 WorkerLeaseRow.released_at.is_(None),
                 WorkerLeaseRow.expires_at <= now,
             )
@@ -2018,9 +2078,7 @@ class SqlRunStore:
         return list(rows.all())
 
     async def workspace_of(self, run_id: UUID) -> UUID | None:
-        return await self._session.scalar(
-            select(RunRow.workspace_id).where(RunRow.id == run_id)
-        )
+        return await self._session.scalar(select(RunRow.workspace_id).where(RunRow.id == run_id))
 
     async def sessions_needing_repair(self, limit: int) -> Sequence[UUID]:
         """Sessions whose head or blockers disagree with the FIFO invariant."""
@@ -2033,34 +2091,22 @@ class SqlRunStore:
             .group_by(RunRow.session_id)
             .subquery()
         )
-        head = (
-            select(RunRow.session_id, RunRow.session_sequence, RunRow.status)
-            .subquery()
-        )
+        head = select(RunRow.session_id, RunRow.session_sequence, RunRow.status).subquery()
         statement = (
             select(SessionRow.id)
             .outerjoin(live, live.c.session_id == SessionRow.id)
             .outerjoin(
                 head,
-                (head.c.session_id == SessionRow.id)
-                & (SessionRow.head_run_id.is_not(None)),
+                (head.c.session_id == SessionRow.id) & (SessionRow.head_run_id.is_not(None)),
             )
             .where(
-                (
-                    (SessionRow.head_run_id.is_(None)) & (live.c.smallest.is_not(None))
-                )
-                | (
-                    (SessionRow.head_run_id.is_not(None)) & (live.c.smallest.is_(None))
-                )
+                ((SessionRow.head_run_id.is_(None)) & (live.c.smallest.is_not(None)))
+                | ((SessionRow.head_run_id.is_not(None)) & (live.c.smallest.is_(None)))
                 | SessionRow.id.in_(
                     select(RunRow.session_id).where(
-                        RunRow.status.not_in(
-                            [state.value for state in TERMINAL_STATES]
-                        ),
+                        RunRow.status.not_in([state.value for state in TERMINAL_STATES]),
                         RunRow.id != SessionRow.head_run_id,
-                        RunRow.blocked_by_run_id.is_distinct_from(
-                            SessionRow.head_run_id
-                        ),
+                        RunRow.blocked_by_run_id.is_distinct_from(SessionRow.head_run_id),
                     )
                 )
                 | SessionRow.id.in_(
@@ -2123,9 +2169,7 @@ class SqlRunStore:
         )
         return True
 
-    async def expired_approvals(
-        self, now: datetime, limit: int
-    ) -> Sequence[tuple[UUID, UUID]]:
+    async def expired_approvals(self, now: datetime, limit: int) -> Sequence[tuple[UUID, UUID]]:
         """Pending approvals nobody answered in time, with the Run each stopped.
 
         Read from the approvals rather than from the Runs, because the approval
@@ -2272,23 +2316,15 @@ class SqlRunStore:
         if not children:  # pragma: no cover - a wait always has children
             return False
         policy = WaitPolicy(parent.wait_policy or WaitPolicy.ALL.value)
-        finished = [
-            child for child in children if RunState(child.status) in TERMINAL_STATES
-        ]
-        succeeded = [
-            child for child in finished if RunState(child.status) is RunState.COMPLETED
-        ]
+        finished = [child for child in children if RunState(child.status) in TERMINAL_STATES]
+        succeeded = [child for child in finished if RunState(child.status) is RunState.COMPLETED]
         if policy is WaitPolicy.ANY and succeeded:
             # Cancel the rest before delivering, so the answer the parent reads
             # already reflects what happened to its siblings.
             for child in children:
                 if RunState(child.status) not in TERMINAL_STATES:
                     await self._cancel_child(child, request_id, "sibling_succeeded")
-            finished = [
-                child
-                for child in children
-                if RunState(child.status) in TERMINAL_STATES
-            ]
+            finished = [child for child in children if RunState(child.status) in TERMINAL_STATES]
         elif len(finished) != len(children):
             # `all`, and somebody is still working. Nothing is delivered
             # piecemeal: a parent handed one of three answers would be a parent
@@ -2372,9 +2408,7 @@ class SqlRunStore:
         session.next_message_sequence += 1
         await self._session.flush()
 
-    async def _cancel_child(
-        self, child: RunRow, request_id: str, reason: str
-    ) -> None:
+    async def _cancel_child(self, child: RunRow, request_id: str, reason: str) -> None:
         """Stop one child, whatever it is doing.
 
         Used by `any`'s default and by a cancelled parent's cascade. A child
@@ -2459,9 +2493,7 @@ class SqlRunStore:
             payload={"reason": "wait_deadline_passed"},
         )
 
-    async def delete_expired_idempotency_records(
-        self, now: datetime, limit: int
-    ) -> int:
+    async def delete_expired_idempotency_records(self, now: datetime, limit: int) -> int:
         doomed = (
             select(IdempotencyRecordRow.id)
             .where(
@@ -2516,9 +2548,7 @@ class SqlRunStore:
             .execution_options(synchronize_session=False)
         )
 
-    async def repair_session_head(
-        self, session_id: UUID, request_id: str
-    ) -> RepairResult:
+    async def repair_session_head(self, session_id: UUID, request_id: str) -> RepairResult:
         """Recompute one Session head; write nothing when nothing was wrong.
 
         The single-Session lock is the seam a phase-2B Scheduler will wrap in a
@@ -2572,9 +2602,7 @@ class SqlRunStore:
             session_id,
             request_id,
         )
-        return RepairResult(
-            session_id=session_id, changed=True, head_run_id=expected_head
-        )
+        return RepairResult(session_id=session_id, changed=True, head_run_id=expected_head)
 
     async def derive_retry(self, command: RetryRunCommand) -> AcceptedRun:
         """Create one Derived Retry that shares the failed Run's root budget.
@@ -2677,9 +2705,7 @@ class SqlRunStore:
                 workspace_id=command.workspace_id,
                 run_id=source.id,
                 events=(
-                    ReservedEvent(
-                        RunEventType.RUN_RETRY_DERIVED, {"derived_run_id": str(run_id)}
-                    ),
+                    ReservedEvent(RunEventType.RUN_RETRY_DERIVED, {"derived_run_id": str(run_id)}),
                 ),
             )
         )
@@ -2688,9 +2714,7 @@ class SqlRunStore:
                 workspace_id=command.workspace_id,
                 run_id=run_id,
                 events=(
-                    ReservedEvent(
-                        RunEventType.RUN_CREATED, {"retry_of_run_id": str(source.id)}
-                    ),
+                    ReservedEvent(RunEventType.RUN_CREATED, {"retry_of_run_id": str(source.id)}),
                 ),
             )
         )
@@ -2781,10 +2805,7 @@ class SqlRunStore:
             )
         if len(requests) > policy.max_parallel:
             return DelegationResult(
-                refusal=(
-                    f"you asked for {len(requests)} at once and may run "
-                    f"{policy.max_parallel}"
-                )
+                refusal=(f"you asked for {len(requests)} at once and may run {policy.max_parallel}")
             )
         agents = await self._child_agents(
             parent.workspace_id, tuple(bindings[item.alias].alias for item in requests)
@@ -2806,10 +2827,7 @@ class SqlRunStore:
             # what it can read and nothing else. Refused before any child
             # exists, so a delegation is never half granted.
             return DelegationResult(
-                refusal=(
-                    f"you cannot read {', '.join(unreadable)}, so you cannot "
-                    f"pass it on"
-                )
+                refusal=(f"you cannot read {', '.join(unreadable)}, so you cannot pass it on")
             )
 
         now = datetime.now(UTC)
@@ -2942,15 +2960,11 @@ class SqlRunStore:
                 actor_type=owning.caller_type,
             )
             created.append(
-                DelegatedChild(
-                    run_id=child_id, session_id=child_session.id, alias=item.alias
-                )
+                DelegatedChild(run_id=child_id, session_id=child_session.id, alias=item.alias)
             )
         return DelegationResult(children=tuple(created))
 
-    async def _readable_artifacts(
-        self, run: RunRow, named: set[str]
-    ) -> dict[str, UUID]:
+    async def _readable_artifacts(self, run: RunRow, named: set[str]) -> dict[str, UUID]:
         """Which of these ids this Run may actually read, keyed by what it typed.
 
         Two ways in, and no third: an Artifact this Run produced itself, or one
@@ -3010,9 +3024,7 @@ class SqlRunStore:
             .on_conflict_do_nothing(constraint="uq_artifact_grants_pair")
         )
 
-    async def _child_agents(
-        self, workspace_id: UUID, aliases: tuple[str, ...]
-    ) -> dict[str, UUID]:
+    async def _child_agents(self, workspace_id: UUID, aliases: tuple[str, ...]) -> dict[str, UUID]:
         """The published Version behind each alias, in this workspace only.
 
         Missing aliases are simply absent from the answer. Whoever asked names
@@ -3069,6 +3081,7 @@ class SqlRunStore:
                 sequence=row.sequence,
                 message=_to_message(row),
                 withdrawn_at=row.withdrawn_at,
+                source_run_id=row.source_run_id,
             )
             for row in rows
         ]
@@ -3259,9 +3272,7 @@ class SqlRunStore:
             .with_for_update()
         )
 
-    async def _lock_session(
-        self, workspace_id: UUID, session_id: UUID
-    ) -> SessionRow | None:
+    async def _lock_session(self, workspace_id: UUID, session_id: UUID) -> SessionRow | None:
         return await self._session.scalar(
             select(SessionRow)
             .where(SessionRow.id == session_id, SessionRow.workspace_id == workspace_id)
@@ -3297,9 +3308,7 @@ class SqlRunStore:
             .limit(1)
         )
 
-    async def _cost_ceiling(
-        self, workspace_id: UUID
-    ) -> tuple[Decimal | None, str | None]:
+    async def _cost_ceiling(self, workspace_id: UUID) -> tuple[Decimal | None, str | None]:
         found = await self._session.execute(
             select(WorkspaceRow.max_run_cost, WorkspaceRow.cost_currency).where(
                 WorkspaceRow.id == workspace_id
@@ -3322,9 +3331,7 @@ class SqlRunStore:
             raise AgentNotPublished
         return version.id, AgentSpec.model_validate(version.spec).limits
 
-    async def _snapshot(
-        self, run: RunRow, capabilities: RunCapabilities
-    ) -> RunSnapshot:
+    async def _snapshot(self, run: RunRow, capabilities: RunCapabilities) -> RunSnapshot:
         session = await self._session.get(SessionRow, run.session_id)
         if session is None:
             raise UnknownSession
@@ -3346,9 +3353,7 @@ class SqlRunStore:
             for row_id, status, _ in siblings
             if RunState(status) not in TERMINAL_STATES
         ]
-        position, queue_status = _queue_position(
-            run.id, state, pending, session.head_run_id
-        )
+        position, queue_status = _queue_position(run.id, state, pending, session.head_run_id)
         view = RunStateView(
             state=state,
             pause_reason=None if run.pause_reason is None else PauseReason(run.pause_reason),
@@ -3360,10 +3365,29 @@ class SqlRunStore:
         )
         blocker = await self._retry_blocker(run, session, summary)
         retry_allowed = capabilities.can_retry and blocker is None
-        head_status, head_pause, head_wait, head_deadline, head_actions = (
-            await self._blocked_head_fields(queue_status, run, capabilities)
+        (
+            head_status,
+            head_pause,
+            head_wait,
+            head_deadline,
+            head_actions,
+        ) = await self._blocked_head_fields(queue_status, run, capabilities)
+        initial = await self._session.scalar(
+            select(SessionMessageRow)
+            .where(
+                SessionMessageRow.source_run_id == run.id,
+                SessionMessageRow.workspace_id == run.workspace_id,
+                SessionMessageRow.role == "user",
+                SessionMessageRow.redacted.is_(False),
+                SessionMessageRow.withdrawn_at.is_(None),
+            )
+            .order_by(SessionMessageRow.sequence)
+            .limit(1)
         )
+        preview = _to_message(initial).text[:160] if initial is not None else None
         return RunSnapshot(
+            agent_id=session.agent_id,
+            input_preview=preview,
             id=run.id,
             purpose=RunPurpose(run.purpose),
             workspace_id=run.workspace_id,
@@ -3489,8 +3513,7 @@ class SqlRunStore:
             .order_by(RunRow.created_at, RunRow.id)
         )
         return tuple(
-            ChildRunRef(id=row_id, status=RunState(status))
-            for row_id, status in rows.all()
+            ChildRunRef(id=row_id, status=RunState(status)) for row_id, status in rows.all()
         )
 
     async def _blocked_head_fields(

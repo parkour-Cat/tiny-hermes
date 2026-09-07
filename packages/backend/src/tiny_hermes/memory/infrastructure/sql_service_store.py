@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.agents.infrastructure.tables import AgentRow
@@ -26,6 +26,57 @@ from tiny_hermes.tenancy.infrastructure.tables import MembershipRow
 class SqlMemoryStore:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def list_records(
+        self,
+        workspace_id: UUID,
+        status: MemoryStatus | None,
+        kind: MemoryKind | None,
+        agent_id: UUID | None,
+        limit: int,
+        offset: int,
+    ) -> Sequence[MemoryRecord]:
+        query = select(MemoryRow).where(MemoryRow.workspace_id == workspace_id)
+        if status is not None:
+            query = query.where(MemoryRow.status == status.value)
+        if kind is not None:
+            query = query.where(MemoryRow.kind == kind.value)
+        if agent_id is not None:
+            query = query.where(MemoryRow.agent_id == agent_id)
+        rows = (
+            await self._session.scalars(
+                query.order_by(MemoryRow.updated_at.desc(), MemoryRow.id)
+                .limit(limit)
+                .offset(offset)
+            )
+        ).all()
+        return [record_of(row) for row in rows]
+
+    async def update_shared(
+        self, memory_id: UUID, expected: datetime, body: str | None, status: MemoryStatus | None
+    ) -> MemoryRecord | None:
+        # The timestamp participates in the write, so two open editors cannot
+        # silently overwrite each other after both read the same revision.
+        values: dict[str, object] = {"updated_at": datetime.now(UTC)}
+        if body is not None:
+            values["body"] = body
+        if status is not None:
+            values["status"] = status.value
+        row = (
+            await self._session.scalars(
+                update(MemoryRow)
+                .where(
+                    MemoryRow.id == memory_id,
+                    MemoryRow.kind == MemoryKind.SHARED.value,
+                    MemoryRow.status == MemoryStatus.ACTIVE.value,
+                    MemoryRow.updated_at == expected,
+                )
+                .values(**values)
+                .returning(MemoryRow),
+                execution_options={"populate_existing": True},
+            )
+        ).one_or_none()
+        return record_of(row) if row is not None else None
 
     async def user_role(self, workspace_id: UUID, user_id: UUID) -> Role | None:
         value = await self._session.scalar(

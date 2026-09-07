@@ -41,6 +41,40 @@ VERSION_ID = uuid4()
 CLAIM = EgressClaim(workspace_id=uuid4(), agent_version_id=uuid4(), run_id=uuid4())
 
 
+@pytest.mark.parametrize(
+    "verdict, allowed, reservations, sends",
+    [
+        (ApprovalVerdict.PENDING, True, 0, 0),
+        (ApprovalVerdict.APPROVED, True, 1, 1),
+        (ApprovalVerdict.APPROVED, False, 1, 0),
+    ],
+)
+async def test_only_an_approved_dispatch_spends_a_tool_call(
+    verdict: ApprovalVerdict,
+    allowed: bool,
+    reservations: int,
+    sends: int,
+) -> None:
+    count = 0
+
+    async def reserve() -> bool:
+        nonlocal count
+        count += 1
+        return allowed
+
+    sender = Sender()
+    await answer_http_call(
+        sender,
+        context(writer(), policy=WritePolicy.GOVERNANCE),
+        call("http.orders.createOrder"),
+        CLAIM,
+        Gate(verdict),
+        before_call=reserve,
+    )
+    assert count == reservations
+    assert len(sender.sent) == sends
+
+
 def spec(policy: WritePolicy | None) -> AgentSpec:
     return AgentSpec(
         personality="An analyst.",
@@ -190,9 +224,7 @@ async def test_a_read_never_asks_anybody() -> None:
     person would make every dashboard an administrator's queue."""
     gate = Gate()
 
-    await answer_http_call(
-        Sender(), context(bound()), call("http.orders.listOrders"), CLAIM, gate
-    )
+    await answer_http_call(Sender(), context(bound()), call("http.orders.listOrders"), CLAIM, gate)
 
     assert gate.asked == []
 
@@ -224,9 +256,7 @@ async def test_the_call_names_the_layers_it_asks_to_be_measured_against() -> Non
     A call that named nothing would be measured against the platform alone."""
     sender = Sender()
 
-    await answer_http_call(
-        sender, context(bound()), call("http.orders.listOrders"), CLAIM
-    )
+    await answer_http_call(sender, context(bound()), call("http.orders.listOrders"), CLAIM)
 
     assert sender.claims == [CLAIM]
 
@@ -443,12 +473,10 @@ async def test_a_malformed_write_is_refused_before_anybody_is_asked() -> None:
 
 
 async def test_a_boundary_refusal_is_named_and_left_on_the_timeline() -> None:
-    """"This workspace never approved that host" and "the API was down" are
+    """ "This workspace never approved that host" and "the API was down" are
     different facts, and a person reading the transcript needs to tell them
     apart."""
-    sender = Sender(
-        HttpToolAnswer(status_code=None, body="", refusal="host_not_allowed")
-    )
+    sender = Sender(HttpToolAnswer(status_code=None, body="", refusal="host_not_allowed"))
 
     outcome = await answer_http_call(
         sender, context(bound()), call("http.orders.listOrders"), CLAIM
@@ -462,9 +490,7 @@ async def test_a_boundary_refusal_is_named_and_left_on_the_timeline() -> None:
 
 
 async def test_a_run_with_no_outbound_face_is_told_so_rather_than_hanging() -> None:
-    outcome = await answer_http_call(
-        None, context(bound()), call("http.orders.listOrders"), CLAIM
-    )
+    outcome = await answer_http_call(None, context(bound()), call("http.orders.listOrders"), CLAIM)
 
     assert outcome.result is not None
     assert outcome.result.failed
@@ -472,9 +498,7 @@ async def test_a_run_with_no_outbound_face_is_told_so_rather_than_hanging() -> N
 
 
 async def test_an_agent_that_bound_nothing_can_call_nothing() -> None:
-    outcome = await answer_http_call(
-        Sender(), context(), call("http.orders.listOrders"), CLAIM
-    )
+    outcome = await answer_http_call(Sender(), context(), call("http.orders.listOrders"), CLAIM)
 
     assert outcome.result is not None
     assert outcome.result.failed

@@ -1,3 +1,4 @@
+import { WorkspacePermissions } from "../workspace/WorkspacePermissions";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -22,14 +23,14 @@ function member(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderMembers(): void {
+function renderMembers(readOnly = false): void {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <TestTheme>
       <QueryClientProvider client={client}>
         <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE}/members`]}>
           <Routes>
-            <Route path="/workspaces/:workspaceId/members" element={<MembersPage />} />
+            <Route path="/workspaces/:workspaceId/members" element={<WorkspacePermissions role={readOnly ? "developer" : "workspace_admin"}><MembersPage /></WorkspacePermissions>} />
           </Routes>
         </MemoryRouter>
       </QueryClientProvider>
@@ -99,4 +100,13 @@ test("an unknown email is the platform's error, not an implicit signup", async (
   expect(
     await screen.findByText("没有用该邮箱注册的用户，邀请不会自动创建账号"),
   ).toBeInTheDocument();
+});
+
+
+test("developers can read membership without being offered administrator writes", async () => {
+  server.use(http.get(`/api/v1/workspaces/${WORKSPACE}/members`, () => HttpResponse.json([member()])));
+  renderMembers(true);
+  expect(await screen.findByText("Admin")).toBeVisible();
+  expect(screen.getByRole("button", { name: "邀请成员" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "移除" })).toBeDisabled();
 });

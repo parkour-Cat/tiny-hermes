@@ -20,6 +20,7 @@ from tiny_hermes.runs.domain.models import (
     RunCapabilities,
     RunEvent,
     RunEventType,
+    RunListQuery,
     RunPurpose,
     RunSignal,
     RunSnapshot,
@@ -377,9 +378,7 @@ class ExecutionContext:
         """
         if self.delegated_scope is None:
             return self.spec.tools
-        return tuple(
-            name for name in self.spec.tools if name in self.delegated_scope.tools
-        )
+        return tuple(name for name in self.spec.tools if name in self.delegated_scope.tools)
 
     @property
     def granted_skills(self) -> tuple[BoundSkill, ...]:
@@ -417,10 +416,7 @@ class ExecutionContext:
             operation
             for operation in self.http_operations
             if operation.call_name in scope.tools
-            and (
-                operation.credential_ref is None
-                or operation.credential_ref in scope.secrets
-            )
+            and (operation.credential_ref is None or operation.credential_ref in scope.secrets)
         )
 
 
@@ -559,9 +555,7 @@ class RunStore(Protocol):
 
     async def create_session(self, command: CreateSessionCommand) -> SessionSnapshot: ...
 
-    async def get_session(
-        self, workspace_id: UUID, session_id: UUID
-    ) -> SessionSnapshot | None: ...
+    async def get_session(self, workspace_id: UUID, session_id: UUID) -> SessionSnapshot | None: ...
 
     async def list_sessions(self, workspace_id: UUID) -> Sequence[SessionSnapshot]: ...
 
@@ -572,7 +566,11 @@ class RunStore(Protocol):
     ) -> RunSnapshot | None: ...
 
     async def list_runs(
-        self, workspace_id: UUID, session_id: UUID | None, capabilities: RunCapabilities
+        self,
+        workspace_id: UUID,
+        session_id: UUID | None,
+        capabilities: RunCapabilities,
+        query: RunListQuery | None = None,
     ) -> Sequence[RunSnapshot]: ...
 
     async def run_tree(
@@ -585,13 +583,9 @@ class RunStore(Protocol):
 
     async def apply_signal(self, command: ApplySignalCommand) -> RunSnapshot: ...
 
-    async def append_events(
-        self, command: AppendEventsCommand
-    ) -> tuple[RunEvent, ...]: ...
+    async def append_events(self, command: AppendEventsCommand) -> tuple[RunEvent, ...]: ...
 
-    async def event_window(
-        self, workspace_id: UUID, run_id: UUID
-    ) -> RunEventWindow | None: ...
+    async def event_window(self, workspace_id: UUID, run_id: UUID) -> RunEventWindow | None: ...
 
     async def list_events_after(
         self, workspace_id: UUID, run_id: UUID, after_sequence: int, limit: int
@@ -607,9 +601,9 @@ class RunStore(Protocol):
 
     async def record_slice(self, command: RecordSliceCommand) -> RunSnapshot: ...
 
-    async def repair_session_head(
-        self, session_id: UUID, request_id: str
-    ) -> RepairResult: ...
+    async def reserve_tool_call(self, workspace_id: UUID, run_id: UUID, lease_id: UUID) -> bool: ...
+
+    async def repair_session_head(self, session_id: UUID, request_id: str) -> RepairResult: ...
 
     async def derive_retry(self, command: RetryRunCommand) -> AcceptedRun: ...
 
@@ -617,7 +611,9 @@ class RunStore(Protocol):
         self, workspace_id: UUID, session_id: UUID
     ) -> Sequence[StoredMessage]: ...
 
-    async def usage_summary(self, workspace_id: UUID) -> WorkspaceUsageSummary: ...
+    async def usage_summary(
+        self, workspace_id: UUID, since: datetime | None = None, until: datetime | None = None
+    ) -> WorkspaceUsageSummary: ...
 
     async def record_end_user_session_read(
         self,
@@ -744,9 +740,7 @@ class RunStore(Protocol):
         """
         ...
 
-    async def mark_withdrawn(
-        self, message_ids: Sequence[UUID], *, at: datetime
-    ) -> int:
+    async def mark_withdrawn(self, message_ids: Sequence[UUID], *, at: datetime) -> int:
         """Flip `withdrawn_at` on rows that do not have it yet, and drop any
         stored compaction summary whose covered range holds one of them.
 
@@ -767,9 +761,7 @@ class RunStore(Protocol):
         """
         ...
 
-    async def save_summary(
-        self, summary: StoredSummary, *, workspace_id: UUID
-    ) -> None:
+    async def save_summary(self, summary: StoredSummary, *, workspace_id: UUID) -> None:
         """Replace the Session's summary with this one.
 
         Upserts on `session_id`, per §7.4.2: a second compaction updates the

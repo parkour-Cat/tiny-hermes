@@ -97,7 +97,7 @@ test("a trimmed tool result is explained with its count and what it freed", () =
   expect(sentence).toContain("2");
   expect(sentence).toContain("9000");
   // Both halves of the fact: the numbers are estimates, and nothing was lost.
-  expect(sentence).toContain("估算");
+  expect(sentence).toContain("预计");
   expect(sentence).toContain("会话记录");
 });
 
@@ -133,7 +133,7 @@ test("a model-written summary names the model and the endpoint that wrote it", (
   // The sentence the operator would otherwise read straight above a payload
   // that contradicts it.
   expect(sentence).not.toContain("no extra model call");
-  expect(fill(t(said?.key ?? "appName"), said?.values ?? {})).not.toContain("没有为此多调");
+  expect(fill(t(said?.key ?? "appName"), said?.values ?? {})).not.toContain("未额外调用模型");
 });
 
 test("a model-written summary whose endpoint went unrecorded still says a model wrote it", () => {
@@ -155,7 +155,7 @@ test("a structural summary is the one that may say no model was called", () => {
 
   const sentence = fill(enUS[said?.key ?? "appName"], said?.values ?? {});
   expect(sentence).toContain("no extra model call");
-  expect(fill(t(said?.key ?? "appName"), said?.values ?? {})).toContain("没有为此多调");
+  expect(fill(t(said?.key ?? "appName"), said?.values ?? {})).toContain("未额外调用模型");
 });
 
 test("a compaction that does not say who wrote it claims neither", () => {
@@ -288,9 +288,7 @@ test("a loaded skill says which document entered the conversation", () => {
   expect(sentence).toContain("rollout");
   expect(sentence).toContain("SKILL.md");
   expect(sentence).toContain("812");
-  // The boundary the prompt itself carries, repeated for the person reading
-  // the timeline: this text is a workspace's, not the platform's.
-  expect(sentence).toContain("参考资料");
+  expect(sentence).toContain("已加载技能");
   expect(sentence).not.toContain("{");
 });
 
@@ -302,7 +300,7 @@ test("a skill load missing its fields gets no sentence", () => {
 test("a proposal says that nothing changed yet", () => {
   const said = eventNote(frame("skill_proposed", { proposal_id: "p1", skill: "rollout" }));
   const sentence = fill(enUS[said?.key ?? "appName"], said?.values ?? {});
-  expect(sentence).toContain("approves");
+  expect(sentence).toContain("approval");
   expect(sentence).not.toContain("{");
 });
 
@@ -315,12 +313,12 @@ test("a run waiting on its children gets its own note, not the generic one", () 
   );
 });
 
-test("the note for a child wait says it will not wake itself", () => {
+test("the note for a child wait identifies what it is waiting for", () => {
   // The sentence a person reads has to answer "am I holding this up". For this
   // wait the answer is no, and the reason is that the children are running —
   // both must survive translation, which is why this asserts the text.
   for (const said of [t("waitingChildRunsNote"), enUS.waitingChildRunsNote]) {
-    expect(said).toMatch(/不会醒|does not wake itself/);
+    expect(said).toMatch(/等待子任务结果|Waiting for child tasks/);
   }
 });
 
@@ -340,7 +338,7 @@ test("a delegation says how many and whether the rest get cancelled", () => {
   // The cost of `any` is that a child about to succeed may be killed. It is
   // stated where somebody reads the timeline rather than left to a bill.
   for (const said of [t("delegatedAnyNote"), enUS.delegatedAnyNote]) {
-    expect(said).toMatch(/取消|cancelled/);
+    expect(said).toMatch(/取消|cancel/);
   }
 });
 

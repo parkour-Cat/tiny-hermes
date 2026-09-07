@@ -8,6 +8,17 @@ from typing import Any, Literal, cast
 from uuid import UUID
 
 
+@dataclass(frozen=True)
+class RunListQuery:
+    limit: int | None = None
+    offset: int = 0
+    text: str = ""
+    agent_id: UUID | None = None
+    status: str | None = None
+    since: datetime | None = None
+    until: datetime | None = None
+
+
 class RunState(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
@@ -21,9 +32,7 @@ class RunState(StrEnum):
     CANCELLED = "cancelled"
 
 
-TERMINAL_STATES = frozenset(
-    {RunState.COMPLETED, RunState.FAILED, RunState.CANCELLED}
-)
+TERMINAL_STATES = frozenset({RunState.COMPLETED, RunState.FAILED, RunState.CANCELLED})
 
 
 class PauseReason(StrEnum):
@@ -541,6 +550,7 @@ class StoredMessage:
     #: `list_session_messages` is the one caller that leaves withdrawn rows in
     #: and needs a way to say so, which is why the field exists here at all.
     withdrawn_at: datetime | None = None
+    source_run_id: UUID | None = None
 
 
 class WithdrawScope(StrEnum):
@@ -769,9 +779,7 @@ class BudgetSummary:
             # platform is careful never to do it.
             "max_cost": None if self.max_cost is None else str(self.max_cost),
             "cost_currency": self.cost_currency,
-            "consumed_cost": (
-                None if self.consumed_cost is None else str(self.consumed_cost)
-            ),
+            "consumed_cost": (None if self.consumed_cost is None else str(self.consumed_cost)),
             "cost_quality": self.cost_quality,
         }
 
@@ -821,9 +829,7 @@ class WorkspaceUsageByQuality:
             # Serialized as a string for the same reason as `BudgetSummary`:
             # a JSON number is a float on the way to a screen, and money is
             # the one place this platform is careful never to send through one.
-            "consumed_cost": (
-                None if self.consumed_cost is None else str(self.consumed_cost)
-            ),
+            "consumed_cost": (None if self.consumed_cost is None else str(self.consumed_cost)),
             "cost_currency": self.cost_currency,
             "run_count": self.run_count,
             "consumed_model_calls": self.consumed_model_calls,
@@ -1020,6 +1026,8 @@ class RunSnapshot:
     #:
     #: 有默认值，所以放在这里而不是挨着 `status`：这个 dataclass 里带默认值的
     #: 字段必须排在无默认值的后面。
+    agent_id: UUID | None = None
+    input_preview: str | None = None
     purpose: RunPurpose = RunPurpose.ANSWER
     head_status: RunState | None = None
     head_pause_reason: PauseReason | None = None
@@ -1052,6 +1060,8 @@ class RunSnapshot:
     def document(self) -> dict[str, Any]:
         return {
             "id": str(self.id),
+            "agent_id": _optional_id(self.agent_id),
+            "input_preview": self.input_preview,
             "session_id": str(self.session_id),
             "agent_version_id": str(self.agent_version_id),
             "status": self.state.value,
@@ -1146,9 +1156,9 @@ def fingerprint_request(
         "message": None if message is None else message.document(),
         "limit_overrides": limit_overrides or {},
     }
-    encoded = json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
     return hashlib.sha256(encoded).hexdigest()
 
 

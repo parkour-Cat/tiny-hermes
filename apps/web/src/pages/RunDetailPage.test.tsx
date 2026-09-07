@@ -19,6 +19,30 @@ const THIRD_RUN = "66666666-7777-4888-8999-aaaaaaaaaaaa";
 const SESSION = "33333333-4444-4555-8666-777777777777";
 const VERSION = "66666666-7777-4888-8999-aaaaaaaaaaaa";
 
+test("saved workspace files have a download even without artifacts, and stale downloads refresh the list", async () => {
+  stream();
+  let stale = false;
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run({ status: "completed" }))),
+    http.get(`/api/v1/runs/${RUN}/tree`, () => HttpResponse.json({ root_run_id: RUN, nodes: [] })),
+    http.get(`/api/v1/runs/${RUN}/files`, () => HttpResponse.json({
+      revision_id: stale ? "revision-2" : "revision-1",
+      items: [{ path: stale ? "notes/new.md" : "notes/summary.md", size_bytes: 42 }],
+    })),
+    http.get(`/api/v1/runs/${RUN}/files/content`, ({ request }) => {
+      expect(request.headers.get("X-Workspace-Id")).toBe(WORKSPACE);
+      expect(new URL(request.url).searchParams.get("revision_id")).toBe("revision-1");
+      expect(new URL(request.url).searchParams.get("path")).toBe("notes/summary.md");
+      stale = true;
+      return HttpResponse.json({ code: "workspace_files_changed" }, { status: 409 });
+    }),
+  );
+  renderRun();
+  await userEvent.click(await screen.findByRole("button", { name: "下载 notes/summary.md" }));
+  expect(await screen.findByText("文件已更新，请从刷新后的列表重新下载。")).toBeInTheDocument();
+  expect(await screen.findByText("notes/new.md")).toBeInTheDocument();
+});
+
 const BUDGET = {
   max_execution_seconds: 600,
   consumed_execution_ms: 1_200,
@@ -448,10 +472,10 @@ test("shows a tool turn in the transcript rather than an empty row", async () =>
   renderRun();
 
   expect(await screen.findByText("先看看目录。")).toBeInTheDocument();
-  // The arrows only appear in a transcript line, never in the tools section,
+  // The markers only appear in a transcript line, never in the tools section,
   // so matching them pins the assertion to the row that used to be blank.
   expect(screen.getByText(/→ file\.list/)).toBeInTheDocument();
-  expect(screen.getByText(/← 3 entries/)).toBeInTheDocument();
+  expect(screen.getByText(/✓ 3 entries/)).toBeInTheDocument();
 });
 
 test("a withdrawn turn is marked as withdrawn instead of reading as a live one", async () => {
@@ -776,4 +800,27 @@ test("the dialog will not send a ceiling that is not a rise", async () => {
   await userEvent.click(screen.getByRole("button", { name: t("confirm") }));
 
   expect(await screen.findByText(t("widenBudgetMustRise"))).toBeVisible();
+});
+
+
+test("results belong to this task and platform instructions have a distinct author", async () => {
+  stream();
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run({ status: "completed" }))),
+    http.get(`/api/v1/runs/${RUN}/files`, () => HttpResponse.json({ revision_id: "rev", items: [] })),
+    http.get(`/api/v1/runs/${RUN}/tree`, () => HttpResponse.json({ root_run_id: RUN, nodes: [] })),
+    http.get(`/api/v1/sessions/${SESSION}/messages`, () => HttpResponse.json([
+      { role: "assistant", source_run_id: OTHER_RUN, parts: [{ type: "text", text: "Earlier task result" }] },
+      { role: "user", author: "platform", source_run_id: RUN, parts: [{ type: "text", text: "Completion check feedback" }] },
+      { role: "assistant", source_run_id: RUN, parts: [{ type: "text", text: "Current task result" }] },
+      { role: "assistant", source_run_id: RUN, parts: [{ type: "text", text: "I will now inspect the files" }, { type: "tool_call", call_id: "inspect", name: "terminal" }] },
+    ])),
+  );
+  renderRun();
+  expect(await screen.findByText("任务结果")).toBeVisible();
+  const result = screen.getByText("任务结果").closest(".ant-card")!;
+  expect(await within(result as HTMLElement).findByText("Current task result")).toBeVisible();
+  expect(within(result as HTMLElement).queryByText("Earlier task result")).toBeNull();
+  expect(screen.queryByText("Earlier task result")).toBeNull();
+  expect(screen.getByText("平台反馈")).toBeInTheDocument();
 });

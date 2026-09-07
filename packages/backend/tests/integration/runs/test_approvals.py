@@ -43,10 +43,7 @@ from .http_tool_support import StandIn, approve_host, ask, register_tool, worker
 async def _events(engine: AsyncEngine, run_id: Any) -> list[dict[str, Any]]:
     async with engine.connect() as connection:
         rows = await connection.execute(
-            text(
-                "SELECT event_type, payload FROM run_events "
-                "WHERE run_id = :id ORDER BY sequence"
-            ),
+            text("SELECT event_type, payload FROM run_events WHERE run_id = :id ORDER BY sequence"),
             {"id": UUID(str(run_id))},
         )
         return [{"type": str(row[0]), "payload": row[1]} for row in rows.all()]
@@ -94,9 +91,7 @@ def _pending(client: TestClient, scope: dict[str, str]) -> list[dict[str, Any]]:
     return _queue(client, scope)
 
 
-def _queue(
-    client: TestClient, scope: dict[str, str], **query: str
-) -> list[dict[str, Any]]:
+def _queue(client: TestClient, scope: dict[str, str], **query: str) -> list[dict[str, Any]]:
     """The queue as the console reads it. No `status` means pending."""
     page = client.get("/api/v1/approvals", headers=scope, params=query)
     assert page.status_code == 200, page.text
@@ -172,7 +167,11 @@ async def test_the_person_deciding_is_shown_the_request_that_would_be_sent(
     matches what runs."""
     await _stopped_run(client, scope, engine, session_for, api, proxy)
 
-    document = _pending(client, scope)[0]["document"]
+    pending = _pending(client, scope)[0]
+    detail = client.get(f"/api/v1/approvals/{pending['id']}", headers=scope)
+    assert detail.status_code == 200, detail.text
+    assert detail.json() == pending
+    document = detail.json()["document"]
 
     assert document["tool"] == "http.orders.createOrder"
     assert document["target"].endswith("/orders")
@@ -209,9 +208,7 @@ async def test_rejecting_pauses_the_run_with_the_reason_it_was_given(
 ) -> None:
     run, stand_in = await _stopped_run(client, scope, engine, session_for, api, proxy)
 
-    decided = _decide(
-        client, scope, _pending(client, scope)[0]["id"], "reject", "not this quarter"
-    )
+    decided = _decide(client, scope, _pending(client, scope)[0]["id"], "reject", "not this quarter")
 
     assert decided.status_code == 200, decided.text
     assert decided.json()["decision_reason"] == "not this quarter"
@@ -452,9 +449,7 @@ def _scheduler(engine: AsyncEngine) -> SchedulerRuntime:
     )
 
 
-async def _ask_gate(
-    gate: SqlApprovalGate, run_id: Any, call: NormalizedCall
-) -> ApprovalCheck:
+async def _ask_gate(gate: SqlApprovalGate, run_id: Any, call: NormalizedCall) -> ApprovalCheck:
     return await gate.check(
         run_id=UUID(str(run_id)),
         approval_type=ApprovalType.GOVERNANCE_APPROVAL,
@@ -626,9 +621,7 @@ async def test_a_misspelled_status_is_refused_rather_than_ignored(
     default pending queue under the heading they asked for — "approved", say —
     and concluding that everything in it was approved.
     """
-    refused = client.get(
-        "/api/v1/approvals", headers=scope, params={"status": "aproved"}
-    )
+    refused = client.get("/api/v1/approvals", headers=scope, params={"status": "aproved"})
 
     assert refused.status_code == 400, refused.text
     assert "aproved" not in refused.text  # not echoed back

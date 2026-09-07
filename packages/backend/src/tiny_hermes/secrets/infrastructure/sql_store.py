@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
-from tiny_hermes.secrets.domain.models import SecretRecord, SecretScope, SecretStatus
+from tiny_hermes.secrets.domain.models import SecretPurpose, SecretRecord, SecretScope, SecretStatus
 from tiny_hermes.secrets.infrastructure.tables import SecretRow
 from tiny_hermes.secrets.ports.store import DuplicateSecretName
 from tiny_hermes.tenancy.domain.models import Role
@@ -29,6 +29,7 @@ class SqlSecretStore:
         row = SecretRow(
             id=record.id,
             name=record.name,
+            purpose=record.purpose.value,
             scope=record.scope.value,
             workspace_id=record.workspace_id,
             status=record.status.value,
@@ -136,6 +137,7 @@ def _record(row: SecretRow) -> SecretRecord:
     return SecretRecord(
         id=row.id,
         name=row.name,
+        purpose=SecretPurpose(row.purpose),
         scope=SecretScope(row.scope),
         workspace_id=row.workspace_id,
         status=SecretStatus(row.status),

@@ -1,8 +1,11 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Alert, Button, Card, Form, Input, Modal, Select, Space, Table, Typography } from "antd";
 import { useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
+import { TimeRangeFilter, timeBounds } from "../ui/TimeRangeFilter";
+import { shortenId } from "../tables/ShortId";
+import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
 import { api } from "../api/client";
 import { useT } from "../i18n/locale";
 import { StatusTag } from "../ui/StatusTag";
@@ -36,6 +39,26 @@ type Attempt = {
 
 export function RunsPage() {
   const t = useT();
+  const { writer } = useWorkspacePermissions();
+  const [params, setParams] = useSearchParams();
+  const search = params.get("q") ?? "";
+  const from = params.get("from") ?? "";
+  const through = params.get("through") ?? "";
+  const status = params.get("status") ?? "";
+  const agentFilter = params.get("agent") ?? "";
+  const rawOffset = Number(params.get("offset") ?? "0");
+  const offset = Number.isSafeInteger(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
+  const query = new URLSearchParams({ ...timeBounds(from, through), limit: "21", offset: String(offset) });
+  if (search.trim()) query.set("q", search.trim());
+  if (status) query.set("status", status);
+  if (agentFilter) query.set("agent_id", agentFilter);
+  function filter(values: Record<string, string>) {
+    const next = new URLSearchParams(params);
+    next.delete("offset");
+    for (const [key, value] of Object.entries(values)) { if (value) next.set(key, value); else next.delete(key); }
+    setParams(next, { replace: true });
+  }
+
   const workspaceId = useWorkspaceId();
   const navigate = useNavigate();
   const [form] = Form.useForm<SubmitValues>();
@@ -45,16 +68,14 @@ export function RunsPage() {
   const scope = { workspace: workspaceId ?? "" };
 
   const runs = useQuery({
-    queryKey: ["runs", workspaceId] as const,
-    queryFn: () => api<RunResponse[]>("/api/v1/runs", scope),
+    queryKey: ["runs", workspaceId, query.toString()] as const,
+    queryFn: () => api<RunResponse[]>(`/api/v1/runs?${query}`, scope),
     enabled: workspaceId !== null,
   });
   const agents = useQuery({
     queryKey: ["agents", workspaceId] as const,
     queryFn: () => api<AgentResponse[]>("/api/v1/agents", scope),
-    // Only the submission dialog needs the agent list; asking for it on every
-    // visit to the Run list would be a request nobody made.
-    enabled: open && workspaceId !== null,
+    enabled: workspaceId !== null,
   });
 
   const submit = useMutation({
@@ -117,7 +138,7 @@ export function RunsPage() {
       render: (_: unknown, run: RunResponse) => (
         // The whole identifier: it is what the address bar, the API and the
         // logs all use, and half of one matches none of them.
-        <Link to={`/workspaces/${workspaceId ?? ""}/runs/${run.id}`}>{run.id}</Link>
+        <div><Link aria-label={run.id} title={run.id} to={`/workspaces/${workspaceId ?? ""}/runs/${run.id}`}>{run.input_preview || shortenId(run.id)}</Link><div><Typography.Text type="secondary">{(agents.data ?? []).find((agent) => agent.id === run.agent_id)?.name ?? run.agent_id ?? ""}</Typography.Text></div></div>
       ),
     },
     {
@@ -143,10 +164,10 @@ export function RunsPage() {
     {
       title: t("runQueue"),
       key: "queue",
-      render: (_: unknown, run: RunResponse) => (
+      render: (_: unknown, run: RunResponse) => run.queue.status === "terminal" ? "—" : (
         <>
           <Typography.Text>{run.queue.status}</Typography.Text>
-          {run.queue.status === "head" ? null : (
+          {run.queue.status === "head" || run.queue.position <= 0 ? null : (
             <Typography.Paragraph type="secondary" className="fact-note">
               {`${t("queuePositionPrefix")}${run.queue.position}${t("queuePositionSuffix")}`}
             </Typography.Paragraph>
@@ -179,23 +200,30 @@ export function RunsPage() {
         title={t("runsTitle")}
         intro={t("runsIntro")}
         extra={
-          <Button type="primary" onClick={() => setOpen(true)}>
+          <Button type="primary" disabled={!writer} onClick={() => setOpen(true)}>
             {t("newRun")}
           </Button>
         }
       />
-      {/* Said out loud rather than papered over with a pager the platform
-          cannot honour: the route takes no page or cursor, so any control here
-          would sort a list that already arrived whole. */}
-      <Alert className="page-alert" type="info" title={t("runsUnpaginated")} showIcon />
+      <Space wrap className="page-alert">
+        <Input aria-label={t("runSearch")} placeholder={t("runSearch")} value={search} allowClear onChange={(event) => filter({ q: event.target.value })} />
+        <Select aria-label={t("runStatus")} style={{ minWidth: 150 }} value={status} onChange={(value) => filter({ status: value })} options={[{ value: "", label: t("allStatuses") }, ...["queued", "running", "waiting_approval", "waiting_external", "paused", "cancelling", "interrupted", "completed", "failed", "cancelled"].map((value) => ({ value, label: <StatusTag code={value} /> }))]} />
+        <Select aria-label={t("allAgents")} style={{ minWidth: 150 }} value={agentFilter} onChange={(value) => filter({ agent: value })} options={[{ value: "", label: t("allAgents") }, ...(agents.data ?? []).map((agent) => ({ value: agent.id, label: agent.name }))]} />
+        <TimeRangeFilter from={from} through={through} onChange={(a, b) => filter({ from: a, through: b })} />
+      </Space>
       <Card loading={runs.isPending} variant="borderless">
         <Table<RunResponse>
           rowKey="id"
           columns={columns}
-          dataSource={runs.data ?? []}
+          dataSource={(runs.data ?? []).slice(0, 20)}
+          scroll={{ x: 850 }}
           pagination={false}
           locale={{ emptyText: <EmptyState title={t("emptyRuns")} /> }}
         />
+        {(offset > 0 || (runs.data?.length ?? 0) > 20) && <Space className="page-alert">
+          <Button disabled={offset === 0 || runs.isFetching} onClick={() => filter({ offset: String(Math.max(0, offset - 20)) })}>{t("approvalPreviousPage")}</Button>
+          <Button disabled={(runs.data?.length ?? 0) <= 20 || runs.isFetching} onClick={() => filter({ offset: String(offset + 20) })}>{t("approvalNextPage")}</Button>
+        </Space>}
       </Card>
       <Modal
         open={open}

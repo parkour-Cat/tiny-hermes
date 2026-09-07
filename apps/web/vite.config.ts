@@ -12,5 +12,8 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
+    // Multi-step editor flows include a bounded 5s permission wait plus user
+    // interactions; the enclosing test must allow both on a shared runner.
+    testTimeout: 15_000,
   },
 });

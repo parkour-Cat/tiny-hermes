@@ -1,3 +1,4 @@
+import { CredentialPicker } from "../forms/CredentialPicker";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Button, Card, Form, Input, Modal, Space, Table, Tag, Typography } from "antd";
 import { useState } from "react";
@@ -31,6 +32,7 @@ import { ShortId } from "../tables/ShortId";
 export function IdentityProvidersPage() {
   const t = useT();
   const queryClient = useQueryClient();
+  const [modal, contextHolder] = Modal.useModal();
   const [open, setOpen] = useState(false);
   const [form] = Form.useForm<{
     issuer: string;
@@ -101,12 +103,9 @@ export function IdentityProvidersPage() {
 
   return (
     <>
+      {contextHolder}
+      {disable.isError ? <Alert role="alert" type="error" showIcon title={problemMessage(disable.error, t)} className="page-alert" /> : null}
       <div className="page-heading">
-        <div>
-          <Typography.Paragraph type="secondary">
-            {t("identityProvidersIntro")}
-          </Typography.Paragraph>
-        </div>
         <Button type="primary" onClick={() => setOpen(true)}>
           {t("registerIdentityProvider")}
         </Button>
@@ -149,7 +148,7 @@ export function IdentityProvidersPage() {
                       danger
                       size="small"
                       loading={disable.isPending}
-                      onClick={() => disable.mutate(row.id)}
+                      onClick={() => modal.confirm({ title: t("oidcDisable"), content: `${row.issuer} — ${t("loginDisableImpact")}`, okText: t("confirm"), cancelText: t("cancel"), okButtonProps: { danger: true }, onOk: () => { disable.mutate(row.id); } })}
                     >
                       {t("oidcDisable")}
                     </Button>
@@ -188,7 +187,7 @@ export function IdentityProvidersPage() {
               label={t("oidcSecretRef")}
               rules={[{ required: true }]}
             >
-              <Input placeholder="OIDC_CLIENT_SECRET" />
+              <CredentialPicker purpose="login" />
             </Form.Item>
             <Form.Item
               name="discoveryUrl"

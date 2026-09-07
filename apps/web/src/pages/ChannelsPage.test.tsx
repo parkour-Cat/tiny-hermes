@@ -9,6 +9,7 @@ import { ChannelsPage } from "./ChannelsPage";
 import { TestTheme } from "../test/TestTheme";
 import { server } from "../test/server";
 import { t } from "../i18n/zh-CN";
+import { WorkspacePermissions } from "../workspace/WorkspacePermissions";
 
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
 const AGENT = "22222222-3333-4444-8555-666666666666";
@@ -30,14 +31,14 @@ function binding(overrides: object = {}) {
   };
 }
 
-function renderChannels(): void {
+function renderChannels(scenario = "feishu", readonly = false): void {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <TestTheme>
       <QueryClientProvider client={client}>
-        <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE}/channels`]}>
+        <MemoryRouter initialEntries={[`/workspaces/${WORKSPACE}/channels#${scenario}`]}>
           <Routes>
-            <Route path="/workspaces/:workspaceId/channels" element={<ChannelsPage />} />
+            <Route path="/workspaces/:workspaceId/channels" element={<WorkspacePermissions role={readonly ? "developer" : "workspace_admin"}><ChannelsPage /></WorkspacePermissions>} />
           </Routes>
         </MemoryRouter>
       </QueryClientProvider>
@@ -48,6 +49,95 @@ function renderChannels(): void {
 const AGENTS = [
   { id: AGENT, name: "Support", alias: "support", status: "active", current_version_id: "v1", created_at: "2026-08-01T00:00:00Z" },
 ];
+
+test("developers can read channels without being invited to administer them", async () => {
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json([binding()])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+  );
+  renderChannels("feishu", true);
+  await screen.findByText("Support");
+  expect(screen.queryByRole("button", { name: t("bindChannel") })).toBeNull();
+  expect(screen.queryByRole("button", { name: t("channelEdit") })).toBeNull();
+});
+
+test.each([false, true])("new long connection saves once and validates credentials after selection (clear=%s)", async (clearCredentials) => {
+  const sent: unknown[] = [];
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json([])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/secrets", () => HttpResponse.json([
+      { id: "s1", name: "encrypt-key", scope: "workspace", status: "active" },
+      { id: "s2", name: "app-secret", scope: "workspace", status: "active" },
+    ])),
+    http.post("/api/v1/channel-bindings", async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(binding({ transport: "long_connection", app_secret_ref: "s2", long_connection_state: "never" }), { status: 201 });
+    }),
+  );
+  renderChannels();
+  await userEvent.click(await screen.findByRole("button", { name: t("bindChannel") }));
+  await userEvent.click(screen.getByLabelText(t("channelAgent")));
+  await userEvent.click(await screen.findByTitle("Support"));
+  await userEvent.click(screen.getByLabelText(t("channelKeyRef")));
+  await userEvent.click(await screen.findByTitle("encrypt-key"));
+  await userEvent.type(screen.getByLabelText(t("channelAppId")), "cli_new");
+  await userEvent.click(screen.getByLabelText(t("channelAppSecretRef")));
+  const option = (await screen.findAllByTitle("app-secret")).find((node) => node.closest(".ant-select-dropdown:not(.ant-select-dropdown-hidden)"));
+  await userEvent.click(option!);
+  await userEvent.click(screen.getByLabelText(t("channelTransport")));
+  await userEvent.click(await screen.findByTitle(t("channelTransportLongConnection")));
+  if (clearCredentials) await userEvent.clear(screen.getByLabelText(t("channelAppId")));
+  await userEvent.click(screen.getByRole("button", { name: t("bindChannelConfirm") }));
+  if (clearCredentials) {
+    await waitFor(() => expect(screen.getByLabelText(t("channelAppId"))).toHaveAttribute("aria-invalid", "true"));
+    expect(sent).toEqual([]);
+  } else {
+    await waitFor(() => expect(sent).toEqual([{
+      channel: "feishu", agent_id: AGENT, app_id: "cli_new",
+      encrypt_key_ref: "s1", app_secret_ref: "s2", transport: "long_connection",
+    }]));
+    expect(await screen.findByText(t("channelTransportRestartHint"))).toBeVisible();
+    expect(screen.queryByText(t("channelConnectionConnected"))).not.toBeInTheDocument();
+  }
+});
+
+test("channel setup separates Feishu from web chat before showing credentials", async () => {
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json([])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/secrets", () => HttpResponse.json([])),
+    http.get("/api/v1/channel-issuers", () => HttpResponse.json([])),
+  );
+  renderChannels();
+  expect(await screen.findByRole("button", { name: "接入飞书机器人" })).toBeVisible();
+  expect(screen.queryByRole("button", { name: "配置网页登录验证" })).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("link", { name: "网页聊天" }));
+  expect(await screen.findByRole("button", { name: "配置网页登录验证" })).toBeVisible();
+  expect(screen.queryByRole("button", { name: "接入飞书机器人" })).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "配置 Support" })).toHaveAttribute("href", `/workspaces/${WORKSPACE}/agents/${AGENT}`);
+});
+
+test("editing can add credentials and switch transport in one save", async () => {
+  let sent: unknown;
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json([binding({ app_secret_ref: null })])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/secrets", () => HttpResponse.json([{ id: "s2", name: "reply-key", scope: "workspace", status: "active" }])),
+    http.patch("/api/v1/channel-bindings/b1", async ({ request }) => {
+      sent = await request.json();
+      return HttpResponse.json(binding({ app_secret_ref: "s2", transport: "long_connection" }));
+    }),
+  );
+  renderChannels();
+  await userEvent.click(await screen.findByRole("button", { name: t("channelEdit") }));
+  await userEvent.click(screen.getByLabelText(t("channelAppSecretRef")));
+  await userEvent.click(await screen.findByTitle("reply-key"));
+  await userEvent.click(screen.getByLabelText(t("channelTransport")));
+  await userEvent.click(await screen.findByTitle(t("channelTransportLongConnection")));
+  await userEvent.click(screen.getByRole("button", { name: t("channelEditConfirm") }));
+  await waitFor(() => expect(sent).toEqual({ app_secret_ref: "s2", transport: "long_connection" }));
+});
 
 test("a bound channel says which Agent it publishes and where", async () => {
   server.use(
@@ -89,7 +179,7 @@ test("the form sends the secret's id, never a key and never its name", async () 
   );
 
   renderChannels();
-  await userEvent.click(await screen.findByRole("button", { name: /绑定渠道|Bind a channel/i }));
+  await userEvent.click(await screen.findByRole("button", { name: /接入飞书机器人|Connect Feishu/i }));
   await userEvent.click(await screen.findByLabelText(/Agent/));
   await userEvent.click(await screen.findByTitle("Support"));
   await userEvent.click(screen.getByLabelText(/加密密钥|Encrypt key/i));
@@ -133,7 +223,7 @@ test("the app secret is optional — a receive-only binding is allowed", async (
   );
 
   renderChannels();
-  await userEvent.click(await screen.findByRole("button", { name: /绑定渠道|Bind a channel/i }));
+  await userEvent.click(await screen.findByRole("button", { name: /接入飞书机器人|Connect Feishu/i }));
   await userEvent.click(await screen.findByLabelText(/Agent/));
   await userEvent.click(await screen.findByTitle("Support"));
   await userEvent.click(screen.getByLabelText(/加密密钥|Encrypt key/i));
@@ -206,16 +296,14 @@ const ISSUER = {
 };
 
 test("who may vouch for an end user is listed beside what they can talk to", async () => {
-  // A binding says which Agent is published; an issuer says whose word this
-  // platform takes for who a person is. Neither is usable without the other,
-  // and until now only one of them had a page.
+  // Web identity configuration is independent of Feishu bindings.
   server.use(
     http.get("/api/v1/channel-bindings", () => HttpResponse.json([binding()])),
     http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
     http.get("/api/v1/channel-issuers", () => HttpResponse.json([ISSUER])),
   );
 
-  renderChannels();
+  renderChannels("web");
 
   expect(await screen.findByText("https://sso.example.com")).toBeVisible();
   // The origins are the embedding allow-list. Shown, because an origin
@@ -236,7 +324,7 @@ test("registering an issuer sends the key reference shape the API takes", async 
     }),
   );
 
-  renderChannels();
+  renderChannels("web");
   await userEvent.click(await screen.findByRole("button", { name: t("registerIssuer") }));
   await userEvent.type(await screen.findByLabelText(t("issuerName")), "https://sso.example.com");
   await userEvent.type(
@@ -278,7 +366,7 @@ test("an issuer can be registered by pasting its public key instead of a JWKS ur
     }),
   );
 
-  renderChannels();
+  renderChannels("web");
   await userEvent.click(await screen.findByRole("button", { name: t("registerIssuer") }));
   await userEvent.type(await screen.findByLabelText(t("issuerName")), "https://sso.example.com");
   await userEvent.click(await screen.findByRole("radio", { name: t("issuerKeyModePublicKey") }));
@@ -649,4 +737,16 @@ test("可回复是文字，不是彩色标签", async () => {
   );
   expect(cell).toBeDefined();
   expect(cell!.className).not.toContain("ant-tag");
+});
+
+ test("a Feishu load failure leaves the web scenario reachable", async () => {
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json({ code: "forbidden" }, { status: 403 })),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/channel-issuers", () => HttpResponse.json([])),
+  );
+  renderChannels();
+  await screen.findByText(/没有权限|not allowed|forbidden/i);
+  await userEvent.click(screen.getByRole("link", { name: "网页聊天" }));
+  expect(await screen.findByRole("button", { name: "配置网页登录验证" })).toBeVisible();
 });

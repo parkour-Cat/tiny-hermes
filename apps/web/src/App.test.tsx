@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { expect, test } from "vitest";
+import { beforeEach, expect, test } from "vitest";
 
 import { App } from "./App";
 import { server } from "./test/server";
@@ -13,6 +13,16 @@ const ADMIN = {
   status: "active",
   is_platform_admin: true,
 };
+
+beforeEach(() => {
+  window.history.replaceState({}, "", "/login");
+  server.use(
+    http.get("/api/v1/auth/oidc/available", () => HttpResponse.json([])),
+    http.get("/api/v1/approvals", () => HttpResponse.json([])),
+    http.get("/api/v1/skill-proposals", () => HttpResponse.json([])),
+    http.get("/api/v1/memories/pending", () => HttpResponse.json([])),
+  );
+});
 
 test("logs in and creates a workspace through the API", async () => {
   let signedIn = false;
@@ -62,5 +72,6 @@ test("a session the platform has already ended returns the user to sign-in", asy
 
   render(<App />);
 
-  expect(await screen.findByRole("button", { name: "登录" })).toBeInTheDocument();
+  // This crosses lazy route imports, the rejected request and the redirect.
+  expect(await screen.findByRole("button", { name: "登录" }, { timeout: 4000 })).toBeInTheDocument();
 });

@@ -8,6 +8,7 @@ import type { OutboundScopeEntry } from "../api/types";
 import { useAuth } from "../auth/AuthProvider";
 import { useT } from "../i18n/locale";
 import { EmptyState } from "../ui/EmptyState";
+import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 
 type EntryValues = { entry: string; note?: string };
@@ -21,8 +22,9 @@ type EntryValues = { entry: string; note?: string };
  * comes second because that is the direction the rule runs — each layer narrows
  * the one above and none may widen it.
  */
-export function OutboundScopePage() {
+export function OutboundScopePage({ mode }: { mode?: "workspace" | "platform" }) {
   const t = useT();
+  const { admin: workspaceAdmin } = useWorkspacePermissions();
   const auth = useAuth();
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
@@ -31,7 +33,7 @@ export function OutboundScopePage() {
   const [workspaceForm] = Form.useForm<EntryValues>();
   const [error, setError] = useState<string | null>(null);
   const scope = { workspace: workspaceId ?? "" };
-  const admin = auth.user?.is_platform_admin === true;
+  const admin = mode !== "workspace" && auth.user?.is_platform_admin === true;
   const platformQuery = ["outbound-scopes", "platform"] as const;
   const workspaceQuery = ["outbound-scopes", "workspace", workspaceId] as const;
 
@@ -43,7 +45,7 @@ export function OutboundScopePage() {
   const workspace = useQuery({
     queryKey: workspaceQuery,
     queryFn: () => api<OutboundScopeEntry[]>("/api/v1/outbound-scopes/workspace", scope),
-    enabled: workspaceId !== null,
+    enabled: mode !== "platform" && workspaceId !== null,
   });
 
   function refresh(): void {
@@ -86,12 +88,12 @@ export function OutboundScopePage() {
     onError: (caught) => setError(problemMessage(caught, t)),
   });
 
-  if (platform.isError) {
+  if (platform.isError || workspace.isError) {
     return (
       <Alert
         type="error"
-        title={problemMessage(platform.error, t)}
-        action={<Button onClick={() => void platform.refetch()}>{t("retry")}</Button>}
+        title={problemMessage(platform.error ?? workspace.error, t)}
+        action={<Button onClick={() => { void platform.refetch(); if (mode !== "platform") void workspace.refetch(); }}>{t("retry")}</Button>}
         showIcon
       />
     );
@@ -132,11 +134,6 @@ export function OutboundScopePage() {
   return (
     <>
       {contextHolder}
-      <div className="page-heading">
-        <div>
-          <Typography.Paragraph type="secondary">{t("outboundIntro")}</Typography.Paragraph>
-        </div>
-      </div>
       {error === null ? null : (
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}
@@ -188,7 +185,7 @@ export function OutboundScopePage() {
         )}
       </Card>
 
-      <Card
+      {mode !== "platform" ? <Card
         title={t("outboundWorkspace")}
         variant="borderless"
         loading={workspace.isPending}
@@ -197,6 +194,7 @@ export function OutboundScopePage() {
           {t("outboundWorkspaceIntro")}
         </Typography.Paragraph>
         <Form<EntryValues>
+          disabled={!workspaceAdmin}
           form={workspaceForm}
           name="workspace-scope"
           layout="inline"
@@ -223,9 +221,9 @@ export function OutboundScopePage() {
         {(workspace.data ?? []).length === 0 ? (
           <EmptyState title={t("emptyOutboundWorkspace")} />
         ) : (
-          rows(workspace.data ?? [], true)
+          rows(workspace.data ?? [], workspaceAdmin)
         )}
-      </Card>
+      </Card> : null}
     </>
   );
 }

@@ -76,7 +76,10 @@ const AGENTS = [
 
 function listing(runs: unknown[]): void {
   server.use(
-    http.get("/api/v1/runs", () => HttpResponse.json(runs)),
+      http.get("/api/v1/runs", ({ request }) => {
+        const q = new URL(request.url).searchParams.get("q")?.toLowerCase() ?? "";
+        return HttpResponse.json(runs.filter((row) => JSON.stringify(row).toLowerCase().includes(q)));
+      }),
     http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
   );
 }
@@ -120,6 +123,8 @@ test("a row states the Run's status, its place in the session, and its times", a
   const row = await rowOf(HEAD_RUN);
 
   expect(within(row).getByText(t("statusCompleted"))).toBeInTheDocument();
+  expect(within(row).queryByText(/排队第/)).not.toBeInTheDocument();
+  expect(within(row).queryByText("terminal")).not.toBeInTheDocument();
   expect(within(row).getByText("1")).toBeInTheDocument();
   expect(within(row).getByText(moment("2026-08-10T02:00:00Z"))).toBeInTheDocument();
   expect(within(row).getByText(moment("2026-08-10T02:04:00Z"))).toBeInTheDocument();
@@ -153,15 +158,12 @@ test("a running Run has no end time, and the column says so", async () => {
   expect(within(await rowOf(HEAD_RUN)).getByText("—")).toBeInTheDocument();
 });
 
-test("the page neither pages the list nor hides that it cannot", async () => {
+test("the full list has no misleading pagination control", async () => {
   listing([runRow({})]);
 
   renderRuns();
   await rowOf(HEAD_RUN);
 
-  expect(
-    screen.getByText("接口一次返回全部任务记录，没有分页，也没有筛选。记录很多时列表会变慢。"),
-  ).toBeInTheDocument();
   // A pager over a list that arrived whole would be a control that pretends to
   // ask the platform for something.
   expect(screen.queryByRole("listitem", { name: /page/i })).not.toBeInTheDocument();
@@ -298,4 +300,29 @@ test("a run that has not failed shows no reason", async () => {
 
   expect(await screen.findByText(t("statusRunning"))).toBeVisible();
   expect(screen.queryByText("model_provider_unreachable")).toBeNull();
+});
+
+
+test("tasks can be found by request text while keeping their full identifier accessible", async () => {
+  listing([runRow({ input_preview: "Summarize September notes", agent_id: AGENT }), runRow({ id: QUEUED_RUN, input_preview: "Organize receipts", agent_id: AGENT })]);
+  renderRuns();
+  expect(await screen.findByText("Summarize September notes")).toBeVisible();
+  await userEvent.type(screen.getByRole("textbox", { name: "查找任务" }), "receipts");
+  expect(screen.queryByText("Summarize September notes")).toBeNull();
+  expect(await screen.findByText("Organize receipts")).toBeVisible();
+});
+
+test("task lookup requests a bounded page and a next page from the server", async () => {
+  const offsets: string[] = [];
+  listing([]);
+  server.use(http.get("/api/v1/runs", ({ request }) => {
+    const query = new URL(request.url).searchParams;
+    if (query.get("limit") !== "21") return HttpResponse.json([]);
+    offsets.push(query.get("offset") ?? "");
+    return HttpResponse.json(query.get("offset") === "20" ? [runRow({ id: QUEUED_RUN, input_preview: "Last page" })] : Array.from({ length: 21 }, (_, i) => runRow({ id: `run-${i}`, input_preview: `Task ${i}` })));
+  }));
+  renderRuns();
+  await userEvent.click(await screen.findByRole("button", { name: "下一页" }));
+  expect(await screen.findByText("Last page")).toBeVisible();
+  expect(offsets).toEqual(["0", "20"]);
 });

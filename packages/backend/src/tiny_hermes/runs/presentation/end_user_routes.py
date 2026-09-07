@@ -55,6 +55,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Cookie, Depends, Header, Request, Response, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from tiny_hermes.agents.application.service import (
@@ -80,6 +81,14 @@ from tiny_hermes.runs.domain.models import (
 )
 from tiny_hermes.runs.presentation.errors import as_app_error
 from tiny_hermes.runs.presentation.routes import REPLAYED_HEADER
+from tiny_hermes.session_workspace.application.files import WorkspaceFiles
+from tiny_hermes.session_workspace.presentation.files import (
+    FILE_ERRORS,
+    EndUserFileResponse,
+    EndUserFilesResponse,
+    file_download,
+    file_error,
+)
 from tiny_hermes.shared.errors import AppError
 
 EndUserSessionCookie = Annotated[str | None, Cookie(alias=END_USER_SESSION_COOKIE)]
@@ -366,6 +375,50 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
         except RunCoordinationError as error:
             raise as_app_error(error) from error
         return [EndUserSessionMessageResponse.from_domain(item) for item in messages]
+
+    @router.get("/sessions/{session_id}/files", response_model=EndUserFilesResponse)
+    async def list_saved_files(  # pyright: ignore[reportUnusedFunction]
+        session_id: UUID,
+        identity: Annotated[EndUserIdentityService, Depends(identity_dependency, scope="function")],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
+        files: Annotated[WorkspaceFiles, Depends(resources.workspace_files, scope="function")],
+        end_user_session: EndUserSessionCookie = None,
+    ) -> EndUserFilesResponse:
+        caller = await resolve_end_user_caller(identity, end_user_session)
+        try:
+            await runs.get_end_user_session(caller.workspace_id, caller.end_user_id, session_id)
+            source = await files.store.session_source(caller.workspace_id, session_id)
+            snapshot = await files.list_files(source)
+        except RunCoordinationError as error:
+            raise as_app_error(error) from error
+        except FILE_ERRORS as error:
+            raise file_error(error) from error
+        return EndUserFilesResponse(
+            revision_id=snapshot.revision_id,
+            items=[
+                EndUserFileResponse(path=item.path, size_bytes=item.size) for item in snapshot.items
+            ],
+        )
+
+    @router.get("/sessions/{session_id}/files/content")
+    async def download_saved_file(  # pyright: ignore[reportUnusedFunction]
+        session_id: UUID,
+        revision_id: UUID,
+        path: str,
+        identity: Annotated[EndUserIdentityService, Depends(identity_dependency, scope="function")],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
+        files: Annotated[WorkspaceFiles, Depends(resources.workspace_files, scope="function")],
+        end_user_session: EndUserSessionCookie = None,
+    ) -> StreamingResponse:
+        caller = await resolve_end_user_caller(identity, end_user_session)
+        try:
+            await runs.get_end_user_session(caller.workspace_id, caller.end_user_id, session_id)
+            source = await files.store.session_source(caller.workspace_id, session_id)
+            return await file_download(files, source, revision_id, path)
+        except RunCoordinationError as error:
+            raise as_app_error(error) from error
+        except FILE_ERRORS as error:
+            raise file_error(error) from error
 
     @router.get("/runs/{run_id}", response_model=EndUserRunResponse)
     async def get_run(  # pyright: ignore[reportUnusedFunction]

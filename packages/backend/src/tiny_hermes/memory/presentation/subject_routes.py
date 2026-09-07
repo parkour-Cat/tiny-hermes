@@ -12,11 +12,12 @@ the reply says how many of each went — which is the same thing the audit recor
 says, and the only way afterwards to tell an erasure from one that never ran.
 """
 
+from dataclasses import asdict
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Cookie, Depends, Header, Request
+from fastapi import APIRouter, Cookie, Depends, Header, Query, Request
 from pydantic import BaseModel, Field
 
 from tiny_hermes.api.resources import ApplicationResources
@@ -61,6 +62,11 @@ class ResolvedSubjectResponse(BaseModel):
     first_seen_at: datetime
 
 
+class SubjectSearchResponse(BaseModel):
+    items: list[ResolvedSubjectResponse]
+    has_more: bool
+
+
 class SubjectExportResponse(BaseModel):
     subject_type: str
     subject_id: UUID
@@ -83,13 +89,76 @@ def subject_router(resources: ApplicationResources) -> APIRouter:
     auth_dependency = resources.auth_service
     service_dependency = resources.subject_service
 
+    @router.get("/search", response_model=SubjectSearchResponse)
+    async def search(  # pyright: ignore[reportUnusedFunction]
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        service: Annotated[SubjectService, Depends(service_dependency, scope="function")],
+        q: str = Query(min_length=2, max_length=255),
+        channel: str | None = Query(default=None, max_length=32),
+        limit: int = Query(default=20, ge=1, le=50),
+        offset: int = Query(default=0, ge=0),
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+    ) -> SubjectSearchResponse:
+        user = await authenticate_browser_user(auth, session_token)
+        if len(q.strip()) < 2:
+            raise AppError(
+                code="invalid_subject_query",
+                title="Query too short",
+                status=422,
+                detail="Enter at least two non-whitespace characters.",
+            )
+        try:
+            rows = await service.search(
+                _actor(user),
+                require_workspace_id(selected_workspace),
+                q.strip(),
+                channel,
+                limit + 1,
+                offset,
+                request.state.request_id,
+            )
+        except ForbiddenSubjectAction as error:
+            raise forbidden() from error
+        return SubjectSearchResponse(
+            items=[ResolvedSubjectResponse(**asdict(row)) for row in rows[:limit]],
+            has_more=len(rows) > limit,
+        )
+
+    @router.get("/from-session/{session_id}", response_model=ResolvedSubjectResponse)
+    async def from_session(  # pyright: ignore[reportUnusedFunction]
+        session_id: UUID,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        service: Annotated[SubjectService, Depends(service_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+    ) -> ResolvedSubjectResponse:
+        user = await authenticate_browser_user(auth, session_token)
+        try:
+            found = await service.from_session(
+                _actor(user),
+                require_workspace_id(selected_workspace),
+                session_id,
+                request.state.request_id,
+            )
+        except ForbiddenSubjectAction as error:
+            raise forbidden() from error
+        except UnknownSubject as error:
+            raise AppError(
+                code="subject_not_found",
+                title="End user not found",
+                status=404,
+                detail="No end user is associated with this session in this workspace.",
+            ) from error
+        return ResolvedSubjectResponse(**asdict(found))
+
     @router.get("/lookup", response_model=ResolvedSubjectResponse)
     async def lookup(  # pyright: ignore[reportUnusedFunction]
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        service: Annotated[
-            SubjectService, Depends(service_dependency, scope="function")
-        ],
+        service: Annotated[SubjectService, Depends(service_dependency, scope="function")],
         channel: str,
         external_user_id: str,
         selected_workspace: WorkspaceHeader = None,
@@ -138,9 +207,7 @@ def subject_router(resources: ApplicationResources) -> APIRouter:
         subject_id: UUID,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        service: Annotated[
-            SubjectService, Depends(service_dependency, scope="function")
-        ],
+        service: Annotated[SubjectService, Depends(service_dependency, scope="function")],
         agent_id: UUID | None = None,
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
@@ -174,9 +241,7 @@ def subject_router(resources: ApplicationResources) -> APIRouter:
         payload: CorrectMemoryRequest,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        service: Annotated[
-            SubjectService, Depends(service_dependency, scope="function")
-        ],
+        service: Annotated[SubjectService, Depends(service_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
@@ -209,9 +274,7 @@ def subject_router(resources: ApplicationResources) -> APIRouter:
         memory_id: UUID,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        service: Annotated[
-            SubjectService, Depends(service_dependency, scope="function")
-        ],
+        service: Annotated[SubjectService, Depends(service_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,
@@ -233,9 +296,7 @@ def subject_router(resources: ApplicationResources) -> APIRouter:
         subject_id: UUID,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        service: Annotated[
-            SubjectService, Depends(service_dependency, scope="function")
-        ],
+        service: Annotated[SubjectService, Depends(service_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,

@@ -35,11 +35,18 @@ import type {
   WritePolicy,
 } from "../api/types";
 import { IMPLEMENTED_TOOLS, MODEL_SCENARIOS } from "../api/types";
+import { UnsavedChangesGuard } from "../forms/UnsavedChangesGuard";
+import { specDiff } from "./specDiff";
+import { SharedMemoryButton } from "./SharedMemoryButton";
 import { FormSection } from "../forms/FormSection";
 import { PageHeading } from "../ui/PageHeading";
 import { useT } from "../i18n/locale";
 import type { MessageKey } from "../i18n/zh-CN";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
+import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
+import { useAuth } from "../auth/AuthProvider";
+import { agentDraftKey, readAgentDraft, writeAgentDraft } from "./agentDraftStorage";
+import type { LocalAgentDraft } from "./agentDraftStorage";
 
 type DraftValues = {
   personality: string;
@@ -130,7 +137,7 @@ type NameValues = {
 
 /** 一张表单：名称与别名跟人格并排在「身份」里，但保存时各走各的请求——
  *  名称不是版本化 spec 的一部分，改名不该长出一个草稿修订。 */
-type FormValues = DraftValues & NameValues;
+export type FormValues = DraftValues & NameValues;
 
 const DEFAULT_DELIVERY = { enabled: false, sync_timeout_seconds: 60 };
 
@@ -255,29 +262,18 @@ function exposureSummary(t: (key: MessageKey) => string, values: DraftValues): s
   ].join(" · ");
 }
 
-function summarizeSpec(spec: AgentSpecDocument): Record<string, string> {
-  const delivery = spec.delivery ?? DEFAULT_DELIVERY;
-  return {
-    personality: spec.personality,
-    model: JSON.stringify(spec.model_policy),
-    tools: spec.tools.join(", ") || "—",
-    skills: (spec.skills ?? []).map((binding) => binding.skill_version_id).join(", ") || "—",
-    network: (spec.network?.allow ?? []).join(", ") || "—",
-    http_tools:
-      (spec.http_tools ?? []).flatMap((binding) => binding.operations).join(", ") || "—",
-    mcp_tools: (spec.mcp_tools ?? []).flatMap((binding) => binding.tools).join(", ") || "—",
-    max_execution_seconds: String(spec.limits.max_execution_seconds),
-    max_elapsed_seconds: String(spec.limits.max_elapsed_seconds),
-    max_model_calls: String(spec.limits.max_model_calls),
-    max_tool_calls: String(spec.limits.max_tool_calls),
-    max_derived_retries: String(spec.limits.max_derived_retries),
-    delivery: delivery.enabled
-      ? `chat_completions/${delivery.sync_timeout_seconds}s`
-      : "off",
-  };
+export function AgentDetailPage() {
+  const auth = useAuth();
+  const { writer } = useWorkspacePermissions();
+  const workspaceId = useWorkspaceId();
+  const { agentId = "" } = useParams();
+  if (auth.loading || auth.error || !auth.user) return <Card loading variant="borderless" />;
+  const key = agentDraftKey(auth.user.id, workspaceId ?? "", agentId);
+  return <AgentEditor key={`${key}:${writer}`} storageKey={key} />;
 }
 
-export function AgentDetailPage() {
+function AgentEditor({ storageKey }: { storageKey: string }) {
+  const { writer } = useWorkspacePermissions();
   const t = useT();
   const workspaceId = useWorkspaceId();
   const { agentId = "" } = useParams();
@@ -286,6 +282,10 @@ export function AgentDetailPage() {
   const [modal, contextHolder] = Modal.useModal();
   const [saveError, setSaveError] = useState<string | null>(null);
   const [publishNote, setPublishNote] = useState<string | null>(null);
+  const [recovery] = useState(() => writer ? readAgentDraft(storageKey) : { draft: null, failed: false });
+  const [localDraft, setLocalDraft] = useState<LocalAgentDraft | null>(recovery.draft);
+  const [storageFailed, setStorageFailed] = useState(recovery.failed);
+  const [restored] = useState(localDraft !== null);
   // Per-summary estimates from a refused publish. Shown as themselves rather
   // than summed, so an author can see which description is the expensive one
   // instead of shortening all of them — the shape `context_budget_unsatisfied`
@@ -410,17 +410,26 @@ export function AgentDetailPage() {
     enabled: enabled && publishedId !== null,
   });
 
+  function rememberEdits(values: FormValues, baseDraft: AgentDraftResponse, baseAgent: AgentResponse): void {
+    const unchanged = JSON.stringify(specOf(values)) === JSON.stringify(specOf(valuesOf(baseDraft))) &&
+      values.name === baseAgent.name && values.alias === baseAgent.alias;
+    const next = unchanged ? null : { revision: baseDraft.revision, name: baseAgent.name, alias: baseAgent.alias, values };
+    setLocalDraft(next);
+    setStorageFailed(!writeAgentDraft(storageKey, next));
+  }
+
   const saveDraft = useMutation({
-    mutationFn: (values: DraftValues) =>
+    mutationFn: ({ values, revision }: { values: DraftValues; revision: number }) =>
       api<AgentDraftResponse>(`/api/v1/agents/${agentId}/draft`, {
         ...scope,
         method: "PUT",
         body: JSON.stringify({
-          expected_revision: draft.data?.revision ?? 0,
+          expected_revision: revision,
           spec: specOf(values),
         }),
       }),
     onSuccess: (saved) => {
+      if (agent.data) rememberEdits(form.getFieldsValue(true), saved, agent.data);
       queryClient.setQueryData(draftQuery, saved);
       setSaveError(null);
     },
@@ -435,6 +444,7 @@ export function AgentDetailPage() {
         body: JSON.stringify(values),
       }),
     onSuccess: (updated) => {
+      if (draft.data) rememberEdits(form.getFieldsValue(true), draft.data, updated);
       queryClient.setQueryData(agentQuery, updated);
       setSaveError(null);
     },
@@ -496,11 +506,14 @@ export function AgentDetailPage() {
       />
     );
   }
-  if (agent.data === undefined || draft.data === undefined) {
+  if (agent.data === undefined || draft.data === undefined || !agent.isFetchedAfterMount || !draft.isFetchedAfterMount) {
     return <Card loading variant="borderless" />;
   }
   const loadedAgent = agent.data;
   const loadedDraft = draft.data;
+  const canRestore = writer && localDraft?.revision === loadedDraft.revision &&
+    localDraft.name === loadedAgent.name && localDraft.alias === loadedAgent.alias;
+  const recoveryConflict = writer && localDraft !== null && !canRestore;
 
   function reload(): void {
     void modal.confirm({
@@ -509,11 +522,13 @@ export function AgentDetailPage() {
       okText: t("confirm"),
       cancelText: t("cancel"),
       onOk: async () => {
-        const fresh = await draft.refetch();
-        if (fresh.data !== undefined) {
-          form.setFieldsValue(valuesOf(fresh.data));
+        const [fresh, freshAgent] = await Promise.all([draft.refetch(), agent.refetch()]);
+        if (fresh.isSuccess && freshAgent.isSuccess) {
+          form.setFieldsValue({ ...valuesOf(fresh.data), name: freshAgent.data.name, alias: freshAgent.data.alias });
+          setLocalDraft(null);
+          setStorageFailed(!writeAgentDraft(storageKey, null));
+          setSaveError(null);
         }
-        setSaveError(null);
       },
     });
   }
@@ -521,10 +536,25 @@ export function AgentDetailPage() {
   function askToPublish(revision: number): void {
     void modal.confirm({
       title: t("publish"),
-      content: `${t("publishWarningPrefix")}${revision}${t("publishWarningSuffix")}`,
+      content: dirty ? t("publishSaveWarning") : `${t("publishWarningPrefix")}${revision}${t("publishWarningSuffix")}`,
       okText: t("confirm"),
       cancelText: t("cancel"),
-      onOk: () => publish.mutateAsync(revision).catch(() => undefined),
+      onOk: async () => {
+        try {
+          const values = await form.validateFields();
+          if (values.name !== loadedAgent.name || values.alias !== loadedAgent.alias) {
+            await rename.mutateAsync({ name: values.name, alias: values.alias });
+          }
+          const changed = JSON.stringify(specOf(values)) !== JSON.stringify(specOf(valuesOf(loadedDraft)));
+          const savedRevision = changed
+            ? (await saveDraft.mutateAsync({ values, revision })).revision
+            : revision;
+          await publish.mutateAsync(savedRevision);
+        } catch {
+          // Mutation errors are shown beside the retained draft; validation
+          // errors remain on the fields. Neither path may publish old content.
+        }
+      },
     });
   }
 
@@ -546,36 +576,70 @@ export function AgentDetailPage() {
     watched !== undefined && watched.personality !== undefined
       ? watched
       : valuesOf(draft.data);
-  const draftSummary = summarizeSpec(specOf(draftValues));
-  const publishedSummary =
-    published.data === undefined ? null : summarizeSpec(published.data.spec);
-  const diffEntries =
-    publishedSummary === null
-      ? []
-      : Object.entries(draftSummary).filter(([key, value]) => publishedSummary[key] !== value);
+  const dirty = JSON.stringify(specOf(draftValues)) !== JSON.stringify(specOf(valuesOf(loadedDraft))) ||
+    (watched?.name !== undefined && watched.name !== loadedAgent.name) ||
+    (watched?.alias !== undefined && watched.alias !== loadedAgent.alias);
+  const saving = saveDraft.isPending || rename.isPending || publish.isPending;
+  const diffEntries = published.data ? specDiff(published.data.spec, specOf(draftValues)) : [];
+  const fieldLabels: Record<string, MessageKey> = {
+    name: "agentName", alias: "agentAlias",
+    personality: "personality", model_policy: "modelEndpoints", endpoint_id: "modelEndpoint",
+    tools: "toolsSection", skills: "skills", http_tools: "httpTools", mcp_tools: "mcpServers",
+    network: "agentNetwork", limits: "budgetSection", delivery: "deliverySection", end_user_access: "agentSummaryEndUserOn",
+    max_execution_seconds: "maxExecutionSeconds", max_elapsed_seconds: "maxElapsedSeconds",
+    max_model_calls: "maxModelCalls", max_tool_calls: "maxToolCalls", max_derived_retries: "maxDerivedRetries",
+    temperature: "diffTemperature", max_output_tokens: "endpointMaxOutput", write_policy: "agentWritePolicy",
+    http_tool_version_id: "currentVersion", mcp_server_version_id: "currentVersion", skill_version_id: "currentVersion",
+    enabled: "diffEnabled", operations: "diffOperations", allow: "diffAllowed", sync_timeout_seconds: "syncTimeoutSeconds",
+    provider: "modelProvider", scenario: "modelScenario",
+  };
+  const localDiff = localDraft === null ? [] : [
+    ...specDiff(specOf(valuesOf(loadedDraft)), specOf(localDraft.values)),
+    ...(["name", "alias"] as const).filter((field) => loadedAgent[field] !== localDraft.values[field])
+      .map((field) => ({ path: field, before: JSON.stringify(loadedAgent[field]), after: JSON.stringify(localDraft.values[field]) })),
+  ];
 
   return (
     <>
       {contextHolder}
+      <UnsavedChangesGuard dirty={dirty || recoveryConflict} onDiscard={() => {
+        const cleared = writeAgentDraft(storageKey, null);
+        setStorageFailed(!cleared);
+        if (cleared) setLocalDraft(null);
+        return cleared;
+      }} />
+      {restored && canRestore && <Alert className="page-alert" type="info" showIcon title={t("agentEditsRestored")} />}
+      {storageFailed && <Alert className="page-alert" type="warning" showIcon title={t("agentEditsStorageFailed")} />}
+      {recoveryConflict && <Alert className="page-alert" type="warning" showIcon title={t("agentEditsConflict")}
+        description={<details><summary>{t("agentEditsDifferences")}</summary><ul>
+          {localDiff.map(({ path, before, after }) => <li key={path}>
+            <Typography.Text strong>{path.split(".").map((part) => fieldLabels[part] ? t(fieldLabels[part]) : part).join(" · ")}</Typography.Text>
+            <div>{t("agentEditsServer")}:</div>
+            <Typography.Paragraph>{before.startsWith('"') ? String(JSON.parse(before)) : before}</Typography.Paragraph>
+            <div>{t("agentEditsLocal")}:</div>
+            <Typography.Paragraph copyable>{after.startsWith('"') ? String(JSON.parse(after)) : after}</Typography.Paragraph>
+          </li>)}
+        </ul></details>} />}
       <PageHeading
         kicker={t("agents")}
         title={agent.data.name}
         intro={agent.data.alias}
         extra={
           <Space wrap>
+          <SharedMemoryButton key={agent.data.id} agentId={agent.data.id} agentName={agent.data.name} />
           <Link to={`/workspaces/${workspaceId}/agents/${agentId}/playground`}>
             <Button>{t("openPlayground")}</Button>
           </Link>
-          <Button
-            type="primary"
-            loading={publish.isPending}
-            onClick={() => askToPublish(draft.data?.revision ?? 0)}
-          >
-            {t("publish")}
-          </Button>
+
           </Space>
         }
       />
+      <Space wrap className="editor-actions page-alert">
+        <Button type="primary" loading={saving} disabled={!writer || recoveryConflict} onClick={() => form.submit()}>{t("saveDraft")}</Button>
+        <Button loading={saving} disabled={!writer || recoveryConflict} onClick={() => askToPublish(localDraft?.revision ?? loadedDraft.revision)}>{t("publish")}</Button>
+        <Button loading={draft.isFetching} onClick={reload}>{t("reloadDraft")}</Button>
+        {dirty && <Typography.Text type="warning">{t("draftUnsaved")}</Typography.Text>}
+      </Space>
       <Card variant="borderless" className="page-alert">
         <Space size="large" wrap>
           <Typography.Text strong>
@@ -589,30 +653,23 @@ export function AgentDetailPage() {
             </Typography.Text>
           )}
         </Space>
-        {currentVersion === undefined ? null : (
-          <Typography.Paragraph className="fact-note">
-            <Typography.Text code>{currentVersion.content_hash}</Typography.Text>
-          </Typography.Paragraph>
-        )}
         <Typography.Title level={5}>{t("diffSection")}</Typography.Title>
-        {publishedSummary === null ? (
+        {published.data === undefined ? (
           <Typography.Paragraph type="secondary">{t("diffUnpublished")}</Typography.Paragraph>
         ) : diffEntries.length === 0 ? (
           <Typography.Paragraph type="secondary">{t("diffNone")}</Typography.Paragraph>
         ) : (
           <ul>
-            {diffEntries.map(([key, value]) => (
-              <li key={key}>
-                <Typography.Text>{key}</Typography.Text>
-                {": "}
-                <Typography.Text delete>{publishedSummary[key]}</Typography.Text>
-                {" → "}
-                <Typography.Text>{value}</Typography.Text>
+            {diffEntries.map(({ path, before, after }) => (
+              <li key={path} className="spec-change">
+                <Typography.Text strong>{path.split(".").map((part) => fieldLabels[part] ? t(fieldLabels[part]) : /^\d+$/.test(part) ? `#${Number(part) + 1}` : part).join(" · ")}</Typography.Text>
+                <div><Typography.Text delete>{before.startsWith('"') ? String(JSON.parse(before)) : before}</Typography.Text>{" → "}<Typography.Text>{after.startsWith('"') ? String(JSON.parse(after)) : after}</Typography.Text></div>
               </li>
             ))}
           </ul>
         )}
       </Card>
+      <details className="page-alert"><summary>{t("diffTechnical")}</summary><pre className="skill-file-body">{JSON.stringify({ published: published.data?.spec ?? null, draft: specOf(draftValues), content_hash: currentVersion?.content_hash ?? null }, null, 2)}</pre></details>
       {publishNote === null ? null : (
         <Alert className="page-alert" type="info" title={publishNote} showIcon />
       )}
@@ -643,12 +700,20 @@ export function AgentDetailPage() {
       <Card title={t("draftSection")} variant="borderless">
         <Form<FormValues>
           form={form}
+          disabled={saving || !writer || recoveryConflict}
           layout="vertical"
           requiredMark={false}
-          initialValues={{ ...valuesOf(loadedDraft), name: loadedAgent.name, alias: loadedAgent.alias }}
+          initialValues={canRestore ? localDraft.values : { ...valuesOf(loadedDraft), name: loadedAgent.name, alias: loadedAgent.alias }}
+          onValuesChange={() => {
+            // Conditional fields still have meaningful defaults in the form store.
+            const values = form.getFieldsValue(true) as FormValues;
+            const next = { revision: localDraft?.revision ?? loadedDraft.revision, name: localDraft?.name ?? loadedAgent.name, alias: localDraft?.alias ?? loadedAgent.alias, values };
+            setLocalDraft(next);
+            setStorageFailed(!writeAgentDraft(storageKey, next));
+          }}
           // `specOf` reads the draft fields by name, so the two name fields
           // sharing this form never reach the spec.
-          onFinish={(values) => saveDraft.mutate(values)}
+          onFinish={(values) => { if (!recoveryConflict) saveDraft.mutate({ values, revision: localDraft?.revision ?? loadedDraft.revision }); }}
         >
           <FormSection
             title={t("agentSectionIdentity")}
@@ -770,6 +835,7 @@ export function AgentDetailPage() {
             fields={[]}
             collapsible
           >
+          <Space wrap className="page-alert"><Link target="_blank" rel="noopener noreferrer" to={`/workspaces/${workspaceId}/tooling#skills`}>{t("skills")}</Link><Link target="_blank" rel="noopener noreferrer" to={`/workspaces/${workspaceId}/tooling#http-tools`}>{t("httpTools")}</Link><Link target="_blank" rel="noopener noreferrer" to={`/workspaces/${workspaceId}/tooling#mcp-servers`}>{t("mcpServers")}</Link></Space>
           <Typography.Title level={5}>{t("toolsSection")}</Typography.Title>
           <Typography.Paragraph type="secondary">{t("toolsHint")}</Typography.Paragraph>
           <Form.Item name="tools">
@@ -784,6 +850,7 @@ export function AgentDetailPage() {
               mode="multiple"
               allowClear
               loading={skills.isLoading || skillVersions.isLoading}
+              optionFilterProp="label"
               placeholder={t("agentSkillsEmpty")}
               // Grouped by skill, so choosing is "which skill, then which
               // version of it" even though what is stored is one version id.
@@ -805,6 +872,7 @@ export function AgentDetailPage() {
               mode="multiple"
               allowClear
               loading={httpTools.isLoading || httpVersions.isLoading}
+              optionFilterProp="label"
               placeholder={t("emptyHttpTools")}
               // Grouped by tool and version, and the label carries whether the
               // operation writes: what an author needs while choosing is
@@ -841,6 +909,7 @@ export function AgentDetailPage() {
               mode="multiple"
               allowClear
               loading={mcpServers.isLoading || mcpVersions.isLoading}
+              optionFilterProp="label"
               placeholder={t("emptyMcpServers")}
               options={(mcpVersions.data ?? []).flatMap((entry) =>
                 entry.versions
@@ -909,14 +978,7 @@ export function AgentDetailPage() {
             </Form.Item>
           ) : null}
           </FormSection>
-          <Space>
-            <Button type="primary" htmlType="submit" loading={saveDraft.isPending}>
-              {t("saveDraft")}
-            </Button>
-            <Button onClick={() => void reload()} loading={draft.isFetching}>
-              {t("reloadDraft")}
-            </Button>
-          </Space>
+
         </Form>
       </Card>
       {(versions.data ?? []).length === 0 ? null : (
@@ -929,6 +991,7 @@ export function AgentDetailPage() {
                 <Typography.Text type="secondary">{t("agentPublished")}</Typography.Text>
               ) : (
                 <Button
+                  disabled={!writer}
                   loading={rollback.isPending}
                   onClick={() => askToRollback(version.id, version.version_number)}
                 >

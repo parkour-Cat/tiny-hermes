@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Button, Card, Descriptions, Form, Input, Modal, Select, Space, Tag, Typography } from "antd";
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
 import { ApiError, api } from "../api/client";
 import { problemMessage } from "../api/messages";
@@ -22,12 +23,14 @@ import { useWorkspaceId } from "../workspace/useWorkspaceId";
  * enterprise's own directory names them. `channel` + external id resolves
  * to the subject; everything else hangs off that.
  *
- * Deliberately a lookup and not a directory. "Who are all the end users of
- * this workspace" is a different question with a different disclosure, and
- * §4.6 does not grant it.
+ * Partial identifier search is a steward-only, bounded and audited lookup.
+ * It does not add an unfiltered user directory.
  */
 export function SubjectDataPage() {
+  const [params] = useSearchParams();
+  const sessionId = params.get("session");
   const t = useT();
+  const [searchRequest, setSearchRequest] = useState<{ q: string; channel: string; offset: number } | null>(null);
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
   const scope = { workspace: workspaceId ?? "" };
@@ -39,16 +42,21 @@ export function SubjectDataPage() {
   const [modal, contextHolder] = Modal.useModal();
   const [form] = Form.useForm<{ body: string }>();
 
+  const candidates = useQuery({
+    queryKey: ["subject-search", workspaceId, searchRequest], enabled: workspaceId !== null && searchRequest !== null,
+    queryFn: () => api<{ items: ResolvedSubjectResponse[]; has_more: boolean }>(`/api/v1/subjects/search?${new URLSearchParams({ q: searchRequest?.q ?? "", channel: searchRequest?.channel ?? "web", offset: String(searchRequest?.offset ?? 0) })}`, scope),
+  });
   const subject = useQuery({
-    queryKey: ["subject-lookup", workspaceId, asked] as const,
+    queryKey: ["subject-lookup", workspaceId, asked, sessionId] as const,
     queryFn: () => {
+      if (asked === null && sessionId !== null) return api<ResolvedSubjectResponse>(`/api/v1/subjects/from-session/${encodeURIComponent(sessionId)}`, scope);
       const query = new URLSearchParams({
         channel: asked?.channel ?? "",
         external_user_id: asked?.externalId ?? "",
       });
       return api<ResolvedSubjectResponse>(`/api/v1/subjects/lookup?${query.toString()}`, scope);
     },
-    enabled: workspaceId !== null && asked !== null,
+    enabled: workspaceId !== null && (asked !== null || sessionId !== null),
   });
 
   const subjectId = subject.data?.subject_id ?? null;
@@ -105,11 +113,6 @@ export function SubjectDataPage() {
   return (
     <>
       {contextHolder}
-      <div className="page-heading">
-        <div>
-          <Typography.Paragraph type="secondary">{t("subjectDataIntro")}</Typography.Paragraph>
-        </div>
-      </div>
 
       <Card variant="borderless" className="page-alert">
         <Space wrap align="end">
@@ -131,6 +134,7 @@ export function SubjectDataPage() {
             onChange={(event) => setExternalId(event.target.value)}
             onPressEnter={() => setAsked({ channel, externalId })}
           />
+          <Button disabled={externalId.trim().length < 2} loading={candidates.isFetching} onClick={() => setSearchRequest({ q: externalId.trim(), channel, offset: 0 })}>{t("subjectPartialFind")}</Button>
           <Button
             type="primary"
             loading={subject.isFetching}
@@ -140,6 +144,12 @@ export function SubjectDataPage() {
           </Button>
         </Space>
       </Card>
+
+      {searchRequest && <Card className="page-alert" loading={candidates.isPending}>
+        <Typography.Paragraph type="secondary">{t("subjectSearchHint")}</Typography.Paragraph>
+        {candidates.isError ? <Alert type="error" title={problemMessage(candidates.error, t)} action={<Button onClick={() => void candidates.refetch()}>{t("retry")}</Button>} /> : candidates.data?.items.length === 0 ? <Typography.Paragraph>{t("subjectNotFound")}</Typography.Paragraph> : candidates.data?.items.map((row) => <div key={`${row.channel}:${row.subject_id}`} className="workspace-row"><Tag>{row.channel}</Tag><Button onClick={() => { setChannel(row.channel); setExternalId(row.external_user_id); setAsked({ channel: row.channel, externalId: row.external_user_id }); }}>{row.external_user_id}</Button><Typography.Text type="secondary">{moment(row.first_seen_at)}</Typography.Text></div>)}
+        <Space><Button disabled={searchRequest.offset === 0} onClick={() => setSearchRequest({ ...searchRequest, offset: Math.max(0, searchRequest.offset - 20) })}>{t("approvalPreviousPage")}</Button><Button disabled={!candidates.data?.has_more} onClick={() => setSearchRequest({ ...searchRequest, offset: searchRequest.offset + 20 })}>{t("approvalNextPage")}</Button></Space>
+      </Card>}
 
       {notFound ? (
         // Not an empty memory list under their name: that reads as "we hold
@@ -161,6 +171,7 @@ export function SubjectDataPage() {
             size="small"
             column={{ xs: 1, sm: 2 }}
             items={[
+              { key: "external", label: t("subjectExternalId"), children: subject.data.external_user_id },
               {
                 key: "id",
                 label: t("subjectId"),
@@ -176,7 +187,7 @@ export function SubjectDataPage() {
               {
                 key: "sessions",
                 label: t("subjectSessions"),
-                children: String((held.data?.sessions ?? []).length),
+                children: held.isError || held.data === undefined ? "—" : String(held.data.sessions.length),
               },
             ]}
           />
@@ -188,7 +199,7 @@ export function SubjectDataPage() {
                 onClick={() =>
                   void modal.confirm({
                     title: t("subjectErase"),
-                    content: t("subjectEraseWarning"),
+                    content: <><Typography.Paragraph>{subject.data?.external_user_id} · {subject.data?.channel} · {workspaceId}</Typography.Paragraph>{t("subjectEraseWarning")}</>,
                     okText: t("confirm"),
                     cancelText: t("cancel"),
                     onOk: () => erase.mutateAsync().catch(() => undefined),
@@ -222,7 +233,9 @@ export function SubjectDataPage() {
 
       {subjectId === null ? null : (
         <Card title={t("subjectMemories")} variant="borderless" loading={held.isPending}>
-          {memories.length === 0 ? (
+          {held.isError ? (
+            <Alert type="error" showIcon title={problemMessage(held.error, t)} action={<Button onClick={() => void held.refetch()}>{t("retry")}</Button>} />
+          ) : memories.length === 0 ? (
             <EmptyState title={t("subjectNoMemories")} />
           ) : (
             <Space direction="vertical" size="middle" style={{ width: "100%" }}>

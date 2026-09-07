@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { selectAntOption } from "./session";
 
 /**
  * A channel opened by a person, through the browser.
@@ -66,18 +67,32 @@ test("an administrator binds a channel, and the delivery path knows about it", a
         credentials: "include",
         body: JSON.stringify({ name: "Greeter", alias: agentAlias }),
       });
-      return ((await created.json()) as { id: string }).id;
+      const agent = (await created.json()) as { id: string };
+      const draft = await fetch(`/api/v1/agents/${agent.id}/draft`, {
+        method: "PUT", headers, credentials: "include",
+        body: JSON.stringify({ expected_revision: 1, spec: {
+          schema_version: 1, personality: "A channel acceptance Agent.",
+          model_policy: { provider: "deterministic", scenario: "complete" }, tools: [],
+          limits: { max_execution_seconds: 600, max_elapsed_seconds: 3600, max_model_calls: 20, max_tool_calls: 10, max_derived_retries: 2 },
+        } }),
+      });
+      if (!draft.ok) throw new Error(`Channel fixture draft failed: ${draft.status}`);
+      const revision = ((await draft.json()) as { revision: number }).revision;
+      const published = await fetch(`/api/v1/agents/${agent.id}/publish`, {
+        method: "POST", headers, credentials: "include",
+        body: JSON.stringify({ expected_revision: revision }),
+      });
+      if (!published.ok) throw new Error(`Channel fixture publish failed: ${published.status}`);
+      return agent.id;
     },
     { workspaceId, agentAlias, secretName },
   );
   expect(agentId).toBeTruthy();
 
   await page.goto(`/workspaces/${workspaceId}/channels`);
-  await page.getByRole("button", { name: "绑定渠道" }).click();
-  await page.getByLabel("Agent").click();
-  await page.getByTitle("Greeter", { exact: true }).click();
-  await page.getByLabel("加密密钥").click();
-  await page.getByTitle(secretName, { exact: true }).click();
+  await page.getByRole("button", { name: "接入飞书机器人" }).click();
+  await selectAntOption(page, "Agent", "Greeter");
+  await selectAntOption(page, "加密密钥", secretName);
   await page.getByLabel("应用 ID").fill("cli_e2e");
   await page.getByRole("button", { name: "绑定", exact: true }).click();
 
@@ -88,5 +103,6 @@ test("an administrator binds a channel, and the delivery path knows about it", a
   // Closing it is a state, not a deletion — `channel_events` is the record
   // of what this channel already delivered.
   await page.getByRole("button", { name: "停用" }).click();
+  await page.getByRole("button", { name: "确定", exact: true }).click();
   await expect(page.getByRole("cell", { name: "停用" })).toBeVisible();
 });

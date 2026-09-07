@@ -12,7 +12,7 @@ worklist, where the thing you came to look at is the thing that just
 happened and every new row pushes it further from the top.
 """
 
-
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -40,6 +40,38 @@ def test_the_newest_run_is_listed_first(
     assert listed.status_code == 200, listed.text
     ids = [str(entry["id"]) for entry in listed.json()]
     assert ids[:3] == [third, second, first]
+
+
+def test_filters_are_applied_before_pagination(
+    client: TestClient, scope: dict[str, str], session_id: str
+) -> None:
+    first = _submit(client, scope, session_id, "invoice-first")
+    second = _submit(client, scope, session_id, "invoice-second")
+    _submit(client, scope, session_id, "unrelated")
+    page = client.get("/api/v1/runs", headers=scope, params={"q": "invoice", "limit": 1})
+    assert [row["id"] for row in page.json()] == [second]
+    older = client.get(
+        "/api/v1/runs", headers=scope, params={"q": "invoice", "limit": 1, "offset": 1}
+    )
+    assert [row["id"] for row in older.json()] == [first]
+    assert client.get("/api/v1/runs", headers=scope, params={"limit": 101}).status_code == 422
+
+
+@pytest.mark.parametrize("request_text", [r"C:\temp\report.txt", 'find "quarterly report"'])
+def test_search_matches_literal_request_text(
+    client: TestClient, scope: dict[str, str], session_id: str, request_text: str
+) -> None:
+    created = client.post(
+        "/api/v1/runs",
+        headers={**scope, "Idempotency-Key": "literal-search"},
+        json={"session_id": session_id, "input": request_text},
+    )
+    assert created.status_code == 201, created.text
+    found = client.get(
+        "/api/v1/runs", headers=scope, params={"q": request_text, "limit": 20}
+    )
+    assert found.status_code == 200, found.text
+    assert any(row["id"] == created.json()["id"] for row in found.json())
 
 
 async def test_runs_sharing_a_timestamp_still_have_one_order(
@@ -101,10 +133,21 @@ def test_a_session_filtered_listing_stays_in_queue_order(
     first = _submit(client, scope, session_id, "s-a")
     second = _submit(client, scope, session_id, "s-b")
 
-    listed = client.get(
-        "/api/v1/runs", headers=scope, params={"session_id": session_id}
-    )
+    listed = client.get("/api/v1/runs", headers=scope, params={"session_id": session_id})
 
     body = listed.json()
     assert [str(entry["id"]) for entry in body][:2] == [first, second]
     assert [entry["queue"]["position"] for entry in body][:2] == [1, 2]
+
+
+def test_console_tasks_are_identifiable_by_their_request_and_agent(
+    client: TestClient,
+    scope: dict[str, str],
+    session_id: str,
+) -> None:
+    run_id = _submit(client, scope, session_id, "readable-title")
+    listing = client.get("/api/v1/runs", headers=scope).json()
+    row = next(item for item in listing if item["id"] == run_id)
+    assert row["input_preview"] == "message readable-title"
+    session = client.get(f"/api/v1/sessions/{session_id}", headers=scope).json()
+    assert row["agent_id"] == session["agent_id"]

@@ -1,7 +1,8 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { composeWithAttachments, mergeStaged, stagedFromList, type StagedFile } from "./attachments";
 import { readClipboardPayload } from "./clipboard";
+import { clearDraft, loadDraftFiles, loadDraftText, saveDraftFiles, saveDraftText } from "./drafts";
 import { canDictate, startDictation } from "./speech";
 import { useDismiss } from "./useDismiss";
 import { useLocale } from "../i18n/locale";
@@ -19,14 +20,18 @@ export function Composer({
   onSend,
   onStop,
   onExport,
+  draftKey,
+  onDraftReset,
 }: {
   disabled: boolean;
   sending: boolean;
   live: boolean;
   canExport: boolean;
-  onSend: (text: string) => void;
+  onSend: (text: string) => void | Promise<void>;
   onStop: () => void;
   onExport: () => void;
+  draftKey?: string;
+  onDraftReset?: () => void;
 }) {
   const { t, locale } = useLocale();
   const area = useRef<HTMLTextAreaElement>(null);
@@ -34,24 +39,36 @@ export function Composer({
   const plus = useRef<HTMLDivElement>(null);
   const dragDepth = useRef(0);
   const listening = useRef<{ stop: () => void } | null>(null);
-  const draft = useRef("");
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState(() => loadDraftText(draftKey));
+  const draft = useRef(input);
   const [files, setFiles] = useState<StagedFile[]>([]);
+  const [missingFiles, setMissingFiles] = useState(() => loadDraftFiles(draftKey));
   const [note, setNote] = useState<string | null>(null);
   const [menu, setMenu] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [dictating, setDictating] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [draftSaved, setDraftSaved] = useState(true);
+  const submitLock = useRef(false);
   const closeMenu = useCallback(() => setMenu(false), []);
   useDismiss(menu, closeMenu, plus);
-  const busy = disabled || sending || live;
-  const ready = (input.trim() !== "" || files.length > 0) && !busy;
+  const busy = disabled || sending || live || submitting;
+  const ready = (input.trim() !== "" || files.length > 0) && !busy && missingFiles.length === 0;
   const voice = canDictate();
+
+  useEffect(() => {
+    if (draftKey === undefined) return;
+    const textSaved = saveDraftText(draftKey, input);
+    const filesSaved = saveDraftFiles(draftKey, [...missingFiles, ...files.map((file) => file.name)]);
+    setDraftSaved(textSaved && filesSaved);
+  }, [draftKey, input, files, missingFiles]);
 
   function addFiles(incoming: StagedFile[]): void {
     if (incoming.length === 0) {
       return;
     }
     setFiles((current) => mergeStaged(current, incoming));
+    setMissingFiles((current) => current.filter((name) => !incoming.some((file) => file.name === name)));
   }
 
   function appendText(chunk: string): void {
@@ -64,26 +81,49 @@ export function Composer({
   }
 
   async function submit(): Promise<void> {
-    if (!ready) {
+    if (!ready || submitLock.current) {
       return;
     }
-    stopVoice();
-    const composed = await composeWithAttachments(input, files);
-    if (composed.text.trim() === "") {
-      setNote(t("attachBinary"));
-      return;
-    }
-    if (composed.skipped.length > 0) {
-      setNote(`${t("attachBinary")} ${composed.skipped.join("、")}`);
-    } else {
-      setNote(null);
-    }
-    onSend(composed.text);
-    draft.current = "";
-    setInput("");
-    setFiles([]);
-    if (area.current !== null) {
-      area.current.style.height = "";
+    submitLock.current = true;
+    setSubmitting(true);
+    try {
+      stopVoice();
+      let composed: Awaited<ReturnType<typeof composeWithAttachments>>;
+      try {
+        composed = await composeWithAttachments(input, files);
+      } catch {
+        setNote(t("attachReadFailed"));
+        return;
+      }
+      if (composed.text.trim() === "") {
+        setNote(t("attachBinary"));
+        return;
+      }
+      if (composed.skipped.length > 0) {
+        setNote(`${t("attachBinary")} ${composed.skipped.join("、")}`);
+      } else {
+        setNote(null);
+      }
+      try {
+        if (draftKey !== undefined) {
+          const textSaved = saveDraftText(draftKey, input);
+          const filesSaved = saveDraftFiles(draftKey, files.map((file) => file.name));
+          setDraftSaved(textSaved && filesSaved);
+        }
+        await onSend(composed.text);
+      } catch {
+        // The caller shows the request error; retain the draft and files for retry.
+        return;
+      }
+      draft.current = "";
+      setInput("");
+      setFiles([]);
+      if (area.current !== null) {
+        area.current.style.height = "";
+      }
+    } finally {
+      submitLock.current = false;
+      setSubmitting(false);
     }
   }
 
@@ -157,10 +197,14 @@ export function Composer({
         event.preventDefault();
         dragDepth.current = 0;
         setDragging(false);
-        addFiles(stagedFromList(event.dataTransfer.files));
+        if (!busy) addFiles(stagedFromList(event.dataTransfer.files));
       }}
     >
       {dragging ? <p className="composer-drop">{t("dropFiles")}</p> : null}
+      {missingFiles.length === 0 ? null : <div className="composer-note" role="status">
+        <p>{t("draftAttachmentsMissing")}{missingFiles.join("、")}</p>
+        <button type="button" disabled={busy} onClick={() => setMissingFiles([])}>{t("draftAttachmentsRemove")}</button>
+      </div>}
       {files.length > 0 ? (
         <ul className="composer-files">
           {files.map((item, index) => (
@@ -169,6 +213,7 @@ export function Composer({
               <button
                 type="button"
                 aria-label={`${t("removeFile")} ${item.name}`}
+                disabled={submitting || sending}
                 onClick={() => setFiles((current) => current.filter((_, i) => i !== index))}
               >
                 ×
@@ -183,8 +228,12 @@ export function Composer({
         placeholder={t("composerPlaceholder")}
         rows={1}
         value={input}
-        disabled={disabled}
+        disabled={disabled || submitting || sending}
         onChange={(event) => {
+          if (event.target.value === "") {
+            if (draftKey !== undefined) clearDraft(draftKey);
+            onDraftReset?.();
+          }
           draft.current = event.target.value;
           setInput(event.target.value);
           fit(event.target);
@@ -198,13 +247,14 @@ export function Composer({
           addFiles(incoming);
         }}
         onKeyDown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey) {
+          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
             event.preventDefault();
             void submit();
           }
         }}
       />
-      {note === null ? null : <p className="composer-note">{note}</p>}
+      {note === null ? null : <p className="composer-note" role="status">{note}</p>}
+      {draftSaved ? null : <p className="composer-note" role="status">{t("draftStorageFailed")}</p>}
       <div className="composer-bar">
         <div className="composer-tools">
           <input

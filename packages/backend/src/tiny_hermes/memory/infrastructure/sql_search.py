@@ -15,7 +15,6 @@ may hand back through a side door.
 """
 
 from collections.abc import Sequence
-from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import Select, func, select
@@ -23,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.memory.domain.search import SearchHit, SearchRequest, snippet_of
 from tiny_hermes.memory.infrastructure.search_query import matching
-from tiny_hermes.runs.domain.models import CallerIdentity
+from tiny_hermes.runs.domain.models import CallerIdentity, message_from_document
 from tiny_hermes.runs.infrastructure.tables import SessionMessageRow, SessionRow
 
 #: The configuration the stored index was built with. Reading it from one place
@@ -111,13 +110,8 @@ def _base(
 
 
 def _hit(row: SessionMessageRow) -> SearchHit:
-    parts: list[Any] = row.content.get("parts") or []
-    body = " ".join(
-        str(cast(dict[str, Any], part).get("text", ""))
-        for part in parts
-        if isinstance(part, dict)
-    )
-    snippet, shortened = snippet_of(body)
+    # Use the transcript projection: reasoning is replay state, not dialogue.
+    snippet, shortened = snippet_of(message_from_document(row.content).text)
     return SearchHit(
         session_id=str(row.session_id),
         run_id=None if row.source_run_id is None else str(row.source_run_id),

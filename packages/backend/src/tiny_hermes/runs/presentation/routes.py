@@ -2,7 +2,8 @@ from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Cookie, Depends, Header, Request, Response, status
+from fastapi import APIRouter, Cookie, Depends, Header, Query, Request, Response, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_serializer
 
 from tiny_hermes.api.resources import ApplicationResources
@@ -20,14 +21,25 @@ from tiny_hermes.runs.application.service import (
     RunCoordinationError,
 )
 from tiny_hermes.runs.domain.models import (
+    RunListQuery,
     RunSignal,
     RunSnapshot,
+    RunState,
     SessionMode,
     SessionSnapshot,
     StoredMessage,
     WorkspaceUsageSummary,
 )
 from tiny_hermes.runs.presentation.errors import as_app_error
+from tiny_hermes.session_workspace.application.files import WorkspaceFiles
+from tiny_hermes.session_workspace.presentation.files import (
+    FILE_ERRORS,
+    ConsoleFileResponse,
+    ConsoleFilesResponse,
+    file_download,
+    file_error,
+)
+from tiny_hermes.shared.errors import AppError
 
 WorkspaceHeader = Annotated[str | None, Header(alias="X-Workspace-Id")]
 CsrfHeader = Annotated[str | None, Header(alias="X-CSRF-Token")]
@@ -80,6 +92,7 @@ class SessionResponse(BaseModel):
 
 
 class SessionMessageResponse(BaseModel):
+    source_run_id: UUID | None = None
     role: str
     parts: list[dict[str, Any]]
     #: `"platform"` when the platform wrote this turn rather than the person the
@@ -101,7 +114,11 @@ class SessionMessageResponse(BaseModel):
     @classmethod
     def from_domain(cls, stored: StoredMessage) -> "SessionMessageResponse":
         return cls.model_validate(
-            {**stored.message.document(), "withdrawn_at": stored.withdrawn_at}
+            {
+                **stored.message.document(),
+                "withdrawn_at": stored.withdrawn_at,
+                "source_run_id": stored.source_run_id,
+            }
         )
 
 
@@ -151,6 +168,8 @@ class RunTreeResponse(BaseModel):
 
 
 class RunResponse(BaseModel):
+    agent_id: UUID | None = None
+    input_preview: str | None = None
     id: UUID
     session_id: UUID
     agent_version_id: UUID
@@ -238,9 +257,7 @@ def session_router(resources: ApplicationResources) -> APIRouter:
     @router.get("", response_model=list[SessionResponse])
     async def list_sessions(  # pyright: ignore[reportUnusedFunction]
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        machines: Annotated[
-            MachineIdentityService, Depends(machines_dependency, scope="function")
-        ],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
@@ -267,9 +284,7 @@ def session_router(resources: ApplicationResources) -> APIRouter:
         payload: CreateSessionRequest,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        machines: Annotated[
-            MachineIdentityService, Depends(machines_dependency, scope="function")
-        ],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
@@ -302,9 +317,7 @@ def session_router(resources: ApplicationResources) -> APIRouter:
     async def get_session(  # pyright: ignore[reportUnusedFunction]
         session_id: UUID,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        machines: Annotated[
-            MachineIdentityService, Depends(machines_dependency, scope="function")
-        ],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
@@ -331,9 +344,7 @@ def session_router(resources: ApplicationResources) -> APIRouter:
         session_id: UUID,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        machines: Annotated[
-            MachineIdentityService, Depends(machines_dependency, scope="function")
-        ],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
@@ -374,11 +385,16 @@ def run_router(resources: ApplicationResources) -> APIRouter:
     @router.get("", response_model=list[RunResponse])
     async def list_runs(  # pyright: ignore[reportUnusedFunction]
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        machines: Annotated[
-            MachineIdentityService, Depends(machines_dependency, scope="function")
-        ],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         session_id: UUID | None = None,
+        limit: int | None = Query(default=None, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        q: str = Query(default="", max_length=255),
+        agent_id: UUID | None = None,
+        run_status: Annotated[RunState | None, Query(alias="status")] = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         authorization: AuthorizationHeader = None,
@@ -394,7 +410,31 @@ def run_router(resources: ApplicationResources) -> APIRouter:
             required_scope="runs.read",
         )
         try:
-            found = await runs.list_runs(caller.workspace_id, caller.actor, session_id)
+            if (
+                (since is not None and since.tzinfo is None)
+                or (until is not None and until.tzinfo is None)
+                or (since is not None and until is not None and since >= until)
+            ):
+                raise AppError(
+                    code="invalid_time_range",
+                    title="Invalid time range",
+                    status=422,
+                    detail="Use timezone-aware times with since before until.",
+                )
+            found = await runs.list_runs(
+                caller.workspace_id,
+                caller.actor,
+                session_id,
+                RunListQuery(
+                    limit=limit,
+                    offset=offset,
+                    text=q.strip(),
+                    agent_id=agent_id,
+                    status=run_status.value if run_status else None,
+                    since=since,
+                    until=until,
+                ),
+            )
         except RunCoordinationError as error:
             raise as_app_error(error) from error
         return [RunResponse.from_domain(item) for item in found]
@@ -405,9 +445,7 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         request: Request,
         response: Response,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        machines: Annotated[
-            MachineIdentityService, Depends(machines_dependency, scope="function")
-        ],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
@@ -445,9 +483,7 @@ def run_router(resources: ApplicationResources) -> APIRouter:
     async def get_run(  # pyright: ignore[reportUnusedFunction]
         run_id: UUID,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        machines: Annotated[
-            MachineIdentityService, Depends(machines_dependency, scope="function")
-        ],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
@@ -473,9 +509,7 @@ def run_router(resources: ApplicationResources) -> APIRouter:
     async def get_run_tree(  # pyright: ignore[reportUnusedFunction]
         run_id: UUID,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        machines: Annotated[
-            MachineIdentityService, Depends(machines_dependency, scope="function")
-        ],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
@@ -504,17 +538,82 @@ def run_router(resources: ApplicationResources) -> APIRouter:
             raise as_app_error(error) from error
         return RunTreeResponse.model_validate(tree.document())
 
+    @router.get("/{run_id}/files", response_model=ConsoleFilesResponse)
+    async def list_saved_files(  # pyright: ignore[reportUnusedFunction]
+        run_id: UUID,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
+        files: Annotated[WorkspaceFiles, Depends(resources.workspace_files, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        authorization: AuthorizationHeader = None,
+    ) -> ConsoleFilesResponse:
+        caller = await resolve_workspace_caller(
+            auth,
+            machines,
+            session_token=session_token,
+            authorization=authorization,
+            csrf_token=None,
+            workspace_header=selected_workspace,
+            write=False,
+            required_scope="runs.read",
+        )
+        try:
+            await runs.get_run(caller.workspace_id, caller.actor, run_id)
+            source = await files.store.run_source(caller.workspace_id, run_id)
+            snapshot = await files.list_files(source)
+        except RunCoordinationError as error:
+            raise as_app_error(error) from error
+        except FILE_ERRORS as error:
+            raise file_error(error) from error
+        return ConsoleFilesResponse(
+            revision_id=snapshot.revision_id,
+            items=[
+                ConsoleFileResponse(path=item.path, size_bytes=item.size, sha256=item.sha256)
+                for item in snapshot.items
+            ],
+        )
+
+    @router.get("/{run_id}/files/content")
+    async def download_saved_file(  # pyright: ignore[reportUnusedFunction]
+        run_id: UUID,
+        revision_id: UUID,
+        path: str,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
+        files: Annotated[WorkspaceFiles, Depends(resources.workspace_files, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+        authorization: AuthorizationHeader = None,
+    ) -> StreamingResponse:
+        caller = await resolve_workspace_caller(
+            auth,
+            machines,
+            session_token=session_token,
+            authorization=authorization,
+            csrf_token=None,
+            workspace_header=selected_workspace,
+            write=False,
+            required_scope="runs.read",
+        )
+        try:
+            await runs.get_run(caller.workspace_id, caller.actor, run_id)
+            source = await files.store.run_source(caller.workspace_id, run_id)
+            return await file_download(files, source, revision_id, path)
+        except RunCoordinationError as error:
+            raise as_app_error(error) from error
+        except FILE_ERRORS as error:
+            raise file_error(error) from error
+
     @router.get("/{run_id}/artifacts", response_model=list[ArtifactResponse])
     async def list_run_artifacts(  # pyright: ignore[reportUnusedFunction]
         run_id: UUID,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        machines: Annotated[
-            MachineIdentityService, Depends(machines_dependency, scope="function")
-        ],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
-        artifacts: Annotated[
-            ArtifactService, Depends(artifacts_dependency, scope="function")
-        ],
+        artifacts: Annotated[ArtifactService, Depends(artifacts_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         authorization: AuthorizationHeader = None,
@@ -531,9 +630,7 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         )
         try:
             await runs.get_run(caller.workspace_id, caller.actor, run_id)
-            found = await artifacts.list_for_run(
-                caller.workspace_id, caller.actor, run_id
-            )
+            found = await artifacts.list_for_run(caller.workspace_id, caller.actor, run_id)
         except RunCoordinationError as error:
             raise as_app_error(error) from error
         except ArtifactForbidden as error:
@@ -595,9 +692,7 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         request: Request,
         response: Response,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        machines: Annotated[
-            MachineIdentityService, Depends(machines_dependency, scope="function")
-        ],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
@@ -636,9 +731,7 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         payload: ControlRunRequest,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        machines: Annotated[
-            MachineIdentityService, Depends(machines_dependency, scope="function")
-        ],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
@@ -665,9 +758,7 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         payload: ControlRunRequest,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        machines: Annotated[
-            MachineIdentityService, Depends(machines_dependency, scope="function")
-        ],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
@@ -694,9 +785,7 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         payload: WidenBudgetRequest,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        machines: Annotated[
-            MachineIdentityService, Depends(machines_dependency, scope="function")
-        ],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
@@ -732,9 +821,7 @@ def run_router(resources: ApplicationResources) -> APIRouter:
         payload: ControlRunRequest,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        machines: Annotated[
-            MachineIdentityService, Depends(machines_dependency, scope="function")
-        ],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
@@ -767,10 +854,10 @@ def usage_router(resources: ApplicationResources) -> APIRouter:
     @router.get("", response_model=UsageSummaryResponse)
     async def get_usage_summary(  # pyright: ignore[reportUnusedFunction]
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        machines: Annotated[
-            MachineIdentityService, Depends(machines_dependency, scope="function")
-        ],
+        machines: Annotated[MachineIdentityService, Depends(machines_dependency, scope="function")],
         runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
+        since: datetime | None = None,
+        until: datetime | None = None,
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         authorization: AuthorizationHeader = None,
@@ -785,8 +872,19 @@ def usage_router(resources: ApplicationResources) -> APIRouter:
             write=False,
             required_scope="runs.read",
         )
+        if (
+            (since is not None and since.tzinfo is None)
+            or (until is not None and until.tzinfo is None)
+            or (since is not None and until is not None and since >= until)
+        ):
+            raise AppError(
+                code="invalid_time_range",
+                title="Invalid time range",
+                status=422,
+                detail="Use timezone-aware times with since before until.",
+            )
         try:
-            summary = await runs.usage_summary(caller.workspace_id, caller.actor)
+            summary = await runs.usage_summary(caller.workspace_id, caller.actor, since, until)
         except RunCoordinationError as error:
             raise as_app_error(error) from error
         return UsageSummaryResponse.from_domain(summary)

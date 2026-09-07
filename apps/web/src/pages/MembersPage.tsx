@@ -1,3 +1,4 @@
+import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Button, Card, Form, Input, Modal, Select, Space, Typography } from "antd";
 import { useState } from "react";
@@ -23,6 +24,7 @@ const ROLE_KEYS: Record<InviteValues["role"], MessageKey> = {
 
 export function MembersPage() {
   const t = useT();
+  const { admin } = useWorkspacePermissions();
   const workspaceId = useWorkspaceId();
   const queryClient = useQueryClient();
   const [form] = Form.useForm<InviteValues>();
@@ -110,7 +112,7 @@ export function MembersPage() {
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}
       <Card title={t("inviteMember")} variant="borderless" className="page-alert">
-        <Form<InviteValues>
+        <Form<InviteValues> disabled={!admin}
           form={form}
           layout="inline"
           requiredMark={false}
@@ -147,7 +149,7 @@ export function MembersPage() {
                 <Typography.Text strong>{member.display_name}</Typography.Text>
                 <Typography.Paragraph type="secondary">{member.subject}</Typography.Paragraph>
               </div>
-              <Select
+              <Select disabled={!admin}
                 aria-label={`${member.subject} ${t("memberRole")}`}
                 value={member.role as InviteValues["role"]}
                 options={roles}
@@ -155,7 +157,7 @@ export function MembersPage() {
                   changeRole.mutate({ userId: member.user_id, role })
                 }
               />
-              <Button
+              <Button disabled={!admin}
                 onClick={() =>
                   void modal.confirm({
                     title: t("removeMember"),

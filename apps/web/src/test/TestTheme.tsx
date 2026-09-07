@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 
 import { LocaleProvider } from "../i18n/locale";
 import { ConsoleTheme } from "../layout/ConsoleTheme";
+import { WorkspacePermissions } from "../workspace/WorkspacePermissions";
 
 /**
  * The console's own theme, with animation switched off.
@@ -22,7 +23,7 @@ export function TestTheme({ children }: { children: ReactNode }) {
   return (
     <ConsoleTheme>
       <LocaleProvider>
-        <ConfigProvider theme={{ token: { motion: false } }}>{children}</ConfigProvider>
+        <ConfigProvider theme={{ token: { motion: false } }}><WorkspacePermissions role="workspace_admin">{children}</WorkspacePermissions></ConfigProvider>
       </LocaleProvider>
     </ConsoleTheme>
   );

@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { chooseDefaultAgent, loadDefaultAgent, saveDefaultAgent } from "../chat/defaultAgent";
 import { forgetAllSessionIds } from "../chat/localSessions";
+import { clearAllDrafts } from "../chat/drafts";
 import { useEndUserAgents } from "../chat/useEndUserAgents";
 import { problemMessage } from "../api/messages";
 import type { ErasureResponse, MemoryResponse, SubjectExportResponse } from "../api/types";
@@ -139,6 +140,7 @@ export function SettingsPage() {
       // listed would show the user a set of chats they were just told were
       // deleted.
       forgetAllSessionIds();
+      clearAllDrafts();
     } catch (caught) {
       setEraseError(problemMessage(caught, t));
     } finally {
@@ -198,7 +200,7 @@ export function SettingsPage() {
       <section>
         <h2>{t("defaultAgent")}</h2>
         <p className="settings-hint">{t("defaultAgentHint")}</p>
-        {(agents.data ?? []).length < 2 ? (
+        {agents.isPending ? <p>{t("loading")}</p> : agents.isError ? <p role="alert">{t("requestFailed")} <button onClick={() => void agents.refetch()}>{t("retry")}</button></p> : (agents.data ?? []).length === 0 ? <p>{t("noAvailableAgents")}</p> : (agents.data ?? []).length === 1 ? (
           <p className="settings-hint">{t("defaultAgentEmpty")}</p>
         ) : (
           <div className="agent-cards" role="group" aria-label={t("defaultAgent")}>
@@ -319,6 +321,7 @@ export function SettingsPage() {
           type="button"
           onClick={() => {
             forgetAllSessionIds();
+            clearAllDrafts();
             setSignedOut(true);
           }}
         >

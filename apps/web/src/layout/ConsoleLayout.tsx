@@ -1,13 +1,16 @@
 import { useQuery } from "@tanstack/react-query";
-import { Alert, Badge, Button } from "antd";
-import { Link, NavLink, Outlet } from "react-router-dom";
+import { Alert, Badge, Button, Select } from "antd";
+import { Link, NavLink, Outlet, useNavigate, useLocation } from "react-router-dom";
 
 import { BrandMark, ConsoleChrome } from "./ConsoleChrome";
-import { NAV_GROUPS } from "./navigation";
+import { NAV_GROUPS, visibleSections } from "./navigation";
 import { useInboxCount } from "./useInboxCount";
 import { api } from "../api/client";
 import { useT } from "../i18n/locale";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
+import { useMyRole } from "../workspace/useMyRole";
+import { useAuth } from "../auth/AuthProvider";
+import { WorkspacePermissions } from "../workspace/WorkspacePermissions";
 
 type WorkspaceSummary = {
   id: string;
@@ -20,6 +23,10 @@ const WORKSPACES_QUERY = ["workspaces"] as const;
 export function ConsoleLayout() {
   const workspaceId = useWorkspaceId();
   const t = useT();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { role } = useMyRole();
+  const { user } = useAuth();
   // Only to put a name on the sider. Membership is the server's answer, never
   // this list's: a Workspace missing from it still gets its requests sent and
   // its refusal shown, because a console that pre-filters is a console that can
@@ -56,12 +63,18 @@ export function ConsoleLayout() {
       sidebar={
         <>
           <BrandMark />
-          <div className="th-workspace-chip">{current?.name ?? workspaceId}</div>
+          <Select className="th-workspace-chip" aria-label={t("switchWorkspace")} value={workspaceId}
+            loading={workspaces.isPending} style={{ width: "100%" }}
+            options={(workspaces.data ?? (current ? [current] : [{ id: workspaceId, name: workspaceId }])).map((entry) => ({ value: entry.id, label: entry.name }))}
+            onChange={(id: string) => {
+              const section = location.pathname.split("/")[3] ?? "agents";
+              navigate(`/workspaces/${id}/${section}${location.hash}`);
+            }} />
           <nav className="th-nav console-nav" aria-label={t("workspaceTitle")}>
             {/* 只有一段的入口（Agents、运行、渠道）直接指向那一段的路径，不经过
                 合并页——给一个只有一段的页面套一层分段外壳，只会多一层没有内容
                 的标题。 */}
-            {NAV_GROUPS.map((group) => (
+            {NAV_GROUPS.filter((group) => role !== null && visibleSections(group, role, user?.is_platform_admin === true).length > 0).map((group) => (
               <NavLink
                 key={group.key}
                 className="th-nav-link"
@@ -72,7 +85,7 @@ export function ConsoleLayout() {
               >
                 {t(group.labelKey)}
                 {group.key === "inbox" && inboxCount !== null ? (
-                  <Badge count={inboxCount} className="nav-badge" />
+                  <Badge count={inboxCount} title={t(inboxCount === "?" ? "inboxCountUnknown" : "inboxCountHint")} className="nav-badge" />
                 ) : null}
               </NavLink>
             ))}
@@ -83,7 +96,7 @@ export function ConsoleLayout() {
         </>
       }
     >
-      <Outlet />
+      <WorkspacePermissions role={role} platform={user?.is_platform_admin === true}><div key={workspaceId}><Outlet /></div></WorkspacePermissions>
     </ConsoleChrome>
   );
 }

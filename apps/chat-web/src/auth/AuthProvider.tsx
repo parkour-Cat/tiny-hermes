@@ -44,10 +44,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const agent = params.get("agent");
     if (credential === null || workspace === null || agent === null) {
       // No credential in this load's URL: nothing to exchange. The cookie
-      // from an earlier exchange, if any, is what every request from here
-      // on trusts — there is no "am I still signed in" call to make first
-      // (design has no such endpoint; a session's validity is proven by
-      // using it, not by asking about it in advance).
+      // from an earlier exchange authenticates subsequent requests. The chat
+      // page confirms its owner before restoring any locally saved draft.
       setLoading(false);
       return;
     }

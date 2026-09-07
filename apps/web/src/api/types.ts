@@ -221,6 +221,8 @@ export type ChildRunRef = {
 };
 
 export type RunResponse = {
+  agent_id?: string | null;
+  input_preview?: string | null;
   id: string;
   session_id: string;
   agent_version_id: string;
@@ -277,6 +279,8 @@ export type CanonicalMessagePart = {
 };
 
 export type CanonicalMessage = {
+  author?: string | null;
+  source_run_id?: string | null;
   role: string;
   parts: CanonicalMessagePart[];
   /** When someone took this turn back, or null/absent while they have not.
@@ -331,6 +335,7 @@ export type IssuedApiKeyResponse = ApiKeyResponse & {
 };
 
 export type SecretResponse = {
+  purpose?: "general" | "model" | "tool" | "channel" | "login";
   id: string;
   name: string;
   scope: "workspace" | "platform";

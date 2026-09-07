@@ -1,7 +1,20 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
-import { unfold } from "./session";
+import { selectAntOption, unfold } from "./session";
+import { expectReadableControl } from "./contrast";
+
+for (const appearance of ["浅色", "深色"]) {
+  test(`console primary action text is readable in ${appearance}`, async ({ page }) => {
+    await page.goto("/workspaces");
+    await expect(page.getByRole("button", { name: "新建工作空间", exact: true })).toBeVisible();
+    const toggle = page.getByRole("button", { name: appearance, exact: true });
+    if (await toggle.count()) await toggle.click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", appearance === "深色" ? "dark" : "light");
+    await expectReadableControl(page.getByRole("button", { name: "新建工作空间", exact: true }));
+    await expectReadableControl(page.getByText("每个工作空间独立保存成员、Agent 与任务数据。", { exact: true }));
+  });
+}
 
 /**
  * The console, driven the way a person drives it, against the real stack.
@@ -12,6 +25,24 @@ import { unfold } from "./session";
  */
 
 /** A name nothing else in the stack will have. */
+test("responsive workspace pages retain a usable content width", async ({ page }) => {
+  await openWorkspace(page);
+  for (const width of [320, 390, 768, 1280]) {
+    await page.setViewportSize({ width, height: 844 });
+    for (const name of ["待办", "平台管理"]) {
+      await page.getByRole("link", { name, exact: true }).click();
+      await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
+      const dimensions = await page.locator("main").evaluate((element) => ({
+        content: element.getBoundingClientRect().width,
+        viewport: innerWidth,
+        scroll: document.documentElement.scrollWidth,
+      }));
+      expect(dimensions.content).toBeGreaterThan(Math.min(width - 64, 600));
+      expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.viewport);
+    }
+  }
+});
+
 function unique(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1_000)}`;
 }
@@ -44,25 +75,77 @@ async function openWorkspace(page: Page): Promise<void> {
  * option near the bottom either.
  */
 async function choose(page: Page, label: string, value: string): Promise<void> {
-  const field = page.getByLabel(label);
-  await field.evaluate((element) => element.scrollIntoView({ block: "center" }));
-  await field.click();
-  // Typing only where the select accepts it. A non-search Ant select renders a
-  // readonly input, and `fill` on one fails outright — so this asks the field
-  // rather than assuming which selects on the page are searchable.
-  const searchable = await field.evaluate(
-    (element) => !(element as HTMLInputElement).readOnly,
-  );
-  if (searchable) {
-    await field.fill(value);
-  }
-  const option = page
-    .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
-    .locator(`.ant-select-item-option[title="${value}"]`);
-  await expect(option).toBeVisible();
-  await option.click();
-  await expect(field.locator("xpath=..")).toHaveAttribute("title", value);
+  await selectAntOption(page, label, value);
 }
+
+test("failed draft saves preserve input and narrow dialogs return keyboard focus", async ({ page }) => {
+  page.on("dialog", (dialog) => dialog.type() === "beforeunload" ? dialog.accept() : dialog.dismiss());
+  await openWorkspace(page);
+  for (const width of [320, 390, 768, 1280]) {
+    await page.setViewportSize({ width, height: 844 });
+    const trigger = page.getByRole("button", { name: "新建 Agent", exact: true });
+    await trigger.focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog", { name: "新建 Agent" });
+    await expect(dialog).toBeVisible();
+    await dialog.getByLabel("名称", { exact: true }).fill("长名称测试".repeat(12));
+    const bounds = await dialog.evaluate((element) => ({
+      left: element.getBoundingClientRect().left, right: element.getBoundingClientRect().right,
+      scroll: document.documentElement.scrollWidth, viewport: innerWidth,
+    }));
+    expect(bounds.left).toBeGreaterThanOrEqual(0);
+    expect(bounds.right).toBeLessThanOrEqual(width);
+    expect(bounds.scroll).toBeLessThanOrEqual(bounds.viewport);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+  }
+  await publishAgent(page, "complete");
+  const input = page.getByLabel("人格", { exact: true });
+  await input.fill("服务失败后仍然保留的草稿内容");
+  const draftPath = "**/api/v1/agents/*/draft";
+  await page.route(draftPath, (route) => route.request().method() === "PUT" ?
+    route.abort("connectionfailed") : route.continue());
+  await page.getByRole("button", { name: /保存草稿$/ }).click();
+  await expect(page.locator(".ant-alert-error")).toBeVisible();
+  await expect(input).toHaveValue("服务失败后仍然保留的草稿内容");
+  await page.reload();
+  await expect(input).toHaveValue("服务失败后仍然保留的草稿内容");
+  await expect(page.getByText("已恢复此标签页未保存的修改，请检查后保存。", { exact: true })).toBeVisible();
+  await page.unroute(draftPath);
+  await page.getByRole("button", { name: /保存草稿$/ }).click();
+  await expect(page.getByText("草稿修订 3", { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(input).toHaveValue("服务失败后仍然保留的草稿内容");
+  await expect(page.getByText("已恢复此标签页未保存的修改，请检查后保存。", { exact: true })).toHaveCount(0);
+  await input.fill("离开时明确放弃的修改");
+  const editorUrl = page.url();
+  await page.getByRole("link", { name: "Agent", exact: true }).click();
+  await page.getByRole("button", { name: "放弃修改并离开", exact: true }).click();
+  await expect(page).toHaveURL(/\/agents$/);
+  await page.goto(editorUrl);
+  await expect(input).toHaveValue("服务失败后仍然保留的草稿内容");
+  const localEdit = `保留这段尚未提交的修改 ${"x".repeat(300)}`;
+  await input.fill(localEdit);
+  const otherTab = await page.context().newPage();
+  await otherTab.goto(editorUrl);
+  await otherTab.getByLabel("人格", { exact: true }).fill("另一页面保存的新配置");
+  await otherTab.getByRole("button", { name: "保存草稿", exact: true }).click();
+  await expect(otherTab.getByText("草稿修订 4", { exact: true })).toBeVisible();
+  await otherTab.close();
+  await page.reload();
+  await expect(input).toHaveValue("另一页面保存的新配置");
+  await expect(page.getByRole("button", { name: "保存草稿", exact: true })).toBeDisabled();
+  await page.getByText("查看暂存差异", { exact: true }).click();
+  await expect(page.getByText(localEdit, { exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const size = await page.evaluate(() => ({ width: innerWidth, scroll: document.documentElement.scrollWidth }));
+  expect(size.scroll).toBeLessThanOrEqual(size.width);
+  await page.screenshot({ path: ".superpowers/agent-draft-conflict-mobile.png", fullPage: true });
+  await page.getByRole("button", { name: "重新载入草稿", exact: true }).click();
+  await page.getByRole("button", { name: "确定", exact: true }).click();
+  await expect(page.getByRole("button", { name: "保存草稿", exact: true })).toBeEnabled();
+});
 
 /**
  * Binds a tool the way a person does: the visible Ant Design wrapper.
@@ -234,14 +317,14 @@ test("a run that has not finished says which round it is on and why", async ({ p
   // Not a race. The round asked to be woken a minute later, so the Run sits in
   // this state long enough that reading it is reading the platform, not
   // catching a frame.
-  await expect(summary(page).getByText("waiting_external", { exact: true })).toBeVisible();
+  await expect(summary(page).getByText("等待外部答复", { exact: true })).toBeVisible();
   await expect(fact(page, "当前轮次")).toHaveText("1");
   await expect(fact(page, "上一轮判定")).toHaveText("等待");
   await expect(fact(page, "等待类型")).toHaveText("timer");
   // A status word says the Run stopped; this says who it is stopped on. A
   // timer is the platform's own deadline, so nobody has to do anything — the
   // opposite of what a generic "等待中" would leave a reader assuming.
-  await expect(page.getByText("这次任务自己要求稍后再继续", { exact: false })).toBeVisible();
+  await expect(page.getByText("任务将在指定时间自动继续，无需操作。", { exact: true })).toBeVisible();
 
   // Woken by the Scheduler when the deadline passed, then finished on the next
   // round. The wait is a minute and the wake is a scan behind it, so this one
@@ -265,7 +348,7 @@ test("the builder binds a tool, playground sends, and rollback restores v1", asy
   await page.getByRole("button", { name: "新建 Agent" }).click();
   await page.getByLabel("名称").fill(name);
   await page.getByLabel("别名").fill(name.toLowerCase().replace(/_/g, "-"));
-  await page.getByRole("button", { name: "创建" }).click();
+  await page.getByRole("button", { name: "创建", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "新建 Agent" })).toBeHidden();
   await expect(page).toHaveURL(/\/agents\/[0-9a-f-]{36}$/);
 

@@ -2,8 +2,9 @@ import { expect, test } from "vitest";
 
 import { NAV_GROUPS, visibleSections } from "./navigation";
 
-test("导航上恰好七个入口", () => {
-  expect(NAV_GROUPS).toHaveLength(7);
+test("平台管理单列，普通工作空间入口保留", () => {
+  expect(NAV_GROUPS.filter((group) => group.key !== "platform")).toHaveLength(8);
+  expect(NAV_GROUPS.some((group) => group.key === "platform")).toBe(true);
 });
 
 test("十八个原有页面一个都没丢", () => {
@@ -36,7 +37,7 @@ test("viewer 看不到他会被拒绝的段，而 developer 看得到渠道", ()
 });
 
 test("身份提供方只跟着平台管理员的标志走，不跟着角色走", () => {
-  const settings = NAV_GROUPS.find((g) => g.key === "settings")!;
+  const settings = NAV_GROUPS.find((g) => g.key === "platform")!;
   const keysFor = (role: Parameters<typeof visibleSections>[1], flag: boolean) =>
     visibleSections(settings, role, flag).map((s) => s.key);
   expect(keysFor("workspace_admin", false)).not.toContain("identity-providers");
@@ -52,4 +53,23 @@ test("每一段都有一句说明", () => {
       expect(section.introKey, `${section.key} 还没有说明`).not.toBeNull();
     }
   }
+});
+
+test("设置里的段按依赖排序：先有 Key 才能接模型", () => {
+  // 一个新管理员从上往下看：接模型之前得先把服务商的 Key 存进保管箱。
+  const settings = NAV_GROUPS.find((g) => g.key === "settings")!;
+  expect(settings.sections.map((s) => s.key)).toEqual([
+    "members",
+    "secrets",
+    "model-endpoints",
+    "outbound",
+    "api-keys",
+  ]);
+});
+
+test("conversation search belongs to records and retains administrator access", () => {
+  const records = NAV_GROUPS.find((group) => group.key === "records")!;
+  expect(visibleSections(records, "workspace_admin", false).map((s) => s.key)).toContain("sessions");
+  expect(visibleSections(records, "developer", false).map((s) => s.key)).not.toContain("sessions");
+  expect(visibleSections(records, "viewer", false).map((s) => s.key)).not.toContain("sessions");
 });

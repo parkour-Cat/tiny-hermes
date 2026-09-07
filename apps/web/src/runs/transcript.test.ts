@@ -1,12 +1,29 @@
 import { describe, expect, it } from "vitest";
 
 import type { CanonicalMessage } from "../api/types";
-import { textOf, transcriptLineOf } from "./transcript";
+import { textOf, toolsOf, transcriptLineOf } from "./transcript";
 
 const message = (parts: CanonicalMessage["parts"], role = "assistant"): CanonicalMessage =>
   ({ role, parts }) as CanonicalMessage;
 
 describe("transcriptLineOf", () => {
+  it("distinguishes empty successful output, failed output, and a missing result", () => {
+    const rounds = toolsOf([
+      message([
+        { type: "tool_call", call_id: "ok", name: "file.write" },
+        { type: "tool_call", call_id: "failed", name: "file.read" },
+        { type: "tool_call", call_id: "pending", name: "file.list" },
+      ]),
+      message([
+        { type: "tool_result", call_id: "ok", output: "", failed: false, exit_code: 0 },
+        { type: "tool_result", call_id: "failed", output: "", failed: true, exit_code: 1 },
+      ], "tool"),
+    ]);
+    expect(rounds.find((round) => round.callId === "ok")?.status).toBe("succeeded");
+    expect(rounds.find((round) => round.callId === "failed")?.status).toBe("failed");
+    expect(rounds.find((round) => round.callId === "pending")?.status).toBe("pending");
+    expect(transcriptLineOf(message([{ type: "tool_result", output: "", failed: false, exit_code: 0 }]))).toContain("✓");
+  });
   it("shows what was said when the turn has words", () => {
     const line = transcriptLineOf(message([{ type: "text", text: "在查目录了。" }]));
 

@@ -81,11 +81,13 @@ class SubjectExport:
 
 
 class SubjectStore(Protocol):
+    async def resolve_session(
+        self, workspace_id: UUID, session_id: UUID
+    ) -> ResolvedSubject | None: ...
+
     async def user_role(self, workspace_id: UUID, user_id: UUID) -> Role | None: ...
 
-    async def memories_of(
-        self, scope: MemoryScope
-    ) -> Sequence[MemoryRecord]: ...
+    async def memories_of(self, scope: MemoryScope) -> Sequence[MemoryRecord]: ...
 
     async def memories_of_subject(
         self, workspace_id: UUID, subject: CallerIdentity
@@ -113,21 +115,21 @@ class SubjectStore(Protocol):
         """
         ...
 
-    async def replace(
-        self, memory_id: UUID, body: str, now: datetime
-    ) -> MemoryRecord: ...
+    async def replace(self, memory_id: UUID, body: str, now: datetime) -> MemoryRecord: ...
 
     async def set_status(
         self, memory_id: UUID, status: MemoryStatus, now: datetime
     ) -> MemoryRecord | None: ...
 
+    async def search_external(
+        self, workspace_id: UUID, query: str, channel: str | None, limit: int, offset: int
+    ) -> Sequence[ResolvedSubject]: ...
+
     async def resolve_external(
         self, workspace_id: UUID, channel: str, external_user_id: str
     ) -> "ResolvedSubject | None": ...
 
-    async def subject_type_of(
-        self, workspace_id: UUID, subject_id: UUID
-    ) -> CallerType | None:
+    async def subject_type_of(self, workspace_id: UUID, subject_id: UUID) -> CallerType | None:
         """Which kind of subject this id is, or `None` for neither.
 
         `users` and `end_users` are separate id spaces, so an id belongs to
@@ -135,13 +137,9 @@ class SubjectStore(Protocol):
         """
         ...
 
-    async def sessions_of(
-        self, workspace_id: UUID, subject: CallerIdentity
-    ) -> Sequence[UUID]: ...
+    async def sessions_of(self, workspace_id: UUID, subject: CallerIdentity) -> Sequence[UUID]: ...
 
-    async def erase(
-        self, workspace_id: UUID, subject: CallerIdentity
-    ) -> ErasureReport: ...
+    async def erase(self, workspace_id: UUID, subject: CallerIdentity) -> ErasureReport: ...
 
     async def append_audit(
         self,
@@ -185,9 +183,7 @@ class UnknownSubjectMemory(SubjectError):
 class SubjectService:
     store: SubjectStore
 
-    async def subject_in(
-        self, workspace_id: UUID, subject_id: UUID
-    ) -> CallerIdentity:
+    async def subject_in(self, workspace_id: UUID, subject_id: UUID) -> CallerIdentity:
         """The subject an id stands for, read rather than assumed.
 
         `subject_routes.py` used to build `CallerType.USER` for every id it
@@ -280,9 +276,7 @@ class SubjectService:
     ) -> MemoryRecord:
         """Take one memory out of use, on the subject's say-so."""
         _owner, actor_type = await self._owned(actor, workspace_id, memory_id, request_id)
-        removed = await self.store.set_status(
-            memory_id, MemoryStatus.REJECTED, _now()
-        )
+        removed = await self.store.set_status(memory_id, MemoryStatus.REJECTED, _now())
         if removed is None:  # pragma: no cover - read a line above
             raise UnknownSubjectMemory
         await self.store.append_audit(
@@ -308,9 +302,7 @@ class SubjectService:
         only. It is the whole reason an erasure is distinguishable from an
         erasure that never happened.
         """
-        actor_type = await self._require_self_or_steward(
-            actor, workspace_id, subject, request_id
-        )
+        actor_type = await self._require_self_or_steward(actor, workspace_id, subject, request_id)
         report = await self.store.erase(workspace_id, subject)
         await self.store.append_audit(
             workspace_id=workspace_id,
@@ -328,6 +320,55 @@ class SubjectService:
             },
         )
         return report
+
+    async def search(
+        self,
+        actor: Actor,
+        workspace_id: UUID,
+        query: str,
+        channel: str | None,
+        limit: int,
+        offset: int,
+        request_id: str,
+    ) -> Sequence[ResolvedSubject]:
+        if actor.is_service_account:
+            raise ForbiddenSubjectAction
+        role = await self.store.user_role(workspace_id, actor.id)
+        if role not in STEWARDS and not actor.is_platform_admin:
+            raise ForbiddenSubjectAction
+        found = await self.store.search_external(workspace_id, query, channel, limit, offset)
+        await self.store.append_audit(
+            workspace_id=workspace_id,
+            actor_id=actor.id,
+            actor_type=CallerType.USER.value,
+            action="subject.searched",
+            resource_id=workspace_id,
+            request_id=request_id,
+            context={"matches": str(len(found)), "channel": channel or "all"},
+        )
+        return found
+
+    async def from_session(
+        self, actor: Actor, workspace_id: UUID, session_id: UUID, request_id: str
+    ) -> ResolvedSubject:
+        if actor.is_service_account:
+            raise ForbiddenSubjectAction
+        role = await self.store.user_role(workspace_id, actor.id)
+        if role not in STEWARDS and not actor.is_platform_admin:
+            raise ForbiddenSubjectAction
+        found = await self.store.resolve_session(workspace_id, session_id)
+        if found is None:
+            raise UnknownSubject
+        await self.store.append_audit(
+            workspace_id=workspace_id,
+            actor_id=actor.id,
+            actor_type=CallerType.USER.value,
+            action="subject.resolved_from_session",
+            resource_id=found.subject_id,
+            request_id=request_id,
+            context={"session_id": str(session_id)},
+        )
+        return found
 
     async def lookup(
         self,

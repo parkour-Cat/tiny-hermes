@@ -26,6 +26,52 @@ FULL = RunCapabilities(can_control=True, can_retry=True)
 CHECKPOINT: dict[str, Any] = {"step": "round-1", "kind": "model_call"}
 
 
+async def test_concurrent_tool_reservations_cannot_exceed_the_shared_limit(
+    engine: AsyncEngine,
+    workspace_id: str,
+    submitted_run: dict[str, Any],
+) -> None:
+    claimed = await _claim(engine, workspace_id)
+    async with _factory(engine).begin() as session:
+        await session.execute(
+            text("UPDATE run_budget_scopes SET max_tool_calls = 1 WHERE root_run_id = :r"),
+            {"r": UUID(str(submitted_run["id"]))},
+        )
+
+    async def reserve() -> bool:
+        async with _factory(engine).begin() as session:
+            return await SqlRunStore(session).reserve_tool_call(
+                UUID(workspace_id),
+                claimed.run.id,
+                claimed.lease_id,
+            )
+
+    attempts = await asyncio.gather(*(reserve() for _ in range(8)))
+    assert attempts.count(True) == 1
+    async with _factory(engine).begin() as session:
+        count = await session.scalar(
+            text("SELECT consumed_tool_calls FROM run_budget_scopes WHERE root_run_id = :r"),
+            {"r": claimed.run.id},
+        )
+    assert count == 1
+
+
+async def test_an_expired_lease_cannot_reserve_a_tool_call(
+    engine: AsyncEngine,
+    workspace_id: str,
+    submitted_run: dict[str, Any],
+) -> None:
+    del submitted_run
+    claimed = await _claim(engine, workspace_id, lease=-1)
+    async with _factory(engine).begin() as session:
+        with pytest.raises(LeaseLost):
+            await SqlRunStore(session).reserve_tool_call(
+                UUID(workspace_id),
+                claimed.run.id,
+                claimed.lease_id,
+            )
+
+
 def _factory(engine: AsyncEngine) -> async_sessionmaker[Any]:
     return async_sessionmaker(engine, expire_on_commit=False)
 
@@ -74,9 +120,7 @@ def _slice(
         model_calls=model_calls,
         tokens=tokens,
         appended=(
-            ()
-            if said is None
-            else (CanonicalMessage("assistant", (TextBlock(text=said),)),)
+            () if said is None else (CanonicalMessage("assistant", (TextBlock(text=said),)),)
         ),
         request_id="slice-1",
         capabilities=FULL,
@@ -439,9 +483,7 @@ async def test_apply_signal_slice_ended_releases_the_lease_like_record_slice(
     claimed = await _claim(engine, scope["X-Workspace-Id"])
 
     async with _factory(engine).begin() as session:
-        await SqlRunStore(session).record_slice(
-            _slice(claimed, scope["X-Workspace-Id"], None)
-        )
+        await SqlRunStore(session).record_slice(_slice(claimed, scope["X-Workspace-Id"], None))
         snapshot = await SqlRunStore(session).apply_signal(
             ApplySignalCommand(
                 workspace_id=UUID(scope["X-Workspace-Id"]),

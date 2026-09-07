@@ -70,6 +70,16 @@ function renderUsage(): void {
   );
 }
 
+test("a failed usage query offers retry and does not report zero usage", async () => {
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(USER)),
+    http.get("/api/v1/usage", () => HttpResponse.json({ title: "Unavailable" }, { status: 503 })),
+  );
+  renderUsage();
+  expect(await screen.findByRole("button", { name: "重试" })).toBeVisible();
+  expect(screen.queryByText("这个工作空间还没有用量数据")).toBeNull();
+});
+
 test("a provider figure and an unknown one render as two separate rows, not one blended total", async () => {
   server.use(
     http.get("/api/v1/auth/me", () => HttpResponse.json(USER)),

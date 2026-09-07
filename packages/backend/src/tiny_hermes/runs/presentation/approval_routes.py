@@ -179,9 +179,7 @@ def approval_router(resources: ApplicationResources) -> APIRouter:
     async def list_approvals(  # pyright: ignore[reportUnusedFunction]
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        service: Annotated[
-            ApprovalService, Depends(service_dependency, scope="function")
-        ],
+        service: Annotated[ApprovalService, Depends(service_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         # Repeatable: `?status=approved&status=rejected` is "answered". An
@@ -232,15 +230,37 @@ def approval_router(resources: ApplicationResources) -> APIRouter:
             has_more=page.has_more,
         )
 
+    @router.get("/{approval_id}", response_model=ApprovalResponse)
+    async def get_approval(  # pyright: ignore[reportUnusedFunction]
+        approval_id: UUID,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        service: Annotated[ApprovalService, Depends(service_dependency, scope="function")],
+        selected_workspace: WorkspaceHeader = None,
+        session_token: SessionCookie = None,
+    ) -> ApprovalResponse:
+        user = await authenticate_browser_user(auth, session_token)
+        try:
+            result = await service.get_approval(
+                _actor(user), require_workspace_id(selected_workspace), approval_id
+            )
+        except ForbiddenApprovalAction as error:
+            raise forbidden() from error
+        except UnknownApproval as error:
+            raise AppError(
+                code="approval_not_found",
+                title="Approval not found",
+                status=404,
+                detail="No approval by that identifier exists in this workspace.",
+            ) from error
+        return ApprovalResponse.from_domain(result)
+
     @router.post("/{approval_id}/decision", response_model=ApprovalResponse)
     async def decide(  # pyright: ignore[reportUnusedFunction]
         approval_id: UUID,
         payload: DecideApprovalRequest,
         request: Request,
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
-        service: Annotated[
-            ApprovalService, Depends(service_dependency, scope="function")
-        ],
+        service: Annotated[ApprovalService, Depends(service_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
         csrf_token: CsrfHeader = None,

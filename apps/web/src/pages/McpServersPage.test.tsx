@@ -114,7 +114,7 @@ test("reading an unchanged server says so rather than looking like nothing happe
 
   await userEvent.click(await screen.findByRole("button", { name: "重新读取" }));
 
-  expect(await screen.findByText("没有变化——没有新版本需要审。")).toBeInTheDocument();
+  expect(await screen.findByText("工具清单未变化。")).toBeInTheDocument();
 });
 
 test("a server that could not be reached is reported and not recorded", async () => {
@@ -138,6 +138,7 @@ test("a server that could not be reached is reported and not recorded", async ()
 
   renderServers();
 
+  await userEvent.click(await screen.findByRole("button", { name: "添加 MCP 服务" }));
   await userEvent.type(await screen.findByLabelText("名称"), "docs");
   await userEvent.type(screen.getByLabelText("地址"), "https://mcp.example.com");
   await userEvent.click(screen.getByRole("button", { name: "登记" }));
@@ -156,6 +157,7 @@ test("nothing registered says so", async () => {
   renderServers();
 
   expect(await screen.findByText("还没有登记 MCP 服务。")).toBeInTheDocument();
+  expect(screen.queryByLabelText("地址")).toBeNull();
 });
 
 test("a bindable version can be withdrawn, the way an HTTP tool version can", async () => {

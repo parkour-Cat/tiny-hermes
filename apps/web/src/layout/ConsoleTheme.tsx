@@ -12,7 +12,7 @@ export type ThemeChoice = "light" | "dark";
 const INK = "#1a1612";
 const PAPER = "#f6f1e8";
 const PAPER_RAISED = "#fbf7f0";
-const COPPER = "#c45c26";
+const COPPER = "#9a4318";
 const LINE = "#ddd4c6";
 const INK_DARK = "#f3ece3";
 const PAPER_DARK = "#161310";
@@ -34,6 +34,8 @@ export function consoleDesignToken(dark: boolean) {
         colorBgContainer: PAPER_RAISED_DARK,
         colorBgLayout: PAPER_DARK,
         colorText: INK_DARK,
+        colorTextSecondary: "#c4b8aa",
+        colorTextDescription: "#c4b8aa",
         colorBorder: LINE_DARK,
         colorBorderSecondary: LINE_DARK,
         borderRadius: 8,
@@ -47,6 +49,8 @@ export function consoleDesignToken(dark: boolean) {
         colorBgContainer: PAPER_RAISED,
         colorBgLayout: PAPER,
         colorText: INK,
+        colorTextSecondary: "#5c5348",
+        colorTextDescription: "#5c5348",
         colorBorder: LINE,
         colorBorderSecondary: LINE,
         borderRadius: 8,
@@ -132,6 +136,7 @@ export function ConsoleTheme({ children }: { children: ReactNode }) {
         theme={{
           algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm,
           token: consoleDesignToken(dark),
+          components: { Button: { primaryColor: dark ? INK : "#fff" } },
         }}
       >
         {children}

@@ -8,8 +8,15 @@ import type { MessageKey } from "./i18n/zh-CN";
  * names (`continue_once`, `file.list`, `run_completed`) are not in this table.
  */
 const STATUS_KEYS: Record<string, MessageKey> = {
+  pending: "approvalStatus_pending",
+  approved: "approvalStatus_approved",
+  rejected: "approvalStatus_rejected",
+  expired: "approvalStatus_expired",
   queued: "statusQueued",
   running: "statusRunning",
+  waiting_approval: "statusWaitingApproval",
+  waiting_external: "statusWaitingExternal",
+  cancelling: "statusCancelling",
   paused: "statusPaused",
   completed: "statusCompleted",
   failed: "statusFailed",

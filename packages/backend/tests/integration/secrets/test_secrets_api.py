@@ -50,18 +50,26 @@ async def test_create_returns_a_mask_and_listing_cannot_remember_plaintext(
 
     async with engine.connect() as connection:
         columns = (
-            await connection.execute(
-                text(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_name = 'secrets'"
+            (
+                await connection.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'secrets'"
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         audits = (
-            await connection.execute(
-                text("SELECT action FROM audit_events WHERE action = 'secret.created'")
+            (
+                await connection.execute(
+                    text("SELECT action FROM audit_events WHERE action = 'secret.created'")
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert "plaintext" not in columns
     assert list(audits) == ["secret.created"]
 
@@ -103,15 +111,11 @@ async def test_developer_can_list_names_but_not_write(
     assert listed.json()[0]["name"] == "openai"
     assert "plaintext" not in listed.json()[0]
     assert _create(client, scope, name="other").status_code == 403
-    disabled = client.post(
-        f"/api/v1/secrets/{created.json()['id']}/disable", headers=scope
-    )
+    disabled = client.post(f"/api/v1/secrets/{created.json()['id']}/disable", headers=scope)
     assert disabled.status_code == 403
 
 
-def test_disable_keeps_the_row_without_plaintext(
-    client: TestClient, scope: dict[str, str]
-) -> None:
+def test_disable_keeps_the_row_without_plaintext(client: TestClient, scope: dict[str, str]) -> None:
     created = _create(client, scope)
     secret_id = created.json()["id"]
     disabled = client.post(f"/api/v1/secrets/{secret_id}/disable", headers=scope)
@@ -157,6 +161,7 @@ def test_create_response_shape_has_no_envelope_fields(
 ) -> None:
     body = cast(dict[str, Any], _create(client, scope).json())
     assert set(body) == {
+        "purpose",
         "id",
         "name",
         "scope",
@@ -305,10 +310,7 @@ async def test_a_database_backup_without_the_kek_cannot_be_decrypted(
 
     async with engine.connect() as connection:
         columns = await connection.execute(
-            text(
-                "SELECT column_name FROM information_schema.columns"
-                " WHERE table_name = 'secrets'"
-            )
+            text("SELECT column_name FROM information_schema.columns WHERE table_name = 'secrets'")
         )
         names = {row.column_name for row in columns}
         row = await connection.execute(
@@ -331,3 +333,25 @@ async def test_a_database_backup_without_the_kek_cannot_be_decrypted(
     )
     with pytest.raises(UnwrapFailed):
         unseal(envelope, decode_kek(NEXT_KEK))
+
+
+def test_credential_purpose_is_saved_without_exposing_its_value(
+    client: TestClient,
+    scope: dict[str, str],
+) -> None:
+    created = client.post(
+        "/api/v1/secrets",
+        headers=scope,
+        json={
+            "name": "robot credential",
+            "scope": "workspace",
+            "plaintext": "private-value",
+            "purpose": "channel",
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["purpose"] == "channel"
+    listed = client.get("/api/v1/secrets", headers=scope).json()
+    assert next(row for row in listed if row["id"] == created.json()["id"])["purpose"] == "channel"
+    assert "private-value" not in str(listed)
+    assert _create(client, scope, name="unclassified").json()["purpose"] == "general"

@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { expect, test } from "vitest";
+import { beforeEach, expect, test } from "vitest";
 
 import { SkillProposalsPage } from "./SkillProposalsPage";
 import { AuthProvider } from "../auth/AuthProvider";
@@ -15,6 +15,13 @@ const PROPOSAL = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
 const SKILL = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
 const BASE = "cccccccc-3333-4333-8333-cccccccccccc";
 const RUN = "dddddddd-4444-4444-8444-dddddddddddd";
+
+beforeEach(() => {
+  server.use(
+    http.get(`/api/v1/workspaces/${WORKSPACE}/members/me`, () => HttpResponse.json({ role: "developer" })),
+    http.get("/api/v1/skills", () => HttpResponse.json([{ id: SKILL, scope: "workspace" }])),
+  );
+});
 
 const USER = {
   id: "u1",
@@ -146,7 +153,9 @@ test("approving publishes a version and says the bindings did not move", async (
   expect(
     await screen.findByText("已发布版本 2。已发布的 Agent 的绑定没有改变。"),
   ).toBeInTheDocument();
-  await waitFor(() => expect(screen.getByText("已批准")).toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByRole("button", { name: "批准并发布新版本" })).not.toBeInTheDocument());
+  await userEvent.click(screen.getByRole("radio", { name: "已批准" }));
+  expect(await screen.findByText("rollout")).toBeVisible();
 });
 
 test("a proposal the scan blocked has no approve control at all", async () => {
@@ -201,7 +210,9 @@ test("rejecting warns that it produces nothing, then ends the proposal", async (
 
   expect(await screen.findByText("拒绝之后这条提案就结束了，不会产生任何版本。")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "确定" }));
-  expect(await screen.findByText("已拒绝")).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByRole("button", { name: "拒绝" })).not.toBeInTheDocument());
+  await userEvent.click(screen.getByRole("radio", { name: "已拒绝" }));
+  expect(await screen.findByText("rollout")).toBeVisible();
 });
 
 test("an empty queue says so rather than showing an empty page", async () => {
@@ -213,4 +224,36 @@ test("an empty queue says so rather than showing an empty page", async () => {
   renderProposals();
 
   expect(await screen.findByText("没有待审提案")).toBeInTheDocument();
+});
+
+ test("pending proposals and history are separate server queries", async () => {
+  const asked: (string | null)[] = [];
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(USER)),
+    http.get("/api/v1/skill-proposals", ({ request }) => {
+      const status = new URL(request.url).searchParams.get("status");
+      asked.push(status);
+      return HttpResponse.json([proposal({ status: status ?? "pending" })]);
+    }),
+  );
+  renderProposals();
+  await screen.findByText("rollout");
+  expect(asked.at(-1)).toBe("pending");
+  await userEvent.click(screen.getByRole("radio", { name: "已批准" }));
+  await waitFor(() => expect(asked.at(-1)).toBe("approved"));
+  expect(screen.queryByRole("button", { name: "批准并发布新版本" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "拒绝" })).not.toBeInTheDocument();
+});
+
+test.each(["viewer", "platform-skill"])("%s cannot decide an otherwise approvable proposal", async (kind) => {
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(USER)),
+    http.get(`/api/v1/workspaces/${WORKSPACE}/members/me`, () => HttpResponse.json({ role: kind === "viewer" ? "viewer" : "developer" })),
+    http.get("/api/v1/skills", () => HttpResponse.json([{ id: SKILL, scope: kind === "platform-skill" ? "platform" : "workspace" }])),
+    http.get("/api/v1/skill-proposals", () => HttpResponse.json([proposal()])),
+  );
+  renderProposals();
+  await screen.findByText("rollout");
+  expect(screen.queryByRole("button", { name: "批准并发布新版本" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "拒绝" })).not.toBeInTheDocument();
 });

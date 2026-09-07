@@ -147,7 +147,11 @@ test("the price in force is shown, because usage is money and nothing else showe
         credential_available: true,
       }),
     ),
-    http.get(`/api/v1/model-endpoints/${ENDPOINT}/pricing`, () => HttpResponse.json(PRICE)),
+    http.get(`/api/v1/model-endpoints/${ENDPOINT}/pricing`, () => HttpResponse.json([
+      { ...PRICE, id: "future", version_number: 3, effective_at: "2099-01-01T00:00:00Z", input_per_million: "99.00" },
+      { ...PRICE, id: "old", version_number: 1, effective_at: "2000-01-01T00:00:00Z", input_per_million: "1.00" },
+      { ...PRICE, effective_at: "2001-01-01T00:00:00Z" },
+    ])),
   );
 
   renderEndpoints();
@@ -172,7 +176,7 @@ test("an endpoint with no price says so, rather than showing zero", async () => 
       }),
     ),
     http.get(`/api/v1/model-endpoints/${ENDPOINT}/pricing`, () =>
-      HttpResponse.json({ code: "pricing_not_set", detail: "" }, { status: 404 }),
+      HttpResponse.json([]),
     ),
   );
 
@@ -487,7 +491,7 @@ test("编辑走的是同一张表单：连接段只读，其余两段带着现�
         credential_available: true,
       }),
     ),
-    http.get(`/api/v1/model-endpoints/${ENDPOINT}/pricing`, () => HttpResponse.json(PRICE)),
+    http.get(`/api/v1/model-endpoints/${ENDPOINT}/pricing`, () => HttpResponse.json([PRICE])),
     http.get("/api/v1/secrets", () => HttpResponse.json([])),
   );
 
@@ -502,4 +506,61 @@ test("编辑走的是同一张表单：连接段只读，其余两段带着现�
   ).toHaveTextContent("USD 3.00 / 15.00");
   // Nothing is 「注册」ed twice: the primary action is now a save.
   expect(screen.getByRole("button", { name: t("saveName") })).toBeInTheDocument();
+});
+
+test("选一个服务商，地址、模型和窗口就填好了，而且都还能改", async () => {
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(user(true))),
+    http.get("/api/v1/model-endpoints", () => HttpResponse.json([])),
+    http.get("/api/v1/secrets", () => HttpResponse.json([])),
+  );
+
+  renderEndpoints();
+  await userEvent.click(await screen.findByLabelText(t("endpointPreset")));
+  await userEvent.click(await screen.findByTitle("DeepSeek"));
+
+  expect(screen.getByLabelText(t("endpointBaseUrl"))).toHaveValue("https://api.deepseek.com/v1");
+  expect(screen.getByLabelText(t("endpointModel"))).toHaveValue("deepseek-chat");
+  expect(screen.getByLabelText(t("endpointContextWindow"))).toHaveValue("128000");
+  // A starting point, not a lock: the number is a plain input.
+  expect(screen.getByLabelText(t("endpointContextWindow"))).toBeEnabled();
+});
+
+test("Key 可以就地存一条：先进保管箱，端点拿到的是它的 id", async () => {
+  // 第一次接模型时保管箱是空的，而它在另一段。让人在同一张表单里把 Key 存进去，
+  // 规则不变：端点里从来只有凭据的 id，没有 Key 本身。
+  const sent: { path: string; body: Record<string, unknown> }[] = [];
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(user(true))),
+    http.get("/api/v1/model-endpoints", () => HttpResponse.json([])),
+    http.get("/api/v1/secrets", () => HttpResponse.json([])),
+    http.post("/api/v1/secrets", async ({ request }) => {
+      sent.push({ path: "secrets", body: (await request.json()) as Record<string, unknown> });
+      return HttpResponse.json(
+        { id: "99999999-8888-4777-8666-555555555555", name: "deepseek-api-key", scope: "workspace", status: "active", mask: "sk-…" },
+        { status: 201 },
+      );
+    }),
+    http.post("/api/v1/model-endpoints", async ({ request }) => {
+      sent.push({ path: "endpoints", body: (await request.json()) as Record<string, unknown> });
+      return HttpResponse.json({ ...SUMMARY, kind: "openai_compatible", base_url: "https://x/v1", credential_available: true }, { status: 201 });
+    }),
+  );
+
+  renderEndpoints();
+  await userEvent.click(await screen.findByLabelText(t("endpointPreset")));
+  await userEvent.click(await screen.findByTitle("DeepSeek"));
+  await userEvent.click(screen.getByLabelText(t("endpointCredentialRef")));
+  await userEvent.click(await screen.findByTitle(t("endpointNewCredential")));
+  await userEvent.type(screen.getByLabelText(t("endpointNewCredentialKey")), "sk-live-secret");
+  await userEvent.click(screen.getByRole("button", { name: t("registerEndpoint") }));
+
+  await waitFor(() => expect(sent).toHaveLength(2));
+  expect(sent[0]).toEqual({
+    path: "secrets",
+    body: { name: "deepseek-api-key", scope: "platform", purpose: "model", plaintext: "sk-live-secret" },
+  });
+  expect(sent[1]!.path).toBe("endpoints");
+  expect(sent[1]!.body.credential_ref).toBe("99999999-8888-4777-8666-555555555555");
+  expect(JSON.stringify(sent[1]!.body)).not.toContain("sk-live-secret");
 });

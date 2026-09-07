@@ -1,13 +1,16 @@
 import { useMutation, useQuery, useQueries, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { api } from "../api/client";
+import { currentEndUserIdentity, type EndUserIdentity } from "../api/session";
+import { QueryProvider } from "../api/QueryProvider";
 import { problemMessage } from "../api/messages";
 import type { CanonicalMessage, EndUserRunResponse, EndUserSessionResponse } from "../api/types";
 import { AgentPicker } from "../chat/AgentPicker";
 import { ApprovalBanner } from "../chat/ApprovalBanner";
 import { Composer } from "../chat/Composer";
+import { clearDraft, loadPendingSend, moveDraft, savePendingSend } from "../chat/drafts";
 import { downloadMarkdown, exportFilename, transcriptMarkdown } from "../chat/exportTranscript";
 import { chatPath, isAgentAlias, matchSessionId } from "../chat/paths";
 import { forgetSessionId, loadKnownSessions, rememberSessionId } from "../chat/localSessions";
@@ -15,6 +18,7 @@ import { loadSessionPrefs, saveSessionPrefs } from "../chat/sessionPrefs";
 import { SessionRail } from "../chat/SessionRail";
 import { sessionTitle } from "../chat/sessionTitle";
 import { Transcript } from "../chat/Transcript";
+import { SavedFiles } from "../chat/SavedFiles";
 import { useEndUserAgents } from "../chat/useEndUserAgents";
 import { useT } from "../i18n/locale";
 import { cancelEndUserRun, useEndUserRun } from "../runs/useEndUserRun";
@@ -48,6 +52,27 @@ import { isLiveStatus, statusLabel } from "../status";
  */
 export function ChatPage() {
   const t = useT();
+  const identity = useQuery({ queryKey: ["end-user-identity"], queryFn: currentEndUserIdentity, retry: false });
+  if (identity.isError) return <main className="auth">
+    <p role="alert">{problemMessage(identity.error, t)}</p>
+    <button onClick={() => { void identity.refetch(); }}>{t("retry")}</button>
+  </main>;
+  if (identity.data === undefined || !identity.isFetchedAfterMount) return <p className="centered">{t("loading")}</p>;
+  return <>
+    {identity.isFetching ? <p className="centered">{t("loading")}</p> : null}
+    <div hidden={identity.isFetching}>
+      <QueryProvider key={`${identity.data.workspace_id}:${identity.data.end_user_id}`}>
+        <ChatConversation identity={identity.data} onIdentityChanged={async () => { await identity.refetch(); }} />
+      </QueryProvider>
+    </div>
+  </>;
+}
+
+function ChatConversation({ identity, onIdentityChanged }: {
+  identity: EndUserIdentity;
+  onIdentityChanged: () => Promise<void>;
+}) {
+  const t = useT();
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
@@ -61,6 +86,8 @@ export function ChatPage() {
   const [error, setError] = useState<string | null>(null);
   const [prefs, setPrefs] = useState(loadSessionPrefs);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const pendingSend = useRef<{ sessionId: string; text: string; key: string } | null>(null);
+  const [composerEpoch, setComposerEpoch] = useState(0);
 
   const knownSessions = alias === null ? [] : loadKnownSessions(alias);
   const known = knownSessions.map((session) => session.id);
@@ -72,6 +99,9 @@ export function ChatPage() {
       : null);
   const activeSessionId =
     routedSession !== null && !prefs.hidden.includes(routedSession) ? routedSession : null;
+  const draftKey = JSON.stringify([identity.workspace_id, identity.end_user_id, alias, activeSessionId]);
+  const currentDraftKey = useRef(draftKey);
+  useEffect(() => { currentDraftKey.current = draftKey; }, [draftKey]);
 
   function go(sessionId?: string | null): void {
     if (alias === null) {
@@ -133,10 +163,19 @@ export function ChatPage() {
   }, [alias, activeSessionId, location.pathname, navigate]);
 
   const send = useMutation({
-    mutationFn: async (text: string) => {
+    mutationFn: async ({ text, source }: { text: string; source: string }) => {
+      const current = await currentEndUserIdentity();
+      if (current.end_user_id !== identity.end_user_id || current.workspace_id !== identity.workspace_id) {
+        await onIdentityChanged();
+        throw new Error(t("draftIdentityChanged"));
+      }
       if (alias === null) {
         throw new Error(t("invalidAddress"));
       }
+      const stored = loadPendingSend(source);
+      const previous = pendingSend.current?.sessionId === (activeSessionId ?? "") ? pendingSend.current : stored;
+      const attempt = { text, key: previous?.text === text ? previous.key : crypto.randomUUID() };
+      if (!savePendingSend(source, attempt)) throw new Error(t("draftRetryStorageFailed"));
       let sessionId = activeSessionId;
       if (sessionId === null) {
         const created = await api<EndUserSessionResponse>(`/api/v1/end-user/agents/${alias}/sessions`, {
@@ -144,18 +183,30 @@ export function ChatPage() {
           body: JSON.stringify({}),
         });
         sessionId = created.id;
+        if (!moveDraft(source, JSON.stringify([identity.workspace_id, identity.end_user_id, alias, sessionId]))) {
+          throw new Error(t("draftRetryStorageFailed"));
+        }
         rememberSessionId(alias, created.id);
         setOpenedId(created.id);
         go(created.id);
       }
-      return api<EndUserRunResponse>(`/api/v1/end-user/sessions/${sessionId}/runs`, {
+      // A lost response may hide an accepted Run; retry the same request identity.
+      const target = JSON.stringify([identity.workspace_id, identity.end_user_id, alias, sessionId]);
+      pendingSend.current = { sessionId, ...attempt };
+      const run = await api<EndUserRunResponse>(`/api/v1/end-user/sessions/${sessionId}/runs`, {
         method: "POST",
-        headers: { "Idempotency-Key": crypto.randomUUID() },
+        headers: { "Idempotency-Key": attempt.key },
         body: JSON.stringify({ input: text }),
       });
+      return { run, target };
     },
-    onMutate: (text) => setOptimistic(text),
-    onSuccess: (created) => {
+    onMutate: ({ text }) => setOptimistic(text),
+    onSuccess: ({ run: created, target }, { source }) => {
+      clearDraft(source);
+      clearDraft(target);
+      pendingSend.current = null;
+      if (currentDraftKey.current !== source && currentDraftKey.current !== target) return;
+      if (source !== target) setComposerEpoch((epoch) => epoch + 1);
       setRunId(created.id);
       queryClient.setQueryData(["end-user-run", created.id], created);
       setError(null);
@@ -230,13 +281,16 @@ export function ChatPage() {
               sessionTitle(titleQueries[index]?.data ?? [], "") === "",
           );
           setRunId(null);
+          setOpenedId(null);
           setOptimistic(null);
           setError(null);
           go(unused ?? null);
         }}
         onHidden={(id) => {
+          clearDraft(JSON.stringify([identity.workspace_id, identity.end_user_id, alias, id]));
           forgetSessionId(alias, id);
           if (id === activeSessionId) {
+            setOpenedId(null);
             go(null);
           }
         }}
@@ -252,6 +306,7 @@ export function ChatPage() {
               alias={alias}
               onAgent={(next) => {
                 setRunId(null);
+                setOpenedId(null);
                 setOptimistic(null);
                 setError(null);
                 navigate(chatPath(next));
@@ -307,13 +362,17 @@ export function ChatPage() {
             onDownload={() => setError(t("artifactUnavailable"))}
             onRetry={() => undefined}
           />
+          <SavedFiles key={activeSessionId} sessionId={activeSessionId} refreshToken={snapshot.data?.state_version} />
         </div>
         <Composer
+          key={`${draftKey}:${composerEpoch}`}
+          draftKey={draftKey}
+          onDraftReset={() => { pendingSend.current = null; }}
           disabled={false}
           sending={send.isPending}
           live={Boolean(live)}
           canExport={(messages.data ?? []).length > 0}
-          onSend={(text) => send.mutate(text)}
+          onSend={async (text) => { await send.mutateAsync({ text, source: draftKey }); }}
           onExport={() => {
             const turns = messages.data ?? [];
             if (turns.length === 0) {

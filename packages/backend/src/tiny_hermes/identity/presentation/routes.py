@@ -54,6 +54,12 @@ def identity_router(resources: ApplicationResources) -> APIRouter:
     router = APIRouter(prefix="/api/v1", tags=["identity"])
     service_dependency = resources.auth_service
 
+    @router.get("/bootstrap/status")
+    async def bootstrap_status(  # pyright: ignore[reportUnusedFunction]
+        service: Annotated[AuthService, Depends(service_dependency, scope="function")],
+    ) -> dict[str, bool]:
+        return {"initialized": await service.initialized()}
+
     @router.post("/bootstrap", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
     async def bootstrap(  # pyright: ignore[reportUnusedFunction]
         payload: BootstrapRequest,
@@ -83,9 +89,7 @@ def identity_router(resources: ApplicationResources) -> APIRouter:
             ) from error
         return UserResponse.from_domain(user)
 
-    @router.post(
-        "/auth/sessions", response_model=UserResponse, status_code=status.HTTP_201_CREATED
-    )
+    @router.post("/auth/sessions", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
     async def login(  # pyright: ignore[reportUnusedFunction]
         payload: LoginRequest,
         response: Response,
