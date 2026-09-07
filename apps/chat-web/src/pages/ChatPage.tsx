@@ -9,6 +9,7 @@ import type { CanonicalMessage, EndUserRunResponse, EndUserSessionResponse } fro
 import { AgentPicker } from "../chat/AgentPicker";
 import { ApprovalBanner } from "../chat/ApprovalBanner";
 import { Composer } from "../chat/Composer";
+import { clearDraft, loadPendingSend, moveDraft, savePendingSend } from "../chat/drafts";
 import { downloadMarkdown, exportFilename, transcriptMarkdown } from "../chat/exportTranscript";
 import { chatPath, isAgentAlias, matchSessionId } from "../chat/paths";
 import { forgetSessionId, loadKnownSessions, rememberSessionId } from "../chat/localSessions";
@@ -75,6 +76,7 @@ function ChatConversation({ identity }: { identity: EndUserIdentity }) {
   const [prefs, setPrefs] = useState(loadSessionPrefs);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const pendingSend = useRef<{ sessionId: string; text: string; key: string } | null>(null);
+  const [composerEpoch, setComposerEpoch] = useState(0);
 
   const knownSessions = alias === null ? [] : loadKnownSessions(alias);
   const known = knownSessions.map((session) => session.id);
@@ -87,6 +89,8 @@ function ChatConversation({ identity }: { identity: EndUserIdentity }) {
   const activeSessionId =
     routedSession !== null && !prefs.hidden.includes(routedSession) ? routedSession : null;
   const draftKey = JSON.stringify([identity.workspace_id, identity.end_user_id, alias, activeSessionId]);
+  const currentDraftKey = useRef(draftKey);
+  useEffect(() => { currentDraftKey.current = draftKey; }, [draftKey]);
 
   function go(sessionId?: string | null): void {
     if (alias === null) {
@@ -148,7 +152,12 @@ function ChatConversation({ identity }: { identity: EndUserIdentity }) {
   }, [alias, activeSessionId, location.pathname, navigate]);
 
   const send = useMutation({
-    mutationFn: async (text: string) => {
+    mutationFn: async ({ text, source }: { text: string; source: string }) => {
+      const current = await currentEndUserIdentity();
+      if (current.end_user_id !== identity.end_user_id || current.workspace_id !== identity.workspace_id) {
+        void queryClient.invalidateQueries({ queryKey: ["end-user-identity"] });
+        throw new Error(t("draftIdentityChanged"));
+      }
       if (alias === null) {
         throw new Error(t("invalidAddress"));
       }
@@ -159,23 +168,32 @@ function ChatConversation({ identity }: { identity: EndUserIdentity }) {
           body: JSON.stringify({}),
         });
         sessionId = created.id;
+        moveDraft(source, JSON.stringify([identity.workspace_id, identity.end_user_id, alias, sessionId]));
         rememberSessionId(alias, created.id);
         setOpenedId(created.id);
         go(created.id);
       }
       // A lost response may hide an accepted Run; retry the same request identity.
+      const target = JSON.stringify([identity.workspace_id, identity.end_user_id, alias, sessionId]);
+      const stored = loadPendingSend(target);
       if (pendingSend.current?.sessionId !== sessionId || pendingSend.current.text !== text) {
-        pendingSend.current = { sessionId, text, key: crypto.randomUUID() };
+        pendingSend.current = { sessionId, text, key: stored?.text === text ? stored.key : crypto.randomUUID() };
       }
-      return api<EndUserRunResponse>(`/api/v1/end-user/sessions/${sessionId}/runs`, {
+      savePendingSend(target, pendingSend.current);
+      const run = await api<EndUserRunResponse>(`/api/v1/end-user/sessions/${sessionId}/runs`, {
         method: "POST",
         headers: { "Idempotency-Key": pendingSend.current.key },
         body: JSON.stringify({ input: text }),
       });
+      return { run, target };
     },
-    onMutate: (text) => setOptimistic(text),
-    onSuccess: (created) => {
+    onMutate: ({ text }) => setOptimistic(text),
+    onSuccess: ({ run: created, target }, { source }) => {
+      clearDraft(source);
+      clearDraft(target);
       pendingSend.current = null;
+      if (currentDraftKey.current !== source && currentDraftKey.current !== target) return;
+      if (source !== target) setComposerEpoch((epoch) => epoch + 1);
       setRunId(created.id);
       queryClient.setQueryData(["end-user-run", created.id], created);
       setError(null);
@@ -250,6 +268,7 @@ function ChatConversation({ identity }: { identity: EndUserIdentity }) {
               sessionTitle(titleQueries[index]?.data ?? [], "") === "",
           );
           setRunId(null);
+          setOpenedId(null);
           setOptimistic(null);
           setError(null);
           go(unused ?? null);
@@ -272,6 +291,7 @@ function ChatConversation({ identity }: { identity: EndUserIdentity }) {
               alias={alias}
               onAgent={(next) => {
                 setRunId(null);
+                setOpenedId(null);
                 setOptimistic(null);
                 setError(null);
                 navigate(chatPath(next));
@@ -330,13 +350,13 @@ function ChatConversation({ identity }: { identity: EndUserIdentity }) {
           <SavedFiles key={activeSessionId} sessionId={activeSessionId} refreshToken={snapshot.data?.state_version} />
         </div>
         <Composer
-          key={draftKey}
+          key={`${draftKey}:${composerEpoch}`}
           draftKey={draftKey}
           disabled={false}
           sending={send.isPending}
           live={Boolean(live)}
           canExport={(messages.data ?? []).length > 0}
-          onSend={async (text) => { await send.mutateAsync(text); }}
+          onSend={async (text) => { await send.mutateAsync({ text, source: draftKey }); }}
           onExport={() => {
             const turns = messages.data ?? [];
             if (turns.length === 0) {

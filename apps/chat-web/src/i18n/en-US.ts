@@ -107,6 +107,7 @@ export const enUS: Record<MessageKey, string> = {
   attachBinary: "Only text attachments can be sent right now. Skipped",
   attachReadFailed: "Could not read the attachment. Select the file again and retry.",
   draftStorageFailed: "Your draft could not be saved. Copy it before refreshing this page.",
+  draftIdentityChanged: "Your sign-in identity changed. Check the current conversation before sending again.",
   greeting: "Hello",
   emptyIntro: "What can I help you with?",
   invalidAddress: "This chat address is invalid. Reopen it from your organization’s entry page.",
