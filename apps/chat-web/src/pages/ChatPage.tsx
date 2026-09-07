@@ -56,8 +56,13 @@ export function ChatPage() {
     <p role="alert">{problemMessage(identity.error, t)}</p>
     <button onClick={() => { void identity.refetch(); }}>{t("retry")}</button>
   </main>;
-  if (identity.data === undefined) return <p className="centered">{t("loading")}</p>;
-  return <ChatConversation key={`${identity.data.workspace_id}:${identity.data.end_user_id}`} identity={identity.data} />;
+  if (identity.data === undefined || !identity.isFetchedAfterMount) return <p className="centered">{t("loading")}</p>;
+  return <>
+    {identity.isFetching ? <p className="centered">{t("loading")}</p> : null}
+    <div hidden={identity.isFetching}>
+      <ChatConversation key={`${identity.data.workspace_id}:${identity.data.end_user_id}`} identity={identity.data} />
+    </div>
+  </>;
 }
 
 function ChatConversation({ identity }: { identity: EndUserIdentity }) {
