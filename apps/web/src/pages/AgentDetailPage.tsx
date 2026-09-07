@@ -594,7 +594,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
     provider: "modelProvider", scenario: "modelScenario",
   };
   const localDiff = localDraft === null ? [] : [
-    ...specDiff(loadedDraft.spec, specOf(localDraft.values)),
+    ...specDiff(specOf(valuesOf(loadedDraft)), specOf(localDraft.values)),
     ...(["name", "alias"] as const).filter((field) => loadedAgent[field] !== localDraft.values[field])
       .map((field) => ({ path: field, before: JSON.stringify(loadedAgent[field]), after: JSON.stringify(localDraft.values[field]) })),
   ];
