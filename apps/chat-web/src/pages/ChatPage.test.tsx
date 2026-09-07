@@ -186,6 +186,28 @@ test("a failed send keeps the draft and can be retried after the service recover
   await waitFor(() => expect(input).toHaveValue(""));
 });
 
+test("retrying a lost send response reuses the request key to avoid duplicate work", async () => {
+  rememberSessionId(ALIAS, SESSION);
+  const keys: (string | null)[] = [];
+  server.use(
+    http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([])),
+    http.post(`/api/v1/end-user/sessions/${SESSION}/runs`, ({ request }) => {
+      keys.push(request.headers.get("Idempotency-Key"));
+      return keys.length === 1 ? HttpResponse.error() : HttpResponse.json(finishedRun(), { status: 201 });
+    }),
+    http.get(`/api/v1/end-user/runs/${RUN}`, () => HttpResponse.json(finishedRun())),
+  );
+  renderChat(`/${ALIAS}/${SESSION}`);
+  await userEvent.type(await screen.findByLabelText("写给智能体"), "只执行一次");
+  const send = screen.getByRole("button", { name: "发送" });
+  await userEvent.click(send);
+  await waitFor(() => expect(send).toBeEnabled());
+  await userEvent.click(send);
+  await waitFor(() => expect(keys).toHaveLength(2));
+  expect(keys[0]).toBeTruthy();
+  expect(keys[1]).toBe(keys[0]);
+});
+
 test("reopening the address for a known session shows the same conversation", async () => {
   rememberSessionId(ALIAS, SESSION);
   server.use(

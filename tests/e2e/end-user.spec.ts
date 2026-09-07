@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
+import { expectReadableControl } from "./contrast";
 
 /**
  * Design §7's own walk: an enterprise signs a credential, opens the chat
@@ -23,6 +24,60 @@ import type { Page } from "@playwright/test";
 
 const CHAT_ORIGIN = process.env.TINY_HERMES_E2E_CHAT_URL ?? "http://127.0.0.1:3001";
 const ISSUER = "https://idp.acme.example";
+
+test("chat keeps a failed draft and its menus remain usable with a keyboard", async ({ page, browser }) => {
+  const workspace = await openWorkspace(page);
+  const { alias } = await publishEndUserAgent(page, workspace);
+  const { publicKey, privateKey } = rsaKeyPair();
+  await registerIssuer(page, workspace, publicKey);
+  const now = Math.floor(Date.now() / 1000);
+  const credential = signCredential({ iss: ISSUER, sub: "ux-keyboard", aud: workspace,
+    iat: now, exp: now + 600, agents: [alias] }, privateKey);
+  const context = await browser.newContext();
+  try {
+    const chat = await context.newPage();
+    await chat.goto(`${CHAT_ORIGIN}/?workspace=${workspace}&agent=${alias}#credential=${encodeURIComponent(credential)}`);
+    const input = chat.getByLabel("写给智能体");
+    await expect(input).toBeVisible();
+    await input.focus();
+    await chat.keyboard.press("Tab");
+    const more = chat.getByRole("button", { name: "更多", exact: true });
+    await expect(more).toBeFocused();
+    await chat.keyboard.press("Enter");
+    await expect(chat.getByRole("menuitem", { name: "附件", exact: true })).toBeFocused();
+    await chat.keyboard.press("ArrowDown");
+    await expect(chat.getByRole("menuitem", { name: "从剪贴板粘贴", exact: true })).toBeFocused();
+    await chat.keyboard.press("Escape");
+    await expect(more).toBeFocused();
+    const runPath = "**/api/v1/end-user/sessions/*/runs";
+    await chat.route(runPath, (route) => route.abort("connectionfailed"));
+    await input.fill("断网后保留输入，恢复后只提交一次。");
+    await chat.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(chat.locator(".banner-warn")).toBeVisible();
+    await expect(input).toHaveValue("断网后保留输入，恢复后只提交一次。");
+    await chat.unroute(runPath);
+    await chat.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(input).toHaveValue("");
+    await expect(chat.locator(".turn-agent")).toHaveCount(1);
+    await chat.reload();
+    await expect(chat.locator(".bubble-user")).toHaveCount(1);
+    const actions = chat.getByRole("button", { name: "会话操作", exact: true });
+    await actions.focus();
+    await chat.keyboard.press("Enter");
+    await expect(chat.getByRole("button", { name: "置顶", exact: true })).toBeFocused();
+    await chat.keyboard.press("Escape");
+    await expect(actions).toBeFocused();
+    await input.fill("检查按钮文字对比度");
+    for (const appearance of ["浅色", "深色"]) {
+      await chat.getByRole("button", { name: "访客", exact: true }).click();
+      await chat.getByRole("button", { name: appearance, exact: true }).click();
+      await chat.keyboard.press("Escape");
+      await expectReadableControl(chat.getByRole("button", { name: "发送", exact: true }));
+    }
+  } finally {
+    await context.close();
+  }
+});
 
 function unique(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1_000)}`;

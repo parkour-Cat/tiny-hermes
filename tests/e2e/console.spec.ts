@@ -2,6 +2,18 @@ import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
 import { selectAntOption, unfold } from "./session";
+import { expectReadableControl } from "./contrast";
+
+for (const appearance of ["浅色", "深色"]) {
+  test(`console primary action text is readable in ${appearance}`, async ({ page }) => {
+    await page.goto("/workspaces");
+    await expect(page.getByRole("button", { name: "新建工作空间", exact: true })).toBeVisible();
+    const toggle = page.getByRole("button", { name: appearance, exact: true });
+    if (await toggle.count()) await toggle.click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", appearance === "深色" ? "dark" : "light");
+    await expectReadableControl(page.getByRole("button", { name: "新建工作空间", exact: true }));
+  });
+}
 
 /**
  * The console, driven the way a person drives it, against the real stack.
@@ -64,6 +76,43 @@ async function openWorkspace(page: Page): Promise<void> {
 async function choose(page: Page, label: string, value: string): Promise<void> {
   await selectAntOption(page, label, value);
 }
+
+test("failed draft saves preserve input and narrow dialogs return keyboard focus", async ({ page }) => {
+  await openWorkspace(page);
+  for (const width of [320, 390, 768, 1280]) {
+    await page.setViewportSize({ width, height: 844 });
+    const trigger = page.getByRole("button", { name: "新建 Agent", exact: true });
+    await trigger.focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.getByRole("dialog", { name: "新建 Agent" });
+    await expect(dialog).toBeVisible();
+    await dialog.getByLabel("名称", { exact: true }).fill("长名称测试".repeat(12));
+    const bounds = await dialog.evaluate((element) => ({
+      left: element.getBoundingClientRect().left, right: element.getBoundingClientRect().right,
+      scroll: document.documentElement.scrollWidth, viewport: innerWidth,
+    }));
+    expect(bounds.left).toBeGreaterThanOrEqual(0);
+    expect(bounds.right).toBeLessThanOrEqual(width);
+    expect(bounds.scroll).toBeLessThanOrEqual(bounds.viewport);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+  }
+  await publishAgent(page, "complete");
+  const input = page.getByLabel("人格", { exact: true });
+  await input.fill("服务失败后仍然保留的草稿内容");
+  const draftPath = "**/api/v1/agents/*/draft";
+  await page.route(draftPath, (route) => route.request().method() === "PUT" ?
+    route.abort("connectionfailed") : route.continue());
+  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
+  await expect(page.locator(".ant-alert-error")).toBeVisible();
+  await expect(input).toHaveValue("服务失败后仍然保留的草稿内容");
+  await page.unroute(draftPath);
+  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
+  await expect(page.getByText("草稿修订 3", { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(input).toHaveValue("服务失败后仍然保留的草稿内容");
+});
 
 /**
  * Binds a tool the way a person does: the visible Ant Design wrapper.
