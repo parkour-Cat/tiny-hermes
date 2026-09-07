@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -16,10 +16,10 @@ import { server } from "../test/server";
 const WORKSPACE = "11111111-2222-4333-8444-555555555555";
 const AGENT = "22222222-3333-4444-8555-666666666666";
 
-beforeEach(() => server.use(
+beforeEach(() => { sessionStorage.clear(); server.use(
   http.get("/api/v1/auth/me", () => HttpResponse.json({ id: "u1", is_platform_admin: false })),
   http.get(`/api/v1/workspaces/${WORKSPACE}/members/me`, () => HttpResponse.json({ role: "developer" })),
-));
+); });
 
 const SPEC = {
   schema_version: 1,
@@ -218,6 +218,23 @@ function renderDetail(role: Role = "developer", platform = false): QueryClient {
   );
   return client;
 }
+
+test("refresh restores unsaved Agent edits without saving or publishing them", async () => {
+  loadedAgent();
+  renderDetail();
+  const personality = await screen.findByLabelText("人格");
+  await userEvent.clear(personality);
+  await userEvent.type(personality, "Keep this unsaved instruction.");
+  await userEvent.clear(screen.getByLabelText("名称"));
+  await userEvent.type(screen.getByLabelText("名称"), "Unsaved analyst");
+  cleanup();
+
+  renderDetail();
+  expect(await screen.findByLabelText("人格")).toHaveValue("Keep this unsaved instruction.");
+  expect(screen.getByLabelText("名称")).toHaveValue("Unsaved analyst");
+  expect(screen.getByText("草稿修订 3")).toBeInTheDocument();
+  expect(screen.getByText("已恢复此标签页未保存的修改，请检查后保存。")).toBeInTheDocument();
+});
 
 test("the loaded draft fills every field the console can edit", async () => {
   loadedAgent();
