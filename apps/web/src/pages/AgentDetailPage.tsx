@@ -601,7 +601,12 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
   return (
     <>
       {contextHolder}
-      <UnsavedChangesGuard dirty={dirty} />
+      <UnsavedChangesGuard dirty={dirty || recoveryConflict} onDiscard={() => {
+        const cleared = writeAgentDraft(storageKey, null);
+        setStorageFailed(!cleared);
+        if (cleared) setLocalDraft(null);
+        return cleared;
+      }} />
       {restored && canRestore && <Alert className="page-alert" type="info" showIcon title={t("agentEditsRestored")} />}
       {storageFailed && <Alert className="page-alert" type="warning" showIcon title={t("agentEditsStorageFailed")} />}
       {recoveryConflict && <Alert className="page-alert" type="warning" showIcon title={t("agentEditsConflict")}
