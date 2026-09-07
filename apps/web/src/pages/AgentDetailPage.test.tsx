@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { createMemoryRouter, Link, MemoryRouter, Route, RouterProvider, Routes } from "react-router-dom";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { AuthProvider } from "../auth/AuthProvider";
@@ -323,6 +323,29 @@ test.each(["unreadable", "quota", "invalid-json", "invalid-shape"])("%s tab stor
   await user.click(screen.getByRole("button", { name: "保存草稿" }));
   expect(await screen.findByText("草稿修订 4")).toBeInTheDocument();
   expect(personality).toHaveValue("Manual save.");
+});
+
+test("explicitly discarding edits when leaving prevents them from returning", async () => {
+  const user = userEvent.setup();
+  loadedAgent();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const path = `/workspaces/${WORKSPACE}/agents/${AGENT}`;
+  const router = createMemoryRouter([
+    { path: "/workspaces/:workspaceId/agents/:agentId", element: <><AgentDetailPage /><Link to="/away">Leave editor</Link></> },
+    { path: "/away", element: <Link to={path}>Return to editor</Link> },
+  ], { initialEntries: [path] });
+  render(<TestTheme><QueryClientProvider client={client}><AuthProvider>
+    <WorkspacePermissions role="developer"><RouterProvider router={router} /></WorkspacePermissions>
+  </AuthProvider></QueryClientProvider></TestTheme>);
+  await user.clear(await screen.findByLabelText("人格"));
+  await user.paste("Discard this edit.");
+  await user.click(screen.getByRole("link", { name: "Leave editor" }));
+  await user.click(await screen.findByRole("button", { name: "继续编辑" }));
+  expect(screen.getByLabelText("人格")).toHaveValue("Discard this edit.");
+  await user.click(screen.getByRole("link", { name: "Leave editor" }));
+  await user.click(await screen.findByRole("button", { name: "放弃修改并离开" }));
+  await user.click(await screen.findByRole("link", { name: "Return to editor" }));
+  expect(await screen.findByLabelText("人格")).toHaveValue(SPEC.personality);
 });
 
 test("the loaded draft fills every field the console can edit", async () => {
