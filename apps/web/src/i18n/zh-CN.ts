@@ -249,6 +249,7 @@ export const zhCN = {
   publishWarningSuffix: " 发布为新版本。",
   publishSaveWarning: "将先保存当前修改，再发布保存后的版本。保存失败时不会发布。",
   draftUnsaved: "有未保存的修改",
+  agentEditsRestored: "已恢复此标签页未保存的修改，请检查后保存。",
   toolSucceeded: "执行成功",
   toolFailed: "执行失败",
   toolPending: "尚未收到结果",

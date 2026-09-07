@@ -253,6 +253,7 @@ export const enUS: Record<MessageKey, string> = {
   publishWarningSuffix: " as a new version.",
   publishSaveWarning: "Save the current changes, then publish the saved version. Publication stops if saving fails.",
   draftUnsaved: "Unsaved changes",
+  agentEditsRestored: "Unsaved edits from this tab were restored. Review them before saving.",
   toolSucceeded: "Succeeded",
   toolFailed: "Failed",
   toolPending: "No result received yet",

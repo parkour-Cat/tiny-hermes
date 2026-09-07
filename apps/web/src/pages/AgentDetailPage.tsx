@@ -44,6 +44,9 @@ import { useT } from "../i18n/locale";
 import type { MessageKey } from "../i18n/zh-CN";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
+import { useAuth } from "../auth/AuthProvider";
+import { agentDraftKey, readAgentDraft, writeAgentDraft } from "./agentDraftStorage";
+import type { LocalAgentDraft } from "./agentDraftStorage";
 
 type DraftValues = {
   personality: string;
@@ -134,7 +137,7 @@ type NameValues = {
 
 /** 一张表单：名称与别名跟人格并排在「身份」里，但保存时各走各的请求——
  *  名称不是版本化 spec 的一部分，改名不该长出一个草稿修订。 */
-type FormValues = DraftValues & NameValues;
+export type FormValues = DraftValues & NameValues;
 
 const DEFAULT_DELIVERY = { enabled: false, sync_timeout_seconds: 60 };
 
@@ -260,6 +263,15 @@ function exposureSummary(t: (key: MessageKey) => string, values: DraftValues): s
 }
 
 export function AgentDetailPage() {
+  const auth = useAuth();
+  const workspaceId = useWorkspaceId();
+  const { agentId = "" } = useParams();
+  if (auth.loading || auth.error || !auth.user) return <Card loading variant="borderless" />;
+  const key = agentDraftKey(auth.user.id, workspaceId ?? "", agentId);
+  return <AgentEditor key={key} storageKey={key} />;
+}
+
+function AgentEditor({ storageKey }: { storageKey: string }) {
   const { writer } = useWorkspacePermissions();
   const t = useT();
   const workspaceId = useWorkspaceId();
@@ -269,6 +281,8 @@ export function AgentDetailPage() {
   const [modal, contextHolder] = Modal.useModal();
   const [saveError, setSaveError] = useState<string | null>(null);
   const [publishNote, setPublishNote] = useState<string | null>(null);
+  const [localDraft, setLocalDraft] = useState<LocalAgentDraft | null>(() => readAgentDraft(storageKey));
+  const [restored] = useState(localDraft !== null);
   // Per-summary estimates from a refused publish. Shown as themselves rather
   // than summed, so an author can see which description is the expensive one
   // instead of shortening all of them — the shape `context_budget_unsatisfied`
@@ -479,11 +493,13 @@ export function AgentDetailPage() {
       />
     );
   }
-  if (agent.data === undefined || draft.data === undefined) {
+  if (agent.data === undefined || draft.data === undefined || !agent.isFetchedAfterMount || !draft.isFetchedAfterMount) {
     return <Card loading variant="borderless" />;
   }
   const loadedAgent = agent.data;
   const loadedDraft = draft.data;
+  const canRestore = writer && localDraft?.revision === loadedDraft.revision &&
+    localDraft.name === loadedAgent.name && localDraft.alias === loadedAgent.alias;
 
   function reload(): void {
     void modal.confirm({
@@ -565,6 +581,7 @@ export function AgentDetailPage() {
     <>
       {contextHolder}
       <UnsavedChangesGuard dirty={dirty} />
+      {restored && canRestore && <Alert className="page-alert" type="info" showIcon title={t("agentEditsRestored")} />}
       <PageHeading
         kicker={t("agents")}
         title={agent.data.name}
@@ -648,7 +665,12 @@ export function AgentDetailPage() {
           disabled={saving || !writer}
           layout="vertical"
           requiredMark={false}
-          initialValues={{ ...valuesOf(loadedDraft), name: loadedAgent.name, alias: loadedAgent.alias }}
+          initialValues={canRestore ? localDraft.values : { ...valuesOf(loadedDraft), name: loadedAgent.name, alias: loadedAgent.alias }}
+          onValuesChange={(_, values: FormValues) => {
+            const next = { revision: localDraft?.revision ?? loadedDraft.revision, name: localDraft?.name ?? loadedAgent.name, alias: localDraft?.alias ?? loadedAgent.alias, values };
+            setLocalDraft(next);
+            writeAgentDraft(storageKey, next);
+          }}
           // `specOf` reads the draft fields by name, so the two name fields
           // sharing this form never reach the spec.
           onFinish={(values) => saveDraft.mutate({ values, revision: loadedDraft.revision })}
