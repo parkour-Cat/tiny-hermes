@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { composeWithAttachments, mergeStaged, stagedFromList, type StagedFile } from "./attachments";
 import { readClipboardPayload } from "./clipboard";
-import { loadDraftFiles, loadDraftText, saveDraftFiles, saveDraftText } from "./drafts";
+import { clearDraft, loadDraftFiles, loadDraftText, saveDraftFiles, saveDraftText } from "./drafts";
 import { canDictate, startDictation } from "./speech";
 import { useDismiss } from "./useDismiss";
 import { useLocale } from "../i18n/locale";
@@ -21,6 +21,7 @@ export function Composer({
   onStop,
   onExport,
   draftKey,
+  onDraftReset,
 }: {
   disabled: boolean;
   sending: boolean;
@@ -30,6 +31,7 @@ export function Composer({
   onStop: () => void;
   onExport: () => void;
   draftKey?: string;
+  onDraftReset?: () => void;
 }) {
   const { t, locale } = useLocale();
   const area = useRef<HTMLTextAreaElement>(null);
@@ -223,6 +225,10 @@ export function Composer({
         value={input}
         disabled={disabled || submitting || sending}
         onChange={(event) => {
+          if (event.target.value === "") {
+            if (draftKey !== undefined) clearDraft(draftKey);
+            onDraftReset?.();
+          }
           draft.current = event.target.value;
           setInput(event.target.value);
           fit(event.target);

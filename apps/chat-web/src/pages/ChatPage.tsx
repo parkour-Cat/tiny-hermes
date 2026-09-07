@@ -359,6 +359,7 @@ function ChatConversation({ identity }: { identity: EndUserIdentity }) {
         <Composer
           key={`${draftKey}:${composerEpoch}`}
           draftKey={draftKey}
+          onDraftReset={() => { pendingSend.current = null; }}
           disabled={false}
           sending={send.isPending}
           live={Boolean(live)}
