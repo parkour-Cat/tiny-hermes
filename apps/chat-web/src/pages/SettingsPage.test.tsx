@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 import { expect, test } from "vitest";
 
 import { SettingsPage } from "./SettingsPage";
+import { Composer } from "../chat/Composer";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { LocaleProvider } from "../i18n/locale";
 import { server } from "../test/server";
@@ -15,11 +16,11 @@ const AGENTS = [
   { alias: "weekly-report", name: "周报助手" },
 ];
 
-function renderSettings(agents = AGENTS): void {
+function renderSettings(agents = AGENTS): ReturnType<typeof render> {
   // The page now asks which Agents the credential allows, for the default-Agent
   // choice. Listed first so a test's own handlers still win.
   server.use(http.get("/api/v1/end-user/agents", () => HttpResponse.json(agents)));
-  render(
+  return render(
     <ChatTheme>
       <LocaleProvider>
         <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -31,6 +32,20 @@ function renderSettings(agents = AGENTS): void {
     </ChatTheme>,
   );
 }
+
+test("clearing this device's conversation list also clears text drafts in this tab", async () => {
+  const composer = () => render(<LocaleProvider><Composer draftKey="settings-cleanup"
+    disabled={false} sending={false} live={false} canExport={false}
+    onSend={() => undefined} onStop={() => undefined} onExport={() => undefined} /></LocaleProvider>);
+  const before = composer();
+  await userEvent.type(screen.getByLabelText("写给智能体"), "清空记录时一起清理");
+  before.unmount();
+  const settings = renderSettings();
+  await userEvent.click(screen.getByRole("button", { name: "清空本机记录" }));
+  settings.unmount();
+  composer();
+  expect(screen.getByLabelText("写给智能体")).toHaveValue("");
+});
 
 test("the page has no account section — the platform was never given a name or email", () => {
   renderSettings();
