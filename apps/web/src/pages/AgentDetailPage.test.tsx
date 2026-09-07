@@ -3,7 +3,7 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { AuthProvider } from "../auth/AuthProvider";
 import { WorkspacePermissions } from "../workspace/WorkspacePermissions";
@@ -20,6 +20,7 @@ beforeEach(() => { sessionStorage.clear(); server.use(
   http.get("/api/v1/auth/me", () => HttpResponse.json({ id: "u1", is_platform_admin: false })),
   http.get(`/api/v1/workspaces/${WORKSPACE}/members/me`, () => HttpResponse.json({ role: "developer" })),
 ); });
+afterEach(() => vi.restoreAllMocks());
 
 const SPEC = {
   schema_version: 1,
@@ -298,6 +299,30 @@ test("a newer server draft exposes the local differences before an explicit disc
   renderDetail();
   expect(await screen.findByLabelText("人格")).toHaveValue("New shared instruction.");
   expect(screen.queryByText("查看暂存差异")).not.toBeInTheDocument();
+});
+
+test.each(["unreadable", "quota", "invalid-json", "invalid-shape"])("%s tab storage still allows a manual Agent save with a visible warning", async (failure) => {
+  const user = userEvent.setup();
+  loadedAgent();
+  server.use(http.put(`/api/v1/agents/${AGENT}/draft`, () => HttpResponse.json(draftBody(4, "Manual save."))));
+  if (failure === "unreadable") vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new DOMException("Denied", "SecurityError"); });
+  if (failure === "quota") vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new DOMException("Full", "QuotaExceededError"); });
+  if (failure === "invalid-json" || failure === "invalid-shape") {
+    const getItem = Storage.prototype.getItem;
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(function (this: Storage, key) {
+      return key.startsWith("tiny-hermes:agent-edits:") ? (failure === "invalid-json" ? "{" : '{"revision":3,"name":"Analyst","alias":"analyst","values":{"personality":"broken"}}') : getItem.call(this, key);
+    });
+  }
+  renderDetail();
+  const personality = await screen.findByLabelText("人格");
+  expect(personality).toHaveValue(SPEC.personality);
+  if (failure !== "quota") expect(screen.getByText("暂存不可用。请手动保存修改，或复制内容后再刷新。")).toBeInTheDocument();
+  await user.clear(personality);
+  await user.paste("Manual save.");
+  if (failure === "quota") expect(screen.getByText("暂存不可用。请手动保存修改，或复制内容后再刷新。")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "保存草稿" }));
+  expect(await screen.findByText("草稿修订 4")).toBeInTheDocument();
+  expect(personality).toHaveValue("Manual save.");
 });
 
 test("the loaded draft fills every field the console can edit", async () => {
