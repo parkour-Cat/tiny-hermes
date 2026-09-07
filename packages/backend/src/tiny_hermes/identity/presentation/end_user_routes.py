@@ -51,7 +51,11 @@ from tiny_hermes.identity.presentation.dependencies import (
     unauthenticated_bearer,
     verify_browser_write,
 )
-from tiny_hermes.identity.presentation.end_user_dependencies import END_USER_SESSION_COOKIE
+from tiny_hermes.identity.presentation.end_user_dependencies import (
+    END_USER_SESSION_COOKIE,
+    EndUserSessionCookie,
+    resolve_end_user_caller,
+)
 from tiny_hermes.shared.errors import AppError
 from tiny_hermes.tenancy.domain.models import Actor
 
@@ -100,6 +104,11 @@ class ChannelIssuerResponse(BaseModel):
 class EndUserSessionResponse(BaseModel):
     end_user_id: UUID
     expires_at: datetime
+
+
+class CurrentEndUserResponse(BaseModel):
+    end_user_id: UUID
+    workspace_id: UUID
 
 
 def end_user_console_router(resources: ApplicationResources) -> APIRouter:
@@ -244,13 +253,23 @@ def end_user_console_router(resources: ApplicationResources) -> APIRouter:
 
 
 def end_user_router(resources: ApplicationResources) -> APIRouter:
-    """The end user's own entry point, design §4.2 — never `_CONSOLE_ONLY`.
-    This is the one route in the whole feature an end user is meant to
-    reach with no platform session at all, which is exactly why it does not
-    live in `end_user_console_router`.
-    """
+    """End-user exchange and identity, never the platform-member session."""
     router = APIRouter(prefix="/api/v1", tags=["end-user-identity"])
     end_users_dependency = resources.end_user_identity_service
+
+    @router.get("/end-user/me", response_model=CurrentEndUserResponse)
+    async def current_identity(  # pyright: ignore[reportUnusedFunction]
+        response: Response,
+        end_users: Annotated[
+            EndUserIdentityService, Depends(end_users_dependency, scope="function")
+        ],
+        session_token: EndUserSessionCookie = None,
+    ) -> CurrentEndUserResponse:
+        caller = await resolve_end_user_caller(end_users, session_token)
+        response.headers["Cache-Control"] = "no-store"
+        return CurrentEndUserResponse(
+            end_user_id=caller.end_user_id, workspace_id=caller.workspace_id
+        )
 
     @router.post(
         "/end-user/sessions",
