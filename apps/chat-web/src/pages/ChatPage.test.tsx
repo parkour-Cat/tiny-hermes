@@ -115,6 +115,40 @@ test("clearing a failed message makes an identical later message a new request",
   expect(keys[1]).not.toBe(keys[0]);
 });
 
+for (const limit of [0, 50]) {
+  test(`storage limited to ${limit} characters preserves first-send input and refuses unsafe submission`, async () => {
+    let created = 0;
+    let runs = 0;
+    server.use(
+      http.post(`/api/v1/end-user/agents/${ALIAS}/sessions`, () => {
+        created += 1; return HttpResponse.json(sessionRow(), { status: 201 });
+      }),
+      http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([])),
+      http.post(`/api/v1/end-user/sessions/${SESSION}/runs`, () => {
+        runs += 1; return HttpResponse.json(finishedRun(), { status: 201 });
+      }),
+      http.get(`/api/v1/end-user/runs/${RUN}`, () => HttpResponse.json(finishedRun())),
+    );
+    renderChat(`/${ALIAS}`);
+    const input = await screen.findByLabelText("写给智能体");
+    const original = Storage.prototype.setItem;
+    const storage = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (key, value) {
+      if (value.length > limit) throw new DOMException("Quota exceeded", "QuotaExceededError");
+      original.call(this, key, value);
+    });
+    try {
+      await userEvent.type(input, "保留我的输入");
+      await userEvent.click(screen.getByRole("button", { name: "发送" }));
+      expect(await screen.findByText("无法保存发送状态，本次未发送。请复制输入，重新打开页面后重试。")).toBeInTheDocument();
+      expect(screen.getByLabelText("写给智能体")).toHaveValue("保留我的输入");
+      expect(created).toBe(0);
+      expect(runs).toBe(0);
+    } finally { storage.mockRestore(); }
+    await userEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(runs).toBe(1));
+  });
+}
+
 test("reopening a conversation exposes its saved files without an active run", async () => {
   rememberSessionId(ALIAS, SESSION);
   server.use(
