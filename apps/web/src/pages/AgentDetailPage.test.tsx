@@ -220,13 +220,14 @@ function renderDetail(role: Role = "developer", platform = false): QueryClient {
 }
 
 test("refresh restores unsaved Agent edits without saving or publishing them", async () => {
+  const user = userEvent.setup();
   loadedAgent();
   renderDetail();
   const personality = await screen.findByLabelText("人格");
-  await userEvent.clear(personality);
-  await userEvent.type(personality, "Keep this unsaved instruction.");
-  await userEvent.clear(screen.getByLabelText("名称"));
-  await userEvent.type(screen.getByLabelText("名称"), "Unsaved analyst");
+  await user.clear(personality);
+  await user.paste("Keep this unsaved instruction.");
+  await user.clear(screen.getByLabelText("名称"));
+  await user.paste("Unsaved analyst");
   cleanup();
 
   renderDetail();
