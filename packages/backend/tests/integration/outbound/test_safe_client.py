@@ -237,6 +237,7 @@ async def test_a_read_timeout_leaves_the_effect_unknown(
         with pytest.raises(OutboundUnreachable) as failure:
             await client.post(f"{url}/slow", json={})
     assert failure.value.external_effect_unknown is True
+    assert app.paths == ["/slow"]
 
 
 async def test_a_connect_failure_leaves_no_doubt(proxy: ProxyHandle) -> None:

@@ -222,7 +222,7 @@ test("a blocked queue offers the head run's actions, not a fake completions refu
   await userEvent.click(screen.getByRole("button", { name: "发送" }));
 
   expect(await screen.findByText("当前会话有未完成任务")).toBeInTheDocument();
-  expect(screen.getByText("paused")).toBeInTheDocument();
+  expect(screen.getByText("已暂停")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "继续" }));
 
   await waitFor(() => expect(resumes).toHaveLength(1));
