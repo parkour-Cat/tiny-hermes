@@ -340,7 +340,8 @@ h4,
   margin-bottom: 16px;
 }
 
-.form-section .ant-collapse-title {
+.form-section.ant-collapse > .ant-collapse-item > .ant-collapse-header > .ant-collapse-title {
+  flex: 1 1 0;
   min-width: 0;
   overflow-wrap: anywhere;
 }
