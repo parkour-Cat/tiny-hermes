@@ -1,5 +1,8 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import { openSection, unfold } from "./session";
 
@@ -56,7 +59,7 @@ async function openWorkspace(page: Page): Promise<void> {
  * finds that one first.
  */
 async function choose(page: Page, label: string, value: string): Promise<void> {
-  await page.getByLabel(label).click();
+  await page.getByLabel(label, { exact: true }).click();
   await page
     .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
     .locator(`.ant-select-item-option[title="${value}"]`)
@@ -76,11 +79,13 @@ async function uploadSkill(page: Page, line: string): Promise<void> {
   const skills = await openSection(page, "工具与技能", "技能", "skills");
   await skills.getByRole("button", { name: "上传技能目录" }).click();
   const upload = page.getByRole("dialog", { name: "上传技能目录" });
-  await upload.getByLabel("选择文件").setInputFiles({
-    name: "SKILL.md",
-    mimeType: "text/markdown",
-    buffer: Buffer.from(skillDocument(line), "utf-8"),
-  });
+  const directory = await mkdtemp(path.join(tmpdir(), "tiny-hermes-skill-e2e-"));
+  try {
+    await writeFile(path.join(directory, "SKILL.md"), skillDocument(line), "utf-8");
+    await upload.getByLabel("选择文件").setInputFiles(directory);
+  } finally {
+    await rm(directory, { recursive: true });
+  }
   await upload.getByRole("button", { name: "确认上传" }).click();
   await expect(upload).toBeHidden();
   await expect(skills.getByRole("heading", { name: SKILL_NAME })).toBeVisible();

@@ -70,7 +70,7 @@ async function openWorkspace(page: Page): Promise<string> {
  * rc-select renders a second, screen-reader-only list carrying the same role.
  */
 async function choose(page: Page, label: string, value: string): Promise<void> {
-  await page.getByLabel(label).click();
+  await page.getByLabel(label, { exact: true }).click();
   await page
     .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
     .locator(`.ant-select-item-option[title="${value}"]`)

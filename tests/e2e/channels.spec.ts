@@ -72,6 +72,14 @@ test("an administrator binds a channel, and the delivery path knows about it", a
   );
   expect(agentId).toBeTruthy();
 
+  await page.goto(`/workspaces/${workspaceId}/agents/${agentId}`);
+  await page.getByLabel("人格").fill("A published channel acceptance Agent.");
+  await page.getByRole("button", { name: "保存草稿", exact: true }).click();
+  await expect(page.getByText("草稿修订 2")).toBeVisible();
+  await page.getByRole("button", { name: "发布", exact: true }).click();
+  await page.getByRole("button", { name: "确定", exact: true }).click();
+  await expect(page.getByText("当前版本 v1")).toBeVisible();
+
   await page.goto(`/workspaces/${workspaceId}/channels`);
   await page.getByRole("button", { name: "接入飞书机器人" }).click();
   await page.getByLabel("Agent").click();

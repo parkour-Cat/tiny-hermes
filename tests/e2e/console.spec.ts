@@ -77,7 +77,8 @@ async function choose(page: Page, label: string, value: string): Promise<void> {
     .locator(`.ant-select-item-option[title="${value}"]`);
   await expect(option).toBeVisible();
   await option.click();
-  await expect(field.locator("xpath=..")).toHaveAttribute("title", value);
+  await expect(field).toHaveAttribute("aria-expanded", "false");
+  await expect(field.locator('xpath=ancestor::div[contains(concat(" ", normalize-space(@class), " "), " ant-select ")][1]')).toContainText(value);
 }
 
 /**
@@ -250,7 +251,7 @@ test("a run that has not finished says which round it is on and why", async ({ p
   // Not a race. The round asked to be woken a minute later, so the Run sits in
   // this state long enough that reading it is reading the platform, not
   // catching a frame.
-  await expect(summary(page).getByText("waiting_external", { exact: true })).toBeVisible();
+  await expect(summary(page).getByText("等待外部答复", { exact: true })).toBeVisible();
   await expect(fact(page, "当前轮次")).toHaveText("1");
   await expect(fact(page, "上一轮判定")).toHaveText("等待");
   await expect(fact(page, "等待类型")).toHaveText("timer");
