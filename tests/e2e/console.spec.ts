@@ -47,6 +47,43 @@ function unique(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1_000)}`;
 }
 
+test("quick model defaults can publish a new Agent without budget tuning", async ({ page }) => {
+  await openWorkspace(page);
+  await page.getByRole("link", { name: "平台管理", exact: true }).click();
+  const model = unique("quick-model");
+  await page.getByLabel("服务地址", { exact: true }).fill("https://models.example.com/v1");
+  await page.getByLabel("API Key", { exact: true }).fill("test-key-never-sent");
+  await page.getByRole("button", { name: "直接填写模型名", exact: true }).click();
+  await page.getByLabel("模型", { exact: true }).fill(model);
+  for (const width of [320, 390, 768, 1280]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(page.getByRole("button", { name: "添加模型", exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+  }
+  await page.getByRole("button", { name: "添加模型", exact: true }).click();
+  const endpointName = `${model} · models.example.com`;
+  await expect(page.getByRole("heading", { name: endpointName, exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "Agent", exact: true }).click();
+  await expect(page.getByRole("combobox", { name: "模型接入点", exact: true })).toBeVisible();
+  for (const width of [320, 390, 768, 1280]) {
+    await page.setViewportSize({ width, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+  }
+  await page.getByRole("button", { name: "新建 Agent", exact: true }).click();
+  await page.getByLabel("名称", { exact: true }).fill(model);
+  await page.getByLabel("别名", { exact: true }).fill(model);
+  await page.getByRole("button", { name: "创建", exact: true }).click();
+  await expect(page.getByText("草稿修订 1", { exact: true })).toBeVisible();
+  await page.getByLabel("人格", { exact: true }).fill("Summarize the user's fictional notes.");
+  await selectAntOption(page, "模型提供方", "模型接入");
+  await selectAntOption(page, "模型接入", endpointName);
+  await bindTool(page, "file.read");
+  await page.getByRole("button", { name: "发布", exact: true }).click();
+  await page.getByRole("button", { name: "确定", exact: true }).click();
+  await expect(page.getByText("当前版本 v1", { exact: true })).toBeVisible();
+  // Publishing is local validation. No request to the placeholder provider is made.
+});
+
 async function openWorkspace(page: Page): Promise<void> {
   const name = unique("Console");
   await page.goto("/workspaces");

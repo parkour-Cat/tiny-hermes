@@ -28,6 +28,8 @@ class MemoryScopeDirectory:
     )
 
     async def layers_for(self, claim: CallerClaim) -> ScopeLayers:
+        if claim.discovery_id is not None:
+            return ScopeLayers(platform=OutboundScope.nothing())
         return ScopeLayers(
             platform=self.platform,
             workspace=_named(self.workspaces, claim.workspace_id),

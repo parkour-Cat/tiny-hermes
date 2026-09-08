@@ -118,7 +118,9 @@ export function AgentsPage() {
                     <>
                       <Select
                         aria-label={t("exampleAgentEndpoint")}
-                        style={{ minWidth: 260 }}
+                        style={{ width: "100%", minWidth: 0 }}
+                        showSearch
+                        optionFilterProp="label"
                         value={chosen}
                         onChange={(value: string) => setEndpointId(value)}
                         options={available.map((endpoint) => ({

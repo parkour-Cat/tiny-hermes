@@ -40,6 +40,14 @@ class ScopeLevel(StrEnum):
     WORKSPACE = "workspace"
 
 
+class ModelDiscoveryGrantRow(IdMixin, Base):
+    """A short-lived administrator approval for one model-list lookup."""
+
+    __tablename__ = "model_discovery_grants"
+    host: Mapped[str] = mapped_column(String(253))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class OutboundScopeRow(IdMixin, CreatedAtMixin, Base):
     """One approved host, wildcard or network, at one level."""
 

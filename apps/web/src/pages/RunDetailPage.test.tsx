@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -125,7 +125,7 @@ function stream(frames: string[] = []): void {
   server.use(http.get(`/api/v1/runs/${RUN}/events`, () => held(frames)));
 }
 
-function renderRun(): void {
+function renderRun(): QueryClient {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <TestTheme>
@@ -138,6 +138,7 @@ function renderRun(): void {
       </QueryClientProvider>
     </TestTheme>,
   );
+  return client;
 }
 
 beforeEach(() => {
@@ -693,6 +694,32 @@ function tree(nodes: object[]) {
     HttpResponse.json({ budget_root_run_id: PARENT, nodes, budget: BUDGET }),
   );
 }
+
+test("task tree follows a run completion received after its initial snapshot", async () => {
+  let finished = false;
+  server.use(
+    http.get(`/api/v1/runs/${RUN}/files`, () => HttpResponse.json({ revision_id: null, items: [] })),
+    http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run({
+      budget_root_run_id: PARENT,
+      status: finished ? "completed" : "running",
+      state_version: finished ? 5 : 4,
+      finished_at: finished ? "2026-08-10T02:09:00Z" : null,
+    }))),
+    http.get(`/api/v1/runs/${RUN}/tree`, () => HttpResponse.json({ budget_root_run_id: PARENT, nodes: [
+      { id: PARENT, status: "failed", depth: 0, parent_run_id: null, relation: "root" },
+      { id: RUN, status: finished ? "completed" : "running", depth: 0, parent_run_id: null, relation: "retry" },
+    ] })),
+  );
+  stream();
+  const client = renderRun();
+  const section = (await screen.findByText(t("taskTreeSection"))).closest(".ant-card") as HTMLElement;
+  expect(within(section).getByText("执行中")).toBeVisible();
+  finished = true;
+  await act(async () => { await client.invalidateQueries({ queryKey: ["run", WORKSPACE, RUN], exact: true }); });
+  expect(await within(await summary()).findByText("已完成")).toBeVisible();
+  expect(await within(section).findByText("已完成")).toBeVisible();
+  expect(within(section).queryByText("执行中")).not.toBeInTheDocument();
+});
 
 test("a child Run can see the siblings it was delegated alongside", async () => {
   // §952's 完整父子任务树. Before the tree route, a child carried

@@ -26,7 +26,7 @@ from tiny_hermes.outbound.errors import (
     OutboundUnreachable,
 )
 
-from ..egress_support import PROXY_TOKEN, ProxyHandle
+from ..egress_support import PROXY_TOKEN, ProxyHandle, running_proxy
 from .conftest import StandIn
 
 
@@ -54,6 +54,17 @@ async def test_an_ordinary_request_reaches_the_endpoint(
         response = await client.post(f"{url}/ok", json={"say": "hello"})
     assert response.status_code == 200
     assert app.last().method == "POST"
+
+
+async def test_a_proxy_starting_late_recovers_before_sending_the_request_once(
+    stand_in: tuple[StandIn, str],
+) -> None:
+    app, url = stand_in
+    async with running_proxy(startup_delay=0.4) as delayed:
+        async with build(delayed, connect_timeout=0.05) as client:
+            response = await client.post(f"{url}/ok", json={"say": "once"})
+    assert response.status_code == 200
+    assert app.paths == ["/ok"]
 
 
 async def test_an_ambient_proxy_cannot_replace_the_platform_s(
@@ -226,6 +237,7 @@ async def test_a_read_timeout_leaves_the_effect_unknown(
         with pytest.raises(OutboundUnreachable) as failure:
             await client.post(f"{url}/slow", json={})
     assert failure.value.external_effect_unknown is True
+    assert app.paths == ["/slow"]
 
 
 async def test_a_connect_failure_leaves_no_doubt(proxy: ProxyHandle) -> None:

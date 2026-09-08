@@ -1,7 +1,9 @@
 from collections.abc import AsyncGenerator
-from datetime import timedelta
-from uuid import UUID
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
 
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -59,6 +61,7 @@ from tiny_hermes.model_catalog.infrastructure.sql_store import SqlModelEndpointS
 from tiny_hermes.outbound.application.service import OutboundScopes
 from tiny_hermes.outbound.client import EgressRoute, SafeOutboundClient
 from tiny_hermes.outbound.infrastructure.sql_store import SqlScopeStore
+from tiny_hermes.outbound.infrastructure.tables import ModelDiscoveryGrantRow
 from tiny_hermes.runs.application.approvals import ApprovalService
 from tiny_hermes.runs.application.event_stream import EventStreamHub, Poll
 from tiny_hermes.runs.application.service import RunCoordination
@@ -277,7 +280,9 @@ class ApplicationResources:
             else:
                 await session.commit()
 
-    def outbound_client(self, workspace_id: UUID | None = None) -> SafeOutboundClient:
+    def outbound_client(
+        self, workspace_id: UUID | None = None, *, discovery_id: UUID | None = None,
+    ) -> SafeOutboundClient:
         """A fresh client per call, not a shared one.
 
         Nothing here is hot enough to need pooling, and a client that outlives a
@@ -299,15 +304,34 @@ class ApplicationResources:
                 url=settings.egress_proxy_url,
                 token=settings.egress_proxy_token,
                 workspace_id=workspace_id,
+                discovery_id=discovery_id,
             )
         )
         return SafeOutboundClient(
             egress=egress,
             connect_timeout=settings.outbound_connect_timeout_seconds,
             read_timeout=settings.outbound_read_timeout_seconds,
-            max_redirects=settings.outbound_max_redirects,
-            max_response_bytes=settings.outbound_max_response_bytes,
+            max_redirects=0 if discovery_id else settings.outbound_max_redirects,
+            max_response_bytes=(min(settings.outbound_max_response_bytes, 1024 * 1024)
+                                if discovery_id else settings.outbound_max_response_bytes),
         )
+
+    @asynccontextmanager
+    async def model_discovery_client(self, host: str) -> AsyncGenerator[SafeOutboundClient]:
+        grant_id = uuid4()
+        factory = self.session_factory()
+        async with factory() as session, session.begin():
+            await session.execute(delete(ModelDiscoveryGrantRow).where(
+                ModelDiscoveryGrantRow.expires_at <= datetime.now(UTC)))
+            session.add(ModelDiscoveryGrantRow(id=grant_id, host=host,
+                expires_at=datetime.now(UTC) + timedelta(seconds=60)))
+        try:
+            async with self.outbound_client(discovery_id=grant_id) as client:
+                yield client
+        finally:
+            async with factory() as session, session.begin():
+                await session.execute(delete(ModelDiscoveryGrantRow).where(
+                    ModelDiscoveryGrantRow.id == grant_id))
 
     async def outbound_scopes(self) -> AsyncGenerator[OutboundScopes]:
         async with self.session_factory()() as session:

@@ -132,6 +132,25 @@ function renderPlayground(viewer = false): void {
   );
 }
 
+test.each([["completed", "已完成"], ["failed", "失败"]])("terminal playground %s is readable and hides internal queue state", async (status, label) => {
+  loadedPlayground();
+  document.cookie = "tiny_hermes_csrf=token-value";
+  const finished = runRow(PENDING, { status, finished_at: "2026-08-10T02:01:00Z", queue: { position: 0, status: "terminal" }, available_actions: [] });
+  server.use(
+    http.post("/api/v1/runs", () => HttpResponse.json(finished, { status: 201 })),
+    http.get(`/api/v1/runs/${PENDING}`, () => HttpResponse.json(finished)),
+    http.get(`/api/v1/runs/${PENDING}/events`, () => held()),
+    http.get(`/api/v1/runs/${PENDING}/artifacts`, () => HttpResponse.json([])),
+    http.get(`/api/v1/runs/${PENDING}/files`, () => HttpResponse.json({ revision_id: null, items: [] })),
+  );
+  renderPlayground();
+  await userEvent.type(await screen.findByLabelText("输入要发给 Agent 的消息"), "Check");
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  expect(await screen.findByText(label)).toBeVisible();
+  expect(screen.queryByText("terminal")).not.toBeInTheDocument();
+  expect(screen.queryByText(status)).not.toBeInTheDocument();
+});
+
 test("a viewer cannot send or automatically create a debugging session", async () => {
   loadedPlayground();
   let posts = 0;
@@ -203,7 +222,7 @@ test("a blocked queue offers the head run's actions, not a fake completions refu
   await userEvent.click(screen.getByRole("button", { name: "发送" }));
 
   expect(await screen.findByText("当前会话有未完成任务")).toBeInTheDocument();
-  expect(screen.getByText("paused")).toBeInTheDocument();
+  expect(screen.getByText("已暂停")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "继续" }));
 
   await waitFor(() => expect(resumes).toHaveLength(1));

@@ -56,6 +56,7 @@ async def running_proxy(
     approved: Sequence[Network] = LOOPBACK,
     policy: AddressPolicy = loopback_is_reachable,
     directory: ScopeDirectory | None = None,
+    startup_delay: float = 0,
 ) -> AsyncGenerator[ProxyHandle]:
     """A real egress proxy, because the client can no longer reach past one.
 
@@ -89,9 +90,13 @@ async def running_proxy(
         policy=policy,
     )
     stop = asyncio.Event()
-    task = asyncio.create_task(server.serve(stop))
+    async def serve() -> None:
+        await asyncio.sleep(startup_delay)
+        await server.serve(stop)
+
+    task = asyncio.create_task(serve())
     try:
-        for _ in range(200):
+        for _ in range(200 if startup_delay == 0 else 0):
             try:
                 reader, writer = await asyncio.open_connection("127.0.0.1", port)
             except OSError:

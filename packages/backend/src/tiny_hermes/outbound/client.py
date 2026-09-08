@@ -36,6 +36,8 @@ stops it *acting*. Anyone adding another long-connection adapter inherits
 this: an SDK that owns its own socket is outside every check in this file.
 """
 
+import asyncio
+import logging
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Self
@@ -51,6 +53,8 @@ from tiny_hermes.outbound.errors import (
     OutboundTooManyRedirects,
     OutboundUnreachable,
 )
+
+logger = logging.getLogger(__name__)
 
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 #: Statuses that keep the request as it was. The rest turn the next hop into a
@@ -93,6 +97,7 @@ class EgressRoute:
     workspace_id: UUID | None = None
     agent_version_id: UUID | None = None
     run_id: UUID | None = None
+    discovery_id: UUID | None = None
 
     def headers(self) -> dict[str, str]:
         """What the proxy needs, and nothing a target should ever see.
@@ -107,6 +112,7 @@ class EgressRoute:
                 ("workspace", self.workspace_id),
                 ("agent", self.agent_version_id),
                 ("run", self.run_id),
+                ("discovery", self.discovery_id),
             )
             if value is not None
         ]
@@ -318,7 +324,22 @@ class SafeOutboundClient:
         if self._client is None:  # pragma: no cover - `_send` refused already
             raise OutboundRefused(RefusalReason.EGRESS_NOT_CONFIGURED)
         try:
-            response = await self._client.send(request, stream=True)
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    response = await self._client.send(request, stream=True)
+                    break
+                except (httpx.ConnectError, httpx.ConnectTimeout) as failure:
+                    # Connection setup failed before the HTTP request was sent.
+                    # Never replay a read/write failure or a proxy's policy refusal.
+                    logger.warning(
+                        "egress connection setup failed: host=%s error=%s attempt=%d",
+                        request.url.host, type(failure).__name__, attempt,
+                    )
+                    if attempt == 3:
+                        raise
+                    await asyncio.sleep(0.25 * (2 ** (attempt - 1)))
         except (httpx.ProxyError, httpx.ConnectError, httpx.ConnectTimeout) as failure:
             # The only socket this client opens goes to the proxy, so a
             # connection that failed is the boundary being unreachable — never
