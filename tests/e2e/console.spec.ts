@@ -64,6 +64,11 @@ test("quick model defaults can publish a new Agent without budget tuning", async
   const endpointName = `${model} · models.example.com`;
   await expect(page.getByRole("heading", { name: endpointName, exact: true })).toBeVisible();
   await page.getByRole("link", { name: "Agent", exact: true }).click();
+  await expect(page.getByRole("combobox", { name: "模型接入点", exact: true })).toBeVisible();
+  for (const width of [320, 390, 768, 1280]) {
+    await page.setViewportSize({ width, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+  }
   await page.getByRole("button", { name: "新建 Agent", exact: true }).click();
   await page.getByLabel("名称", { exact: true }).fill(model);
   await page.getByLabel("别名", { exact: true }).fill(model);

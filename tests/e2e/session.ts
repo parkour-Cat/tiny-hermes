@@ -52,7 +52,7 @@ export async function unfold(page: Page, title: string): Promise<void> {
 
 /** Keyboard selection avoids clicking an option while the popup is moving. */
 export async function selectAntOption(page: Page, label: string, value: string): Promise<void> {
-  const field = page.getByLabel(label, { exact: true });
+  const field = page.getByRole("combobox", { name: label, exact: true });
   await field.click();
   if (await field.evaluate((element) => !(element as HTMLInputElement).readOnly)) {
     await field.fill(value);
