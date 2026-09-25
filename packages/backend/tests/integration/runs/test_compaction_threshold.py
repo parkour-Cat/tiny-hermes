@@ -18,7 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
-from tiny_hermes.runs.domain.context_budget import PROTECTED_RECENT_MESSAGES
+from tiny_hermes.runs.domain.context_budget import MIN_COMPACTION_THRESHOLD
 
 from ..conftest import VALID_SPEC
 from .test_context_budget import SMALL_ENDPOINT, ask, fails, payloads, says, start_session, status
@@ -27,13 +27,13 @@ from .test_worker_tools import Recording, drive
 CREDENTIAL = "TINY_HERMES_TEST_COMPACTION_THRESHOLD_KEY"
 
 #: `SMALL_ENDPOINT`'s allowance is 9,472 (`test_context_budget.py::ALLOWANCE`).
-#: Eight seeded turns of 1,000 characters each land the round at roughly a
-#: third of it — comfortably past `MIN_COMPACTION_THRESHOLD` (0.20),
-#: comfortably short of `DEFAULT_COMPACTION_THRESHOLD` (0.50), so the same
-#: seeded conversation lands on opposite sides of the two thresholds under
-#: test without needing two different fixtures.
-TURN_SIZE = 1_000
-TURN_PAIRS = 4
+#: Ten seeded turns of 1,800 characters each land the round at about 6.8K —
+#: past `MIN_COMPACTION_THRESHOLD` (0.50), short of the default (0.85) — and
+#: long enough that four of them lie outside the retained tail (half the room
+#: on this window), so there is something for a compaction to take. Worked
+#: out against `plan_context` directly, not guessed.
+TURN_SIZE = 1_800
+TURN_PAIRS = 5
 
 
 @pytest.fixture(autouse=True)
@@ -141,10 +141,11 @@ async def test_a_declared_threshold_moves_when_compaction_starts(
     small_endpoint: str,
 ) -> None:
     """The same seeded conversation, two Agents, one difference between
-    them: `compaction_threshold`. The default (0.50) never sees this round
-    cross its ratio and sends it untouched; `0.20` does, and only a `Worker`
-    that actually read the author's number off the published spec — through
-    `_compaction_threshold`, not a hardcoded default — could tell them apart.
+    them: `compaction_threshold`. The default (0.85) never sees this round
+    cross its ratio and sends it untouched; the lowest allowed (0.50) does,
+    and only a `Worker` that actually read the author's number off the
+    published spec — through `_compaction_threshold`, not a hardcoded
+    default — could tell them apart.
     """
     workspace_id = UUID(scope["X-Workspace-Id"])
 
@@ -160,7 +161,9 @@ async def test_a_declared_threshold_moves_when_compaction_starts(
     assert status(client, scope, default_run)["status"] == "completed"
     assert await payloads(engine, default_run, "context_compacted") == []
 
-    aggressive_agent = _publish(client, scope, small_endpoint, compaction_threshold=0.20)
+    aggressive_agent = _publish(
+        client, scope, small_endpoint, compaction_threshold=MIN_COMPACTION_THRESHOLD
+    )
     aggressive_session = start_session(client, scope, aggressive_agent)
     await _seed_old_turns(
         engine, UUID(aggressive_session), workspace_id, pairs=TURN_PAIRS, size=TURN_SIZE
@@ -194,7 +197,7 @@ async def test_a_requested_compaction_happens_even_far_below_the_threshold(
     四层（命令、入站、store、Worker），任何一层断了都会让「写进去了」为真而
     「压缩发生了」为假。
 
-    用默认阈值（0.50）的那个 Agent：上一条测试已经证明同样这段历史在它手里
+    用默认阈值（0.85）的那个 Agent：上一条测试已经证明同样这段历史在它手里
     **不会**触发压缩。所以这里如果压了，只可能是因为那个请求被读到了。
     """
     workspace_id = UUID(scope["X-Workspace-Id"])
@@ -344,9 +347,9 @@ async def test_a_conversation_too_small_to_gain_anything_does_not_pay_for_a_summ
     条数、角色分布和线索词。所以「结构摘要都没让上下文变小」蕴含「模型摘要
     更不会」，这是可推的，不用先花钱试一次才知道。
 
-    `/compact` 已经在入站那一层挡掉了「没什么可压」，但那道闸数的是**消息条数**
-    （`条数 - PROTECTED_RECENT_MESSAGES >= 2`）。四条极短的消息过得了那道闸，
-    却压不出任何东西——于是旧行为是：花一次摘要调用，拿回 `freed_estimate 0`。
+    `/compact` 已经在入站那一层挡掉了「没什么可压」，这里绕过那道闸直接写标记：
+    四条极短的消息全在保留区里，保留区之外什么都没有——v2.9 的旧行为是花一次
+    摘要调用，拿回 `freed_estimate 0`。
 
     两条判据缺一不可：
     - **一次模型调用都没发生**（省下的钱）
@@ -356,7 +359,7 @@ async def test_a_conversation_too_small_to_gain_anything_does_not_pay_for_a_summ
 
     agent = _publish(client, scope, small_endpoint, compaction_threshold=None)
     session = start_session(client, scope, agent)
-    # 四条极短的消息：够过入站那道按条数的闸，压不出任何东西。
+    # 四条极短的消息：全在保留区里，压不出任何东西。
     await _seed_old_turns(engine, UUID(session), workspace_id, pairs=2, size=4)
     async with engine.begin() as connection:
         await connection.execute(
@@ -376,7 +379,7 @@ async def test_a_conversation_too_small_to_gain_anything_does_not_pay_for_a_summ
     # 说，而这两句话对人的意思完全不同（见 `channels/domain/reply.py`）。
     skipped = await payloads(engine, run, "context_compaction_skipped")
     assert len(skipped) == 1, skipped
-    assert skipped[0]["reason"] == "no_gain"
+    assert skipped[0]["reason"] == "nothing_outside_tail"
 
 
 async def test_a_requested_compaction_takes_as_much_history_as_it_may(
@@ -385,22 +388,14 @@ async def test_a_requested_compaction_takes_as_much_history_as_it_may(
     engine: AsyncEngine,
     small_endpoint: str,
 ) -> None:
-    """`/compact` 要尽量多压，不是压到「刚好装得下」就停。
+    """`/compact` 要把允许它碰的全拿走，不是压到「刚好装得下」就停。
 
-    边界搜索是从小往大走、**第一个装得下的就返回**。自动那条路上这是对的：
-    压缩是为了装下，压到够用就停能少改一段历史、少作废一次前缀缓存。
+    2026-09-03 那次 `covered: 2`：17 条活着的历史只压掉最老的 2 条，因为边界搜索
+    从小往大走、第一个装得下的就返回，而 `/compact` 下最小的边界当场就「装得下」。
 
-    但 `/compact` 把 `threshold` 置成 0，于是最小的那个边界（`through=2`）当场
-    就「装得下」——**不管这段对话有 17 条还是 170 条，永远只压最老的 2 条。**
-
-    这就是 2026-09-03 那次 `covered: 2` 的真正原因。当时读成了「这段对话太短」，
-    其实那段会话有 17 条活着的历史；短的不是对话，是这一步愿意拿的量。而只压
-    两条老消息，摘要多半比它们还长，于是 `freed_estimate` 是 0——上一轮改动让
-    它不再被采用，但那只是不再做亏本买卖，`/compact` 还是什么都没压成。
-
-    判据不是「比 2 多」——比 2 多可以是 3，那和什么都没压差不多。判据是**它把
-    允许它碰的全拿走了**：种下的 8 条 + 这一轮的提问 = 9 条历史，减掉
-    `PROTECTED_RECENT_MESSAGES`（2，§7.4.2 的「最近历史」永不压缩）＝ 7。
+    v2.10 起没有搜索：范围就是保留区之外的全部。判据因此写成「每一条历史要么
+    被压缩，要么原样发给了模型」——一条都不能两边都不在，也不能两边都在。不写死
+    一个条数：保留区有多大是规划器的事，这里要守的是「没有被漏掉的中间地带」。
     """
     workspace_id = UUID(scope["X-Workspace-Id"])
 
@@ -416,16 +411,18 @@ async def test_a_requested_compaction_takes_as_much_history_as_it_may(
         )
 
     run = ask(client, scope, session, "and what is left?")
-    model = Recording(says("这段对话讲了八轮，用户问了库存和排班。"), says("nothing is left"))
+    model = Recording(says("这段对话讲了十轮，用户问了库存和排班。"), says("nothing is left"))
     await drive(engine, model, None)
 
     assert status(client, scope, run)["status"] == "completed"
     compacted = await payloads(engine, run, "context_compacted")
     assert len(compacted) == 1, compacted
-    expected = TURN_PAIRS * 2 + 1 - PROTECTED_RECENT_MESSAGES
-    assert compacted[0]["covered"] == expected, (
-        "没有把允许它碰的都拿走——升序搜索会停在最小那个装得下的边界，"
-        f"而 `/compact` 拿到的量因此和对话有多长无关：{compacted[0]}"
+    assert compacted[0]["covered"] > 2, compacted[0]
+    answered = model.requests[-1]
+    verbatim = [message for message in answered.messages if message.author != "platform"]
+    history = TURN_PAIRS * 2 + 1
+    assert compacted[0]["covered"] + len(verbatim) == history, (
+        f"covered {compacted[0]['covered']} + sent verbatim {len(verbatim)} != {history}"
     )
     # 拿得多才省得下。这条不是重复上一条：一个把 `covered` 报大、却没让上下文
     # 变小的实现同样会让上一条为真。
