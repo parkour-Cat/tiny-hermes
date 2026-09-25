@@ -527,8 +527,38 @@ def test_what_the_user_said_is_put_back_word_for_word() -> None:
     assert result.compacted is not None
     head = result.messages[0].blocks[0].text  # type: ignore[union-attr]
     assert "never touch the billing tables" in head
-    # The newest covered user message goes back as itself — images and all.
-    assert history[2].message in result.messages
+    assert "and answer in English" in head
+    # Not the current request ("so?" is, and it is in the tail), so it is not
+    # also sent as a message of its own.
+    assert history[2].message not in result.messages
+
+
+def test_the_put_back_shrinks_with_a_small_window() -> None:
+    """A pasted document as an old user message must not be what makes a
+    small window overflow after compaction — it is in the summary, and the
+    put-back is capped at a quarter of the room left."""
+    window = ContextWindow(context_window=13_568, reserved_output_tokens=4_096)
+    history = _stored(
+        _says(_words(5_500, "a pasted document")),
+        _says(_words(5_500, "reply"), role="assistant"),
+        _says(_words(5_500, "another pasted document")),
+        _says(_words(5_500, "reply"), role="assistant"),
+        _says("and what is left?"),
+    )
+
+    result = plan_context(
+        window=window,
+        safety_rules=RULES,
+        personality=PERSONALITY,
+        tool_schemas=(),
+        history=history,
+        threshold=THRESHOLD,
+    )
+
+    assert result.compacted is not None
+    assert result.fits is True
+    head = result.messages[0].blocks[0].text  # type: ignore[union-attr]
+    assert "pasted document" not in head
 
 
 def test_a_loaded_skill_is_put_back_and_a_large_one_is_named() -> None:
