@@ -765,3 +765,67 @@ def test_a_bigger_window_never_pauses_where_a_smaller_one_fits() -> None:
             threshold=THRESHOLD,
         )
         assert result.fits, size
+
+
+# --- invariants over a sweep of windows ----------------------------------
+#
+# One bug in this file was only visible as non-monotonic behaviour across
+# window sizes (460 fit, 520–720 paused, 740 fit). These hold for every shape
+# and every window below, not just the ones a hand-written case happens to use.
+
+
+def _shapes() -> dict[str, tuple[StoredMessage, ...]]:
+    text = [
+        _says(_words(900, f"t{index}"), role="user" if index % 2 == 0 else "assistant")
+        for index in range(40)
+    ]
+    tools: list[CanonicalMessage] = [_says("go")]
+    for index in range(25):
+        tools.append(_called(f"c{index}"))
+        tools.append(_answered(f"c{index}", f"{index}" + "o" * (1_000 + 900 * (index % 7))))
+    tools.append(_says("status?"))
+    skill: list[CanonicalMessage] = [
+        _says("use the runbook"),
+        _called("s", name="skill.load", skill="deploy", path="SKILL.md"),
+        _answered("s", "runbook step. " * 600),
+        *[_says(_words(700, f"w{index}"), role="assistant") for index in range(20)],
+        _says("and now?"),
+    ]
+    loop: list[CanonicalMessage] = [_says("migrate everything")]
+    for index in range(30):
+        loop.append(_called(f"m{index}"))
+        loop.append(_answered(f"m{index}", f"{index}" + "q" * 6_000))
+    return {
+        "text": _stored(*text),
+        "tools": _stored(*tools),
+        "skill": _stored(*skill),
+        "loop": _stored(*loop),
+    }
+
+
+_SIZES = [300, 450, 700, 1_000, 1_500, 2_500, 4_000, 6_000, 9_000, 13_568, 20_000,
+          32_000, 50_000, 80_000, 128_000, 200_000]
+
+
+def test_sweep_no_orphans_honest_pauses_and_monotonic_fit() -> None:
+    for name, history in _shapes().items():
+        fitted_at: int | None = None
+        for size in _SIZES:
+            result = plan_context(
+                window=ContextWindow(context_window=size, reserved_output_tokens=0),
+                safety_rules=RULES,
+                personality=PERSONALITY,
+                tool_schemas=(),
+                history=history,
+                threshold=THRESHOLD,
+                untrimmed_tools=SKILL_TOOLS,
+            )
+            where = f"{name} @ {size}"
+            assert _orphans(result.messages) == [], where
+            if result.fits:
+                assert result.input_estimate <= result.allowance, where
+                fitted_at = fitted_at or size
+            else:
+                assert result.compacted is None, where
+                assert result.messages == tuple(item.message for item in history), where
+                assert fitted_at is None, f"{where}: fit at {fitted_at} but not here"
