@@ -224,3 +224,32 @@ async def test_a_threshold_outside_the_bounds_is_refused_without_an_endpoint(
                 "context_budget": {"compaction_threshold": above_the_platform_bound},
             }
         )
+
+
+# -- the absolute trigger (§7.4.2 v2.10), the same promise one field over -----
+
+
+def test_a_spec_that_does_not_set_the_trigger_cap_hashes_as_before() -> None:
+    spec = AgentSpec.model_validate(_spec_without_threshold())
+
+    document, _ = normalize_agent_spec(spec)
+
+    assert "compaction_trigger_cap_tokens" not in document["context_budget"]  # type: ignore[operator]
+
+
+def test_setting_the_trigger_cap_changes_the_hash() -> None:
+    without = normalize_agent_spec(AgentSpec.model_validate(_spec_without_threshold()))[1]
+    capped = {
+        **valid_spec(),
+        "context_budget": {
+            "segments": [{"segment": "memory", "target_tokens": 2_048}],
+            "compaction_trigger_cap_tokens": 150_000,
+        },
+    }
+
+    assert without != normalize_agent_spec(AgentSpec.model_validate(capped))[1]
+
+
+def test_a_trigger_cap_that_is_not_positive_is_refused() -> None:
+    with pytest.raises(ValidationError):
+        ContextBudget.model_validate({"compaction_trigger_cap_tokens": 0})
