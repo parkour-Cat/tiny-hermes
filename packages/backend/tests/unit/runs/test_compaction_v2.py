@@ -661,3 +661,59 @@ def test_when_nothing_makes_it_fit_the_originals_come_back_uncompacted() -> None
     assert result.fits is False
     assert result.compacted is None
     assert result.messages == tuple(item.message for item in history)
+
+
+def test_a_round_that_does_not_fit_compacts_whatever_it_saves() -> None:
+    """The minimum gain keeps a round that fits from paying a summarizer for
+    a few messages. A round that does not fit has no such choice."""
+    window = ContextWindow(1_200, reserved_output_tokens=200)
+    history = _stored(
+        _says("the task, stated at length: " + "t" * 600),
+        *(_says(f"round {index}: " + "w" * 600, role="assistant") for index in range(8)),
+        _says("what is left?"),
+    )
+
+    result = plan_context(
+        window=window,
+        safety_rules=RULES,
+        personality=PERSONALITY,
+        tool_schemas=(),
+        history=history,
+        threshold=THRESHOLD,
+    )
+
+    assert result.fits is True
+    assert result.compacted is not None
+
+
+def test_the_minimum_gain_shrinks_with_the_window() -> None:
+    """4,096 tokens is most of a small window; a round that fits but is over
+    its trigger may compact for a sixteenth of the allowance."""
+    window = ContextWindow(13_568, reserved_output_tokens=4_096)
+    history = _stored(
+        *(
+            _says(_words(700, f"turn {index}"), role="user" if index % 2 == 0 else "assistant")
+            for index in range(12)
+        ),
+        _says("and?"),
+    )
+    raw = plan_context(
+        window=ContextWindow(100_000_000, reserved_output_tokens=1_000),
+        safety_rules=RULES,
+        personality=PERSONALITY,
+        tool_schemas=(),
+        history=history,
+    ).input_estimate
+    assert window.input_allowance * THRESHOLD < raw <= window.input_allowance
+
+    result = plan_context(
+        window=window,
+        safety_rules=RULES,
+        personality=PERSONALITY,
+        tool_schemas=(),
+        history=history,
+        threshold=THRESHOLD,
+    )
+
+    assert result.compacted is not None
+    assert result.compacted.freed_estimate < MIN_COMPACTION_GAIN_TOKENS
