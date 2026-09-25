@@ -444,30 +444,24 @@ async def test_the_summary_is_generated_once_and_then_reused(
     await drive(engine, model, None)
     assert status(client, scope, second_run)["status"] == "completed"
 
-    # Both rounds needed to compact — the seeded pair alone is over the small
-    # endpoint's allowance, and nothing in this test ever removes it.
+    # Only the first round compacts. v2.10 makes the stored summary a
+    # checkpoint: the second round sends summary + what came after it, which
+    # is under the trigger, so there is nothing to compact and no event.
     first_compacted = await payloads(engine, first_run, "context_compacted")
     second_compacted = await payloads(engine, second_run, "context_compacted")
     assert len(first_compacted) == 1
-    assert len(second_compacted) == 1
+    assert first_compacted[0]["source"] == "model"
+    assert second_compacted == []
 
     assert model.calls == 1
     stored = await _stored_summary_row(engine, session_id)
     assert stored is not None
 
-    # Reusing the stored summary is not the same as ignoring it: the second
-    # round's own compaction record has to say `source == "model"` too, or an
-    # implementation that finds the stored summary and then discards it back
-    # to the structural one would pass every assertion above.
-    assert second_compacted[0]["source"] == "model"
-
-    # And the model itself has to have actually been shown that text as the
-    # compacted turn — not just that a row with the right `source` exists.
-    # `model.requests[-1]` is round two's own request: round two never calls
-    # the summarizer (reused, not regenerated), so nothing after round one's
-    # two calls (summarize, then answer) touches `summary_requests` again.
+    # Reusing the stored summary is not the same as ignoring it: round two's
+    # own request has to carry that text. `model.requests[-1]` is round two's
+    # request — round two never calls the summarizer.
     round_two_given = model.requests[-1].messages
-    assert any(message.text == stored["summary"] for message in round_two_given)
+    assert any(stored["summary"] in message.text for message in round_two_given)
 
 
 async def test_a_failed_summary_falls_back_and_does_not_drop_messages(
@@ -585,100 +579,10 @@ async def test_a_summary_too_large_to_fit_falls_back_to_the_structural_plan(
     assert len(compacted) == 1
     assert compacted[0]["source"] == "structural"
 
-    # The oversized summary was still generated and still saved — a later
-    # round with more room to work with may still get to use it. Only this
-    # round's own re-plan had to fall back.
-    stored = await _stored_summary_row(engine, session_id)
-    assert stored is not None
-    assert stored["summary"] == OVERSIZED_SUMMARY
-
-
-async def test_a_summary_that_cuts_deeper_than_it_covers_falls_back(
-    client: TestClient,
-    scope: dict[str, str],
-    engine: AsyncEngine,
-    agent_on_the_small_endpoint: Any,
-) -> None:
-    """A stored summary can pass the numeric coverage check
-    (`stored.last_sequence >= this round's boundary`) and still be unusable,
-    and the Run has to degrade to the structural plan rather than stretch to
-    accommodate it.
-
-    The name is historical and kept deliberately. `plan_context` used to
-    *search* for a boundary: it walked forward until the round fit, so a text
-    bigger than the terse structural sentence could buy itself room by cutting
-    one message deeper than the range it was ever asked to explain — a
-    `CompactionRecord` claiming message ids the summarizer never read. That
-    move no longer exists: given a `CoveredSummary` the boundary is pinned to
-    the range the text covers, and a text too big for that range simply does
-    not fit, so nothing is compacted with it at all. This test's outcome is
-    unchanged and still worth guarding — the fallback fires, the round goes
-    out on the structural summary, and no model call is spent — but it now
-    fires on `plan.fits`, not on a coverage comparison. See
-    `test_summary_widening.py`, which asserts that distinction directly.
-    """
-    agent = agent_on_the_small_endpoint()
-
-    # A throwaway Session, seeded identically, purely to learn this
-    # endpoint's *structural* compaction boundary for this seed shape — the
-    # exact number depends on token math this test does not want to hand-
-    # encode, and the real Session below has the same shape so the same
-    # number applies to it.
-    probe_session = start_session(client, scope, agent)
-    probe_id = UUID(probe_session)
-    workspace_id = UUID(scope["X-Workspace-Id"])
-    await _seed_old_turns(engine, probe_id, workspace_id, pairs=8, size=3_000)
-    probe_run = ask(client, scope, probe_session, "and what is left?")
-    await drive(engine, FailingSummarizer(says("nothing is left")), None)
-    probe_compacted = (await payloads(engine, probe_run, "context_compacted"))[0]
-    assert probe_compacted["source"] == "structural"
-    baseline_last = probe_compacted["last_sequence"]
-
-    session = start_session(client, scope, agent)
-    session_id = UUID(session)
-    await _seed_old_turns(engine, session_id, workspace_id, pairs=8, size=3_000)
-    # Numerically sufficient (`last_sequence == baseline_last`, satisfying
-    # the coverage check on its own) but with a text bigger than the terse
-    # structural sentence that boundary was sized for.
-    #
-    # What the multiplier is calibrated to, since a later reader tuning it
-    # needs the real reason: it is the size at which the text is too big to
-    # stand at `baseline_last` while still being nowhere near
-    # `test_a_summary_too_large_to_fit_falls_back_to_the_structural_plan`'s
-    # 20_000-fold text, which no boundary in this history could absorb. The
-    # gap between those two is what keeps this a distinct case rather than a
-    # second copy of that test.
-    #
-    # It was originally calibrated for a different property — under the old
-    # boundary *search* this was the exact size that fit at through 11 but not
-    # at through 10, making the search step one message past its coverage.
-    # `plan_context` pins the boundary now and never takes that step, so that
-    # property is gone; the number is kept because the size relation above
-    # still holds and still exercises the path this test is named for.
-    await _plant_summary_row(
-        engine,
-        session_id,
-        workspace_id,
-        first_sequence=1,
-        last_sequence=baseline_last,
-        text_body="占位摘要，故意写得比结构摘要长很多。" * 150,
-    )
-
-    model = SummarizingRecording(says("nothing is left"))
-    run = ask(client, scope, session, "and what is left?")
-    await drive(engine, model, None)
-
-    assert status(client, scope, run)["status"] == "completed"
-    compacted = await payloads(engine, run, "context_compacted")
-    assert len(compacted) == 1
-    # Fell back to the structural plan rather than stretching to fit the
-    # planted text — and the structural plan compacts the same range the
-    # planted text claimed, so nothing about the round's own boundary moved.
-    assert compacted[0]["source"] == "structural"
-    assert compacted[0]["last_sequence"] == baseline_last
-    # And no model call was ever made over it — this is the reuse path
-    # (the numeric check passed), not the generate path.
-    assert model.calls == 0
+    # Not saved. v2.10 makes a stored summary the checkpoint every later
+    # round builds on, so a text that does not fit would make every later
+    # round not fit either. Only an accepted summary is persisted.
+    assert await _stored_summary_row(engine, session_id) is None
 
 
 async def test_the_summarizer_is_never_asked_once_the_cost_ceiling_is_reached(
@@ -730,25 +634,18 @@ async def test_a_reused_summary_brings_a_run_back_under_the_cost_ceiling(
     small_endpoint: str,
     agent_on_the_small_endpoint: Any,
 ) -> None:
-    """The mirror of the CRITICAL fix, one call earlier in the method.
+    """Reading a stored summary costs nothing, so it must never be gated on
+    §12.4 — only paying for a new one is.
 
-    The cost gate has to front `_generate_summary` — the part that actually
-    spends — and nothing before it. The reuse branch (step 2) makes no model
-    call, so gating *that* on `baseline`'s estimate would measure a Run
-    against the bigger structural plan when a shorter reused summary could
-    have brought it back under the ceiling on its own: a Run paused that
-    should have continued, the same shape as the Critical this file already
-    covers, one step earlier in the method.
+    Since v2.10 the stored summary is the checkpoint the view is built on
+    before anything else is asked, so a Run whose uncompacted history would
+    project over the ceiling goes out on summary + what came after it, under
+    the ceiling, without a model call.
 
-    Calibrated against `plan_context` and `projected_cost` directly (not
-    guessed — the same approach
-    `test_a_summary_that_cuts_deeper_than_it_covers_falls_back` uses, see
-    that test's note). At this seed shape (`pairs=8, size=3_000`, the same
-    conversation `test_a_summary_that_cuts_deeper_than_it_covers_falls_back`
-    calibrates against) and $3/$15-per-million pricing, the structural
-    baseline projects to $0.088866 and reusing the short summary planted
-    below projects to $0.088599 — a ceiling of $0.0887 sits strictly between
-    the two, refusing the first and allowing the second.
+    The uncompacted history here (`pairs=8, size=3_000`) does not fit the
+    small endpoint at all; the checkpoint view does, and at $3/$15 per
+    million it projects under the $0.0887 ceiling — a Run that reached for
+    anything but the stored summary would either pause or spend a call.
     """
     priced = client.post(
         f"/api/v1/model-endpoints/{small_endpoint}/pricing",
@@ -766,7 +663,7 @@ async def test_a_reused_summary_brings_a_run_back_under_the_cost_ceiling(
         session_id,
         workspace_id,
         first_sequence=1,
-        last_sequence=10,
+        last_sequence=14,
         text_body="已处理，无新增。",
     )
     await _set_ceiling(engine, workspace_id, "0.0887")
@@ -777,13 +674,10 @@ async def test_a_reused_summary_brings_a_run_back_under_the_cost_ceiling(
 
     reloaded = status(client, scope, run)
     assert reloaded["status"] == "completed"
-    # And it got there on the reused summary, not by skipping compaction —
-    # no model call was needed (the stored summary was sufficient), and the
-    # round's own compaction record says so.
     assert model.calls == 0
-    compacted = await payloads(engine, run, "context_compacted")
-    assert len(compacted) == 1
-    assert compacted[0]["source"] == "model"
+    # Built on the checkpoint, not a new compaction.
+    assert await payloads(engine, run, "context_compacted") == []
+    assert any("已处理，无新增。" in message.text for message in model.requests[-1].messages)
 
 
 async def test_a_refused_summary_is_logged_same_as_a_timeout(
