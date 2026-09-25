@@ -1,40 +1,26 @@
-"""Where a reused summary is allowed to stand, and what happens when it cannot.
+"""When a freshly generated model summary may replace the structural plan.
 
-`test_compaction_summary.py::test_a_summary_that_cuts_deeper_than_it_covers_falls_back`
-proves the wiring end to end — the Worker really does fall back through a real
-HTTP round. What it cannot prove on its own is *why* the candidate was
-rejected: a `source == "structural"` result looks identical however it came
-about. This file calls `plan_context` and `_honestly_widens` directly and
-asserts on the `ContextPlan` in hand instead of on a persisted event.
+§7.4.2 v2.10: a model summary is accepted only if the plan built on it — as
+the new checkpoint — fits, stands on exactly the range it was asked about,
+compacts nothing further, and sends less than the round would have sent
+without compacting. Only an accepted summary is saved, because a stored
+summary is what every later round builds on.
 
-`plan_context` no longer searches for a boundary when it is given a
-`CoveredSummary`: it pins the boundary to the range that summary explains, so
-a text that would once have bought itself room by cutting one message deeper
-than it covers now simply does not fit, and the whole reuse is refused. That
-is the trade this file pins: the summary is used at its own range or not at
-all, never at somebody else's. `_honestly_widens`'s coverage comparison
-survives as corroboration of the pin, not as the thing preventing the widening
-— and the tests below say which of the two actually fired.
-
-The seed shape here (`pairs=8, size=3_000` old turns, `SAFETY_PREAMBLE` and
-"You are concise." as the fixed segments) is the exact shape
-`test_compaction_summary.py`'s "cuts deeper" and cost-ceiling tests calibrate
-against — this file is where that calibration was actually worked out, moved
-here per code review rather than left as a comment claiming a robustness the
-integration test could not prove.
+The Worker's end-to-end half is in `test_compaction_summary.py`; this file
+calls `plan_context` and `_summary_holds` directly, so each rejection can be
+attributed to the rule that made it.
 """
 
 from uuid import uuid4
 
-# `_honestly_widens` is private and asserted on directly, which pyright
-# flags — deliberately, per code review: it is the only way to check which
-# of its two rejection branches fired on a `ContextPlan`, rather than
-# inferring it from a persisted `source` string that looks the same either
-# way.
+# `_summary_holds` is private and asserted on directly — the only way to see
+# which rule refused a candidate, rather than inferring it from a persisted
+# `source` string that looks the same either way.
 from tiny_hermes.runs.application.worker import (
-    _honestly_widens,  # pyright: ignore[reportPrivateUsage]
+    _summary_holds,  # pyright: ignore[reportPrivateUsage]
 )
 from tiny_hermes.runs.domain.context_budget import (
+    ContextPlan,
     ContextWindow,
     CoveredSummary,
     plan_context,
@@ -54,7 +40,7 @@ _PERSONALITY = "You are concise."  # `VALID_SPEC["personality"]`, matched exactl
 
 def _seeded_history(pairs: int, size: int) -> tuple[StoredMessage, ...]:
     """`pairs` old user/assistant exchanges of `size` ASCII characters each,
-    then one short new question — the same shape
+    then one short new question — the shape
     `test_compaction_summary.py::_seed_old_turns` writes into
     `session_messages`, built here with no database at all."""
     history: list[StoredMessage] = []
@@ -67,7 +53,7 @@ def _seeded_history(pairs: int, size: int) -> tuple[StoredMessage, ...]:
                     id=uuid4(),
                     sequence=sequence,
                     message=CanonicalMessage(
-                        role=role,  # pyright: ignore[reportArgumentType]
+                        role=role,  # type: ignore[arg-type]
                         blocks=(TextBlock(text=filler * size),),
                     ),
                 )
@@ -86,95 +72,76 @@ def _seeded_history(pairs: int, size: int) -> tuple[StoredMessage, ...]:
 
 
 def _plan(
-    history: tuple[StoredMessage, ...],
-    stored_summary: str | None = None,
-    covers: int = 10,
-):
-    """`covers` defaults to this seed shape's own structural boundary — the
-    range the Worker would have asked a summarizer to explain here."""
+    history: tuple[StoredMessage, ...], summary: CoveredSummary | None = None
+) -> ContextPlan:
     return plan_context(
         window=_WINDOW,
         safety_rules=SAFETY_PREAMBLE,
         personality=_PERSONALITY,
         tool_schemas=(),
         history=history,
-        stored_summary=(
-            None if stored_summary is None else CoveredSummary(stored_summary, covers)
-        ),
+        stored_summary=summary,
     )
 
 
-def test_the_baseline_structural_boundary_for_this_seed_shape() -> None:
-    """Pinned so the two tests below have a number to compare against, and
-    so a change to `DEFAULT_SEGMENTS` or this window fails *here*, loudly,
-    rather than silently shifting what the other two tests actually cover."""
+def _baseline() -> tuple[tuple[StoredMessage, ...], ContextPlan]:
     history = _seeded_history(pairs=8, size=3_000)
-
-    baseline = plan_context(
-        window=_WINDOW, safety_rules=SAFETY_PREAMBLE, personality=_PERSONALITY,
-        tool_schemas=(), history=history,
-    )
-
-    assert baseline.fits
+    baseline = _plan(history)
     assert baseline.compacted is not None
     assert baseline.compacted.source == "structural"
-    assert baseline.compacted.last_sequence == 10
+    assert baseline.before_compaction_estimate is not None
+    return history, baseline
 
 
-def test_a_text_too_large_to_fit_is_rejected_on_the_fits_check() -> None:
-    """The oversized-text half: the candidate does not fit *at all*, at any
-    `through` the search tries — `_honestly_widens` must say no because of
-    `plan.fits`, not because of the coverage comparison."""
-    history = _seeded_history(pairs=8, size=3_000)
-    covered_last = 10
+def test_a_short_summary_standing_on_its_own_range_is_accepted() -> None:
+    history, baseline = _baseline()
+    assert baseline.compacted is not None
 
-    candidate = _plan(history, stored_summary="超长摘要片段" * 20_000)
+    candidate = _plan(
+        history, CoveredSummary("已处理，无新增。", baseline.compacted.last_sequence)
+    )
 
-    assert candidate.fits is False
-    assert _honestly_widens(candidate, covered_last) is False
-
-
-def test_a_text_that_would_have_to_cut_deeper_is_not_given_the_chance() -> None:
-    """The case `test_compaction_summary.py`'s "cuts deeper" test drives
-    through a real Run: a summary text bigger than the terse structural one
-    (§7.4.2's seven sections cost more than a one-sentence count) but not so
-    big it fails outright. The `through` search used to settle one message
-    past `covered_last` to make it fit, producing a `CompactionRecord` whose
-    range claimed a turn the summarizer never read.
-
-    Pinning removes the move rather than catching it after the fact: at its
-    own boundary this text does not fit, so nothing is compacted with it and
-    `_honestly_widens` refuses on `plan.fits`. Asserted here explicitly —
-    `last_sequence == 11` used to be the observable symptom, and this is the
-    test that would notice it coming back.
-    """
-    history = _seeded_history(pairs=8, size=3_000)
-    covered_last = 10
-
-    candidate = _plan(history, stored_summary="占位摘要，故意写得比结构摘要长很多。" * 150)
-
-    assert candidate.fits is False
+    assert candidate.checkpoint == baseline.compacted.last_sequence
     assert candidate.compacted is None
-    assert _honestly_widens(candidate, covered_last) is False
+    assert _summary_holds(candidate, baseline) is True
 
 
-def test_a_text_that_fits_its_own_range_is_accepted() -> None:
-    """The contrast case: a short reused summary fits at the boundary it was
-    written about, stands in for exactly that range, and `_honestly_widens`
-    accepts it — this is the shape
-    `test_the_summary_is_generated_once_and_then_reused`'s second round and
-    `test_a_reused_summary_brings_a_run_back_under_the_cost_ceiling` both
-    rely on.
+def test_a_text_too_large_to_fit_is_refused() -> None:
+    history, baseline = _baseline()
+    assert baseline.compacted is not None
 
-    Exactly, not at most: a short text would once have settled wherever the
-    search first found room, which for a summary covering more than this
-    round needs meant the model reading it *and* the turns it describes."""
-    history = _seeded_history(pairs=8, size=3_000)
-    covered_last = 10
+    candidate = _plan(
+        history, CoveredSummary("超长摘要片段" * 20_000, baseline.compacted.last_sequence)
+    )
 
-    candidate = _plan(history, stored_summary="已处理，无新增。")
+    assert candidate.fits is False
+    assert _summary_holds(candidate, baseline) is False
 
-    assert candidate.fits is True
-    assert candidate.compacted is not None
-    assert candidate.compacted.last_sequence == covered_last
-    assert _honestly_widens(candidate, covered_last) is True
+
+def test_a_text_that_saves_nothing_is_refused() -> None:
+    """Fits, stands on its range — and is no shorter than what it replaced.
+    The first `/compact` in production applied exactly this and reported
+    「已压缩」."""
+    history, baseline = _baseline()
+    assert baseline.compacted is not None
+    assert baseline.before_compaction_estimate is not None
+    covered = [
+        item for item in history if item.sequence <= baseline.compacted.last_sequence
+    ]
+    as_long = "".join(item.message.text for item in covered)
+
+    candidate = _plan(history, CoveredSummary(as_long, baseline.compacted.last_sequence))
+
+    assert candidate.input_estimate >= baseline.before_compaction_estimate
+    assert _summary_holds(candidate, baseline) is False
+
+
+def test_a_summary_that_does_not_become_the_checkpoint_is_refused() -> None:
+    """Asked about one range, planned at another: whatever the text says, it
+    is not the checkpoint it would be saved as."""
+    history, baseline = _baseline()
+
+    candidate = _plan(history, CoveredSummary("已处理，无新增。", last_sequence=999))
+
+    assert candidate.checkpoint is None
+    assert _summary_holds(candidate, baseline) is False
