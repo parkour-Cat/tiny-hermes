@@ -159,6 +159,30 @@ async def test_the_eighth_load_still_goes_through() -> None:
     assert event is not None
 
 
+async def test_loading_a_version_again_is_not_counted() -> None:
+    """§7.4.2 v2.10: a compaction folds skill text into the summary, and the
+    model loading it again is taking back what it had, not reading the
+    catalog. The ceiling counts different versions, not calls."""
+    already = [uuid4() for _ in range(MAX_SKILL_LOADS - 1)] + [VERSION_ID]
+
+    answer, event = await answer_skill_load(
+        Library("text"), context(), call(skill="rollout"), already
+    )
+
+    assert answer.failed is False
+    assert event is not None
+
+
+async def test_repeated_loads_of_one_version_leave_room_for_others() -> None:
+    already = [VERSION_ID] * MAX_SKILL_LOADS
+
+    answer, _ = await answer_skill_load(
+        Library("text"), context(), call(skill="rollout"), already
+    )
+
+    assert answer.failed is False
+
+
 async def test_a_refusal_does_not_spend_the_run_s_allowance() -> None:
     """The ceiling is on documents loaded, not on calls attempted.
 
