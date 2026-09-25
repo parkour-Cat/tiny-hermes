@@ -40,6 +40,7 @@ from tiny_hermes.runs.application.tool_answers import (
 )
 from tiny_hermes.runs.domain.context_budget import (
     DEFAULT_COMPACTION_THRESHOLD,
+    SUMMARY_TOOL_RESULT_CHARS,
     CompactionRecord,
     ContextPlan,
     CoveredSummary,
@@ -149,6 +150,7 @@ from tiny_hermes.tools.domain.openapi import estimated_tokens_of
 from tiny_hermes.tools.domain.registry import (
     DEFAULT_OUTPUT_BYTES,
     PLATFORM_TOOLS,
+    UNTRIMMED_TOOLS,
     schemas_for_agent,
 )
 
@@ -1738,178 +1740,97 @@ class WorkerRuntime:
         context: ExecutionContext,
         mcp: tuple[BoundMcpTool, ...] = (),
     ) -> ContextPlan:
-        """`_plan`'s decision, widened by the Session's persisted summary.
+        """`_plan`'s decision, built on the Session's stored summary and, when
+        this round compacts, improved by a new model-written one.
 
-        Product design §7.4.2: a compaction's summary is model-written,
-        generated once and persisted, and every later round reads what was
-        saved rather than asking a model again. The order below is that rule
-        turned into steps, and the order is the design — not an
-        implementation detail free to be rearranged:
+        Product design §7.4.2 v2.10. The order is the design:
 
-        1. Plan once, with no stored summary at all
-           (`_plan(context, mcp)`, no I/O). If that plan does not compact,
-           there is nothing here to widen — the plan already stands, and nothing
-           this round did needed a Session summary read at all.
-        2. It compacted, and structurally (`_plan` never passes a stored
-           summary in, so "compacted" here always means "structurally" —
-           there is no other kind it could produce). `latest_summary` says
-           what this Session has already written down, if anything. A
-           summary whose `last_sequence` already reaches this round's
-           compaction boundary already explains everything the round would
-           compact — no model call, just the same plan recomputed with that
-           text in hand, standing in for its *own* range rather than this
-           round's shorter one (step 6), and it earns the right to replace
-           step 1's plan only if `_honestly_widens` agrees. This step spends
-           nothing — no model call, only the read already paid for by
-           needing to compact at all — so it is never gated on §12.4: a Run
-           one round from its ceiling that would have continued on a
-           *shorter* reused summary must not be measured against the bigger
-           structural estimate instead and paused for no reason.
-        3. It does not reach far enough — including "there is no summary
-           yet". This is the point past which a model call is actually about
-           to be spent, so §12.4 is checked here and nowhere earlier:
-           reaching for a stored summary in step 2 costs nothing and must not
-           be blocked by it, but paying for a summarization call — plus
-           whatever retries a hung endpoint costs — only to be stopped by the
-           very same ceiling moments later on the baseline plan it would have
-           gotten anyway is spending this Run was never allowed to keep.
-        4. Under ceiling. The auxiliary model is asked once, over exactly the
-           turns the stored summary has not already digested
-           (`summary_prompt`'s update form when one exists, its fresh form
-           when none does).
-        5. It answered something usable: persisted with `save_summary`
-           regardless of what happens next — the row is still a true
-           statement about the range it was asked to explain even if this
-           particular round cannot use it (a later round, with more room or
-           a shorter conversation, still can). It did not answer something
-           usable — a timeout, a refusal, an empty response, any exception —
-           step 1's plan goes out exactly as it stood. §7.4.2's failure
-           ladder, first rung.
-        6. Either way — reused from step 2, or just generated and saved in
-           step 5 — the summary goes to `plan_context` as a `CoveredSummary`,
-           text and range together, and stands in for exactly that range or
-           not at all: the boundary is pinned there rather than searched for.
-           So the only question left for `_honestly_widens` is whether the
-           pinned plan fits, and that is not hypothetical — a model summary
-           can be longer than the structural sentence it replaces, and at its
-           own boundary it may not fit where the structural one did. Not
-           fitting is a generation failure exactly like a timeout: step 1's
-           plan goes out unchanged.
+        1. Read the stored summary and plan on it as a checkpoint — summary,
+           put-back, and whatever came after it. Reading costs nothing, so it
+           is never gated on §12.4: a Run whose full history would project
+           over its ceiling must still be able to go out on the checkpoint.
+        2. If that plan does not compact, it stands. A `/compact` that found
+           nothing worth doing records why, so its receipt can say "nothing
+           to do" rather than "failed".
+        3. It compacted, structurally (`plan_context` never writes a model
+           summary itself — it has no I/O). Only now is a model call about to
+           be spent, so §12.4 is checked here and nowhere earlier.
+        4. The summarizer is asked once, over exactly the turns this
+           compaction covers, in `summary_prompt`'s update form when the plan
+           was built on a stored summary.
+        5. The answer is re-planned as the new checkpoint and accepted only if
+           that plan fits, compacts nothing further, and sends less than the
+           round would have without compacting. Only an accepted summary is
+           saved: a stored summary is what every later round builds on, so a
+           text that does not fit would make every later round not fit
+           either. Anything else — a timeout, a refusal, an empty answer, a
+           text too long — sends step 3's structural plan, which is not
+           persisted, and the next round that compacts asks again.
         """
         # 先消费 `/compact` 的标记，再规划。读和清在一次语句里（见
         # `take_compaction_request`），所以一个请求只压一次；**压没压成都清掉**
         # ——留着它会让一段短对话背着一个几周后突然生效的请求，而那时解释它的
         # 那条回执早就滚没了。
         forced = await self._take_compaction_request(claimed.run.session_id)
-
-        baseline = _plan(context, mcp, forced=forced)
-        if baseline.compacted is None:
-            return baseline
-
-        if forced and baseline.compacted.freed_estimate == 0:
-            # 免费那一遍已经省不出东西了，模型那一遍更不会：结构摘要
-            # （`_summarize`，无模型调用）只写覆盖范围、条数、角色分布和线索词，
-            # 永远比模型写的语义摘要短。所以「结构的都没让上下文变小」蕴含
-            # 「模型的更不会」——不必先花一次调用才知道。
-            #
-            # 只对 `forced` 生效。自动那条路上压缩是为了装得下，一次省不出东西
-            # 的压缩本来就过不了 `plan.fits`；`forced` 才会不问装不装得下就压，
-            # 也只有它会走到这里。
-            #
-            # 返回不带压缩的那一版，而不是 `baseline`：`baseline` 里那次压缩
-            # 自己就是「省下 0」的，采用它等于把上下文变大，并且会记下一条
-            # `freed_estimate = 0` 的 `CONTEXT_COMPACTED`——那正是
-            # `_honestly_widens` 现在拒绝的东西，两处不能只守一处。
-            #
-            # 记一条事件：`/compact` 的回执要靠它把「压不动」和「压缩失败」
-            # 分开说。不记的话两种都落到「压缩失败，稍后再试一次」——而对这
-            # 一种，再试同样不会成。
-            await self._append_event(
-                claimed,
-                RunEventType.CONTEXT_COMPACTION_SKIPPED,
-                {
-                    "reason": "no_gain",
-                    "covered": baseline.compacted.covered,
-                    "first_sequence": baseline.compacted.first_sequence,
-                    "last_sequence": baseline.compacted.last_sequence,
-                },
-            )
-            return _plan(context, mcp)
-
-        covered_last = baseline.compacted.last_sequence
         stored = await self._latest_summary(claimed.run.session_id)
-        if stored is not None and stored.last_sequence >= covered_last:
-            candidate = _plan(
-                context,
-                mcp,
-                stored_summary=CoveredSummary(stored.text, stored.last_sequence),
-                forced=forced,
-            )
-            if _honestly_widens(candidate, stored.last_sequence):
-                return candidate
-            logger.info(
-                # Not "did not fit": `plan_context` never returns a compacted
-                # plan that failed to fit, so a refusal here is one of two
-                # situations this Worker cannot tell apart from the plan in
-                # hand — the pinned boundary held nothing that fit, or the
-                # covered range left no boundary to stand at (it has moved
-                # inside the protected recent history). Naming only the first
-                # would send an operator to investigate window sizing for a
-                # case that is not about size.
-                "a stored summary covered enough by sequence number, but this "
-                "round would not compact at the range that summary explains — "
-                "either nothing fit there or no boundary sat there. Using the "
-                "structural plan for this round",
-                extra={"run_id": str(claimed.run.id)},
-            )
+        checkpoint = (
+            None if stored is None else CoveredSummary(stored.text, stored.last_sequence)
+        )
+
+        baseline = _plan(context, mcp, checkpoint, forced=forced)
+        if baseline.compacted is None:
+            if forced and baseline.compaction_skipped is not None:
+                # `/compact` 的回执要靠它把「没什么可压」和「压缩失败」分开说。
+                # 不记的话两种都落到「压缩失败，稍后再试一次」——而对这一种，
+                # 再试同样不会成。
+                await self._append_event(
+                    claimed,
+                    RunEventType.CONTEXT_COMPACTION_SKIPPED,
+                    {"reason": baseline.compaction_skipped},
+                )
             return baseline
 
-        # Only past this point does a call actually get made. Gating any
-        # earlier — including in front of the free reuse read above — would
-        # measure a Run against `baseline`'s estimate when a reused summary
-        # could have returned something smaller, the mirror of the Critical
-        # this same plan already had to be checked against (see step 6):
-        # a Run paused that should have continued. `_execute_slice` runs its
-        # own, real check again on whatever this method returns either way —
-        # this is an early exit, not a replacement for it.
         if not _cost_precheck(context, baseline).allowed:
             return baseline
         if not _calls_precheck(context.budget):
             # §12.4 withholds the streaming-usage overshoot allowance from
-            # the call counter specifically — Token and cost may be crossed
-            # by one call's real usage because a streamed response's final
-            # usage is only known once the call ends, but a call either
-            # happens or it does not, so that excuse does not apply here.
-            # The round's own call is the one guaranteed to follow whatever
-            # this method returns (`_execute_slice` runs it right after,
-            # gated only on cost), so spending this call must leave room for
-            # that one too — otherwise a ceiling of `max_model_calls=1`
-            # would let a single round spend two calls, the summarizer's and
-            # the round's own, before anything noticed.
+            # the call counter specifically: a call either happens or it does
+            # not. The round's own call is the one guaranteed to follow, so
+            # spending this call must leave room for that one too.
             return baseline
 
-        generated = await self._generate_summary(claimed, context, baseline.compacted, stored)
+        previous = stored if baseline.checkpoint is not None else None
+        generated = await self._generate_summary(claimed, context, baseline.compacted, previous)
         if generated is None:
             return baseline
 
+        covered_last = baseline.compacted.last_sequence
+        candidate = _plan(context, mcp, CoveredSummary(generated, covered_last))
+        if not _summary_holds(candidate, baseline):
+            logger.warning(
+                "a model summary was generated but not used: it did not fit, or "
+                "it saved nothing over the uncompacted round. Using the "
+                "structural plan for this round; the summary is not saved",
+                extra={"run_id": str(claimed.run.id)},
+            )
+            return baseline
+
         await self._save_summary(claimed, context, baseline.compacted, generated)
-        candidate = _plan(
-            context,
-            mcp,
-            stored_summary=CoveredSummary(generated, covered_last),
-            forced=forced,
+        before = baseline.before_compaction_estimate
+        return replace(
+            candidate,
+            compacted=replace(
+                baseline.compacted,
+                summary=generated,
+                source="model",
+                freed_estimate=(
+                    before - candidate.input_estimate
+                    if before is not None
+                    else baseline.compacted.freed_estimate
+                ),
+            ),
+            before_compaction_estimate=before,
         )
-        if _honestly_widens(candidate, covered_last):
-            return candidate
-        logger.warning(
-            # Same two indistinguishable situations as the reuse path's log
-            # above, and the same reason for not naming just one of them.
-            "a freshly generated summary was saved, but this round would not "
-            "compact at the range it explains — either nothing fit there or no "
-            "boundary sat there. Using the structural plan for this round",
-            extra={"run_id": str(claimed.run.id)},
-        )
-        return baseline
 
     async def _take_compaction_request(self, session_id: UUID) -> bool:
         """`/compact` 的标记，读走并清掉。自己开一个 session，和
@@ -2529,66 +2450,41 @@ def _transcript_text(covered: Sequence[StoredMessage]) -> str:
                     f"{item.message.role} called {block.name}({block.arguments})"
                 )
             elif isinstance(block, ToolResultBlock):
-                lines.append(f"tool result for {block.call_id}: {block.output}")
+                output = block.output
+                if len(output) > SUMMARY_TOOL_RESULT_CHARS:
+                    # 摘要要知道跑了什么、大致返回了什么，不需要每个字节；全文在
+                    # 会话记录里。截短也让摘要调用本身便宜。
+                    output = (
+                        output[:SUMMARY_TOOL_RESULT_CHARS]
+                        + f" […{len(output)} characters in full]"
+                    )
+                lines.append(f"tool result for {block.call_id}: {output}")
     return "\n".join(lines)
 
 
-def _honestly_widens(plan: ContextPlan, covered_last: int) -> bool:
-    """Whether a summary-widened re-plan may replace the structural
-    baseline `_plan_context` built it to improve on.
+def _summary_holds(candidate: ContextPlan, baseline: ContextPlan) -> bool:
+    """Whether the plan built on a new model summary may replace the
+    structural one it was generated to improve on (§7.4.2 v2.10).
 
-    Four ways it may not, and every one of them is a generation failure
-    §7.4.2 already has an answer for — the structural summary the caller
-    started with:
-
-    - `plan.fits` is False. A model summary can be longer than the
-      structural sentence it replaced, and `plan_context`'s own answer to
-      "even the caller-given text did not make this small enough" is
-      `paused(context_overflow)` further up the call stack — but the
-      structural summary this call started with may still fit fine, and a
-      Run that would have continued on it must not be paused because a
-      *different*, longer summary text was tried in its place.
-    - `plan.compacted` is None. Nothing was compacted with this text at all:
-      either the pinned boundary held nothing that fit, or the covered range
-      left no boundary to stand at — the sequence is not in this round's
-      history, or it has moved inside the protected recent turns. This has to
-      be its own check rather than something `plan.fits` implies, because
-      since `plan_context` started returning fitting originals when its
-      compaction search comes back empty, a plan can now be `fits=True` and
-      carry no compaction whatsoever. Accepting one would send the round out
-      with the summary silently dropped and no `CONTEXT_COMPACTED` event
-      saying so.
-    - `plan.compacted.last_sequence` is not exactly `covered_last` — the last
-      sequence the summary text handed to this call was asked to explain. A
-      record that reaches past it claims turns the summarizer never read; one
-      that stops short leaves the model reading a summary of turns it is also
-      sent verbatim, and writes an event reporting the shorter range as
-      though that were all the text covers.
-
-      Neither is what `plan_context` does any more: given a `CoveredSummary`
-      it pins the boundary instead of searching, so the only way this
-      comparison can fail is a plan that did not honour the pin. It is kept as
-      the corroboration, not as the mechanism — the guarantee lives in the
-      pin, and this says so out loud rather than trusting it silently.
-    - `plan.compacted.freed_estimate` is 0 — the summary is no shorter than
-      what it replaces, so applying it makes the context *bigger*. Fitting is
-      not the same question: a longer text can still fit, and the first three
-      checks all pass while the round comes out worse than if nothing had been
-      compacted at all.
-
-      This is not hypothetical. The first `/compact` this platform ever served
-      in production wrote `covered 2, source "model", freed_estimate 0` beside
-      a `context_summary_billed` of 355 + 1,372 tokens: a summary longer than
-      the two short messages it replaced, applied anyway, reported to the user
-      as 「已压缩」. `freed_estimate` is `max(saved, 0)`, so 0 is exactly
-      "saved nothing" — the check needs no threshold to compare against and no
-      constant anybody would have to justify.
+    - It fits. A model summary can be far longer than the structural sentence
+      it replaces; a Run that would have continued on the structural plan
+      must not be paused because a longer text was tried in its place.
+    - It stands on exactly the range it was asked about (`checkpoint`), and
+      compacts nothing further. Anything else would mean the text did not
+      become the checkpoint it is about to be saved as.
+    - It sends less than the round would have sent without compacting at
+      all. A summary no shorter than what it replaces makes the context
+      bigger — the first `/compact` in production did exactly that, and
+      reported 「已压缩」.
     """
+    before = baseline.before_compaction_estimate
     return (
-        plan.fits
-        and plan.compacted is not None
-        and plan.compacted.last_sequence == covered_last
-        and plan.compacted.freed_estimate > 0
+        candidate.fits
+        and candidate.compacted is None
+        and baseline.compacted is not None
+        and candidate.checkpoint == baseline.compacted.last_sequence
+        and before is not None
+        and candidate.input_estimate < before
     )
 
 
@@ -2791,9 +2687,9 @@ def _plan(
 
     ``stored_summary`` only ever arrives from `_plan_context`, never chosen
     here: this function stays the same one-shot, no-I/O calculation
-    `plan_context` itself is, called with `None` for a first, cheap read of
-    whether this round compacts at all, and again with a Session's persisted
-    summary once `_plan_context` has decided that summary is the one to use.
+    `plan_context` itself is. It is the checkpoint the view is built on —
+    the Session's persisted summary, or a freshly generated one being tried
+    before it is saved.
     """
     summaries = _summaries(context)
     if context.window is None:
@@ -2815,16 +2711,19 @@ def _plan(
         memories=[fact.body for fact in context.memories],
         segments=(context.spec.context_budget or ContextBudget()).resolve(),
         stored_summary=stored_summary,
-        # `forced` 是 `/compact`：有人明说了要压，那就不再问这一轮花掉了额度的
-        # 几成。传 0 而不是绕过 `plan_context`——级联、保护、失败降级全都还要照
-        # 原样走一遍，唯一不同的是「够不够线」这个问题不再被问。
-        threshold=0.0 if forced else _compaction_threshold(context),
-        # 同一个 `forced`，两件事：上一行说「别问够不够线」，这一行说「拿多少」。
-        # 分成两个参数而不是让 `plan_context` 从 `threshold == 0.0` 推断，是因为
-        # 那是个巧合式的判别——一个平台管理员把默认阈值配成 0 也会踩中它，而那
-        # 不是有人发了 `/compact`。
-        take_all_it_may=forced,
+        threshold=_compaction_threshold(context),
+        trigger_cap=_compaction_trigger_cap(context),
+        # `/compact`：有人明说了要压，不再问这一轮有没有到触发线。
+        forced=forced,
+        untrimmed_tools=UNTRIMMED_TOOLS,
     )
+
+
+def _compaction_trigger_cap(context: ExecutionContext) -> int | None:
+    """This Agent's absolute trigger, if it set one. `None` — the default —
+    means the ratio alone decides: an Agent on a large window gets to use it."""
+    budget = context.spec.context_budget
+    return None if budget is None else budget.compaction_trigger_cap_tokens
 
 
 def _compaction_threshold(context: ExecutionContext) -> float:
