@@ -492,7 +492,7 @@ class ContextPlan:
         return bool(self.trimmed) or self.compacted is not None
 
 
-def _stub(block: ToolResultBlock) -> ToolResultBlock:
+def _stub(block: ToolResultBlock, full_length: int | None = None) -> ToolResultBlock:
     """A cleared tool result: the same call, its head, and how much went.
 
     The block stays where it was rather than being removed. Dropping it would
@@ -503,12 +503,16 @@ def _stub(block: ToolResultBlock) -> ToolResultBlock:
 
     "Kept in the session transcript" is true for an operator reading the Run;
     the model has no tool that fetches by `call_id` (§1.10, 不声称什么).
+
+    ``full_length`` is the length the transcript holds. The block may already
+    be the capped copy from `_capped`, whose own length is not "in full".
     """
+    length = full_length if full_length is not None else len(block.output)
     return replace(
         block,
         output=(
             block.output[:PRUNE_HEAD_CHARS]
-            + f"\n[…trimmed by the platform: {len(block.output)} characters in full, "
+            + f"\n[…trimmed by the platform: {length} characters in full, "
             f"kept in the session transcript under call_id {block.call_id}.]"
         ),
     )
@@ -607,6 +611,7 @@ def _clean(
     stop: int,
     names: Mapping[str, str],
     untrimmed: frozenset[str],
+    full_lengths: Mapping[str, int],
     tokenizer: str | None,
 ) -> TrimRecord | None:
     """§7.4.2 ① 清理：三遍确定性处理，都不调模型，只动 ``messages[:stop]``。
@@ -661,7 +666,7 @@ def _clean(
                 and len(block.output) > PRUNE_MIN_RESULT_CHARS
                 and names.get(block.call_id) not in untrimmed
             ):
-                stubbed = _stub(block)
+                stubbed = _stub(block, full_lengths.get(block.call_id))
                 if len(stubbed.output) < len(block.output):
                     freed += estimate_tokens(block.output, tokenizer) - estimate_tokens(
                         stubbed.output, tokenizer
@@ -1199,6 +1204,12 @@ def plan_context(
 
     # 入口限长：每轮都做，结果只取决于那条工具结果本身，所以从第一次发送起形态就固定。
     names = _tool_names(history)
+    full_lengths = {
+        block.call_id: len(block.output)
+        for item in history
+        for block in item.message.blocks
+        if isinstance(block, ToolResultBlock)
+    }
     capped = [_cap_message(item.message, names, untrimmed_tools) for item in history]
 
     # 存档点：存下的摘要覆盖到哪一条，此后就发「摘要 + 补回 + 之后的原文」。只在它
@@ -1235,7 +1246,9 @@ def plan_context(
     # ① 清理。`/compact` 不做：它要清的那一段马上整段进摘要。
     if not forced:
         candidate = list(post)
-        cleaned = _clean(candidate, tail_start, names, untrimmed_tools, tokenizer)
+        cleaned = _clean(
+            candidate, tail_start, names, untrimmed_tools, full_lengths, tokenizer
+        )
         if cleaned is not None and cleaned.freed_estimate >= PRUNE_MIN_RECLAIM_TOKENS:
             post = candidate
             trimmed.append(cleaned)
@@ -1332,7 +1345,7 @@ def plan_context(
                 if isinstance(block, ToolResultBlock) and names.get(block.call_id) not in (
                     untrimmed_tools
                 ):
-                    stubbed = _stub(block)
+                    stubbed = _stub(block, full_lengths.get(block.call_id))
                     if len(stubbed.output) < len(block.output):
                         freed_here += estimate_tokens(
                             block.output, tokenizer
