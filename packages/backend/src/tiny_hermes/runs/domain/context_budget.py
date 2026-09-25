@@ -1306,11 +1306,64 @@ def plan_context(
             trimmed.append(squeezed_memory)
             spent -= mem_estimate - _memory_estimate(kept_memories, tokenizer)
 
-    # ④ 仍装不下：`fits=False`，调用者进入 `paused(context_overflow)`，不截断、不删除。
+    # ④ 兜底的倒数第二级：保留区里的大工具结果，从旧到新只留开头，够了就停。保留区
+    # 平时一个字不动，但小窗口上一个工具结果就可能比整个剩余空间还大——暂停比只发它
+    # 的开头更糟。技能正文仍然不动。
+    if spent > allowance:
+        rescued = list(view)
+        references: list[str] = []
+        freed_here = 0
+        for index, message in enumerate(rescued):
+            if spent - freed_here <= allowance:
+                break
+            if message.role != "tool":
+                continue
+            blocks: list[Any] = []
+            touched = False
+            for block in message.blocks:
+                if isinstance(block, ToolResultBlock) and names.get(block.call_id) not in (
+                    untrimmed_tools
+                ):
+                    stubbed = _stub(block)
+                    if len(stubbed.output) < len(block.output):
+                        freed_here += estimate_tokens(
+                            block.output, tokenizer
+                        ) - estimate_tokens(stubbed.output, tokenizer)
+                        references.append(block.call_id)
+                        blocks.append(stubbed)
+                        touched = True
+                        continue
+                blocks.append(block)
+            if touched:
+                rescued[index] = replace(message, blocks=tuple(blocks))
+        if references and spent - freed_here <= allowance:
+            view = rescued
+            spent -= freed_here
+            trimmed.append(
+                TrimRecord(
+                    SegmentName.OLD_TOOL_RESULTS,
+                    dropped=len(references),
+                    freed_estimate=max(freed_here, 0),
+                    references=tuple(references),
+                )
+            )
+
+    # ④ 最后一级：仍装不下就保留原文，`fits=False`，调用者进入
+    # `paused(context_overflow)`，不截断、不删除。也不带压缩记录：模型摘要永远不比
+    # 已经装不下的结构摘要短，带着记录回去只会让 Worker 为一个注定暂停的轮次付一次
+    # 摘要调用。
+    if spent > allowance:
+        originals = tuple(item.message for item in history)
+        return finish(
+            originals,
+            fixed + _estimate(originals, tokenizer),
+            fits=False,
+            skipped=skipped,
+        )
     return finish(
         view,
         spent,
-        fits=spent <= allowance,
+        fits=True,
         checkpoint=checkpoint,
         compacted=compacted,
         before=before,
