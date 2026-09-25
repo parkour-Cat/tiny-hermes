@@ -492,7 +492,9 @@ class ContextPlan:
         return bool(self.trimmed) or self.compacted is not None
 
 
-def _stub(block: ToolResultBlock, full_length: int | None = None) -> ToolResultBlock:
+def _stub(
+    block: ToolResultBlock, full_length: int | None = None, *, head: int = PRUNE_HEAD_CHARS
+) -> ToolResultBlock:
     """A cleared tool result: the same call, its head, and how much went.
 
     The block stays where it was rather than being removed. Dropping it would
@@ -511,7 +513,7 @@ def _stub(block: ToolResultBlock, full_length: int | None = None) -> ToolResultB
     return replace(
         block,
         output=(
-            block.output[:PRUNE_HEAD_CHARS]
+            block.output[:head]
             + f"\n[…trimmed by the platform: {length} characters in full, "
             f"kept in the session transcript under call_id {block.call_id}.]"
         ),
@@ -1048,13 +1050,15 @@ def _head(
 
 
 def _retained_tail_start(
-    messages: Sequence[CanonicalMessage], target: int, tokenizer: str | None
+    messages: Sequence[CanonicalMessage], target: int, ceiling: int, tokenizer: str | None
 ) -> int:
     """保留区从哪一条开始（``messages`` 里的下标）。
 
-    从最新往前累计，到达目标时停在那条消息的开头，整条计入；至少保留最后一条。然后
-    若切点把某次工具调用留在前面、它的结果留在后面，就前移到那次调用之前——只往更早
-    移动，所以保留区只会比目标大。
+    从最新往前累计，到达 ``target`` 时停在那条消息的开头，整条计入——但若整条计入会
+    让保留区超过 ``ceiling``（可用空间的一半），这一条就留在保留区外，交给摘要：
+    小窗口上跨过目标的那一条可能是一个比整个剩余空间还大的工具结果，把它护住只会让
+    这一轮装不下。最后一条消息无论多大都保留。然后若切点把某次工具调用留在前面、
+    它的结果留在后面，就前移到那次调用之前。
     """
     if not messages:
         return 0
@@ -1062,6 +1066,8 @@ def _retained_tail_start(
     total = 0
     for index in range(len(messages) - 1, -1, -1):
         total += _message_estimate(messages[index], tokenizer)
+        if total > ceiling and index < len(messages) - 1:
+            break
         start = index
         if total >= target:
             break
@@ -1263,8 +1269,10 @@ def plan_context(
     if not forced and spent < trigger:
         return finish([*head, *post], spent, fits=spent <= allowance, checkpoint=checkpoint)
 
-    tail_target = min(RETAINED_TAIL_TOKENS, max(allowance - fixed, 0) // 2)
-    tail_start = _retained_tail_start(post, tail_target, tokenizer)
+    tail_ceiling = max(allowance - fixed, 0) // 2
+    tail_start = _retained_tail_start(
+        post, min(RETAINED_TAIL_TOKENS, tail_ceiling), tail_ceiling, tokenizer
+    )
 
     # ① 清理。`/compact` 不做：它要清的那一段马上整段进摘要。
     if not forced:
@@ -1281,6 +1289,7 @@ def plan_context(
 
     # ② 摘要：上一份摘要之后、保留区之前的全部，一次压完。
     view = [*head, *post]
+    uncompacted, uncompacted_spent = view, spent
     compacted: CompactionRecord | None = None
     before: int | None = None
     skipped: str | None = None
@@ -1333,64 +1342,50 @@ def plan_context(
             )
 
     # ③ 段裁剪：压缩之后仍装不下，才让出未命中的技能摘要，再让出低相关记忆。
+    segments_freed = 0
     if spent > allowance:
         over = spent - allowance
         kept_estimate = _summary_estimate(kept, tokenizer)
         squeezed = _drop_unhit_summaries(kept, tokenizer, ceiling=max(kept_estimate - over, 0))
         if squeezed is not None:
             trimmed.append(squeezed)
-            spent -= kept_estimate - _summary_estimate(kept, tokenizer)
-    if spent > allowance and kept_memories:
-        over = spent - allowance
+            segments_freed += kept_estimate - _summary_estimate(kept, tokenizer)
+    if spent - segments_freed > allowance and kept_memories:
+        over = spent - segments_freed - allowance
         mem_estimate = _memory_estimate(kept_memories, tokenizer)
         squeezed_memory = _trim_memories(
             kept_memories, tokenizer, ceiling=max(mem_estimate - over, 0)
         )
         if squeezed_memory is not None:
             trimmed.append(squeezed_memory)
-            spent -= mem_estimate - _memory_estimate(kept_memories, tokenizer)
+            segments_freed += mem_estimate - _memory_estimate(kept_memories, tokenizer)
+    spent -= segments_freed
 
-    # ④ 兜底的倒数第二级：保留区里的大工具结果，从旧到新只留开头，够了就停。保留区
-    # 平时一个字不动，但小窗口上一个工具结果就可能比整个剩余空间还大——暂停比只发它
-    # 的开头更糟。技能正文仍然不动。
+    # ④ 兜底的倒数第二级：工具结果换成不带开头的存根，从旧到新，够了就停。保留区平时
+    # 一个字不动，但小窗口上一个工具结果就可能比整个剩余空间还大——暂停比只发一句存根
+    # 更糟。先动普通工具结果，全部动完仍装不下才动技能正文：存根明说了「被平台裁掉、
+    # 全长多少」，模型知道自己没有拿到全文，这不是 `skill.load` 拒绝截断时防的那种
+    # 「拿着半份当整份」。
+    #
+    # 先试压缩后的视图；它装不下时再试压缩前的——小窗口上摘要消息本身（前缀、结构
+    # 摘要、补回段）就可能比一个存根大，不压缩、只打存根反而装得下。
     if spent > allowance:
-        rescued = list(view)
-        references: list[str] = []
-        freed_here = 0
-        for index, message in enumerate(rescued):
-            if spent - freed_here <= allowance:
-                break
-            if message.role != "tool":
-                continue
-            blocks: list[Any] = []
-            touched = False
-            for block in message.blocks:
-                if isinstance(block, ToolResultBlock) and names.get(block.call_id) not in (
-                    untrimmed_tools
-                ):
-                    stubbed = _stub(block, full_lengths.get(block.call_id))
-                    if len(stubbed.output) < len(block.output):
-                        freed_here += estimate_tokens(
-                            block.output, tokenizer
-                        ) - estimate_tokens(stubbed.output, tokenizer)
-                        references.append(block.call_id)
-                        blocks.append(stubbed)
-                        touched = True
-                        continue
-                blocks.append(block)
-            if touched:
-                rescued[index] = replace(message, blocks=tuple(blocks))
-        if references and spent - freed_here <= allowance:
-            view = rescued
-            spent -= freed_here
-            trimmed.append(
-                TrimRecord(
-                    SegmentName.OLD_TOOL_RESULTS,
-                    dropped=len(references),
-                    freed_estimate=max(freed_here, 0),
-                    references=tuple(references),
-                )
+        rescued = _rescue(view, spent, allowance, names, untrimmed_tools, full_lengths, tokenizer)
+        if rescued is None and compacted is not None:
+            rescued = _rescue(
+                uncompacted,
+                uncompacted_spent - segments_freed,
+                allowance,
+                names,
+                untrimmed_tools,
+                full_lengths,
+                tokenizer,
             )
+            if rescued is not None:
+                compacted, before = None, None
+        if rescued is not None:
+            view, spent, record = rescued
+            trimmed.append(record)
 
     # ④ 最后一级：仍装不下就保留原文，`fits=False`，调用者进入
     # `paused(context_overflow)`，不截断、不删除。也不带压缩记录：模型摘要永远不比
@@ -1412,6 +1407,58 @@ def plan_context(
         compacted=compacted,
         before=before,
         skipped=skipped,
+    )
+
+
+def _rescue(
+    view: Sequence[CanonicalMessage],
+    spent: int,
+    allowance: int,
+    names: Mapping[str, str],
+    untrimmed: frozenset[str],
+    full_lengths: Mapping[str, int],
+    tokenizer: str | None,
+) -> tuple[list[CanonicalMessage], int, TrimRecord] | None:
+    """兜底的倒数第二级（见 `plan_context` ④）。装得下就返回改过的视图，否则 `None`。"""
+    rescued = list(view)
+    references: list[str] = []
+    freed = 0
+    for exempt_pass in (False, True):
+        for index, message in enumerate(rescued):
+            if spent - freed <= allowance:
+                break
+            if message.role != "tool":
+                continue
+            blocks: list[Any] = []
+            touched = False
+            for block in message.blocks:
+                if (
+                    isinstance(block, ToolResultBlock)
+                    and (names.get(block.call_id) in untrimmed) == exempt_pass
+                ):
+                    stubbed = _stub(block, full_lengths.get(block.call_id), head=0)
+                    if len(stubbed.output) < len(block.output):
+                        freed += estimate_tokens(block.output, tokenizer) - estimate_tokens(
+                            stubbed.output, tokenizer
+                        )
+                        references.append(block.call_id)
+                        blocks.append(stubbed)
+                        touched = True
+                        continue
+                blocks.append(block)
+            if touched:
+                rescued[index] = replace(message, blocks=tuple(blocks))
+    if not references or spent - freed > allowance:
+        return None
+    return (
+        rescued,
+        spent - freed,
+        TrimRecord(
+            SegmentName.OLD_TOOL_RESULTS,
+            dropped=len(references),
+            freed_estimate=max(freed, 0),
+            references=tuple(references),
+        ),
     )
 
 
