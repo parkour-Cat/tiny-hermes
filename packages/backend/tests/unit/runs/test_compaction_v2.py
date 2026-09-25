@@ -11,10 +11,12 @@ from typing import Any
 from uuid import uuid4
 
 from tiny_hermes.runs.domain.context_budget import (
+    MESSAGE_OVERHEAD_TOKENS,
     MIN_COMPACTION_GAIN_TOKENS,
     PRUNE_HEAD_CHARS,
     PRUNE_MIN_RESULT_CHARS,
     RETAINED_TAIL_TOKENS,
+    SKILL_LOAD_TOOL,
     SKILL_REINJECT_MAX_TOKENS,
     TOOL_RESULT_HEAD_CHARS,
     TOOL_RESULT_MAX_CHARS,
@@ -31,6 +33,11 @@ from tiny_hermes.runs.domain.models import (
     TextBlock,
     ToolCallBlock,
     ToolResultBlock,
+)
+from tiny_hermes.tools.domain.registry import (
+    IMPLEMENTED_TOOLS,
+    SKILL_LOAD_SCHEMA,
+    UNTRIMMED_TOOLS,
 )
 
 RULES = "Stay inside the platform."
@@ -92,6 +99,18 @@ def _plan(
     )
 
 
+def _raw(history: tuple[StoredMessage, ...]) -> int:
+    """What the round would cost untouched: planned against a window it
+    cannot come near, so nothing is cleared or compacted."""
+    return plan_context(
+        window=ContextWindow(context_window=100_000_000, reserved_output_tokens=1_000),
+        safety_rules=RULES,
+        personality=PERSONALITY,
+        tool_schemas=(),
+        history=history,
+    ).input_estimate
+
+
 def _conversation(turns: int, *, start: int = 1) -> tuple[StoredMessage, ...]:
     """Alternating user/assistant turns of roughly 1,500 estimated tokens each."""
     messages = [
@@ -109,9 +128,9 @@ def _just_over_the_trigger() -> tuple[StoredMessage, ...]:
     """The shortest conversation whose uncompacted estimate crosses the trigger."""
     for turns in range(2, 400):
         history = _conversation(turns)
-        untouched = _plan(history, threshold=1.0)
-        if untouched.input_estimate > TRIGGER:
-            assert untouched.input_estimate < TRIGGER * 1.05
+        untouched = _raw(history)
+        if untouched > TRIGGER:
+            assert untouched < TRIGGER * 1.05
             return history
     raise AssertionError("fixture never crossed the trigger")
 
@@ -150,7 +169,7 @@ def test_below_the_trigger_nothing_is_rewritten_at_all() -> None:
         *[_says(_words(800, f"filler {index}"), role="assistant") for index in range(30)],
         _says("and now?"),
     )
-    assert _plan(history, threshold=1.0).input_estimate < TRIGGER
+    assert _raw(history) < TRIGGER
 
     result = _plan(history)
 
@@ -172,7 +191,7 @@ def test_one_compaction_brings_the_round_well_below_the_trigger() -> None:
 
 def test_an_absolute_cap_triggers_before_the_ratio_does() -> None:
     history = _conversation(20)
-    assert _plan(history, threshold=1.0).input_estimate < TRIGGER
+    assert _raw(history) < TRIGGER
 
     result = _plan(history, trigger_cap=20_000)
 
@@ -187,18 +206,20 @@ def test_the_newest_twenty_thousand_tokens_go_out_verbatim() -> None:
 
     result = _plan(history)
 
-    kept = _verbatim(result.messages, history)
-    assert kept[-1] is history[-1]
-    # The kept rows are a contiguous run ending at the newest one.
-    assert [item.sequence for item in kept] == list(
-        range(kept[0].sequence, history[-1].sequence + 1)
+    # messages[0] is the summary and messages[1] the newest covered user
+    # message put back whole; the retained tail is everything after them.
+    tail = [item for item in _verbatim(result.messages[2:], history)]
+    assert tail[-1] is history[-1]
+    assert [item.sequence for item in tail] == list(
+        range(tail[0].sequence, history[-1].sequence + 1)
     )
-    tail = sum(estimate_tokens(item.message.blocks[0].text) for item in kept)  # type: ignore[union-attr]
-    assert tail >= RETAINED_TAIL_TOKENS
+    assert len(tail) == len(result.messages) - 2
+    sizes = [estimate_tokens(item.message.blocks[0].text) + MESSAGE_OVERHEAD_TOKENS
+        for item in tail]  # type: ignore[union-attr]
+    assert sum(sizes) >= RETAINED_TAIL_TOKENS
     # Whole messages, and the cut is at the first one that reaches the
     # target — not one further.
-    without_oldest = tail - estimate_tokens(kept[0].message.blocks[0].text)  # type: ignore[union-attr]
-    assert without_oldest < RETAINED_TAIL_TOKENS
+    assert sum(sizes[1:]) < RETAINED_TAIL_TOKENS
 
 
 def test_the_tail_moves_earlier_rather_than_split_a_call_from_its_result() -> None:
@@ -235,7 +256,7 @@ def test_a_long_run_of_tool_calls_after_one_request_can_be_compacted() -> None:
         rounds.append(_called(f"c{index}"))
         rounds.append(_answered(f"c{index}", _words(2_200, f"output {index}")))
     history = _stored(request, *rounds)
-    assert _plan(history, threshold=1.0).input_estimate > TRIGGER
+    assert _raw(history) > TRIGGER
 
     result = _plan(history)
 
@@ -260,7 +281,7 @@ def test_after_a_compaction_the_next_round_reads_the_checkpoint() -> None:
     """The full history is still far over the trigger; the view — summary
     plus what came after it — is not, so nothing is compacted again."""
     history, before, after, summary = _checkpointed(60, 6)
-    assert _plan(history, threshold=1.0).input_estimate > TRIGGER
+    assert _raw(history) > TRIGGER
 
     result = _plan(history, stored_summary=summary)
 
@@ -310,7 +331,10 @@ def test_a_checkpoint_that_grows_past_the_trigger_compacts_only_what_is_new() ->
 
     assert result.compacted is not None
     covered = {item.id: item for item in history}
-    assert all(covered[value].sequence > before[-1].sequence for value in result.compacted.message_ids)
+    assert all(
+        covered[value].sequence > before[-1].sequence
+        for value in result.compacted.message_ids
+    )
     # The record states the whole range the resulting summary stands for.
     assert result.compacted.first_sequence == history[0].sequence
     # The structural fallback continues the stored text rather than replacing it.
@@ -346,7 +370,7 @@ def test_a_compaction_that_would_free_almost_nothing_is_not_made() -> None:
 
 def test_compact_on_request_ignores_the_trigger() -> None:
     history = _conversation(30)
-    assert _plan(history, threshold=1.0).input_estimate < TRIGGER
+    assert _raw(history) < TRIGGER
 
     result = _plan(history, forced=True)
 
@@ -381,7 +405,7 @@ def _tool_heavy(results: int, size: int, *, name: str = "shell.exec") -> tuple[S
 def test_over_the_trigger_old_tool_output_is_cleared_first() -> None:
     """Enough to get back under the trigger, so no summary is needed."""
     history = _tool_heavy(12, 25_000)
-    assert _plan(history, threshold=1.0).input_estimate > TRIGGER
+    assert _raw(history) > TRIGGER
 
     result = _plan(history)
 
@@ -535,3 +559,11 @@ def test_skill_summaries_are_not_dropped_when_a_compaction_is_enough() -> None:
 
     assert result.compacted is not None
     assert len(result.skill_summaries) == 5
+
+
+def test_the_planner_and_the_registry_name_the_same_skill_tool() -> None:
+    """The put-back recognizes skill text by tool name; the registry is where
+    the name is defined, and where the exemption list is declared."""
+    assert SKILL_LOAD_TOOL in IMPLEMENTED_TOOLS
+    assert SKILL_LOAD_SCHEMA["function"]["name"] == SKILL_LOAD_TOOL
+    assert SKILL_LOAD_TOOL in UNTRIMMED_TOOLS
