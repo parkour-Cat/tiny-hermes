@@ -297,7 +297,8 @@ async def test_a_summary_that_frees_nothing_is_not_applied(
         context_summary_billed : input 355 + output 1372
         context_compacted      : covered 2, source "model", freed_estimate 0
 
-    模型摘要比它替掉的两条消息还长，`_honestly_widens` 照样放行了——它查的是
+    模型摘要比它替掉的两条消息还长，当时的采纳判据（`_honestly_widens`，v2.10 起
+    是 `_summary_holds`）照样放行了——它查的是
     「装得下吗、边界对吗」，从来没查过「这一下到底省没省」。于是那一轮花了
     1727 个 token，把上下文变大了一点，回执上写的是「已压缩」。
 
