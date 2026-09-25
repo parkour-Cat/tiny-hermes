@@ -289,9 +289,10 @@ PRUNE_HEAD_CHARS = 1_500
 #: 必须多到抵得过那次失效，否则这笔买卖是亏的。
 PRUNE_MIN_RECLAIM_TOKENS = 4_096
 
-#: 一次自动压缩至少要省下这么多，否则不做（`/compact` 只要求为正）。这也是防止
-#: 反复压缩的机制：固定段或当前请求本身太大时，每轮能压的只有刚离开保留区的几条，
-#: 不值得每轮为它们花一次摘要调用。按这一轮自己的收益判断，不需要跨轮的计数器。
+#: 一次自动压缩至少要省下这么多（与输入额度的 1/16 取小者），否则不做；只对「不压
+#: 也装得下」的一轮适用，`/compact` 只要求为正。这也是防止反复压缩的机制：固定段或
+#: 当前请求本身太大时，每轮能压的只有刚离开保留区的几条，不值得每轮为它们花一次摘要
+#: 调用。按这一轮自己的收益判断，不需要跨轮的计数器。
 MIN_COMPACTION_GAIN_TOKENS = 4_096
 
 #: 交给摘要模型的转写里，每个工具结果先截到这么长。摘要不需要原始输出的全部，
@@ -1274,7 +1275,14 @@ def plan_context(
         freed = spent - candidate_spent
         if freed <= 0:
             skipped = "no_gain"
-        elif not forced and freed < MIN_COMPACTION_GAIN_TOKENS:
+        elif (
+            not forced
+            and spent <= allowance
+            and freed < min(MIN_COMPACTION_GAIN_TOKENS, allowance // 16)
+        ):
+            # 只对「不压也装得下」的一轮设门槛：它防的是为几条消息每轮付一次摘要
+            # 调用，而装不下的一轮没有这个选择。门槛随窗口缩小——4,096 是小窗口
+            # 的一大半。
             skipped = "insufficient_gain"
         else:
             before = spent
