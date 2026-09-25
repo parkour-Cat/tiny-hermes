@@ -597,3 +597,67 @@ def test_the_planner_and_the_registry_name_the_same_skill_tool() -> None:
     assert SKILL_LOAD_TOOL in IMPLEMENTED_TOOLS
     assert SKILL_LOAD_SCHEMA["function"]["name"] == SKILL_LOAD_TOOL
     assert SKILL_LOAD_TOOL in UNTRIMMED_TOOLS
+
+
+# --- the last rungs -----------------------------------------------------
+
+
+def test_a_small_window_stubs_a_big_result_inside_the_tail_rather_than_pause() -> None:
+    """The retained tail is never touched while anything else can give — but
+    on a small window one tool result can be larger than the whole room, and
+    pausing is worse than sending its head."""
+    window = ContextWindow(6_000, reserved_output_tokens=1_000)
+    history = _stored(
+        _says("run the suite"),
+        _called("c1"),
+        _answered("c1", "x" * 20_000),
+        _called("c2"),
+        _answered("c2", "y" * 20_000),
+        _says("keep going"),
+    )
+
+    result = plan_context(
+        window=window,
+        safety_rules=RULES,
+        personality=PERSONALITY,
+        tool_schemas=(),
+        history=history,
+        threshold=THRESHOLD,
+    )
+
+    assert result.fits is True
+    assert _orphans(result.messages) == []
+    newest = next(
+        block
+        for message in result.messages
+        for block in message.blocks
+        if isinstance(block, ToolResultBlock) and block.call_id == "c2"
+    )
+    assert newest.output.startswith("y" * 100)
+    assert "20000" in newest.output
+
+
+def test_when_nothing_makes_it_fit_the_originals_come_back_uncompacted() -> None:
+    """§7.4.2 保留原文: and no compaction record, so the Worker does not pay a
+    summarizer for a round that is going to pause anyway — a model summary is
+    never shorter than the structural one that already did not fit."""
+    window = ContextWindow(600, reserved_output_tokens=100)
+    history = _stored(
+        _says("start"),
+        _says("m" * 40_000, role="assistant"),
+        _says("n" * 40_000, role="assistant"),
+        _says("the question"),
+    )
+
+    result = plan_context(
+        window=window,
+        safety_rules=RULES,
+        personality=PERSONALITY,
+        tool_schemas=(),
+        history=history,
+        threshold=THRESHOLD,
+    )
+
+    assert result.fits is False
+    assert result.compacted is None
+    assert result.messages == tuple(item.message for item in history)
