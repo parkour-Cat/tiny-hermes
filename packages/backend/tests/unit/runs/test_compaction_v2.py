@@ -214,8 +214,7 @@ def test_the_newest_twenty_thousand_tokens_go_out_verbatim() -> None:
         range(tail[0].sequence, history[-1].sequence + 1)
     )
     assert len(tail) == len(result.messages) - 1
-    sizes = [estimate_tokens(item.message.blocks[0].text) + MESSAGE_OVERHEAD_TOKENS
-        for item in tail]  # type: ignore[union-attr]
+    sizes = [estimate_tokens(item.message.text) + MESSAGE_OVERHEAD_TOKENS for item in tail]
     assert sum(sizes) >= RETAINED_TAIL_TOKENS
     # Whole messages, and the cut is at the first one that reaches the
     # target — not one further.

@@ -6,7 +6,12 @@ every byte of it; the full output is still in the session transcript.
 
 from uuid import uuid4
 
-from tiny_hermes.runs.application.worker import _transcript_text
+# Private and asserted on directly, as `test_summary_widening.py` does with
+# `_summary_holds`: the transcript is what the summarizer is shown, and no
+# public surface exposes it short of driving a Run.
+from tiny_hermes.runs.application.worker import (
+    _transcript_text,  # pyright: ignore[reportPrivateUsage]
+)
 from tiny_hermes.runs.domain.context_budget import SUMMARY_TOOL_RESULT_CHARS
 from tiny_hermes.runs.domain.models import (
     CanonicalMessage,
