@@ -943,34 +943,33 @@ def _text_of(message: CanonicalMessage) -> str:
     return "\n".join(block.text for block in message.blocks if isinstance(block, TextBlock))
 
 
-def _put_back(covered: Sequence[StoredMessage], tokenizer: str | None) -> tuple[str, int | None]:
-    """补回段的文字，以及要作为原消息补回的那条（最新一条用户消息）的下标。
+def _put_back(
+    covered: Sequence[StoredMessage], allowance: int, tokenizer: str | None
+) -> str:
+    """补回段的文字：范围内用户的原话，和加载过的技能正文。
 
-    只看被摘要的范围，不看「当前」是哪一条——补回段必须每轮逐字相同，否则摘要消息
-    每轮都变，前缀缓存每轮都从头失效。所以「当前请求」在这里的意思是「范围内最新的
-    用户消息」：一轮之内压缩时它就是当前请求，之后来了新消息，它照样在那里。
+    只取决于被摘要的范围和端点的输入额度，不取决于这一轮的其他任何东西——补回段在
+    摘要消息里，它每轮都变，前缀缓存就每轮从头失效。所以上限按输入额度的比例算，而
+    不是按「这一轮还剩多少」：后者随每轮召回的记忆变化。
+
+    两个上限都取「固定值」与「输入额度的 1/8」中较小的：小窗口上一份被贴进来的文档
+    不能成为压缩后装不下的原因，它已经在摘要里了。放不下的一条跳过，继续放更早、更
+    短的——一份长文档不该挤掉一句「别动计费表」。
     """
-    newest = next(
-        (index for index in range(len(covered) - 1, -1, -1)
-         if covered[index].message.role == "user"),
-        None,
-    )
     parts: list[str] = []
 
     said: list[str] = []
-    spent = 0
-    for index in range(len(covered) - 1, -1, -1):
-        message = covered[index].message
-        if index == newest or message.role != "user" or message.author is not None:
+    room = min(USER_VERBATIM_MAX_TOKENS, allowance // 8)
+    for item in reversed(covered):
+        message = item.message
+        if message.role != "user" or message.author is not None:
             continue
         text = _text_of(message)
-        if not text:
-            continue
         cost = estimate_tokens(text, tokenizer)
-        if spent + cost > USER_VERBATIM_MAX_TOKENS:
-            break
+        if not text or cost > room:
+            continue
         said.append(text)
-        spent += cost
+        room -= cost
     if said:
         parts.append(
             "What the user said in the summarized part, word for word, newest first:\n"
@@ -1000,16 +999,15 @@ def _put_back(covered: Sequence[StoredMessage], tokenizer: str | None) -> tuple[
     if loaded:
         shown: list[str] = []
         named: list[str] = []
-        total = 0
+        room = min(SKILL_REINJECT_TOTAL_TOKENS, allowance // 8)
         for label, text in loaded:
             cost = estimate_tokens(text, tokenizer)
-            if cost <= SKILL_REINJECT_MAX_TOKENS and total + cost <= SKILL_REINJECT_TOTAL_TOKENS:
+            if cost <= SKILL_REINJECT_MAX_TOKENS and cost <= room:
                 shown.append(f"### {label}\n{text}")
-                total += cost
+                room -= cost
             else:
                 named.append(label)
-        section = ["Skills loaded earlier in this conversation:"]
-        section += shown
+        section = ["Skills loaded earlier in this conversation:", *shown]
         if named:
             section.append(
                 "Too long to repeat here — load again with skill.load if needed: "
@@ -1017,21 +1015,29 @@ def _put_back(covered: Sequence[StoredMessage], tokenizer: str | None) -> tuple[
             )
         parts.append("\n\n".join(section))
 
-    return "\n\n".join(parts), newest
+    return "\n\n".join(parts)
 
 
 def _head(
-    summary: str, covered: Sequence[StoredMessage], tokenizer: str | None
+    summary: str,
+    covered: Sequence[StoredMessage],
+    request: CanonicalMessage | None,
+    allowance: int,
+    tokenizer: str | None,
 ) -> list[CanonicalMessage]:
-    """压缩后视图的开头：摘要消息（前缀 + 摘要 + 补回段），再加范围内最新那条用户
-    消息的原文——原文而不是文字，因为它可能带图片，而当前请求必须完整保留。"""
-    put_back, newest = _put_back(covered, tokenizer)
+    """压缩后视图的开头：摘要消息（前缀 + 摘要 + 补回段），以及——当前请求落在被摘要
+    的范围里时（一轮之内的长任务）——当前请求的原消息。原消息而不是文字，因为它可能
+    带图片，而当前请求必须完整保留。
+
+    之后来了新的用户消息，它就不再是当前请求，不再单独发送；摘要消息不受影响。
+    """
     text = f"{SUMMARY_PREFIX}\n\n{summary}"
+    put_back = _put_back(covered, allowance, tokenizer)
     if put_back:
         text += f"\n\n{put_back}"
     head = [CanonicalMessage(role="user", blocks=(TextBlock(text=text),), author="platform")]
-    if newest is not None:
-        head.append(covered[newest].message)
+    if request is not None and any(item.message is request for item in covered):
+        head.append(request)
     return head
 
 
@@ -1212,7 +1218,7 @@ def plan_context(
         if found is not None:
             start = found + 1
             checkpoint = stored_summary.last_sequence
-            head = _head(stored_summary.text, history[:start], tokenizer)
+            head = _head(stored_summary.text, history[:start], request, allowance, tokenizer)
     post = capped[start:]
     spent = fixed + _estimate(head, tokenizer) + _estimate(post, tokenizer)
     trigger = allowance * threshold
@@ -1254,7 +1260,10 @@ def plan_context(
                 if stored_summary is None or checkpoint is None
                 else f"{stored_summary.text}\n\n{structural}"
             )
-            candidate = [*_head(text, covered, tokenizer), *post[tail_start:]]
+            candidate = [
+                *_head(text, covered, request, allowance, tokenizer),
+                *post[tail_start:],
+            ]
             return candidate, fixed + _estimate(candidate, tokenizer), text
 
         # Hints first, then without them: they cost tokens, and a summary
