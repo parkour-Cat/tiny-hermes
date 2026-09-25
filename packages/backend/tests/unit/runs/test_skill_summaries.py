@@ -31,6 +31,7 @@ from tiny_hermes.runs.domain.models import (
     CanonicalMessage,
     StoredMessage,
     TextBlock,
+    ToolCallBlock,
     ToolResultBlock,
 )
 
@@ -160,15 +161,16 @@ def test_every_summary_may_be_loaded_and_then_none_of_them_can_go() -> None:
     assert planned.trimmed == ()
 
 
-def test_the_summaries_go_before_the_recent_history_and_after_tool_results() -> None:
-    """Step two of the fixed order, in a round that is genuinely too big.
-
-    The conversation is long enough that trimming the old tool result does not
-    save it, so the planner reaches the summaries — and it still gets to keep
-    every turn, which is what the order is for.
-    """
+def test_the_summaries_give_way_only_after_compaction() -> None:
+    """v2.10's order: 旧工具结果 → 旧会话压缩 → 未命中技能摘要. The round is
+    genuinely too big; compaction takes the old turns, and only what is still
+    over is taken from the summaries — one of two, not both."""
     history = stored(
         says("start"),
+        CanonicalMessage(
+            role="assistant",
+            blocks=(ToolCallBlock(call_id="c1", name="shell.exec", arguments={"c": "ls"}),),
+        ),
         CanonicalMessage(
             role="tool",
             blocks=(
@@ -185,12 +187,9 @@ def test_the_summaries_go_before_the_recent_history_and_after_tool_results() -> 
     planned = plan(history, tight, skill_summaries=summaries)
 
     assert planned.fits is True
-    assert [record.segment for record in planned.trimmed] == [
-        SegmentName.OLD_TOOL_RESULTS,
-        SegmentName.SKILL_SUMMARIES,
-    ]
+    assert planned.compacted is not None
+    assert [record.segment for record in planned.trimmed] == [SegmentName.SKILL_SUMMARIES]
     assert planned.skill_summaries == (summaries[0].text,)
-    assert len(planned.messages) == len(history)
 
 
 def test_a_round_that_is_barely_over_loses_one_summary_and_not_all_of_them() -> None:
@@ -212,17 +211,25 @@ def test_a_round_that_is_barely_over_loses_one_summary_and_not_all_of_them() -> 
     assert planned.skill_summaries == (summaries[0].text,)
 
 
-def test_a_loaded_document_is_a_tool_result_and_is_trimmed_first() -> None:
-    """Where the *body* lives needs no new code, and this is the proof.
-
-    A loaded skill comes back as a tool result, so it is in `old_tool_results`
-    — the first segment the fixed order touches — and the summary that names it
-    outlives it. The model can always ask for the document again; it cannot ask
-    for a skill it no longer knows exists.
-    """
+def test_a_loaded_document_is_the_last_thing_to_give_way() -> None:
+    """Skill text is exempt from the entry cap and from cleanup (§7.4.2 v2.10,
+    豁免): it is instructions, and half of it read as whole is worse than none.
+    But on a window smaller than the document itself, the last rung stubs it
+    — marked as trimmed, so the model knows — rather than pause; and the
+    summary that names it outlives it, so the model can ask for it again."""
     body = "The deployment runbook, in full. " * 200
     history = stored(
         says("what does the runbook say"),
+        CanonicalMessage(
+            role="assistant",
+            blocks=(
+                ToolCallBlock(
+                    call_id="skill-load-1",
+                    name="skill.load",
+                    arguments={"skill": "deploy", "path": "SKILL.md"},
+                ),
+            ),
+        ),
         CanonicalMessage(
             role="tool",
             blocks=(
@@ -236,14 +243,18 @@ def test_a_loaded_document_is_a_tool_result_and_is_trimmed_first() -> None:
     summaries = (summary("deploy", loaded=True),)
     tight = ContextWindow(context_window=300, reserved_output_tokens=0)
 
-    planned = plan(history, tight, skill_summaries=summaries)
+    planned = plan(
+        history, tight, skill_summaries=summaries, untrimmed_tools=frozenset({"skill.load"})
+    )
 
     assert planned.fits is True
-    first = planned.trimmed[0]
-    assert first.segment is SegmentName.OLD_TOOL_RESULTS
-    assert first.references == ("skill-load-1",)
     assert planned.skill_summaries == (summaries[0].text,)
-    stub = planned.messages[1].blocks[0]
-    assert isinstance(stub, ToolResultBlock)
+    stub = next(
+        block
+        for message in planned.messages
+        for block in message.blocks
+        if isinstance(block, ToolResultBlock)
+    )
     assert "skill-load-1" in stub.output
+    assert "trimmed by the platform" in stub.output
     assert body not in stub.output

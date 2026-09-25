@@ -742,3 +742,25 @@ def test_a_stub_of_a_capped_result_states_the_original_length() -> None:
     stub = result.messages[2].blocks[0]
     assert isinstance(stub, ToolResultBlock)
     assert "40000 characters in full" in stub.output
+
+
+def test_a_bigger_window_never_pauses_where_a_smaller_one_fits() -> None:
+    """The tail takes whole messages, so the one crossing the target could be
+    a result bigger than the room; it stays outside the tail instead, and is
+    compacted. Found by sweeping windows: 460 and 740 fit, 520–720 paused."""
+    history = _stored(
+        _says("start"),
+        _called("c1"),
+        _answered("c1", "x" * 4_000),
+        _says("and now the thing I actually want" + "y" * 200),
+    )
+    for size in range(400, 1_000, 20):
+        result = plan_context(
+            window=ContextWindow(context_window=size, reserved_output_tokens=0),
+            safety_rules=RULES,
+            personality=PERSONALITY,
+            tool_schemas=(),
+            history=history,
+            threshold=THRESHOLD,
+        )
+        assert result.fits, size
