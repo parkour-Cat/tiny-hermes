@@ -813,6 +813,13 @@ MIN_HINT_OCCURRENCES = 2
 #: platform ships no stop-word list it could consult instead.
 MIN_LATIN_HINT = 4
 
+#: And longer than this are hashes, base64 blobs, minified lines — nothing
+#: anyone searches for by typing it, and one of them said twice would ride in
+#: full inside every summary (found by an integration fixture whose turns were
+#: 1,800-character runs: the structural summary came out longer than the turns
+#: it replaced).
+MAX_LATIN_HINT = 40
+
 
 def compaction_hints(covered: Sequence[StoredMessage]) -> tuple[str, ...]:
     """Terms worth searching for, taken from the text being compacted away.
@@ -869,7 +876,7 @@ def _terms(said: str) -> list[str]:
     found.extend(
         word.lower()
         for word in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", said)
-        if len(word) >= MIN_LATIN_HINT
+        if MIN_LATIN_HINT <= len(word) <= MAX_LATIN_HINT
     )
     return found
 
