@@ -1086,6 +1086,26 @@ def _retained_tail_start(
     return start
 
 
+def _splits_a_tool_pair(history: Sequence[StoredMessage], through: int) -> bool:
+    """Whether cutting after the first ``through`` messages leaves a `tool`
+    result behind with its call on the other side (§7.4.2: 工具调用与工具结果
+    不能拆开). Compares the two id sets directly rather than assuming a
+    result always follows its call by one message."""
+    called_ids = {
+        block.call_id
+        for item in history[:through]
+        for block in item.message.blocks
+        if isinstance(block, ToolCallBlock)
+    }
+    if not called_ids:
+        return False
+    return any(
+        isinstance(block, ToolResultBlock) and block.call_id in called_ids
+        for item in history[through:]
+        for block in item.message.blocks
+    )
+
+
 def _estimate(messages: Sequence[CanonicalMessage], tokenizer: str | None) -> int:
     return sum(_message_estimate(message, tokenizer) for message in messages)
 
@@ -1227,7 +1247,10 @@ def plan_context(
             ),
             None,
         )
-        if found is not None:
+        # 也不用一份止于「工具调用」、而结果在它之后的摘要：建在它上面的视图会发出
+        # 一个找不到调用的工具结果，provider 整个请求都会拒。Worker 自己存的摘要
+        # 不会这样（切点只往前移），但一行存着的摘要不能证明是谁写的。
+        if found is not None and not _splits_a_tool_pair(history, found + 1):
             start = found + 1
             checkpoint = stored_summary.last_sequence
             head = _head(stored_summary.text, history[:start], request, allowance, tokenizer)
