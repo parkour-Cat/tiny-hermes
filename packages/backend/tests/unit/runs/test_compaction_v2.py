@@ -206,14 +206,14 @@ def test_the_newest_twenty_thousand_tokens_go_out_verbatim() -> None:
 
     result = _plan(history)
 
-    # messages[0] is the summary and messages[1] the newest covered user
-    # message put back whole; the retained tail is everything after them.
-    tail = [item for item in _verbatim(result.messages[2:], history)]
+    # messages[0] is the summary; the current request is in the tail, so
+    # nothing is put back as a message of its own and the tail is the rest.
+    tail = _verbatim(result.messages[1:], history)
     assert tail[-1] is history[-1]
     assert [item.sequence for item in tail] == list(
         range(tail[0].sequence, history[-1].sequence + 1)
     )
-    assert len(tail) == len(result.messages) - 2
+    assert len(tail) == len(result.messages) - 1
     sizes = [estimate_tokens(item.message.blocks[0].text) + MESSAGE_OVERHEAD_TOKENS
         for item in tail]  # type: ignore[union-attr]
     assert sum(sizes) >= RETAINED_TAIL_TOKENS
@@ -536,7 +536,7 @@ def test_what_the_user_said_is_put_back_word_for_word() -> None:
 def test_the_put_back_shrinks_with_a_small_window() -> None:
     """A pasted document as an old user message must not be what makes a
     small window overflow after compaction — it is in the summary, and the
-    put-back is capped at a quarter of the room left."""
+    put-back is capped at an eighth of the allowance."""
     window = ContextWindow(context_window=13_568, reserved_output_tokens=4_096)
     history = _stored(
         _says(_words(5_500, "a pasted document")),
