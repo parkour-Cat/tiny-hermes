@@ -67,6 +67,13 @@ PLATFORM_TOOLS = frozenset(
     }
 )
 
+#: Tools whose results are instructions rather than data, and so are never
+#: cut down by the context planner — not capped on entry, not cleared later
+#: (§7.4.2 v2.10, 豁免). `skill.load` refuses an oversized file whole rather
+#: than truncating it, because a model handed half a document cannot tell it
+#: is holding half; the planner cutting it afterwards would undo exactly that.
+UNTRIMMED_TOOLS = frozenset({"skill.load"})
+
 #: The longest a round may ask to sleep, a little over a day. A Run in
 #: `waiting_external` holds its Session's head, so the model does not get to
 #: decide that a conversation is unavailable until next year.
