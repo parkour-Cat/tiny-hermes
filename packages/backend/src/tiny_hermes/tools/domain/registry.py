@@ -155,10 +155,12 @@ PLATFORM_WAIT_ARGUMENTS = frozenset({"seconds"})
 #: model handed half a document has no way to know it is reading half.
 MAX_SKILL_FILE_BYTES = 65_536
 
-#: How many times one Run may load skill text. Progressive loading is meant to
-#: bring in the two or three documents a task needs; a Run asking for a ninth is
-#: reading the catalog rather than doing the work, and the ceiling is named in
-#: the refusal so the model can stop asking.
+#: How many different skill versions one Run may load text from. Progressive
+#: loading is meant to bring in the two or three documents a task needs; a Run
+#: asking for a ninth skill is reading the catalog rather than doing the work,
+#: and the ceiling is named in the refusal so the model can stop asking.
+#: Loading a version again does not count (§7.4.2 v2.10): after a compaction
+#: folds skill text into the summary, loading it again is taking it back.
 MAX_SKILL_LOADS = 8
 
 #: What `skill.load` reads when the model names no file. §10.1 makes `SKILL.md`

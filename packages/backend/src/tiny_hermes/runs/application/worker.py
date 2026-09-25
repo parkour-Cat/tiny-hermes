@@ -1086,9 +1086,9 @@ class WorkerRuntime:
         results: list[Block] = []
         events: list[ReservedEvent] = []
         # Counted across the whole Run and carried forward inside this round:
-        # eight loads is a Run's ceiling, not a slice's, and a round asking
-        # three times must not get three answers out of one round's worth of
-        # room.
+        # eight different skills is a Run's ceiling, not a slice's, and a round
+        # asking for three must not get three answers out of one round's worth
+        # of room.
         loaded = list(context.loaded_skills)
         tool_limit_reached = False
 
