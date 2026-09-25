@@ -717,3 +717,28 @@ def test_the_minimum_gain_shrinks_with_the_window() -> None:
 
     assert result.compacted is not None
     assert result.compacted.freed_estimate < MIN_COMPACTION_GAIN_TOKENS
+
+
+def test_a_stub_of_a_capped_result_states_the_original_length() -> None:
+    """A result capped on entry and later stubbed must still say how long the
+    output really was, not how long the capped copy was."""
+    window = ContextWindow(4_000, reserved_output_tokens=500)
+    history = _stored(
+        _says("run it"),
+        _called("c1"),
+        _answered("c1", "z" * 40_000),
+        _says("and again"),
+    )
+
+    result = plan_context(
+        window=window,
+        safety_rules=RULES,
+        personality=PERSONALITY,
+        tool_schemas=(),
+        history=history,
+        threshold=THRESHOLD,
+    )
+
+    stub = result.messages[2].blocks[0]
+    assert isinstance(stub, ToolResultBlock)
+    assert "40000 characters in full" in stub.output
