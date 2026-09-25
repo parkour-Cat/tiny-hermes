@@ -642,11 +642,12 @@ def test_when_nothing_makes_it_fit_the_originals_come_back_uncompacted() -> None
     summarizer for a round that is going to pause anyway — a model summary is
     never shorter than the structural one that already did not fit."""
     window = ContextWindow(600, reserved_output_tokens=100)
+    # The newest message is kept whole whatever its size, and it is text —
+    # nothing any rung may cut.
     history = _stored(
-        _says("start"),
+        _says("the question"),
         _says("m" * 40_000, role="assistant"),
         _says("n" * 40_000, role="assistant"),
-        _says("the question"),
     )
 
     result = plan_context(

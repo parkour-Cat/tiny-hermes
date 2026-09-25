@@ -182,7 +182,9 @@ def test_the_summaries_give_way_only_after_compaction() -> None:
         says("and now the thing I actually want" + "y" * 200),
     )
     summaries = (summary("deploy", size=400), summary("rollback", size=400))
-    tight = ContextWindow(context_window=460, reserved_output_tokens=0)
+    # Sized so compaction alone leaves the round a little over: one summary
+    # has to go, and one is enough.
+    tight = ContextWindow(context_window=560, reserved_output_tokens=0)
 
     planned = plan(history, tight, skill_summaries=summaries)
 

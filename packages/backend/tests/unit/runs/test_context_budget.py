@@ -312,12 +312,15 @@ def test_incompressible_content_that_does_not_fit_does_not_get_truncated() -> No
 
 
 def test_a_conversation_that_cannot_be_compacted_small_enough_keeps_its_originals() -> None:
-    """压缩失败后保留原文. Nothing is deleted on the way to the pause."""
+    """压缩失败后保留原文. Nothing is deleted on the way to the pause.
+
+    The newest message is always kept whole, and here it is text no rung may
+    cut — the one shape where compacting everything else is still not enough.
+    """
     history = stored(
-        says("start"),
+        says("the question"),
         says("m" * 40_000, role="assistant"),
         says("n" * 40_000, role="assistant"),
-        says("the question"),
     )
     result = plan(history, ContextWindow(600, reserved_output_tokens=100))
 

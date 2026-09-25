@@ -125,20 +125,34 @@ def test_nothing_to_compact_survives_an_aggressive_threshold(
     assert plan.compacted is None
 
 
+#: Large enough that the retained tail's target (20K) is below its ceiling
+#: (half the room), so one long message can sit inside the tail while two
+#: tiny ones lie outside it.
+_ROOMY = ContextWindow(61_000, reserved_output_tokens=1_000)
+
+
 @pytest.fixture
 def costly_to_compact() -> tuple[StoredMessage, ...]:
-    """Originals that fit `WINDOW` outright, and whose only compactable part
-    is not worth compacting.
-
-    Two tiny turns, then one long one, then the request. The long one and the
-    request fill the retained tail, so what lies outside it is the two tiny
-    turns — and a structural summary standing in for them costs more than
-    they do (`compaction_skipped == "no_gain"`)."""
+    """Originals that fit outright, and whose only compactable part is not
+    worth compacting: two tiny turns outside the retained tail, the long log
+    and the request inside it. A structural summary standing in for the two
+    tiny turns costs more than they do (`compaction_skipped == "no_gain"`)."""
     return _stored(
         _says("ok"),
         _says("sure", role="assistant"),
-        _says("here is the log: " + "h" * 2_440),
+        _says("here is the log: " + "h" * 68_000),
         _says("what now?"),
+    )
+
+
+def _roomy(history: tuple[StoredMessage, ...], *, threshold: float) -> ContextPlan:
+    return plan_context(
+        window=_ROOMY,
+        safety_rules=RULES,
+        personality=PERSONALITY,
+        tool_schemas=(),
+        history=history,
+        threshold=threshold,
     )
 
 
@@ -147,15 +161,17 @@ def test_originals_that_fit_are_sent_when_the_search_finds_nothing(
 ) -> None:
     """`paused(context_overflow)` is for a round that genuinely cannot be
     sent. This one can: the same history at a 0.99 ratio goes out untouched,
-    and crossing a 0.50 ratio is not a reason to refuse to send it."""
-    unforced = _plan_with(costly_to_compact, threshold=0.99)
+    and crossing a 0.40 ratio is not a reason to refuse to send it."""
+    unforced = _roomy(costly_to_compact, threshold=0.99)
     assert unforced.fits
     assert unforced.compacted is None
     assert unforced.input_estimate <= unforced.allowance
 
-    plan = _plan_with(costly_to_compact, threshold=0.50)
+    plan = _roomy(costly_to_compact, threshold=0.40)
 
+    assert plan.input_estimate >= _ROOMY.input_allowance * 0.40
     assert plan.compacted is None
+    assert plan.compaction_skipped == "no_gain"
     assert plan.fits
     assert plan.input_estimate == unforced.input_estimate
     assert plan.messages == tuple(stored.message for stored in costly_to_compact)
