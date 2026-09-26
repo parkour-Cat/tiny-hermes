@@ -259,7 +259,7 @@ def _controller(settings: Settings) -> SandboxClient | None:
 
 async def _ensure_bucket(workspace: WorkspaceRuntime | None) -> None:
     """Idempotent bucket creation at boot, so the first checkpoint is not the
-    request that discovers a fresh MinIO. A failure here is logged rather than
+    request that discovers a fresh object store. A failure here is logged rather than
     fatal: the store may simply not be up yet, and every later operation
     reports `workspace_storage_unavailable` honestly."""
     if workspace is None:
