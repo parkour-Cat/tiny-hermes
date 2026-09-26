@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     #: Required since phase 3C: the platform writes real objects, so a
     #: deployment without credentials must fail at startup rather than at the
     #: first checkpoint. The Controller process never receives these — it has
-    #: Docker and must not gain MinIO.
+    #: Docker and must not gain object-store credentials.
     # Required to be *present*, allowed to be empty: the controller runs with
     # both deliberately blank — it must never hold an object-store credential
     # (design §14.6) — while a deployment that forgot to set them at all still

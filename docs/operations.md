@@ -38,7 +38,8 @@ Secret，而把 KEK 放进同一个备份会亲手取消这条性质。
 docker exec tiny-hermes-postgres-1 pg_dump -U tiny_hermes -Fc tiny_hermes > backup.dump
 ```
 
-对象存储（MinIO）里的 artifact 与 skill 包要单独备份，它们不在数据库里。
+对象存储（SeaweedFS；2026-09 之前是 MinIO）里的 artifact、skill 包与会话工作区要单独备份，
+它们不在数据库里。
 
 **备份要包含 `alembic_version`**（`pg_dump` 默认会带）。恢复时的第一件事就是确认它的值，
 因为它决定了这份备份属于哪个版本的代码。
@@ -122,6 +123,50 @@ uv run --no-sync python scripts/upgrade_rollback_drill.py \
   --admin postgresql://tiny_hermes:local-only@127.0.0.1:55433/postgres
 ```
 
+### 从 MinIO 迁到 SeaweedFS
+
+MinIO 的镜像 2026-09-11 从 Docker Hub 下架，内置对象存储换成了 SeaweedFS
+（`deploy/compose/compose.yaml` 的 `seaweedfs` 服务，S3 端口仍是 9000）。
+**SeaweedFS 读不了 MinIO 的磁盘格式**：旧部署的对象留在 `tiny-hermes_minio-data`
+卷里，升级后不复制过来就访问不到——artifact 打不开、会话工作区恢复不出来。
+
+新的 Compose 文件不再声明那个卷，所以 `docker compose down -v` **不会**删掉它。
+
+```
+# 1. 停掉旧栈，不带 -v：卷要留着
+docker compose -f deploy/compose/compose.yaml down
+
+# 2. 升级到新代码，只起新的对象存储
+docker compose -f deploy/compose/compose.yaml up -d seaweedfs --wait
+
+# 3. 用旧卷临时起一个 MinIO，换到 19000 端口，免得和新服务的 9000 撞上
+docker run -d --name th-old-minio -p 127.0.0.1:19000:9000 \
+  -v tiny-hermes_minio-data:/data \
+  -e MINIO_ROOT_USER=tiny-hermes-local -e MINIO_ROOT_PASSWORD=tiny-hermes-local-password \
+  minio/minio:RELEASE.2025-07-23T15-54-02Z server /data
+
+# 4. 复制，并逐个读回核对 SHA-256；中途断了就重跑，已经一致的会跳过
+uv run --no-sync python scripts/migrate_object_store.py \
+  --source http://127.0.0.1:19000 \
+  --source-access-key tiny-hermes-local --source-secret-key tiny-hermes-local-password \
+  --target http://127.0.0.1:9000 \
+  --target-access-key tiny-hermes-local --target-secret-key tiny-hermes-local-password
+
+# 5. 起其余服务，确认 artifact 能打开之后再收尾
+docker compose -f deploy/compose/compose.yaml up -d --wait
+docker rm -f th-old-minio
+# 旧卷留一段时间，确认无误后再删：
+# docker volume rm tiny-hermes_minio-data
+```
+
+第 3 步依赖本机**还缓存着**那个 MinIO 镜像（跑过旧栈的机器都有，但只有那台机器的
+架构）。Docker Hub 上已经拉不到，quay.io 在 2026-09-25 对匿名访问也不开放了。没有
+缓存的机器，这份手册没有给出办法——如果按第 3 节做过对象存储备份，从备份恢复到
+SeaweedFS 是另一条路，但那条路没有演练过。
+
+这几步在 2026-09-25 用一次性的卷和容器走过一遍（20 个对象，复制后另写代码从两边
+读出比对，一致；重跑一次，20 个全部跳过）。没有在一台真实的旧部署上走过。
+
 ## 6. KEK 轮换
 
 见 `docs/superpowers/verification/2026-08-22-kek-rotation.md`。要点：
@@ -167,4 +212,6 @@ uv run --no-sync python scripts/kek_destruction_drill.py \
 - ~~对象存储的备份恢复没有演练。~~ **已补（2026-08-23）**，见第 3 节。
   仍然没有演练过的是**跨主机**恢复：演练里备份桶和主桶在同一个 MinIO 里，
   所以它证明的是「备份能还原」，不是「备份能搬到另一台机器上还原」。
+  对象存储换成 SeaweedFS 之后，这个演练**没有重跑**；它只用 S3 接口，但「应当还能
+  跑通」不是跑过。
 - **没有测量过规模**：十万条 Secret 的轮换要多久、大库的 `pg_restore` 要多久，都不知道。

@@ -85,7 +85,7 @@ class WorkspaceManifest:
     """An immutable, deterministic description of one revision's tree.
 
     Built only by ``build_manifest``, which owns normalization and ordering.
-    ``canonical_bytes`` is the exact document stored in MinIO, so its encoding
+    ``canonical_bytes`` is the exact document stored in the object store, so its encoding
     is a compatibility promise, not a formatting preference.
     """
 

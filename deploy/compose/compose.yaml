@@ -1,14 +1,14 @@
 name: tiny-hermes
 
 # Two environment shapes on purpose. The base carries no credential of any
-# kind; the app shape adds the MinIO keys and the model-key passthrough. The
+# kind; the app shape adds the object-store keys and the model-key passthrough. The
 # controller keeps only the base: it holds the Docker socket, and a process
 # holding Docker must not also hold object-storage credentials or model keys —
 # design §14.6 makes both directions of that separation an assertion.
 x-base-env: &base-env
   DATABASE_URL: postgresql+asyncpg://tiny_hermes:local-only@postgres:5432/tiny_hermes
   REDIS_URL: redis://redis:6379/0
-  S3_ENDPOINT: http://minio:9000
+  S3_ENDPOINT: http://seaweedfs:9000
   S3_BUCKET: tiny-hermes
   SESSION_COOKIE_SECRET: ${SESSION_COOKIE_SECRET:-local-cookie-secret-with-32-characters}
   BOOTSTRAP_TOKEN: ${BOOTSTRAP_TOKEN:-local-bootstrap-token-with-32-characters}
@@ -100,20 +100,24 @@ services:
       retries: 20
     ports: ["6379:6379"]
 
-  minio:
-    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
-    command: ["server", "/data", "--console-address", ":9001"]
+  # S3-compatible object store. MinIO until 2026-09-11, when its images left
+  # Docker Hub; a deployment that ran MinIO copies its objects over with
+  # `scripts/migrate_object_store.py` (docs/operations.md). The S3 port stays
+  # 9000 so nothing that talks to it changes.
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.47
+    command: ["mini", "-dir=/data", "-s3.port=9000"]
     environment:
-      MINIO_ROOT_USER: tiny-hermes-local
-      MINIO_ROOT_PASSWORD: tiny-hermes-local-password
+      AWS_ACCESS_KEY_ID: tiny-hermes-local
+      AWS_SECRET_ACCESS_KEY: tiny-hermes-local-password
     volumes:
-      - minio-data:/data
+      - seaweedfs-data:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/healthz"]
       interval: 5s
       timeout: 3s
       retries: 20
-    ports: ["9000:9000", "9001:9001"]
+    ports: ["9000:9000"]
 
   migrate:
     build:
@@ -135,7 +139,7 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
-      minio:
+      seaweedfs:
         condition: service_healthy
     healthcheck:
       test:
@@ -164,7 +168,7 @@ services:
       context: ../..
       dockerfile: apps/api/Dockerfile
     command: ["/app/.venv/bin/tiny-hermes-controller"]
-    # The base only: no MinIO credential and no model key may reach the one
+    # The base only: no object-store credential and no model key may reach the one
     # process that holds the Docker socket (design §14.6).
     environment: *base-env
     # Root inside its own container, because the socket is root:root 0660 and
@@ -302,14 +306,17 @@ services:
 networks:
   # Nothing on this network can route anywhere: `internal` is Docker's way of
   # saying a bridge has no gateway. A sandbox attached to it can reach the
-  # proxy and nothing else — not the internet, not PostgreSQL, not MinIO, not
+  # proxy and nothing else — not the internet, not PostgreSQL, not the object store, not
   # another Run's container.
   sandbox-egress:
     internal: true
 
 volumes:
   postgres-data:
-  minio-data:
+  # Not `minio-data`: SeaweedFS cannot read MinIO's on-disk format. That volume
+  # is deliberately no longer declared, so `docker compose down -v` does not
+  # delete a deployment's old objects before they have been copied over.
+  seaweedfs-data:
   # Shared by the controller, the worker and the scheduler. Not by the API or
   # the web service, which have no business talking to the controller at all.
   controller-socket:
