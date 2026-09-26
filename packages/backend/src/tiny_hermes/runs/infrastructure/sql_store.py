@@ -932,7 +932,7 @@ class SqlRunStore:
             loaded_skills=await self._loaded_skills(run.id),
             http_operations=await self._bound_operations(spec),
             prices=await self._pinned_prices(run.model_pricing_version_id),
-            memories=await self._remembered(run, owning, _latest_request(history)),
+            memories=await self._remembered(run, owning, _run_request(history, run.id)),
             depth=run.depth,
             delegated_scope=(
                 None
@@ -1433,7 +1433,13 @@ class SqlRunStore:
         today, and writing the difference down here is what will keep §4.5's
         end-user identity from being wired to the wrong one.
 
-        `query` is this Run's latest request, and the ordering it produces is
+        Frozen for the Run: the memories as they stood when it was created
+        (`as_of`), ranked against its own request, so every round gets the
+        same block. The tool tells the model a memory it writes "does not
+        affect this Run", and a block that changed mid-Run would also stop
+        matching the prefix a provider had cached.
+
+        `query` is this Run's own request, and the ordering it produces is
         **keyword relevance, not meaning** (§14.3 excludes vector memory). It
         decides which memories the planner sees first, and therefore which ones
         survive when the segment is over budget.
@@ -1458,7 +1464,11 @@ class SqlRunStore:
                 caller_id=session.caller_id,
             ),
         ):
-            found.extend(await library.relevant_in(scope, query, limit=MEMORY_READ_LIMIT))
+            found.extend(
+                await library.relevant_in(
+                    scope, query, limit=MEMORY_READ_LIMIT, as_of=run.created_at
+                )
+            )
         return tuple(found)
 
     async def _pinned_prices(self, version_id: UUID | None) -> TokenPrices | None:
@@ -3716,15 +3726,21 @@ def _new_budget(
     )
 
 
-def _latest_request(history: Sequence[StoredMessage]) -> str:
-    """What this Run was last asked, as the query memories are ranked against.
+def _run_request(history: Sequence[StoredMessage], run_id: UUID) -> str:
+    """What this Run was asked, as the query memories are ranked against.
 
-    The last user turn rather than the whole conversation: what the person just
-    said is what this round is about, and ranking against the transcript would
-    let an early digression outweigh the current question forever.
+    This Run's own input, not the latest user turn: the latest can be a
+    platform-authored instruction ("The task is not finished…") or the next
+    Run's message arriving mid-Run, and either would re-rank the memories
+    between rounds. Falls back to the latest turn a person wrote when this
+    Run carries no input of its own (a compaction Run).
     """
     for item in reversed(history):
-        if item.message.role == "user":
+        if item.source_run_id == run_id and item.message.role == "user":
+            if item.message.author is None:
+                return item.message.text
+    for item in reversed(history):
+        if item.message.role == "user" and item.message.author is None:
             return item.message.text
     return ""
 
