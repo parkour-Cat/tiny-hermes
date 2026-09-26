@@ -37,6 +37,7 @@ from tiny_hermes.runs.application.tool_answers import (
     answer_session_search,
     answer_skill_load,
     answer_skill_propose,
+    waits_for_approval,
 )
 from tiny_hermes.runs.domain.context_budget import (
     DEFAULT_COMPACTION_THRESHOLD,
@@ -1102,6 +1103,14 @@ class WorkerRuntime:
                 )
             tool_limit_reached = not accepted
             return accepted
+
+        # All or nothing when the round stops for a person: asked of every call
+        # before any runs, so a round that waits has no effects to forget.
+        # See `waits_for_approval`.
+        for call in response.tool_calls:
+            waiting = await waits_for_approval(context, call, mcp, self._approvals)
+            if waiting is not None:
+                return _RoundWork((), False, approval=waiting)
 
         for call in response.tool_calls:
             external = call.name.startswith((f"{MCP_PREFIX}.", f"{HTTP_PREFIX}."))
