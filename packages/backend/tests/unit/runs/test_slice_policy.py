@@ -450,3 +450,59 @@ def test_the_shared_budget_outranks_it_too() -> None:
 
     assert decision.signal is RunSignal.SAFE_PAUSE_REACHED
     assert decision.pause_reason is PauseReason.LIMIT
+
+
+# -- stop_conditions.max_rounds (§12.3 最大连续轮数) --------------------------
+
+
+def _at_round_ceiling(verdict: GoalVerdict) -> RoundOutcome:
+    return RoundOutcome(
+        verdict=verdict,
+        cancel_requested=False,
+        pause_requested=False,
+        budget_allows=True,
+        slice_expired=False,
+        rounds_exhausted=True,
+    )
+
+
+def test_a_run_out_of_rounds_that_would_continue_pauses_at_its_limit() -> None:
+    """Declared since M2A and read by nothing until now: an Agent published with
+    `max_rounds` ran until some other valve stopped it."""
+    decision = decide_after_round(_at_round_ceiling(CONTINUE))
+
+    assert decision.signal is RunSignal.SAFE_PAUSE_REACHED
+    assert decision.pause_reason is PauseReason.LIMIT
+    assert decision.limit_reached is True
+    assert decision.limit_valve == "max_rounds"
+
+
+def test_a_run_that_finishes_on_its_last_round_completes() -> None:
+    """The ceiling stops the next round, not the one that already met the goal."""
+    decision = decide_after_round(_at_round_ceiling(DONE))
+
+    assert decision.signal is RunSignal.COMPLETED
+
+
+def test_a_run_out_of_rounds_does_not_start_a_wait_it_could_not_follow() -> None:
+    """Waking would mean another round, which the ceiling forbids."""
+    decision = decide_after_round(
+        _at_round_ceiling(GoalVerdict(GoalOutcome.WAIT, wait_seconds=60))
+    )
+
+    assert decision.pause_reason is PauseReason.LIMIT
+    assert decision.limit_valve == "max_rounds"
+
+
+def test_the_budget_valve_still_names_itself() -> None:
+    decision = decide_after_round(
+        RoundOutcome(
+            verdict=CONTINUE,
+            cancel_requested=False,
+            pause_requested=False,
+            budget_allows=False,
+            slice_expired=False,
+        )
+    )
+
+    assert decision.limit_valve == "budget"
