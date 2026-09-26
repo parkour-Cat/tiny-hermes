@@ -389,7 +389,7 @@ class SandboxController:
             await self.store.set_instance_status(sandbox_id, InstanceStatus.DESTROYED)
         await self.store.release(reservation.id)
         # Container first, then volume: the volume cannot be in use once the
-        # container is confirmed gone. Session state lives in MinIO revisions;
+        # container is confirmed gone. Session state lives in object-store revisions;
         # a Run's teardown owes the host nothing but this reclamation.
         await self.engine.remove_volume(_volume_name(run_id))
         await self.audit.record(

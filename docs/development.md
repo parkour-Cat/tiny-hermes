@@ -194,7 +194,7 @@ docker compose --env-file .env -f deploy/compose/compose.yaml ps -a
 ```
 
 The same two lines are shell-agnostic; on Linux they run unchanged. Nine
-services report healthy — `postgres`, `redis`, `minio`, `api`, `web`,
+services report healthy — `postgres`, `redis`, `seaweedfs`, `api`, `web`,
 `worker`, `scheduler`, `controller`, and `migrate` having exited 0.
 
 Open `http://127.0.0.1:3000/bootstrap` to create the first administrator. The page sends the bootstrap token in a request header; it is never included in the URL. The equivalent API call is:
@@ -1364,7 +1364,7 @@ storage.
 
 Phase 3C adds the persistence the container itself deliberately lacks: a
 Session's `/workspace/data` is checkpointed after every write-capable tool
-round into immutable revisions in MinIO, restored into each fresh container
+round into immutable revisions in the object store, restored into each fresh container
 before its first model call, and governed by `file.list` / `file.read` /
 `file.write` alongside `shell.exec`. Two facts are worth keeping straight:
 
@@ -1518,7 +1518,7 @@ docker compose --env-file .env -f deploy/compose/compose.yaml config --volumes
 docker volume ls --filter label=com.docker.compose.project=tiny-hermes
 ```
 
-For this repository the expected named volumes are `tiny-hermes_postgres-data` and `tiny-hermes_minio-data`. If any other project or volume appears, stop and investigate before continuing.
+For this repository the expected named volumes are `tiny-hermes_postgres-data` and `tiny-hermes_seaweedfs-data`. A machine that ran the stack before the object store moved to SeaweedFS (2026-09) also has `tiny-hermes_minio-data`: it still carries the project label, so the second command lists it, but it is no longer declared in the Compose file and `down -v` below does not delete it. Copy its objects first (`docs/operations.md`, "从 MinIO 迁到 SeaweedFS"), then remove it by name when you no longer need it. If any other project or volume appears, stop and investigate before continuing.
 
 After confirming the targets, remove only this Compose project's containers, network, and named volumes:
 
@@ -1526,14 +1526,14 @@ After confirming the targets, remove only this Compose project's containers, net
 docker compose --env-file .env -f deploy/compose/compose.yaml down -v
 ```
 
-This permanently deletes the local PostgreSQL and MinIO data in those two volumes. Redis is configured without a persistent volume.
+This permanently deletes the local PostgreSQL and object-store data in those two volumes. Redis is configured without a persistent volume.
 
 ## Security notes
 
 - Never commit `.env`, browser cookies, passwords, bootstrap tokens, database dumps, or real service credentials.
 - The values in Compose are for an isolated local machine only. An enterprise deployment must use generated secrets and protected secret delivery.
 - The first successful bootstrap closes the bootstrap endpoint permanently; changing the token does not reopen it.
-- Local PostgreSQL and MinIO passwords are deliberately development-only and must not be copied into a production manifest.
+- Local PostgreSQL and object-store passwords are deliberately development-only and must not be copied into a production manifest.
 - Environment variables can be visible through process and container inspection. Local Compose sets `TINY_HERMES_KEK` for API ready; a production deployment must mount the KEK from a protected file or KMS.
 - M1 through 4C provides Agent publication, Run execution, model endpoints,
   platform-owned `file.*` and `shell.exec` in a Docker sandbox, persistent

@@ -1,8 +1,8 @@
 """Back up the object store, lose it, put it back — and check the bytes.
 
-`docs/operations.md` says artifacts and skill packages live in MinIO and
-must be backed up separately, and then recorded that this had never been
-rehearsed. The database drills next to it found two things a runbook cannot
+`docs/operations.md` says artifacts and skill packages live in the object
+store (SeaweedFS; MinIO until 2026-09) and must be backed up separately, and
+then recorded that this had never been rehearsed. The database drills next to it found two things a runbook cannot
 tell you by being read (`--data-only` restores in the wrong order; rolling
 back destroys the deduplication record), so the object half deserved the
 same treatment rather than a sentence.
@@ -18,7 +18,7 @@ artifacts would be the accident it exists to prevent.
 
 Usage::
 
-    docker compose -f deploy/compose/compose.yaml up -d minio --wait
+    docker compose -f deploy/compose/compose.yaml up -d seaweedfs --wait
     uv run --no-sync python scripts/object_restore_drill.py \\
       --endpoint http://127.0.0.1:9000 \\
       --access-key tiny-hermes-local --secret-key tiny-hermes-local-password

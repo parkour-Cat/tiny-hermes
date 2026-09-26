@@ -80,18 +80,21 @@ jobs:
       # image is reported as such; the fixture's second build is cache-backed.
       - name: Build the sandbox runtime image
         run: docker build -t tiny-hermes-sandbox:test -f deploy/sandbox/Dockerfile deploy/sandbox
-      # A plain step rather than a service container: the minio image needs
-      # its `server /data` arguments, and GitHub services cannot pass any.
-      - name: Start MinIO
+      # A plain step rather than a service container: the image needs its
+      # `mini` arguments, and GitHub services cannot pass any. Same image and
+      # arguments as deploy/compose/compose.yaml (MinIO until its images left
+      # Docker Hub on 2026-09-11).
+      - name: Start SeaweedFS
         run: |
-          docker run -d --name minio -p 9000:9000 \
-            -e MINIO_ROOT_USER=tiny-hermes-local \
-            -e MINIO_ROOT_PASSWORD=tiny-hermes-local-password \
-            minio/minio:RELEASE.2025-07-23T15-54-02Z server /data
-          for attempt in $(seq 1 30); do
-            curl -sf http://localhost:9000/minio/health/live && break
+          docker run -d --name seaweedfs -p 9000:9000 \
+            -e AWS_ACCESS_KEY_ID=tiny-hermes-local \
+            -e AWS_SECRET_ACCESS_KEY=tiny-hermes-local-password \
+            chrislusf/seaweedfs:4.47 mini -dir=/data -s3.port=9000
+          for attempt in $(seq 1 60); do
+            curl -sf http://localhost:9000/healthz && break
             sleep 1
           done
+          curl -sf http://localhost:9000/healthz
       - run: uv run alembic upgrade head
       - run: uv run pytest packages/backend/tests/integration -v
       - name: Repeat concurrency regressions
@@ -222,7 +225,7 @@ jobs:
           docker compose -f deploy/compose/compose.yaml exec -T api sh -c 'test ! -e /var/run/docker.sock'
           docker compose -f deploy/compose/compose.yaml exec -T worker sh -c 'test ! -e /var/run/docker.sock'
       # The other half of design §14.6: the one process holding Docker holds
-      # no MinIO credential and no model key, and the processes holding those
+      # no object-store credential and no model key, and the processes holding those
       # never see the socket.
       - name: Prove the credential boundary in the running stack
         run: |
