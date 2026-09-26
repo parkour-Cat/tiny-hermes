@@ -342,7 +342,8 @@ async def test_a_stored_summary_covering_a_withdrawn_message_is_dropped(
     那段话被原样发回模型——里面提炼的正是用户刚收回的那几轮。撤回是 §14.3 说的
     「不可见」，它没有「除了被摘要过的那部分」这个例外。
 
-    `_honestly_widens` 拦不住：它只管上界。
+    v2.10 起更要紧：存下的摘要是存档点，此后每一轮都发它，没有哪一步会再
+    问一次它提炼的那些消息还在不在。
     """
     session_id, _first_id, second_id = seeded_session_with_two_messages
     withdrawn_sequence = await _sequence_of(db_session, second_id)

@@ -260,6 +260,12 @@ class ContextBudget(BaseModel):
     #: that is out of bounds while still working on it, and only publish
     #: refuses it.
     compaction_threshold: float | None = Field(default=None, gt=0, le=1)
+    #: An absolute trigger in estimated input tokens, whichever of this and
+    #: the ratio comes first (§7.4.2 v2.10). `None` — the default — means no
+    #: cap: an Agent on a large window is there to use it, and the platform
+    #: has no data to decide for everyone that a round costs too much. For a
+    #: deployment that cares about the cost or latency of one very long round.
+    compaction_trigger_cap_tokens: int | None = Field(default=None, gt=0)
 
     @field_validator("segments")
     @classmethod
@@ -781,6 +787,9 @@ def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
         budget_document = cast(dict[str, object], budget)
         if budget_document.get("compaction_threshold") is None:
             budget_document.pop("compaction_threshold", None)
+        # The same promise again for the field v2.10 added.
+        if budget_document.get("compaction_trigger_cap_tokens") is None:
+            budget_document.pop("compaction_trigger_cap_tokens", None)
     if normalized.get("network") is None:
         # Same reasoning as `completion` and `context_budget`: there is no
         # default network *document*, only the absence of one, and a spec that

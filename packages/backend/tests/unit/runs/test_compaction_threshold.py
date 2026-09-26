@@ -15,8 +15,8 @@ RULES = "Stay inside the platform."
 PERSONALITY = "You are a careful assistant."
 
 #: Sized so the fixture below sits at roughly two thirds of the allowance:
-#: comfortably under 1.0 (it already fits, the old criterion), and over 0.5
-#: (the new default) — the one window that can tell 0.50 and 0.99 apart.
+#: comfortably under 1.0 (it already fits, the old criterion), and over 0.5 —
+#: the one window that can tell 0.50 and 0.99 apart.
 WINDOW = ContextWindow(1_200, reserved_output_tokens=200)
 
 
@@ -44,11 +44,8 @@ def mid_history() -> tuple[StoredMessage, ...]:
 
 @pytest.fixture
 def short_history() -> tuple[StoredMessage, ...]:
-    """Nothing here is outside `PROTECTED_RECENT_MESSAGES` plus the current
-    request: two messages total, the last of which (the only ``user`` turn)
-    *is* the current request. `compactable` cannot reach 2 no matter how the
-    window is sized, so structural compaction is not geometrically possible —
-    the case `can_compact` exists to recognize."""
+    """Nothing here is outside the retained tail: two short messages, so
+    there is nothing to compact however the window is sized."""
     return _stored(_says("hello"), _says("hi there", role="assistant"))
 
 
@@ -69,11 +66,29 @@ def _last_text(messages: tuple[CanonicalMessage, ...]) -> str:
     return block.text
 
 
-def test_a_history_that_fits_is_still_compacted_past_the_threshold(
-    mid_history: tuple[StoredMessage, ...],
-) -> None:
-    plan = _plan_with(mid_history, threshold=0.50)
+def test_a_history_that_fits_is_still_compacted_past_the_threshold() -> None:
+    """On a window large enough for something to lie outside the retained
+    tail (v2.10): `mid_history` on `WINDOW` is entirely inside it, so there
+    is nothing to compact however low the ratio is."""
+    window = ContextWindow(101_000, reserved_output_tokens=1_000)
+    history = _stored(
+        *(
+            _says(f"turn {index}: " + "w" * 4_000, role="user" if index % 2 else "assistant")
+            for index in range(40)
+        ),
+        _says("what is left?"),
+    )
 
+    plan = plan_context(
+        window=window,
+        safety_rules=RULES,
+        personality=PERSONALITY,
+        tool_schemas=(),
+        history=history,
+        threshold=0.50,
+    )
+
+    assert plan.input_estimate < window.input_allowance
     assert plan.fits
     assert plan.compacted is not None
 
@@ -99,19 +114,10 @@ def test_the_current_request_is_never_compacted_away(
 def test_nothing_to_compact_survives_an_aggressive_threshold(
     short_history: tuple[StoredMessage, ...],
 ) -> None:
-    """Pins the `can_compact` gate directly, rather than relying on
-    `test_memory_segment.py` / `test_skill_summaries.py` to catch its
-    regression by accident (both fail for a reason incidental to this file —
-    a squeezed segment that already fit `allowance` but not a
-    threshold-scaled target — and either could be renamed or restructured
-    without anyone noticing the gate went with it).
-
-    A history with nothing outside the protected tail gives step four's
-    search no `through` to pick (`range(2, max(compactable, 0) + 1)` is
-    empty). Without `can_compact`, an aggressive threshold would still force
-    entry past the trim steps' early returns, land in that empty search, and
-    fall out the bottom as `paused(context_overflow)` — discarding a plan
-    that already fit for a reason unrelated to how much of it was spent.
+    """A history with nothing outside the retained tail has nothing to
+    compact. An aggressive threshold must not turn that into
+    `paused(context_overflow)` — discarding a plan that already fit for a
+    reason unrelated to how much of it was spent.
     """
     plan = _plan_with(short_history, threshold=0.01)
 
@@ -119,23 +125,34 @@ def test_nothing_to_compact_survives_an_aggressive_threshold(
     assert plan.compacted is None
 
 
+#: Large enough that the retained tail's target (20K) is below its ceiling
+#: (half the room), so one long message can sit inside the tail while two
+#: tiny ones lie outside it.
+_ROOMY = ContextWindow(61_000, reserved_output_tokens=1_000)
+
+
 @pytest.fixture
 def costly_to_compact() -> tuple[StoredMessage, ...]:
-    """Originals that fit `WINDOW` outright, and whose only compactable
-    boundary makes the round *bigger*.
-
-    Two tiny turns, then one long one, then the request. `compactable` is 2,
-    so step four's search has exactly one `through` to try — and standing a
-    structural summary in for two turns worth 13 tokens costs 88, which pushes
-    the round past `allowance`. Before the ratio trigger this shape was
-    unreachable: the cascade was only ever entered by a round that already did
-    not fit, and one that did not fit had nothing to lose by the search
-    failing."""
+    """Originals that fit outright, and whose only compactable part is not
+    worth compacting: two tiny turns outside the retained tail, the long log
+    and the request inside it. A structural summary standing in for the two
+    tiny turns costs more than they do (`compaction_skipped == "no_gain"`)."""
     return _stored(
         _says("ok"),
         _says("sure", role="assistant"),
-        _says("here is the log: " + "h" * 2_440),
+        _says("here is the log: " + "h" * 68_000),
         _says("what now?"),
+    )
+
+
+def _roomy(history: tuple[StoredMessage, ...], *, threshold: float) -> ContextPlan:
+    return plan_context(
+        window=_ROOMY,
+        safety_rules=RULES,
+        personality=PERSONALITY,
+        tool_schemas=(),
+        history=history,
+        threshold=threshold,
     )
 
 
@@ -144,15 +161,17 @@ def test_originals_that_fit_are_sent_when_the_search_finds_nothing(
 ) -> None:
     """`paused(context_overflow)` is for a round that genuinely cannot be
     sent. This one can: the same history at a 0.99 ratio goes out untouched,
-    and crossing a 0.50 ratio is not a reason to refuse to send it."""
-    unforced = _plan_with(costly_to_compact, threshold=0.99)
+    and crossing a 0.40 ratio is not a reason to refuse to send it."""
+    unforced = _roomy(costly_to_compact, threshold=0.99)
     assert unforced.fits
     assert unforced.compacted is None
     assert unforced.input_estimate <= unforced.allowance
 
-    plan = _plan_with(costly_to_compact, threshold=0.50)
+    plan = _roomy(costly_to_compact, threshold=0.40)
 
+    assert plan.input_estimate >= _ROOMY.input_allowance * 0.40
     assert plan.compacted is None
+    assert plan.compaction_skipped == "no_gain"
     assert plan.fits
     assert plan.input_estimate == unforced.input_estimate
     assert plan.messages == tuple(stored.message for stored in costly_to_compact)

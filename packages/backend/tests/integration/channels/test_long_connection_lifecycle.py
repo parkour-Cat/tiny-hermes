@@ -1648,9 +1648,10 @@ async def test_a_compact_frame_over_the_long_connection_becomes_a_compaction_run
     所以判据是**库里有那个 Run**，不是「deliver 没抛异常」：抛不抛异常是这次
     的症状，而下一个缺陷不一定长这样。
 
-    先灌四条消息再发命令：`request_compaction` 的门槛是
-    `messages - PROTECTED_RECENT_MESSAGES >= 2`，不够就走「没什么可压」的
-    早退，压根到不了提交 Run 那一步——那样这条测试会因为没走到而变绿。
+    先灌四条足够长的消息再发命令：`request_compaction` 的门槛是「上一份摘要
+    之后的原文比一个完整的保留区还长」（`has_compactable_history`），不够就走
+    「没什么可压」的早退，压根到不了提交 Run 那一步——那样这条测试会因为没走到
+    而变绿。
     """
     _webhook_id, long_id = seeded_bindings_of_both_transports
 
@@ -1705,7 +1706,10 @@ async def test_a_compact_frame_over_the_long_connection_becomes_a_compaction_run
                     "w": workspace_id,
                     "q": sequence,
                     "r": "user" if sequence % 2 == 0 else "assistant",
-                    "c": json.dumps({"parts": [{"type": "text", "text": f"m{sequence}"}]}),
+                    # 四条合计越过 `RETAINED_TAIL_TOKENS`（2 万）：保留区之外要有东西。
+                    "c": json.dumps(
+                        {"parts": [{"type": "text", "text": f"m{sequence} " + "x" * 16_000}]}
+                    ),
                 },
             )
 

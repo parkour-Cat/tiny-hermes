@@ -193,3 +193,22 @@ def test_a_compaction_with_nothing_to_gain_does_not_invite_a_retry() -> None:
     assert said is not None
     assert "已压缩" not in said
     assert "再试" not in said, said
+
+
+def test_nothing_outside_the_recent_part_says_the_recent_part_is_kept() -> None:
+    """v2.10: the newest part of a conversation is always kept word for word,
+    so a short conversation has nothing `/compact` could merge. Saying "too
+    little to merge, a summary would be longer" would be the wrong reason —
+    the person should learn that the recent part is kept on purpose."""
+    said = reply_for(
+        state=RunState.COMPLETED,
+        said="",
+        purpose=RunPurpose.COMPACTION,
+        compaction=None,
+        compaction_skipped={"reason": "nothing_outside_tail"},
+    )
+    assert said is not None
+    assert "最近" in said
+    assert "原样保留" in said
+    assert "再试" not in said
+    assert "摘要反而更长" not in said

@@ -17,7 +17,7 @@ from uuid import uuid4
 from tiny_hermes.runs.domain.context_budget import (
     DEFAULT_SEGMENTS,
     PRUNE_MIN_RESULT_CHARS,
-    PRUNE_PROTECTED_RECENT_MESSAGES,
+    RETAINED_TAIL_TOKENS,
     TRIMMING_ORDER,
     Accounting,
     ContextWindow,
@@ -96,12 +96,12 @@ def test_the_default_segments_are_the_table_in_the_product_design() -> None:
 
 
 def test_the_trimming_order_is_the_fixed_one() -> None:
-    """旧工具大结果 → 未命中技能摘要 → 低相关记忆 → 旧会话的结构化压缩."""
+    """v2.10: 旧工具结果 → 旧会话压缩 → 未命中技能摘要 → 低相关记忆."""
     assert TRIMMING_ORDER == (
         SegmentName.OLD_TOOL_RESULTS,
+        SegmentName.RECENT_HISTORY,
         SegmentName.SKILL_SUMMARIES,
         SegmentName.MEMORY,
-        SegmentName.RECENT_HISTORY,
     )
 
 
@@ -141,8 +141,10 @@ def test_a_conversation_that_fits_is_sent_exactly_as_it_is() -> None:
     assert result.messages == tuple(item.message for item in history)
 
 
-def test_the_oldest_tool_results_are_the_first_thing_trimmed() -> None:
-    """Step one of the fixed order, and the only one with content in M2A."""
+def test_on_a_small_window_every_big_result_gives_way_rather_than_pause() -> None:
+    """Both results are too big for this window. The older one, outside the
+    retained tail, is cleared first; the newer one sits in the tail, and on a
+    window this small the last rung stubs it too rather than pause."""
     history = stored(
         says("run the suite"),
         called("./one", "c1"),
@@ -154,9 +156,11 @@ def test_the_oldest_tool_results_are_the_first_thing_trimmed() -> None:
     result = plan(history, ContextWindow(6_000, reserved_output_tokens=1_000))
 
     assert result.fits is True
-    assert [record.segment for record in result.trimmed] == [SegmentName.OLD_TOOL_RESULTS]
-    assert result.trimmed[0].references == ("c1", "c2")
-    assert result.compacted is None
+    assert {record.segment for record in result.trimmed} == {SegmentName.OLD_TOOL_RESULTS}
+    assert {
+        reference for record in result.trimmed for reference in record.references
+    } == {"c1", "c2"}
+    assert _no_orphaned_tool_results(result.messages)
 
 
 def test_a_trimmed_result_keeps_its_call_and_says_what_was_taken() -> None:
@@ -186,8 +190,9 @@ def test_a_trimmed_result_keeps_its_call_and_says_what_was_taken() -> None:
     assert result.messages[1] == history[1].message
 
 
-def test_trimming_stops_as_soon_as_the_round_fits() -> None:
-    """Oldest first, and no further — the newest output is the last to go."""
+def test_the_last_rung_stops_as_soon_as_the_round_fits() -> None:
+    """Inside the tail, oldest first and no further — the newest output is the
+    last to go."""
     history = stored(
         says("start"),
         called("./one", "c1"),
@@ -198,14 +203,14 @@ def test_trimming_stops_as_soon_as_the_round_fits() -> None:
     result = plan(history, ContextWindow(9_000, reserved_output_tokens=1_000))
 
     assert result.fits is True
-    assert result.trimmed[0].references == ("c1",)
+    assert result.trimmed[-1].references == ("c1",)
     # The most recent result is still whole, because giving up the older one
     # was enough.
     assert result.messages[-1] == history[-1].message
 
 
 def test_a_long_conversation_is_compacted_and_the_range_is_recorded() -> None:
-    """Step four, and the record §7.4.2 requires it to leave."""
+    """The record §7.4.2 requires a compaction to leave."""
     history = stored(
         says("the task, stated at length: " + "t" * 600),
         *(says(f"round {index}: " + "w" * 600, role="assistant") for index in range(8)),
@@ -254,61 +259,21 @@ def test_a_compaction_boundary_never_splits_a_tool_call_from_its_result() -> Non
     'Messages with role tool must be a response to a preceding message with
     tool_calls'. §7.4.2: 工具调用与工具结果不能拆开.
 
-    Message count alone would stop at the smallest boundary that fits, and
-    that is `through=2` here — right between the call and its answer, as
-    `test_the_search_settles_early_when_there_is_room` in
-    `test_stored_summary.py` shows for the plain-message version of this same
-    shape. The fix must walk past the pair instead, to `through=3`.
+    Here the retained tail's token target lands on the result; the cut moves
+    earlier, to the call.
     """
     history = stored(
         says("the task, stated at some length: " + "t" * 550),
+        *(says(f"round {index}: " + "w" * 900, role="assistant") for index in range(6)),
         called("./step-0", "c0"),
-        answered("ok", "c0"),
-        *(says(f"round {index}: " + "w" * 200, role="assistant") for index in range(4)),
+        answered("r" * 3_000, "c0"),
         says("what is left?"),
     )
-    result = plan(history, ContextWindow(1_200, reserved_output_tokens=200))
+    result = plan(history, ContextWindow(2_400, reserved_output_tokens=200))
 
     assert result.fits is True
     assert _no_orphaned_tool_results(result.messages)
-    compaction = result.compacted
-    assert compaction is not None
-    # Advanced past the pair, not stopped short of it: the call's answer
-    # (sequence 3) is inside the covered range too, not left standing alone.
-    assert compaction.last_sequence >= 3
-    assert compaction.message_ids == tuple(
-        item.id for item in history[: compaction.covered]
-    )
-
-
-def test_when_every_boundary_would_split_a_pair_the_originals_are_kept() -> None:
-    """No legal boundary exists in [2, compactable] at all: the call sits
-    right after the start of the compactable range, its answer sits just
-    outside it (protected by `PROTECTED_RECENT_MESSAGES`), and every
-    candidate boundary in between would have to include the call without its
-    answer.
-
-    §7.4.2's failure ladder still applies: this round already fits `allowance`
-    without any compaction, so nothing may be dropped and the Run may not be
-    paused just because structural compaction found no legal place to cut —
-    `threshold=0.0` forces the cascade to run anyway, to prove step four's
-    empty search is what produces this result, not the round fitting from the
-    start.
-    """
-    history = stored(
-        says("start the task"),
-        called("./step-0", "c0"),
-        says("padding a", role="assistant"),
-        says("padding b", role="assistant"),
-        says("padding d", role="assistant"),
-        answered("ok", "c0"),
-        says("what is left?"),
-    )
-    result = plan(history, ROOMY, threshold=0.0)
-
-    assert result.fits is True
-    assert result.compacted is None
-    assert result.messages == tuple(item.message for item in history)
+    assert result.compacted is not None
 
 
 def test_the_summary_says_what_it_replaced_and_where_to_find_it() -> None:
@@ -316,9 +281,11 @@ def test_the_summary_says_what_it_replaced_and_where_to_find_it() -> None:
     rounds: list[CanonicalMessage] = []
     for index in range(6):
         rounds.append(called(f"./step-{index}", f"c{index}"))
-        rounds.append(answered("q" * 3_000, f"c{index}"))
+        # Distinct outputs: identical ones would be deduplicated below the
+        # trigger by cleanup alone, and this test is about the summary.
+        rounds.append(answered(f"{index}" + "q" * 3_000, f"c{index}"))
     history = stored(says("do it"), *rounds, says("status?"))
-    window = ContextWindow(1_000, reserved_output_tokens=750)
+    window = ContextWindow(5_000, reserved_output_tokens=750)
     result = plan(history, window)
 
     assert result.compacted is not None
@@ -328,25 +295,6 @@ def test_the_summary_says_what_it_replaced_and_where_to_find_it() -> None:
     assert "shell.exec" in summary.text
     # Same input, same output. A summary a model wrote would not have this.
     assert plan(history, window).messages[0].text == summary.text
-
-
-def test_a_compaction_never_reaches_the_request_it_is_making_room_for() -> None:
-    """§7.4.2: 当前用户请求必须完整保留 — including from step four.
-
-    A fresh Run states its request first and everything after it is the work,
-    so oldest-first compaction walks straight at the one message that may not
-    go. It stops instead, and this conversation overflows with its originals
-    intact rather than fitting by summarizing the question away.
-    """
-    history = stored(
-        says("the task: " + "t" * 600),
-        *(says(f"round {index}: " + "w" * 900, role="assistant") for index in range(8)),
-    )
-    result = plan(history, ContextWindow(1_200, reserved_output_tokens=200))
-
-    assert result.compacted is None
-    assert result.fits is False
-    assert result.messages == tuple(item.message for item in history)
 
 
 def test_incompressible_content_that_does_not_fit_does_not_get_truncated() -> None:
@@ -364,12 +312,15 @@ def test_incompressible_content_that_does_not_fit_does_not_get_truncated() -> No
 
 
 def test_a_conversation_that_cannot_be_compacted_small_enough_keeps_its_originals() -> None:
-    """压缩失败后保留原文. Nothing is deleted on the way to the pause."""
+    """压缩失败后保留原文. Nothing is deleted on the way to the pause.
+
+    The newest message is always kept whole, and here it is text no rung may
+    cut — the one shape where compacting everything else is still not enough.
+    """
     history = stored(
-        says("start"),
+        says("the question"),
         says("m" * 40_000, role="assistant"),
         says("n" * 40_000, role="assistant"),
-        says("the question"),
     )
     result = plan(history, ContextWindow(600, reserved_output_tokens=100))
 
@@ -390,167 +341,80 @@ def test_the_planner_never_reports_a_number_as_usage() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 主动裁剪（§7.4.2「主动裁剪：不花钱的那几级不等压缩线」）
-#
-# 这一组守的是同一件事的五个面：不花钱的裁剪有自己的触发点、按条数保护尾部、
-# 三遍确定性处理、以及两道缓存闸门。参照实现见 spec 里点名的
-# `hermes-agent @ 3f83297` 的 `prune_tool_results_only`。
+# 清理（§7.4.2 v2.10「① 清理」）：三遍确定性处理与缓存闸门。只在视图越过触发线时
+# 发生，只动保留区之外——v2.9 的「主动裁剪」有自己的触发点、按条数保护尾部，
+# 这两条 v2.10 取消了，对应的测试见 `test_compaction_v2.py`。
 # ---------------------------------------------------------------------------
 
-
-def _wide() -> ContextWindow:
-    """一个大到压缩线永远够不着的窗口——这正是主动裁剪要解决的处境。
-
-    1M 窗口、阈值 0.50 意味着要攒到 500K 才触发压缩；下面每条测试的历史都远小于
-    那个数，所以任何在旧判据下发生的裁剪都只可能来自主动裁剪这条路径。
-    """
-    return ContextWindow(context_window=1_000_000, reserved_output_tokens=0)
+#: 触发线 85K（输入额度 100K × 0.85）；下面的夹具都在它之上。
+_WINDOW = ContextWindow(context_window=101_000, reserved_output_tokens=1_000)
 
 
-def _huge(marker: str) -> str:
-    """一段超过 `PRUNE_MIN_RESULT_CHARS` 的工具输出。
-
-    `marker` 让每段内容互不相同，免得「去重」那一遍替「打存根」那一遍把测试蒙混过关。
-    """
-    return f"{marker}:" + ("x" * PRUNE_MIN_RESULT_CHARS)
+def _tail() -> tuple[CanonicalMessage, ...]:
+    """一段刚好填满保留区的最近对话，让夹具里更早的东西都落在保留区之外。"""
+    return (says("recent " + "r" * int(RETAINED_TAIL_TOKENS * 3 / 1.1)),)
 
 
-def test_a_big_old_tool_result_is_pruned_long_before_the_compaction_line() -> None:
-    """这条是整组的由来。
-
-    旧实现里 `_trim_old_tool_results` 的目标是总额度，所以 1M 窗口下这段历史
-    （几十 KB）离触发线差着三个数量级，一次裁剪都不会发生，而那段早就没用的输出
-    每一轮都被逐字重发。
-    """
-    history = stored(
-        *[
-            message
-            for index in range(12)
-            for message in (
-                says(f"问题 {index}"),
-                called(f"cmd {index}", f"c{index}"),
-                answered(_huge(f"out{index}"), f"c{index}"),
-            )
-        ]
-    )
-    plan_result = plan(history, _wide())
-
-    assert plan_result.fits
-    trimmed_segments = [record.segment for record in plan_result.trimmed]
-    assert SegmentName.OLD_TOOL_RESULTS in trimmed_segments
-
-
-def test_the_newest_messages_are_protected_by_count_not_by_tokens() -> None:
-    """按 Token 保护尾部会在大窗口上护住整个会话，于是什么也裁不掉。
-
-    Hermes 的 docstring 专门点了这个陷阱：`tail_token_budget` 是从压缩阈值推导的
-    （1M 窗口上约 100K），用它做尾部保护等于把整段历史都算成「最近」。
-    """
-    history = stored(
-        *[
-            message
-            for index in range(12)
-            for message in (
-                says(f"问题 {index}"),
-                called(f"cmd {index}", f"c{index}"),
-                answered(_huge(f"out{index}"), f"c{index}"),
-            )
-        ]
-    )
-    plan_result = plan(history, _wide())
-
-    kept_whole = [
-        block.output
-        for message in plan_result.messages[-PRUNE_PROTECTED_RECENT_MESSAGES:]
-        for block in message.blocks
-        if isinstance(block, ToolResultBlock)
-    ]
-    # 尾部里的工具结果一个字都没动。
-    assert all(len(output) > PRUNE_MIN_RESULT_CHARS for output in kept_whole)
-
-
-def test_identical_tool_results_are_deduplicated_even_inside_the_protected_tail() -> None:
-    """第一遍是无损的，所以它不受尾部保护限制。
-
-    完全相同的输出重复出现时，最新的那份保留完整，更早的改成回指——模型能看到的
-    信息一个字没少，而重复的字节不再每轮重发。
-    """
-    # 这段输出要够大：两道闸门是真的，夹具小于它们时正确的行为就是什么都不做。
-    # 一段 8K 字符约 2K Token，回收量抵不过 `PRUNE_MIN_RECLAIM_TOKENS`，
-    # 所以这里用远大于阈值的那种「一次 ls 刷了满屏」的量级。
-    same = "identical:" + ("x" * (PRUNE_MIN_RESULT_CHARS * 6))
+def test_identical_tool_results_outside_the_tail_point_at_the_copy_inside_it() -> None:
+    """第一遍是无损的：更早的那份改成回指，指向保留区里一字不差、完整发送的那份。
+    这一次清理就够让这一轮回到触发线以下，所以不做摘要，两份都还在。"""
+    same = "identical:" + ("x" * 29_000)
+    filler = [says("f" * 30_000, role="assistant") for _ in range(4)]
     history = stored(
         says("跑一遍"),
         called("ls", "c1"),
         answered(same, "c1"),
-        says("再跑一遍"),
+        *filler,
+        *_tail(),
         called("ls", "c2"),
         answered(same, "c2"),
     )
-    plan_result = plan(history, _wide())
+    plan_result = plan(history, _WINDOW)
 
-    outputs = [
-        block.output
+    assert plan_result.compacted is None
+    outputs = {
+        block.call_id: block.output
         for message in plan_result.messages
         for block in message.blocks
         if isinstance(block, ToolResultBlock)
-    ]
-    assert len(outputs) == 2
-    # 最新的那份完整保留，更早的那份不再重复承载同样的字节。
-    assert outputs[-1] == same
-    assert outputs[0] != same
-    assert len(outputs[0]) < len(same)
+    }
+    assert outputs["c2"] == same
+    assert "c2" in outputs["c1"]
+    assert len(outputs["c1"]) < len(same)
 
 
 def test_an_oversized_tool_call_argument_outside_the_tail_is_truncated() -> None:
-    """第三遍：过大的工具调用参数也算重发的字节。
-
-    只裁尾部之外的——模型正在依据的那次调用，参数必须原样。
-    """
+    """第三遍：过大的工具调用参数也算重发的字节。只裁保留区之外的——模型正在
+    依据的那次调用，参数必须原样。"""
     giant = "giant-argument:" + ("x" * (PRUNE_MIN_RESULT_CHARS * 6))
-    history = stored(
-        called(giant, "c1"),
-        answered("ok", "c1"),
-        # 尾部保护按条数，所以那次调用必须真的被推出尾部才轮得到第三遍。
-        *[
-            message
-            for index in range(PRUNE_PROTECTED_RECENT_MESSAGES + 2)
-            for message in (says(f"后续 {index}"),)
-        ],
-    )
-    plan_result = plan(history, _wide())
+    filler = [says("f" * 30_000, role="assistant") for _ in range(5)]
+    history = stored(called(giant, "c1"), answered("ok", "c1"), *filler, *_tail())
+    plan_result = plan(history, _WINDOW)
 
-    first = plan_result.messages[0]
-    argument = next(
-        block.arguments["command"]
-        for block in first.blocks
-        if isinstance(block, ToolCallBlock)
+    first = next(
+        block
+        for message in plan_result.messages
+        for block in message.blocks
+        if isinstance(block, ToolCallBlock) and block.call_id == "c1"
     )
-    # 比原长短，不是比阈值短：截断后的内容是「阈值长度 + 一句说明去哪儿取全文」，
-    # 本来就会比阈值长一点。断言写成 `< PRUNE_MIN_RESULT_CHARS` 会把一个正确的
-    # 实现判成失败。
+    argument = first.arguments["command"]
+    # 比原长短，不是比阈值短：截断后的内容是「阈值长度 + 一句说明去哪儿取全文」。
     assert len(argument) < len(giant)
     assert "truncated by the platform" in argument
 
 
-def test_a_prune_that_would_reclaim_almost_nothing_changes_nothing() -> None:
-    """缓存闸门：改写历史会让 provider 的前缀缓存从最早被改写处失效。
-
-    所以回收不够多就一个字不改——省下的那点 Token 抵不过一次缓存失效。
-    断言的是「历史逐条相同」，不是「没有 trimmed 记录」：后者一个改了内容却忘了
-    记录的实现也满足。
-    """
+def test_a_cleanup_that_would_reclaim_almost_nothing_is_not_recorded() -> None:
+    """缓存闸门：回收不够多就不采纳这次清理——省下的那点 Token 抵不过一次缓存失效。
+    这一轮越过了触发线，所以接下来轮到压缩；清理本身不留下任何记录。"""
+    filler = [says("f" * 30_000, role="assistant") for _ in range(9)]
     history = stored(
-        *[
-            message
-            for index in range(12)
-            for message in (
-                says(f"问题 {index}"),
-                called(f"cmd {index}", f"c{index}"),
-                answered(f"短输出 {index}", f"c{index}"),
-            )
-        ]
+        called("cmd", "c1"),
+        answered("短输出 " + "s" * (PRUNE_MIN_RESULT_CHARS + 10), "c1"),
+        *filler,
+        *_tail(),
     )
-    plan_result = plan(history, _wide())
+    plan_result = plan(history, _WINDOW)
 
-    assert plan_result.messages == tuple(item.message for item in history)
+    assert SegmentName.OLD_TOOL_RESULTS not in {
+        record.segment for record in plan_result.trimmed
+    }

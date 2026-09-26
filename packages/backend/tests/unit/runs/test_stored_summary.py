@@ -1,7 +1,10 @@
-"""压缩用传进来的那份摘要，而不是每轮现编一份。
+"""压缩用传进来的那份摘要，而不是每轮现编一份；而且它是存档点。
 
 现编会同时坏两件事：同一个 Run 重放得到不同的上下文，以及每轮多付一次模型
 调用。所以摘要是输入，不是这一层的产物。
+
+v2.10 起它还是存档点：此后每轮发「摘要 + 补回 + 它之后的原文」，它覆盖的原文
+不再发送。
 """
 
 from typing import Any
@@ -58,7 +61,7 @@ def _answered(output: str, call_id: str) -> CanonicalMessage:
 
 @pytest.fixture
 def long_history() -> tuple[StoredMessage, ...]:
-    """Long enough that `WINDOW` forces step four: structural compaction.
+    """Long enough that `WINDOW` forces a structural compaction.
 
     Same shape as `test_a_long_conversation_is_compacted_and_the_range_is_recorded`
     in `test_context_budget.py` — a long stated task, several padded rounds, and
@@ -113,10 +116,9 @@ def test_a_stored_summary_is_what_the_model_sees(
         stored_summary=CoveredSummary(text="用户在排查一条图片管道的故障。", last_sequence=7),
     )
 
-    assert plan.compacted is not None
+    assert plan.checkpoint == 7
     text = _first_text(plan.messages)
     assert "用户在排查一条图片管道的故障。" in text
-    assert plan.compacted.source == "model"
 
 
 def test_without_one_it_falls_back_to_the_structural_summary(
@@ -130,22 +132,26 @@ def test_without_one_it_falls_back_to_the_structural_summary(
     assert plan.compacted.source == "structural"
 
 
-def test_the_stored_summary_is_not_used_when_nothing_is_compacted(
-    short_history: tuple[StoredMessage, ...],
-) -> None:
+def test_the_originals_a_stored_summary_covers_are_not_sent_again() -> None:
+    """A checkpoint, even on a history that would not need compacting: the
+    Session was compacted once, and the turns the summary stands for stay
+    replaced. (The user's own words come back inside the summary message's
+    put-back, not as the message they were.)"""
+    history = _stored(_says("hello"), _says("hi there", role="assistant"), _says("and now?"))
     plan = _plan_with(
-        short_history, stored_summary=CoveredSummary(text="不该出现", last_sequence=1)
+        history, stored_summary=CoveredSummary(text="打过招呼。", last_sequence=1)
     )
 
-    assert plan.compacted is None
-    assert "不该出现" not in "".join(_all_text(plan.messages))
+    assert plan.checkpoint == 1
+    sent = _all_text(plan.messages)
+    assert "hello" not in sent
+    assert "hi there" in sent
+    assert "打过招呼。" in _first_text(plan.messages)
 
 
 @pytest.fixture
 def room_to_spare() -> tuple[StoredMessage, ...]:
-    """Long enough to compact, short enough that compacting the first two
-    turns is already enough — so the boundary search stops well before the end
-    of any range a stored summary is likely to cover."""
+    """Short enough to fit without compacting."""
     return _stored(
         _says("the task, stated at some length: " + "t" * 550),
         *(_says(f"round {index}: " + "w" * 200, role="assistant") for index in range(5)),
@@ -153,61 +159,28 @@ def room_to_spare() -> tuple[StoredMessage, ...]:
     )
 
 
-def test_the_search_settles_early_when_there_is_room(
+def test_a_stored_summary_stands_for_exactly_the_range_it_explains(
     room_to_spare: tuple[StoredMessage, ...],
 ) -> None:
-    """Pinned so the test below has a number to be about: without a stored
-    summary this shape compacts two turns and stops, because two is enough."""
-    plan = _plan_with(room_to_spare, stored_summary=None)
-
-    assert plan.compacted is not None
-    assert plan.compacted.last_sequence == 2
-
-
-def test_a_stored_summary_compacts_exactly_the_range_it_explains(
-    room_to_spare: tuple[StoredMessage, ...],
-) -> None:
-    """一份解释 1–5 的摘要，不能只顶替 1–2。
-
-    顶替少了不丢东西，坏的是另外两件：模型同时读到一份说「1–5 发生了这些」的
-    摘要和 3–5 的原文；`CONTEXT_COMPACTED` 说 `covered=2`、`freed_estimate`
-    也按两条算——运维照着这条记录去查模型读到了什么，读到的是一份少说了三条的
-    账。
-
-    所以边界不是搜出来的：摘要写下来时就已经说明了它解释到哪，`plan_context`
-    钉在那里，装不下就整份不用（`_honestly_widens` 那条回退路）。
-    """
+    """一份解释 1–5 的摘要，顶替的就是 1–5：模型不会同时读到「1–5 发生了这些」和
+    其中几条的原文，也不会少读 6 之后的原文。"""
     covered = CoveredSummary(text="1 到 5 轮里用户确认了参数并让我继续。", last_sequence=5)
 
     plan = _plan_with(room_to_spare, stored_summary=covered)
 
     assert plan.fits
-    assert plan.compacted is not None
-    assert plan.compacted.last_sequence == 5
-    assert plan.compacted.covered == 5
-    assert "1 到 5 轮里用户确认了参数并让我继续。" in _first_text(plan.messages)
-    # 3–5 顶替掉了，不该再以原文出现一遍。
-    assert "round 2: " not in "".join(_all_text(plan.messages))
+    assert plan.checkpoint == 5
+    sent = "".join(_all_text(plan.messages))
+    assert "1 到 5 轮里用户确认了参数并让我继续。" in sent
+    assert "round 3: " not in sent  # sequence 5
+    assert "round 4: " in sent  # sequence 6
 
 
-def test_a_pinned_boundary_mid_pair_is_refused_rather_than_cut() -> None:
-    """The stored summary's own range can end between a `tool_calls` message
-    and the `tool` message answering it — nothing on the write side of a
-    summary knows about pairing, it only knows a sequence number to stop at.
-
-    The text genuinely covers those turns, so trimming the range would be
-    dishonest in the other direction (`_honestly_widens`'s territory); but
-    compacting to exactly that boundary produces a `tool` message with no
-    call ahead of it, which is what the provider rejects. Cutting there is
-    not an option, so the pinned boundary is refused outright rather than
-    silently extended past the pair — extending would compact a turn
-    (sequence 3, the answer) the stored text was never asked to explain, the
-    same "walked past its own range" failure `_honestly_widens` exists to
-    catch, just produced from this side instead. `worker.py::_plan_context`
-    already treats `compacted is None` here as a generation failure and falls
-    back to its own structural (unpinned) plan, whose search is free to
-    advance past the same pair because it never claimed to explain only 1-2.
-    """
+def test_a_summary_ending_between_a_call_and_its_result_is_not_a_checkpoint() -> None:
+    """Built on it, the view would send the result (sequence 3) with its call
+    (sequence 2) summarized away — the shape a provider rejects outright. The
+    Worker never saves such a summary (its cut moves earlier instead), but a
+    stored row is not proof of who wrote it."""
     history = _stored(
         _says("the task, stated at some length: " + "t" * 550),
         _called("./step-0", "c0"),
@@ -215,10 +188,9 @@ def test_a_pinned_boundary_mid_pair_is_refused_rather_than_cut() -> None:
         *(_says(f"round {index}: " + "w" * 200, role="assistant") for index in range(4)),
         _says("what is left?"),
     )
-    # Sequence 2 is the `tool_calls` message; its answer is sequence 3.
     covered = CoveredSummary(text="用户让我跑一个命令。", last_sequence=2)
 
     plan = _plan_with(history, stored_summary=covered)
 
-    assert plan.compacted is None
-    assert plan.messages == tuple(item.message for item in history)
+    assert plan.checkpoint is None
+    assert "用户让我跑一个命令。" not in "".join(_all_text(plan.messages))

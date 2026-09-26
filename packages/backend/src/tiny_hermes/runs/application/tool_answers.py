@@ -138,18 +138,23 @@ async def answer_skill_load(
         asked = skill_load_of(call)
     except ToolRefused as refused:
         return refusal(call.call_id, refused.reason, refused.detail), None
-    if len(loaded) >= MAX_SKILL_LOADS:
-        return (
-            text_refusal(
-                call.call_id,
-                f"this Run has already loaded skill text {MAX_SKILL_LOADS} "
-                f"times, which is the limit",
-            ),
-            None,
-        )
     bound = next(
         (skill for skill in context.granted_skills if skill.name == asked.skill), None
     )
+    # 按不同的技能版本计（§7.4.2 v2.10），同一版本再加载不计数：压缩把技能正文折进
+    # 摘要之后，模型再加载一次是取回它本来有的东西，不是在翻目录。
+    counted = set(loaded)
+    if (bound is None or bound.skill_version_id not in counted) and len(
+        counted
+    ) >= MAX_SKILL_LOADS:
+        return (
+            text_refusal(
+                call.call_id,
+                f"this Run has already loaded text from {MAX_SKILL_LOADS} "
+                f"different skills, which is the limit",
+            ),
+            None,
+        )
     if bound is None:
         # The same refusal an unbound tool gets, and for the same reason: what
         # the model may reach is what the Version bound.

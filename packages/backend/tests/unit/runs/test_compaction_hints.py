@@ -204,3 +204,14 @@ def test_hints_are_dropped_before_compaction_is_allowed_to_fail() -> None:
     assert "鹈鹕" in with_hints
     assert "鹈鹕" not in without
     assert len(without) < len(with_hints)
+
+
+def test_a_long_unbroken_string_is_not_a_hint() -> None:
+    """A hash, a base64 blob, a minified line: one "word" of thousands of
+    characters, said twice, would otherwise ride inside every summary in full
+    — a compaction that saves nothing because its own hint list is as long as
+    what it replaced. Nobody searches for such a string by typing it."""
+    blob = "a" * 1_800
+    hints = compaction_hints([_said(1, blob), _said(2, blob)])
+
+    assert hints == ()

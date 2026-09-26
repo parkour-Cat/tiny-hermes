@@ -67,6 +67,13 @@ PLATFORM_TOOLS = frozenset(
     }
 )
 
+#: Tools whose results are instructions rather than data, and so are never
+#: cut down by the context planner — not capped on entry, not cleared later
+#: (§7.4.2 v2.10, 豁免). `skill.load` refuses an oversized file whole rather
+#: than truncating it, because a model handed half a document cannot tell it
+#: is holding half; the planner cutting it afterwards would undo exactly that.
+UNTRIMMED_TOOLS = frozenset({"skill.load"})
+
 #: The longest a round may ask to sleep, a little over a day. A Run in
 #: `waiting_external` holds its Session's head, so the model does not get to
 #: decide that a conversation is unavailable until next year.
@@ -148,10 +155,12 @@ PLATFORM_WAIT_ARGUMENTS = frozenset({"seconds"})
 #: model handed half a document has no way to know it is reading half.
 MAX_SKILL_FILE_BYTES = 65_536
 
-#: How many times one Run may load skill text. Progressive loading is meant to
-#: bring in the two or three documents a task needs; a Run asking for a ninth is
-#: reading the catalog rather than doing the work, and the ceiling is named in
-#: the refusal so the model can stop asking.
+#: How many different skill versions one Run may load text from. Progressive
+#: loading is meant to bring in the two or three documents a task needs; a Run
+#: asking for a ninth skill is reading the catalog rather than doing the work,
+#: and the ceiling is named in the refusal so the model can stop asking.
+#: Loading a version again does not count (§7.4.2 v2.10): after a compaction
+#: folds skill text into the summary, loading it again is taking it back.
 MAX_SKILL_LOADS = 8
 
 #: What `skill.load` reads when the model names no file. §10.1 makes `SKILL.md`

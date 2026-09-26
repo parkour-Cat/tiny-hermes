@@ -59,9 +59,9 @@ from tiny_hermes.runs.application.service import (
 )
 from tiny_hermes.runs.domain.approval import ApprovalStatus
 from tiny_hermes.runs.domain.context_budget import (
-    PROTECTED_RECENT_MESSAGES,
     Accounting,
     ContextWindow,
+    has_compactable_history,
 )
 from tiny_hermes.runs.domain.models import (
     TERMINAL_STATES,
@@ -950,30 +950,31 @@ class SqlRunStore:
     async def request_compaction(self, session_id: UUID) -> bool:
         """打上标记，并回答这段会话有没有可压缩的历史。
 
-        「有没有可压缩的」用的判据和规划器一样：留给压缩的必须至少有两条消息
-        （`PROTECTED_RECENT_MESSAGES` 之外还剩 ≥ 2），否则 `plan_context` 里的
-        `can_compact` 也是 False，压缩根本不会发生。判据写在这里而不是让调用方
-        猜，是为了让回执说的那句话和下一轮真正会发生的事对得上。
+        「有没有可压缩的」用的判据和规划器一样（`has_compactable_history`）：
+        上一份摘要之后的原文比一个完整的保留区还长，保留区之外才有东西可压。
+        判据写在这里而不是让调用方猜，是为了让回执说的那句话和下一轮真正会发生
+        的事对得上。它不知道窗口多大，按完整的保留区算——小窗口上规划器会把保留
+        区缩小，所以这里可能在「其实还能压一点」时说没有，不会在真没得压时说有。
 
         标记照写不误，哪怕现在没得压：会话在下一轮之前还会长，那时它就该生效。
         """
-        row = await self._session.execute(
-            select(func.count())
-            .select_from(SessionMessageRow)
-            .where(
-                SessionMessageRow.session_id == session_id,
-                SessionMessageRow.redacted.is_(False),
-                SessionMessageRow.withdrawn_at.is_(None),
-            )
+        stored = await self.latest_summary(session_id)
+        scoped = select(SessionMessageRow).where(
+            SessionMessageRow.session_id == session_id,
+            SessionMessageRow.redacted.is_(False),
+            SessionMessageRow.withdrawn_at.is_(None),
         )
-        messages = int(row.scalar_one())
+        if stored is not None:
+            scoped = scoped.where(SessionMessageRow.sequence > stored.last_sequence)
+        found = await self._session.scalars(scoped.order_by(SessionMessageRow.sequence))
+        messages = [_to_message(row) for row in found]
         await self._session.execute(
             update(SessionRow)
             .where(SessionRow.id == session_id)
             .values(compaction_requested_at=datetime.now(UTC))
         )
         await self._session.flush()
-        return messages - PROTECTED_RECENT_MESSAGES >= 2
+        return has_compactable_history(messages)
 
     async def take_compaction_request(self, session_id: UUID) -> bool:
         """读走那个标记：返回它是否曾被置上，并清掉它。
