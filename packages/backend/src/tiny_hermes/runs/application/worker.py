@@ -888,24 +888,28 @@ class WorkerRuntime:
         for path in condition.expected_artifacts:
             # `test -e` and not a stat of the host: the artifact is a path
             # inside the sandbox, and this is the only place it exists.
-            met = await self._check_holds(
+            held = await self._check_holds(
                 claimed, handle, box, f"test -e {shlex.quote(f'{DATA_ROOT}/{path}')}", 30
             )
-            if met is None:
+            if held is None:
                 return GoalEvidence(declared=True, observable=False)
-            checks.append(CompletionCheck(name=path, met=met))
+            checks.append(CompletionCheck(name=path, met=held[0]))
 
         if condition.verification_command is not None:
-            met = await self._check_holds(
+            held = await self._check_holds(
                 claimed,
                 handle,
                 box,
                 condition.verification_command,
                 _VERIFICATION_TIMEOUT_SECONDS,
             )
-            if met is None:
+            if held is None:
                 return GoalEvidence(declared=True, observable=False)
-            checks.append(CompletionCheck(name=condition.verification_command, met=met))
+            checks.append(
+                CompletionCheck(
+                    name=condition.verification_command, met=held[0], output=held[1]
+                )
+            )
 
         return GoalEvidence(declared=True, checks=tuple(checks))
 
@@ -916,8 +920,9 @@ class WorkerRuntime:
         box: _Sandbox,
         line: str,
         timeout_seconds: int,
-    ) -> bool | None:
-        """Run one check. ``None`` means it did not answer.
+    ) -> tuple[bool, str] | None:
+        """Run one check: whether it held, and what it printed. ``None`` means
+        it did not answer.
 
         A command that was killed on its timeout, or a controller that refused
         to run it, said nothing about whether the goal was met. Reporting
@@ -951,7 +956,7 @@ class WorkerRuntime:
             return None
         if result.timed_out:
             return None
-        return int(result.exit_code) == 0
+        return int(result.exit_code) == 0, str(result.output)
 
     async def _file_safety_holds(
         self, claimed: ClaimedRun, handle: _LeaseHandle, box: _Sandbox
@@ -2420,6 +2425,43 @@ def _no_round(failure: str | None = None) -> ModelResponse:
     )
 
 
+def _persona(context: ExecutionContext) -> str:
+    """The Agent's personality, followed by how its claim of being finished
+    will be checked.
+
+    A model used to learn the completion conditions only by failing them, and
+    `completion.constraints` — documented as "handed to the model" — reached
+    no model at all. Said once, up front, in the segment that is sent every
+    round and never trimmed. The planner and the request both call this, so
+    the text that is charged is the text that is sent.
+
+    The constraints are the author's words and are not checked by anything;
+    the sentence says so, so the model does not read them as enforced.
+    """
+    personality = context.spec.personality
+    condition = context.spec.completion
+    if condition is None:
+        return personality
+    lines = ["When you say the task is finished, the platform checks it:"]
+    if condition.expected_artifacts:
+        listed = ", ".join(condition.expected_artifacts)
+        lines.append(f"- these files must exist under {DATA_ROOT}: {listed}")
+    if condition.verification_command is not None:
+        lines.append(
+            f"- this command must succeed in your sandbox: {condition.verification_command}"
+        )
+    if condition.constraints:
+        lines.append(
+            "The author of this Agent also set these constraints (nothing checks "
+            f"them automatically; respect them): {condition.constraints}"
+        )
+    if condition.stop_conditions.max_rounds is not None:
+        lines.append(
+            f"This task may take at most {condition.stop_conditions.max_rounds} rounds."
+        )
+    return f"{personality}\n\n" + "\n".join(lines)
+
+
 def _rounds_exhausted(context: ExecutionContext) -> bool:
     """Whether the round being judged is the last `max_rounds` allows.
 
@@ -2739,7 +2781,7 @@ def _plan(
         # Chosen from the same schema list the request advertises, so the
         # planner charges exactly the preamble the provider sends.
         safety_rules=safety_preamble(tools=bool(schemas)),
-        personality=context.spec.personality,
+        personality=_persona(context),
         tool_schemas=schemas,
         history=context.history,
         skill_summaries=summaries,
@@ -2810,7 +2852,7 @@ def _request(
     return ModelRequest(
         images=pictures or {},
         policy=context.spec.model_policy,
-        personality=context.spec.personality,
+        personality=_persona(context),
         messages=plan.messages,
         round_index=_round_index(context),
         tools=_tool_schemas(context, mcp),
