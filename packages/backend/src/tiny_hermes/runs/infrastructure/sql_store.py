@@ -945,6 +945,17 @@ class SqlRunStore:
             # (see `_remembered`'s own docstring for why those are kept
             # apart).
             caller_type=None if owning is None else CallerType(owning.caller_type),
+            rounds_judged=int(
+                await self._session.scalar(
+                    select(func.count())
+                    .select_from(RunEventRow)
+                    .where(
+                        RunEventRow.run_id == run.id,
+                        RunEventRow.event_type == RunEventType.GOAL_VERDICT.value,
+                    )
+                )
+                or 0
+            ),
         )
 
     async def request_compaction(self, session_id: UUID) -> bool:
@@ -1702,7 +1713,7 @@ class SqlRunStore:
             return await self._snapshot(run, command.capabilities)
 
         extra = (
-            (ReservedEvent(RunEventType.RUN_LIMIT_REACHED, {"reason": "budget"}),)
+            (ReservedEvent(RunEventType.RUN_LIMIT_REACHED, {"reason": command.limit_valve}),)
             if command.limit_reached
             else ()
         )

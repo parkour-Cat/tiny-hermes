@@ -555,6 +555,7 @@ class WorkerRuntime:
                     _budget_after(after, response, executed_ms) and not work.tool_limit_reached
                 )
                 slice_expired = (monotonic() - started) >= self._settings.max_slice_seconds
+                rounds_exhausted = _rounds_exhausted(context)
                 hold_slice = after.compat_deadline_at is not None and not compat_expired
                 # §12.1: `_has_waiting_run` opens its own transaction, worth
                 # paying only when the answer could change this round's
@@ -581,6 +582,7 @@ class WorkerRuntime:
                         slice_expired=False,
                         compat_window_expired=compat_expired,
                         user_waiting=False,
+                        rounds_exhausted=rounds_exhausted,
                     )
                 )
                 # `_has_waiting_run` reads in its own transaction, separate
@@ -612,6 +614,7 @@ class WorkerRuntime:
                         hold_slice=hold_slice,
                         compat_window_expired=compat_expired,
                         user_waiting=waiting,
+                        rounds_exhausted=rounds_exhausted,
                     )
                 )
 
@@ -1313,7 +1316,11 @@ class WorkerRuntime:
             claimed,
             handle,
             after.state_version,
-            SliceDecision(None, limit_reached=decision.limit_reached),
+            SliceDecision(
+                None,
+                limit_reached=decision.limit_reached,
+                limit_valve=decision.limit_valve,
+            ),
             response,
             executed_ms,
             appended,
@@ -2242,6 +2249,7 @@ class WorkerRuntime:
             signal=decision.signal,
             pause_reason=decision.pause_reason,
             limit_reached=decision.limit_reached,
+            limit_valve=decision.limit_valve,
             wait_kind=decision.wait_kind,
             wait_seconds=decision.wait_seconds,
             wait_policy=decision.wait_policy,
@@ -2412,12 +2420,27 @@ def _no_round(failure: str | None = None) -> ModelResponse:
     )
 
 
+def _rounds_exhausted(context: ExecutionContext) -> bool:
+    """Whether the round being judged is the last `max_rounds` allows.
+
+    Counted per Run (`rounds_judged`), not from `_round_index`: that one is
+    the budget tree's model calls, which a child's or a retry's rounds also
+    move.
+    """
+    completion = context.spec.completion
+    ceiling = None if completion is None else completion.stop_conditions.max_rounds
+    return ceiling is not None and context.rounds_judged + 1 >= ceiling
+
+
 def _round_index(context: ExecutionContext) -> int:
-    """Which round this is, counted across the Run rather than the slice.
+    """Which round this is, counted across slices rather than within one.
 
     So a scenario that needs a second round still gets one after the Run has
     been re-queued at a slice boundary — and so the number the model is told
     and the number a person reads off the Run are the same number.
+
+    Counted from the budget, which the whole Run tree shares: a child's or a
+    retry's model calls move it too. A per-Run count is `rounds_judged`.
     """
     return context.budget.consumed_model_calls + 1
 
