@@ -265,3 +265,36 @@ async def test_an_admin_edit_is_the_only_door_to_shared_memory(
     assert created.status_code == 201, created.text
     assert created.json()["kind"] == "shared"
     assert created.json()["status"] == "active"
+
+
+async def test_a_memory_written_during_a_run_does_not_reach_that_run(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    rememberer: str,
+) -> None:
+    """The tool tells the model "Recorded for future conversations. It does not
+    affect this Run." Memories used to be re-read every round, so under
+    `low_risk_auto` the new one was in the very next round's system prompt —
+    and the memory block changed mid-Run, re-ranked against whatever the last
+    user turn was, so the prefix a provider had cached stopped matching.
+
+    A Run reads memories as they stood when it was created, the same set every
+    round."""
+    workspace_id = scope["X-Workspace-Id"]
+    await _set_policy(engine, workspace_id, "low_risk_auto")
+    session = session_for(rememberer)
+    _run(client, scope, session, "I prefer answers in one line.")
+    await _worker(engine, workspace_id, Recorder()).run_once()
+    assert await _pending_bodies(engine, workspace_id) == []
+
+    body = "I like tables better than lists."
+    _run(client, scope, session, body)
+    model = Recorder()
+    await _worker(engine, workspace_id, model).run_once()
+
+    assert len(model.requests) >= 2
+    assert all(body not in "".join(r.memories) for r in model.requests)
+    assert len({r.memories for r in model.requests}) == 1
+    assert "I prefer answers in one line." in "".join(model.requests[0].memories)
