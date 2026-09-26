@@ -16,11 +16,11 @@ from tiny_hermes.runs.domain.models import (
     TextBlock,
     ToolCallBlock,
     ToolResultBlock,
+    safety_preamble,
 )
 from tiny_hermes.runs.infrastructure.deterministic_model import (
     DeterministicModelProvider,
 )
-from tiny_hermes.runs.domain.models import safety_preamble
 from tiny_hermes.runs.infrastructure.openai_model import (
     SKILL_BLOCK_CLOSE,
     SKILL_BLOCK_OPEN,
@@ -82,7 +82,7 @@ def test_an_agent_with_no_skills_sends_no_skill_message() -> None:
     assert [item["content"] for item in system] == [safety_preamble(tools=False), PERSONALITY]
 
 
-TOOL = {
+TOOL: dict[str, Any] = {
     "type": "function",
     "function": {"name": "shell.exec", "description": "Run a command.", "parameters": {}},
 }

@@ -26,10 +26,10 @@ from tiny_hermes.runs.domain.context_budget import (
     plan_context,
 )
 from tiny_hermes.runs.domain.models import (
-    SAFETY_PREAMBLE,
     CanonicalMessage,
     StoredMessage,
     TextBlock,
+    safety_preamble,
 )
 
 #: The endpoint `test_compaction_summary.py` builds its `agent_on_the_small_
@@ -76,7 +76,7 @@ def _plan(
 ) -> ContextPlan:
     return plan_context(
         window=_WINDOW,
-        safety_rules=SAFETY_PREAMBLE,
+        safety_rules=safety_preamble(tools=False),
         personality=_PERSONALITY,
         tool_schemas=(),
         history=history,
