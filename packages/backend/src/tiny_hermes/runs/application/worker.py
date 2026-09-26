@@ -58,7 +58,6 @@ from tiny_hermes.runs.domain.goal import (
     judge,
 )
 from tiny_hermes.runs.domain.models import (
-    SAFETY_PREAMBLE,
     Block,
     BudgetSummary,
     CacheStateHint,
@@ -75,6 +74,7 @@ from tiny_hermes.runs.domain.models import (
     ToolCallBlock,
     ToolResultBlock,
     WorkspaceCleanupTarget,
+    safety_preamble,
 )
 from tiny_hermes.runs.domain.slice_policy import (
     RoundOutcome,
@@ -2710,11 +2710,14 @@ def _plan(
             skill_summaries=tuple(item.text for item in summaries),
             memories=tuple(fact.body for fact in context.memories),
         )
+    schemas = _tool_schemas(context, mcp)
     return plan_context(
         window=context.window,
-        safety_rules=SAFETY_PREAMBLE,
+        # Chosen from the same schema list the request advertises, so the
+        # planner charges exactly the preamble the provider sends.
+        safety_rules=safety_preamble(tools=bool(schemas)),
         personality=context.spec.personality,
-        tool_schemas=_tool_schemas(context, mcp),
+        tool_schemas=schemas,
         history=context.history,
         skill_summaries=summaries,
         memories=[fact.body for fact in context.memories],
