@@ -436,7 +436,7 @@ Provider Adapter 负责系统消息位置、并行工具调用、流式分片、
 - 当前轮尚未持久化任何助手输出或工具调用时，可以把同一 CanonicalMessage 转换后交给备用 Provider 重试。
 - 已向用户发送部分输出、持久化工具调用或发生外部副作用后，不能在同一轮静默切换 Provider；Run 进入 `interrupted` 或 `paused(operator)`，由新的安全步骤继续。
 - Provider 特有内容无法转换时明确返回 `provider_history_incompatible`，不能猜测或丢弃后继续。
-- 平台不要求、保存或转发 Provider 的隐藏推理内容。
+- 平台不要求 Provider 返回推理内容。端点返回了推理内容（如 `reasoning_content`）时，平台把它作为`ReasoningBlock` 存进会话记录，并在后续请求里原样回传给端点——思考模式的端点要求这样做，不回传会被拒绝（`400 The reasoning_content in the thinking mode must be passed back to the API`）。原先这里写的是「不保存、不转发」，与实现不符，2026-09-26 按实现改正。
 
 #### 7.4.2 上下文预算与裁剪顺序
 
