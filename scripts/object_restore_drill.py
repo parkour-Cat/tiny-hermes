@@ -2,10 +2,10 @@
 
 `docs/operations.md` says artifacts and skill packages live in the object
 store (SeaweedFS; MinIO until 2026-09) and must be backed up separately, and
-then recorded that this had never been rehearsed. The database drills next to it found two things a runbook cannot
-tell you by being read (`--data-only` restores in the wrong order; rolling
-back destroys the deduplication record), so the object half deserved the
-same treatment rather than a sentence.
+then recorded that this had never been rehearsed. The database drills next to
+it found two things a runbook cannot tell you by being read (`--data-only`
+restores in the wrong order; rolling back destroys the deduplication record),
+so the object half deserved the same treatment rather than a sentence.
 
 What this checks that a byte count would not: the **content** of every
 object after the restore. A restore that returns the right number of
