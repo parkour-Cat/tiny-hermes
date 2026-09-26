@@ -20,8 +20,8 @@ from tiny_hermes.runs.domain.models import (
 from tiny_hermes.runs.infrastructure.deterministic_model import (
     DeterministicModelProvider,
 )
+from tiny_hermes.runs.domain.models import safety_preamble
 from tiny_hermes.runs.infrastructure.openai_model import (
-    SAFETY_PREAMBLE,
     SKILL_BLOCK_CLOSE,
     SKILL_BLOCK_OPEN,
     build_payload,
@@ -79,7 +79,34 @@ def test_an_agent_with_no_skills_sends_no_skill_message() -> None:
     payload = build_payload(SPEC, request(), tools=[])
 
     system = [item for item in payload["messages"] if item["role"] == "system"]
-    assert [item["content"] for item in system] == [SAFETY_PREAMBLE, PERSONALITY]
+    assert [item["content"] for item in system] == [safety_preamble(tools=False), PERSONALITY]
+
+
+TOOL = {
+    "type": "function",
+    "function": {"name": "shell.exec", "description": "Run a command.", "parameters": {}},
+}
+
+
+def test_a_model_given_tools_is_not_told_it_has_none() -> None:
+    """The preamble used to open every request with "You have no tools … Answer
+    with text only", including the ones that advertised a dozen tools two
+    fields down. A model handed both instructions has to pick one to ignore."""
+    payload = build_payload(SPEC, request(), tools=[TOOL])
+
+    first = payload["messages"][0]
+    assert first["role"] == "system"
+    assert first["content"] == safety_preamble(tools=True)
+    assert "no tools" not in first["content"]
+    assert "text only" not in first["content"]
+    assert payload["tools"]
+
+
+def test_a_model_given_no_tools_is_told_to_answer_in_text() -> None:
+    payload = build_payload(SPEC, request(), tools=[])
+
+    assert payload["messages"][0]["content"] == safety_preamble(tools=False)
+    assert "text only" in safety_preamble(tools=False)
 
 
 def test_the_summaries_come_after_the_persona_in_a_message_of_their_own() -> None:
@@ -95,7 +122,7 @@ def test_the_summaries_come_after_the_persona_in_a_message_of_their_own() -> Non
     )
 
     system = [item["content"] for item in payload["messages"] if item["role"] == "system"]
-    assert system[0] == SAFETY_PREAMBLE
+    assert system[0] == safety_preamble(tools=False)
     assert system[1] == PERSONALITY
     assert "deploy" not in system[1]
     assert "- deploy: how to ship" in system[2]
@@ -115,7 +142,8 @@ def test_the_workspace_material_is_inside_markers_the_preamble_names() -> None:
     assert block.startswith(SKILL_BLOCK_OPEN)
     assert SKILL_BLOCK_CLOSE in block
     assert "skill.load" in block
-    assert "reference material" in SAFETY_PREAMBLE
+    assert "reference material" in safety_preamble(tools=False)
+    assert "reference material" in safety_preamble(tools=True)
 
 
 # -- what the drill scenario does -------------------------------------------
