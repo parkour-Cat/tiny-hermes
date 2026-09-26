@@ -465,3 +465,32 @@ async def test_max_rounds_stops_a_run_that_never_finishes(
             )
         ).scalars().all()
     assert [payload["reason"] for payload in reasons] == ["max_rounds"]
+
+
+async def test_the_model_is_told_how_it_will_be_checked_and_why_a_check_failed(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_that_declares: Any
+) -> None:
+    """Two things the model could not know. Before: the conditions its claim
+    is checked against — `completion.constraints` said "handed to the model"
+    and nothing handed it. After a failed claim: what the verification
+    printed, not only that it failed."""
+    agent = agent_that_declares(
+        {
+            "verification_command": "pytest -q",
+            "expected_artifacts": ["report.md"],
+            "constraints": "Never edit files under vendor/.",
+        },
+        rounds=2,
+    )
+    submit(client, scope, agent, "write the report")
+    sandbox = ScriptedSandbox(failing=("pytest -q",), output="")
+    model = Recording(claims_done("all done"), claims_done("all done"))
+
+    await drive(engine, model, sandbox)
+
+    first = model.requests[0].personality
+    assert "pytest -q" in first
+    assert "report.md" in first
+    assert "Never edit files under vendor/." in first
+    second = " ".join(message.text for message in model.requests[1].messages)
+    assert "not yet" in second
