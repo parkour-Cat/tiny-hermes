@@ -58,7 +58,11 @@ def buckets(client: Minio) -> Iterator[tuple[str, str]]:
         client.make_bucket(name)
     yield names
     for name in names:
-        keys = [DeleteObject(o.object_name) for o in client.list_objects(name, recursive=True)]
+        keys = [
+            DeleteObject(o.object_name)
+            for o in client.list_objects(name, recursive=True)
+            if o.object_name is not None
+        ]
         list(client.remove_objects(name, keys))
         client.remove_bucket(name)
 
