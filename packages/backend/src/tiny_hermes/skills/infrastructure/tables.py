@@ -205,8 +205,8 @@ class SkillVersionLoadRow(Base):
     """
 
     __tablename__ = "skill_version_loads"
+    # The primary key is the pair, so one Run counts once per version.
     __table_args__ = (
-        UniqueConstraint("skill_version_id", "run_id", name="uq_skill_version_loads_run"),
         Index("ix_skill_version_loads_workspace_version", "workspace_id", "skill_version_id"),
     )
 
