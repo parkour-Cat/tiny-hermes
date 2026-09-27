@@ -49,6 +49,7 @@ from tiny_hermes.skills.domain.models import (
     Skill,
     SkillProposal,
     SkillScope,
+    SkillUsage,
     SkillVersion,
 )
 from tiny_hermes.skills.domain.package import (
@@ -169,6 +170,26 @@ class SkillVersionResponse(BaseModel):
         )
 
 
+class SkillUsageResponse(BaseModel):
+    """How many of this workspace's Runs loaded a version, and how they ended
+    (§15.4). Evidence that it was used — not that it caused the outcome."""
+
+    runs: int
+    completed: int
+    failed: int
+
+    @classmethod
+    def from_domain(cls, usage: SkillUsage) -> "SkillUsageResponse":
+        return cls(runs=usage.runs, completed=usage.completed, failed=usage.failed)
+
+
+class SkillVersionListItem(SkillVersionResponse):
+    """A version as the version list shows it: with its usage, which only the
+    list is read to judge by."""
+
+    usage: SkillUsageResponse
+
+
 class SkillVersionDetailResponse(SkillVersionResponse):
     files: list[SkillFilePayload]
 
@@ -263,6 +284,10 @@ class ProposalDetailResponse(ProposalResponse):
 
     files: list[SkillFilePayload]
     diff: list[FileDiffResponse]
+    #: The base version's usage when this is a patch (§15.4): the question a
+    #: reviewer is answering is whether the version in use is good enough.
+    #: `None` for a proposed new skill, which has no history to show.
+    base_usage: SkillUsageResponse | None
 
 
 def skill_router(resources: ApplicationResources) -> APIRouter:
@@ -383,7 +408,7 @@ def skill_router(resources: ApplicationResources) -> APIRouter:
             raise _skill_not_found() from error
         return SkillResponse.from_domain(skill)
 
-    @router.get("/{skill_id}/versions", response_model=list[SkillVersionResponse])
+    @router.get("/{skill_id}/versions", response_model=list[SkillVersionListItem])
     async def list_versions(  # pyright: ignore[reportUnusedFunction]
         skill_id: UUID,
         request: Request,
@@ -391,18 +416,30 @@ def skill_router(resources: ApplicationResources) -> APIRouter:
         catalog: Annotated[SkillCatalog, Depends(catalog_dependency, scope="function")],
         selected_workspace: WorkspaceHeader = None,
         session_token: SessionCookie = None,
-    ) -> list[SkillVersionResponse]:
+    ) -> list[SkillVersionListItem]:
         user = await authenticate_browser_user(auth, session_token)
         workspace_id = require_workspace_id(selected_workspace)
         try:
             versions = await catalog.list_versions(
                 _actor(user), workspace_id, skill_id, request.state.request_id
             )
+            usage = await catalog.usage(
+                _actor(user),
+                workspace_id,
+                [version.id for version in versions],
+                request.state.request_id,
+            )
         except ForbiddenSkillAction as error:
             raise forbidden() from error
         except UnknownSkill as error:
             raise _skill_not_found() from error
-        return [SkillVersionResponse.from_domain(version) for version in versions]
+        return [
+            SkillVersionListItem(
+                **SkillVersionResponse.from_domain(version).model_dump(),
+                usage=SkillUsageResponse.from_domain(usage[version.id]),
+            )
+            for version in versions
+        ]
 
     @router.post(
         "/{skill_id}/versions",
@@ -673,6 +710,18 @@ def skill_proposal_router(resources: ApplicationResources) -> APIRouter:
             proposal, difference = await catalog.read_proposal(
                 _actor(user), workspace_id, proposal_id, request.state.request_id
             )
+            base_usage = (
+                None
+                if proposal.base_version_id is None
+                else (
+                    await catalog.usage(
+                        _actor(user),
+                        workspace_id,
+                        [proposal.base_version_id],
+                        request.state.request_id,
+                    )
+                )[proposal.base_version_id]
+            )
         except ForbiddenSkillAction as error:
             raise forbidden() from error
         except UnknownProposal as error:
@@ -685,6 +734,7 @@ def skill_proposal_router(resources: ApplicationResources) -> APIRouter:
                 for item in proposal.files
             ],
             diff=[FileDiffResponse.from_domain(item) for item in difference.files],
+            base_usage=None if base_usage is None else SkillUsageResponse.from_domain(base_usage),
         )
 
     @router.post(

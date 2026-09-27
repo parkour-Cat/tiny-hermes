@@ -150,7 +150,11 @@ from tiny_hermes.runs.ports.store import (
     StoredSummary,
     WidenBudgetCommand,
 )
-from tiny_hermes.skills.infrastructure.tables import SkillRow, SkillVersionRow
+from tiny_hermes.skills.infrastructure.tables import (
+    SkillRow,
+    SkillVersionLoadRow,
+    SkillVersionRow,
+)
 from tiny_hermes.tenancy.domain.models import Role
 from tiny_hermes.tenancy.infrastructure.tables import MembershipRow, WorkspaceRow
 from tiny_hermes.tools.domain.http_calls import BoundOperation
@@ -600,6 +604,19 @@ class SqlRunStore:
             raise UnknownSession
         occurred_at = datetime.now(UTC)
         written: list[RunEvent] = []
+        for event in command.events:
+            if event.event_type is RunEventType.SKILL_LOADED:
+                # §15.4: kept beside the event, which retention will prune.
+                await self._session.execute(
+                    pg_insert(SkillVersionLoadRow)
+                    .values(
+                        skill_version_id=UUID(str(event.payload["skill_version_id"])),
+                        run_id=command.run_id,
+                        workspace_id=command.workspace_id,
+                        loaded_at=occurred_at,
+                    )
+                    .on_conflict_do_nothing()
+                )
         for offset, event in enumerate(command.events):
             row = RunEventRow(
                 id=uuid4(),
