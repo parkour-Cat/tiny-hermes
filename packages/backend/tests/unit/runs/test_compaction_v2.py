@@ -18,6 +18,7 @@ from tiny_hermes.runs.domain.context_budget import (
     RETAINED_TAIL_TOKENS,
     SKILL_LOAD_TOOL,
     SKILL_REINJECT_MAX_TOKENS,
+    TODO_WRITE_TOOL,
     TOOL_RESULT_HEAD_CHARS,
     TOOL_RESULT_MAX_CHARS,
     TOOL_RESULT_TAIL_CHARS,
@@ -828,3 +829,20 @@ def test_sweep_no_orphans_honest_pauses_and_monotonic_fit() -> None:
                 assert result.compacted is None, where
                 assert result.messages == tuple(item.message for item in history), where
                 assert fitted_at is None, f"{where}: fit at {fitted_at} but not here"
+
+
+def test_the_latest_task_list_is_put_back_and_an_older_one_is_not() -> None:
+    """The list is only in the transcript (§16.1, v2.12); summarized away, the
+    model would lose track of what is left the moment it most needs it."""
+    _, result = _compacted_with(
+        _says("migrate the three services"),
+        _called("t1", name=TODO_WRITE_TOOL, items=[]),
+        _answered("t1", "[ ] 1. old plan step"),
+        _called("t2", name=TODO_WRITE_TOOL, items=[]),
+        _answered("t2", "[x] 1. billing\n[>] 2. search\n[ ] 3. auth"),
+    )
+
+    assert result.compacted is not None
+    head = result.messages[0].blocks[0].text  # type: ignore[union-attr]
+    assert "[>] 2. search" in head
+    assert "old plan step" not in head
