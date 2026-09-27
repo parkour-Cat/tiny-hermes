@@ -107,6 +107,8 @@ export type EndUserRunResponse = {
   state_version: number;
   finished_at: string | null;
   queue: QueueResponse;
+  /** §12.1 补充: what this end user added and the run ended without reading. */
+  undelivered_steers?: string[];
 };
 
 /**

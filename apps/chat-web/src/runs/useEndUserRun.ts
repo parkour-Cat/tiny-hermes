@@ -47,6 +47,18 @@ export function useEndUserRun(runId: string | null): UseQueryResult<EndUserRunRe
  * unbuilt — see `ChatPage.tsx`'s own docstring for why — so there is no
  * `pauseEndUserRun`/`resumeEndUserRun` beside this one.
  */
+/**
+ * §12.1 补充: add to a reply still at work, without stopping it. Kept for the
+ * run's next step; a run that ends first hands it back as
+ * `undelivered_steers`.
+ */
+export function steerEndUserRun(runId: string, text: string): Promise<{ waiting: number }> {
+  return api<{ waiting: number }>(`/api/v1/end-user/runs/${runId}/steer`, {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+}
+
 export function cancelEndUserRun(
   runId: string,
   expectedStateVersion: number,
