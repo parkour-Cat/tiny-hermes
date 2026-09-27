@@ -88,7 +88,6 @@ def upgrade() -> None:
         ),
         sa.Column("workspace_id", sa.Uuid(), nullable=False),
         sa.Column("loaded_at", sa.DateTime(timezone=True), nullable=False),
-        sa.UniqueConstraint("skill_version_id", "run_id", name="uq_skill_version_loads_run"),
     )
     op.create_index(
         "ix_skill_version_loads_workspace_version",
