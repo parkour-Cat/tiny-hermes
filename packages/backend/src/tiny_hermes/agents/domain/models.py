@@ -90,6 +90,18 @@ class DeterministicModelPolicy(BaseModel):
     ] = "complete"
 
 
+class SkillReview(BaseModel):
+    """Ask, after a Run with enough tool calls completes, whether the work is
+    worth a skill (§15.4). What it can produce is a pending proposal."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = True
+    #: This Run's own tool calls, not its budget tree's: a parent is reviewed
+    #: for what it did, not for what its children did.
+    min_tool_calls: int = Field(default=10, ge=1, le=200)
+
+
 class EndpointModelPolicy(BaseModel):
     """A real model, named by the endpoint a platform administrator approved."""
 
@@ -640,6 +652,9 @@ class AgentSpec(BaseModel):
     #: in. Omitted from the normalized document when absent, the ninth
     #: widening to leave every earlier content hash exactly as it was.
     end_user_access: EndUserAccess | None = None
+    #: §15.4's post-run review. Absent means never reviewed, and then carrying
+    #: no key — the tenth widening to leave every earlier content hash alone.
+    skill_review: "SkillReview | None" = None
 
     @field_validator("mcp_tools")
     @classmethod
@@ -824,6 +839,9 @@ def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
         # and is serialized into every spec, so putting it there would have
         # rewritten every hash. This key is absent unless an author wrote one.
         normalized.pop("delegation", None)
+    if normalized.get("skill_review") is None:
+        # The tenth widening, same promise.
+        normalized.pop("skill_review", None)
     if normalized.get("end_user_access") is None:
         # The ninth widening, same promise: an Agent that never opted into the
         # end-user entry point carries no key for it.

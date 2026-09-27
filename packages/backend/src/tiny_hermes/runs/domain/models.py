@@ -189,6 +189,10 @@ class RunEventType(StrEnum):
     #: §16.1: the model replaced its task list — how many items, how many
     #: done, how many under way. Never the items' words.
     TODO_UPDATED = "todo_updated"
+    #: §15.4: the post-run review — what it decided (`proposed`, `none`,
+    #: `unreadable`, `refused`, `failed`, or `skipped` with a reason), the
+    #: proposal it opened, and, when a call was made, what it cost.
+    SKILL_REVIEW = "skill_review"
 
     # Also not derived from a signal, and for the same reason: a
     # summarization call is a real call on a real endpoint (§7.4.2), and

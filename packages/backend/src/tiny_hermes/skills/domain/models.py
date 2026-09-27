@@ -134,3 +134,13 @@ class SkillProposal:
     def approvable(self) -> bool:
         """§15.3 step 3: a blocking finding may be looked at, never approved."""
         return self.status is ProposalStatus.PENDING and not blocking(self.findings)
+
+
+@dataclass(frozen=True)
+class SkillUsage:
+    """How many Runs in one workspace loaded a version, and how they ended
+    (§15.4). Says the skill was used, not that it caused the outcome."""
+
+    runs: int = 0
+    completed: int = 0
+    failed: int = 0

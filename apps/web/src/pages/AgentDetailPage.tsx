@@ -63,6 +63,9 @@ type DraftValues = {
   tools: string[];
   delivery_enabled: boolean;
   end_user_access_enabled: boolean;
+  /** §15.4. Optional in the type: a draft kept before this existed has neither. */
+  skill_review_enabled?: boolean;
+  skill_review_min_tool_calls?: number;
   sync_timeout_seconds: number;
   /** Bound skill *version* ids. Never names — see `agentSkillsHint`. */
   skills: string[];
@@ -157,6 +160,8 @@ function valuesOf(draft: AgentDraftResponse): DraftValues {
     tools: [...draft.spec.tools],
     delivery_enabled: delivery.enabled,
     end_user_access_enabled: draft.spec.end_user_access?.enabled ?? false,
+    skill_review_enabled: draft.spec.skill_review?.enabled ?? false,
+    skill_review_min_tool_calls: draft.spec.skill_review?.min_tool_calls ?? 10,
     sync_timeout_seconds: delivery.sync_timeout_seconds,
     skills: (draft.spec.skills ?? []).map((binding) => binding.skill_version_id),
     network: [...(draft.spec.network?.allow ?? [])],
@@ -227,6 +232,14 @@ function specOf(values: DraftValues): AgentSpecDocument {
       tools,
       write_policy: values.mcp_write_policy ?? null,
     }));
+  }
+  if (values.skill_review_enabled === true) {
+    // Written only when on, so an Agent that never asked publishes the
+    // document — and the content hash — it published before.
+    spec.skill_review = {
+      enabled: true,
+      min_tool_calls: values.skill_review_min_tool_calls ?? 10,
+    };
   }
   if (values.end_user_access_enabled) {
     // Written only when open, and that asymmetry is the point: `models.py`'s
@@ -906,6 +919,19 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
               }))}
             />
           </Form.Item>
+          <Form.Item
+            name="skill_review_enabled"
+            label={t("agentSkillReview")}
+            extra={t("agentSkillReviewHint")}
+            valuePropName="checked"
+          >
+            <Switch />
+          </Form.Item>
+          {watched?.skill_review_enabled === true ? (
+            <Form.Item name="skill_review_min_tool_calls" label={t("agentSkillReviewMinToolCalls")}>
+              <InputNumber min={1} max={200} className="full-width" />
+            </Form.Item>
+          ) : null}
           <Typography.Title level={5}>{t("agentHttpTools")}</Typography.Title>
           <Typography.Paragraph type="secondary">{t("agentHttpToolsHint")}</Typography.Paragraph>
           <Form.Item name="http_tools" label={t("agentHttpTools")}>

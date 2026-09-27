@@ -17,6 +17,7 @@ from tiny_hermes.skills.domain.models import (
     SkillProposal,
     SkillScope,
     SkillSource,
+    SkillUsage,
     SkillVersion,
     SkillVersionStatus,
 )
@@ -214,6 +215,13 @@ class MemorySkillStore:
         )
         self.proposals[proposal_id] = decided
         return decided
+
+    async def usage(
+        self, workspace_id: UUID, version_ids: Sequence[UUID]
+    ) -> dict[UUID, SkillUsage]:
+        del workspace_id
+        # No Runs live in this store, so nothing has loaded anything.
+        return {version_id: SkillUsage() for version_id in version_ids}
 
     async def count_proposals_for_run(self, run_id: UUID) -> int:
         return sum(

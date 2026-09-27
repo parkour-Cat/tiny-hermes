@@ -8,6 +8,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
+from tiny_hermes.runs.domain.models import RunState
+from tiny_hermes.runs.infrastructure.tables import RunRow
 from tiny_hermes.skills.domain.models import (
     ProposalOrigin,
     ProposalStatus,
@@ -15,6 +17,7 @@ from tiny_hermes.skills.domain.models import (
     SkillProposal,
     SkillScope,
     SkillSource,
+    SkillUsage,
     SkillVersion,
     SkillVersionStatus,
 )
@@ -24,6 +27,7 @@ from tiny_hermes.skills.infrastructure.tables import (
     SkillFileRow,
     SkillProposalRow,
     SkillRow,
+    SkillVersionLoadRow,
     SkillVersionRow,
 )
 from tiny_hermes.skills.ports.store import DuplicateSkillName, VersionResult
@@ -271,6 +275,32 @@ class SqlSkillStore:
         row.decided_at = decided_at
         await self._session.flush()
         return _proposal(row)
+
+    async def usage(
+        self, workspace_id: UUID, version_ids: Sequence[UUID]
+    ) -> dict[UUID, SkillUsage]:
+        found: dict[UUID, SkillUsage] = {version_id: SkillUsage() for version_id in version_ids}
+        if not version_ids:
+            return found
+        rows = await self._session.execute(
+            select(
+                SkillVersionLoadRow.skill_version_id,
+                func.count(),
+                func.count().filter(RunRow.status == RunState.COMPLETED.value),
+                func.count().filter(RunRow.status == RunState.FAILED.value),
+            )
+            .join(RunRow, RunRow.id == SkillVersionLoadRow.run_id)
+            .where(
+                SkillVersionLoadRow.workspace_id == workspace_id,
+                SkillVersionLoadRow.skill_version_id.in_(list(version_ids)),
+            )
+            .group_by(SkillVersionLoadRow.skill_version_id)
+        )
+        for version_id, runs, completed, failed in rows.all():
+            found[version_id] = SkillUsage(
+                runs=int(runs), completed=int(completed), failed=int(failed)
+            )
+        return found
 
     async def count_proposals_for_run(self, run_id: UUID) -> int:
         value = await self._session.scalar(

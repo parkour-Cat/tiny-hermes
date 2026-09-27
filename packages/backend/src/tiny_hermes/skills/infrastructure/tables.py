@@ -192,3 +192,29 @@ class SkillProposalRow(IdMixin, CreatedAtMixin, Base):
     decided_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class SkillVersionLoadRow(Base):
+    """One Run that loaded one version (§15.4, v2.12) — the evidence a
+    reviewer reads.
+
+    A table rather than a count over `skill_loaded` events: a terminal Run's
+    events are pruned after the retention window, and a count read off them
+    would drift to zero without anybody deciding it should. One row per Run
+    and version, so a Run that read the same text twice counts once.
+    """
+
+    __tablename__ = "skill_version_loads"
+    # The primary key is the pair, so one Run counts once per version.
+    __table_args__ = (
+        Index("ix_skill_version_loads_workspace_version", "workspace_id", "skill_version_id"),
+    )
+
+    skill_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("skill_versions.id", ondelete="CASCADE"), primary_key=True
+    )
+    run_id: Mapped[UUID] = mapped_column(
+        ForeignKey(run_tables.RunRow.id, ondelete="CASCADE"), primary_key=True
+    )
+    workspace_id: Mapped[UUID] = mapped_column(nullable=False)
+    loaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

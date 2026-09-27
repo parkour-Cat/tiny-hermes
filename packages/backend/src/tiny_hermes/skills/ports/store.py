@@ -18,6 +18,7 @@ from tiny_hermes.skills.domain.models import (
     SkillProposal,
     SkillScope,
     SkillSource,
+    SkillUsage,
     SkillVersion,
     SkillVersionStatus,
 )
@@ -122,6 +123,13 @@ class SkillStore(Protocol):
         ...
 
     async def count_proposals_for_run(self, run_id: UUID) -> int: ...
+
+    async def usage(
+        self, workspace_id: UUID, version_ids: Sequence[UUID]
+    ) -> dict[UUID, SkillUsage]:
+        """How this workspace's Runs did with each version (§15.4). Only this
+        workspace's: a platform skill's use elsewhere is not its business."""
+        ...
 
     async def append_audit(
         self,

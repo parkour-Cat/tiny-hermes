@@ -83,6 +83,8 @@ export type AgentSpecDocument = {
    * to agree — opening this grants nothing on its own.
    */
   end_user_access?: { enabled: boolean };
+  /** §15.4: review a completed run for a skill worth proposing. Absent means never. */
+  skill_review?: { enabled: boolean; min_tool_calls: number };
   /**
    * What this Agent may reach on the network, fixed at publish like `tools`.
    *
@@ -560,6 +562,13 @@ export type SkillVersionResponse = {
   created_at: string;
 };
 
+/** How many of this workspace's runs loaded a version, and how they ended
+ * (§15.4). Evidence it was used, not that it caused the outcome. */
+export type SkillUsage = { runs: number; completed: number; failed: number };
+
+/** A version as the version list returns it. */
+export type SkillVersionListItem = SkillVersionResponse & { usage: SkillUsage };
+
 export type SkillFilePayload = {
   path: string;
   content: string;
@@ -599,6 +608,8 @@ export type FileDiffResponse = {
 export type ProposalDetailResponse = ProposalResponse & {
   files: SkillFilePayload[];
   diff: FileDiffResponse[];
+  /** The base version's usage for a patch; null for a new skill. */
+  base_usage: SkillUsage | null;
 };
 
 export type OutboundScopeEntry = {

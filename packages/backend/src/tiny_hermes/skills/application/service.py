@@ -24,6 +24,7 @@ from tiny_hermes.skills.domain.models import (
     SkillProposal,
     SkillScope,
     SkillSource,
+    SkillUsage,
     SkillVersion,
     SkillVersionStatus,
 )
@@ -185,6 +186,13 @@ class SkillCatalog:
         await self._require_reader(actor, workspace_id, request_id)
         skill = await self._visible(workspace_id, skill_id)
         return await self._store.list_versions(skill.id)
+
+    async def usage(
+        self, actor: Actor, workspace_id: UUID, version_ids: Sequence[UUID], request_id: str
+    ) -> dict[UUID, SkillUsage]:
+        """§15.4's evidence for a reviewer, counted in the reader's workspace."""
+        await self._require_reader(actor, workspace_id, request_id)
+        return await self._store.usage(workspace_id, version_ids)
 
     async def read_version(
         self,

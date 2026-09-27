@@ -19,3 +19,8 @@ class SkillLibrary(Protocol):
         tool result saying so.
         """
         ...
+
+    async def read_package(self, version_id: UUID) -> tuple[tuple[str, str], ...]:
+        """Every file of a version as (path, text) — what a review's patch
+        carries over besides the SKILL.md it rewrites (§15.4)."""
+        ...

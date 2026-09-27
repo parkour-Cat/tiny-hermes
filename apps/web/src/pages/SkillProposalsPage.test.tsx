@@ -257,3 +257,21 @@ test.each(["viewer", "platform-skill"])("%s cannot decide an otherwise approvabl
   expect(screen.queryByRole("button", { name: "批准并发布新版本" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "拒绝" })).not.toBeInTheDocument();
 });
+
+test("a patch shows how the version it changes has done", async () => {
+  document.cookie = "tiny_hermes_csrf=token-value";
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(USER)),
+    http.get("/api/v1/skill-proposals", () => HttpResponse.json([proposal()])),
+    http.get(`/api/v1/skill-proposals/${PROPOSAL}`, () =>
+      HttpResponse.json({ ...detail(), base_usage: { runs: 4, completed: 3, failed: 1 } }),
+    ),
+  );
+
+  renderProposals();
+  await userEvent.click(await screen.findByRole("button", { name: "差异" }));
+
+  expect(
+    await screen.findByText("当前版本 4 次运行加载过：3 次完成，1 次失败"),
+  ).toBeInTheDocument();
+});
