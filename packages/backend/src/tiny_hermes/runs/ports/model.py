@@ -117,6 +117,11 @@ class ModelResponse:
     external_effect_unknown: bool = False
     #: A normalized reason when ``stop_reason`` is ``failed``.
     failure: str | None = None
+    #: A reply cut off by the output limit in plain text, which the next
+    #: request can ask the model to continue (§7.4.3). ``text`` then holds what
+    #: was written so far. False for a reply cut off inside a tool call: half
+    #: a JSON argument is not finished by appending more text.
+    continuable: bool = False
     #: A thinking model's own reasoning, when the endpoint sent some.
     #: `None` rather than empty, because the two decide different things:
     #: DeepSeek requires this back on the next request, and a field invented

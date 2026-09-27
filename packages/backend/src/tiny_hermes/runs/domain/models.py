@@ -169,6 +169,10 @@ class RunEventType(StrEnum):
     #: 上下文变大。和「压缩失败」分开是因为要对人说的话不同——失败可以
     #: 稍后再试，这一种再试同样不会成，只会再白花一次摘要调用。
     CONTEXT_COMPACTION_SKIPPED = "context_compaction_skipped"
+    #: §7.4.3: a malformed, empty or truncated reply was asked again or
+    #: continued within the round. Each one is a real, billed model call, so
+    #: a round that cost three calls says why.
+    MODEL_ROUND_RETRIED = "model_round_retried"
 
     # Also not derived from a signal, and for the same reason: a
     # summarization call is a real call on a real endpoint (§7.4.2), and

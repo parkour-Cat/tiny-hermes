@@ -150,14 +150,34 @@ class RetryPolicy:
         return random.uniform(0, ceiling) / 1000  # noqa: S311 - jitter, not a secret
 
 
-def _failed(reason: str) -> ModelResponse:
+def _failed(
+    reason: str,
+    body: dict[str, Any] | None = None,
+    *,
+    text: str = "",
+    continuable: bool = False,
+) -> ModelResponse:
+    """A round that produced nothing usable.
+
+    ``body`` is the provider's answer when there was one: a reply that came
+    back malformed was still a call the provider billed, so its usage is kept
+    (§7.4.3). Dropping it made the round's cost unknown, and §12.4 never turns
+    an unknown cost back.
+    """
+    prompt_tokens, completion_tokens, quality = (
+        _usage(body) if body is not None else (None, None, UsageQuality.UNAVAILABLE)
+    )
     return ModelResponse(
         stop_reason=StopReason.FAILED,
-        text="",
-        usage_quality=UsageQuality.UNAVAILABLE,
+        text=text,
+        input_tokens=prompt_tokens,
+        output_tokens=completion_tokens,
+        usage_quality=quality,
+        cached_input_tokens=None if body is None else _cached(body, prompt_tokens),
         replay_safe=True,
         external_effect_unknown=False,
         failure=reason,
+        continuable=continuable,
     )
 
 
@@ -209,15 +229,27 @@ def _cached(body: dict[str, Any], prompt_tokens: int | None) -> int | None:
     return count
 
 
+def _truncated(body: dict[str, Any], message_any: Any) -> ModelResponse:
+    """A reply the output limit cut off: continuable when it was plain text,
+    not when it was inside a tool call (§7.4.3)."""
+    message = cast(dict[str, Any], message_any) if isinstance(message_any, dict) else {}
+    calls: Any = message.get("tool_calls")
+    if isinstance(calls, list) and calls:
+        return _failed("max_output_reached", body)
+    content: Any = message.get("content")
+    written = content if isinstance(content, str) else ""
+    return _failed("max_output_reached", body, text=written, continuable=True)
+
+
 def normalize(body: dict[str, Any], names: Mapping[str, str] | None = None) -> ModelResponse:
     """One endpoint answer, as one platform round. ``names`` is the request's
     `wire_names`, so a call comes back to the tool that was advertised."""
     choices: Any = body.get("choices")
     if not isinstance(choices, list) or not choices:
-        return _failed("empty_response")
+        return _failed("empty_response", body)
     first: Any = cast(list[Any], choices)[0]
     if not isinstance(first, dict):
-        return _failed("malformed_choice")
+        return _failed("malformed_choice", body)
     entry = cast(dict[str, Any], first)
 
     message_any: Any = entry.get("message")
@@ -227,17 +259,17 @@ def normalize(body: dict[str, Any], names: Mapping[str, str] | None = None) -> M
         # for one had left the contract. One is bound now, so it is a parse.
         return _tool_round(body, message_any, names or {})
     if finish == "length":
-        return _failed("max_output_reached")
+        return _truncated(body, message_any)
     if finish not in ("stop", None):
-        return _failed("unsupported_stop_reason")
+        return _failed("unsupported_stop_reason", body)
 
     message: Any = message_any
     if not isinstance(message, dict):
-        return _failed("malformed_choice")
+        return _failed("malformed_choice", body)
     content: Any = cast(dict[str, Any], message).get("content")
     text = content if isinstance(content, str) else ""
     if not text.strip():
-        return _failed("empty_response")
+        return _failed("empty_response", body)
 
     prompt_tokens, completion_tokens, quality = _usage(body)
     return ModelResponse(
@@ -266,20 +298,20 @@ def _reasoning(message: dict[str, Any]) -> str | None:
 def _tool_round(body: dict[str, Any], message: Any, names: Mapping[str, str]) -> ModelResponse:
     """A round that asked for tools rather than answering."""
     if not isinstance(message, dict):
-        return _failed("malformed_choice")
+        return _failed("malformed_choice", body)
     fields = cast(dict[str, Any], message)
     raw: Any = fields.get("tool_calls")
     if not isinstance(raw, list) or not raw:
-        return _failed("malformed_tool_call")
+        return _failed("malformed_tool_call", body)
 
     calls: list[ToolCallBlock] = []
     for entry in cast(list[Any], raw):
         if not isinstance(entry, dict):
-            return _failed("malformed_tool_call")
+            return _failed("malformed_tool_call", body)
         call = cast(dict[str, Any], entry)
         function: Any = call.get("function")
         if not isinstance(function, dict):
-            return _failed("malformed_tool_call")
+            return _failed("malformed_tool_call", body)
         signature = cast(dict[str, Any], function)
         try:
             # Decoded once, here at the edge. Carrying the provider's JSON
@@ -287,9 +319,9 @@ def _tool_round(body: dict[str, Any], message: Any, names: Mapping[str, str]) ->
             # could decide differently what a malformed one means.
             arguments: Any = json.loads(str(signature.get("arguments") or "{}"))
         except ValueError:
-            return _failed("malformed_tool_arguments")
+            return _failed("malformed_tool_arguments", body)
         if not isinstance(arguments, dict):
-            return _failed("malformed_tool_arguments")
+            return _failed("malformed_tool_arguments", body)
         try:
             calls.append(
                 ToolCallBlock(
@@ -301,7 +333,7 @@ def _tool_round(body: dict[str, Any], message: Any, names: Mapping[str, str]) ->
         except ValueError:
             # A call with no id cannot be answered and one with no name cannot
             # be dispatched. Either is a failed round, not a guess.
-            return _failed("malformed_tool_call")
+            return _failed("malformed_tool_call", body)
 
     content: Any = fields.get("content")
     prompt_tokens, completion_tokens, quality = _usage(body)

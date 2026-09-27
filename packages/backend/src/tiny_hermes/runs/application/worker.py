@@ -496,8 +496,8 @@ class WorkerRuntime:
                 pictures = await resolve_images(
                     plan.messages, self._images, claimed.run.session_id
                 )
-                response = await self._model.complete(
-                    _request(context, box, plan, mcp, pictures)
+                response = await self._complete_recovering(
+                    claimed, context, plan, _request(context, box, plan, mcp, pictures)
                 )
                 if box is not None:
                     # Only the first round of a slice is told, because only the
@@ -1853,6 +1853,71 @@ class WorkerRuntime:
             before_compaction_estimate=before,
         )
 
+    async def _complete_recovering(
+        self,
+        claimed: ClaimedRun,
+        context: ExecutionContext,
+        plan: ContextPlan,
+        request: ModelRequest,
+    ) -> ModelResponse:
+        """One round's model call, recovering the replies §7.4.3 lists.
+
+        A malformed tool call, an empty reply, or one cut off inside a tool
+        call is asked again with a note saying what was wrong; a plain-text
+        reply cut off by the output limit is continued. The notes and the
+        half-written text live only in these requests — what the round
+        returns, and so what is stored, is one reply. Each extra request is a
+        real call, prechecked like one (`_retry_allowed`), and every attempt's
+        usage is added into what the round returns.
+        """
+        attempts: list[ModelResponse] = []
+        written: list[str] = []
+        retried = 0
+        continued = 0
+        current = request
+        while True:
+            response = await self._model.complete(current)
+            attempts.append(response)
+            if response.stop_reason is not StopReason.FAILED:
+                break
+            reason = response.failure or ""
+            if response.continuable:
+                if continued >= _MAX_CONTINUATIONS:
+                    break
+            elif reason not in _RETRY_NOTES or retried >= _MAX_RETRIES:
+                break
+            if not _retry_allowed(context, plan, attempts):
+                break
+            if response.continuable:
+                continued += 1
+                written.append(response.text)
+                attempt = continued
+            else:
+                retried += 1
+                attempt = retried
+            await self._append_event(
+                claimed,
+                RunEventType.MODEL_ROUND_RETRIED,
+                {"reason": reason, "attempt": attempt, "continued": response.continuable},
+            )
+            base = request.messages
+            if written:
+                base = (
+                    *base,
+                    CanonicalMessage(role="assistant", blocks=(TextBlock(text="".join(written)),)),
+                )
+            note = _CONTINUE_NOTE if response.continuable else _RETRY_NOTES[reason]
+            current = replace(
+                request,
+                messages=(
+                    *base,
+                    CanonicalMessage(
+                        role="user", blocks=(TextBlock(text=note),), author="platform"
+                    ),
+                ),
+            )
+        return _merged(attempts, "".join(written))
+
     async def _take_compaction_request(self, session_id: UUID) -> bool:
         """`/compact` 的标记，读走并清掉。自己开一个 session，和
         `_latest_summary` 同一个理由：这一步在规划**之前**，不属于任何一次
@@ -2661,6 +2726,103 @@ def _cost_from(response: ModelResponse, prices: TokenPrices | None = None) -> Co
         output_tokens=response.output_tokens,
         usage_quality=response.usage_quality,
         cached_input_tokens=response.cached_input_tokens,
+    )
+
+
+#: §7.4.3: how many times one round asks again after a malformed, empty or
+#: tool-call-truncated reply, and how many times it asks a truncated text
+#: reply to continue. Small on purpose: each is a billed call, and a model
+#: that fails the same way three times will not be talked out of it.
+_MAX_RETRIES = 2
+_MAX_CONTINUATIONS = 3
+
+#: What the model is told when it is asked again. Said in the request only;
+#: never stored.
+_RETRY_NOTES = {
+    "malformed_tool_arguments": (
+        "Your previous reply could not be used: a tool call's arguments were not "
+        "a valid JSON object. Reply again; if you call a tool, give its arguments "
+        "as one valid JSON object."
+    ),
+    "malformed_tool_call": (
+        "Your previous reply could not be used: a tool call was missing its id or "
+        "name, or was not shaped as a function call. Reply again."
+    ),
+    "empty_response": "Your previous reply was empty. Reply again.",
+    "max_output_reached": (
+        "Your previous reply was cut off at the output limit in the middle of a "
+        "tool call. Reply again with a smaller call — for example, write a long "
+        "file in several parts."
+    ),
+}
+_CONTINUE_NOTE = (
+    "Your reply was cut off at the output limit. Continue exactly where it "
+    "stopped, without repeating anything you already wrote."
+)
+
+
+def _retry_allowed(
+    context: ExecutionContext, plan: ContextPlan, attempts: Sequence[ModelResponse]
+) -> bool:
+    """Whether one more call may be made this round — §12.4's checks, counting
+    what this round's earlier attempts already spent, so a retry never takes
+    the ceiling further past than one call could."""
+    budget = context.budget
+    spent_calls = sum(item.model_calls for item in attempts)
+    if budget.consumed_model_calls + spent_calls >= budget.max_model_calls:
+        return False
+    if budget.max_tokens is not None:
+        spent_tokens = sum(item.billable_tokens for item in attempts)
+        if budget.consumed_tokens + spent_tokens >= budget.max_tokens:
+            return False
+    if budget.max_cost is None:
+        return True
+    consumed = budget.consumed_cost
+    if consumed is None:
+        return False
+    for item in attempts:
+        cost = _cost_from(item, context.prices)
+        if cost is None or not cost.known or cost.amount is None:
+            # A spend this platform cannot state is not one it can prove fits.
+            return False
+        consumed += cost.amount
+    return _cost_precheck(
+        replace(context, budget=replace(budget, consumed_cost=consumed)), plan
+    ).allowed
+
+
+def _merged(attempts: Sequence[ModelResponse], written: str) -> ModelResponse:
+    """The round's one reply: the last attempt, with every attempt's usage
+    added in and any continued text in front of its own.
+
+    Counts are summed only when every attempt reported them; one attempt with
+    no usage makes the round's usage unavailable, as §12.4's "unknown is not
+    zero" requires.
+    """
+    final = attempts[-1]
+    if len(attempts) == 1:
+        return final
+    counted = all(
+        item.input_tokens is not None
+        and item.output_tokens is not None
+        and item.usage_quality is not UsageQuality.UNAVAILABLE
+        for item in attempts
+    )
+    cached = [item.cached_input_tokens for item in attempts]
+    return replace(
+        final,
+        text=written + final.text if final.stop_reason is not StopReason.FAILED else final.text,
+        model_calls=sum(item.model_calls for item in attempts),
+        input_tokens=sum(item.input_tokens or 0 for item in attempts) if counted else None,
+        output_tokens=sum(item.output_tokens or 0 for item in attempts) if counted else None,
+        usage_quality=final.usage_quality if counted else UsageQuality.UNAVAILABLE,
+        cached_input_tokens=(
+            sum(value for value in cached if value is not None)
+            if counted and all(value is not None for value in cached)
+            else None
+        ),
+        replay_safe=all(item.replay_safe for item in attempts),
+        external_effect_unknown=any(item.external_effect_unknown for item in attempts),
     )
 
 

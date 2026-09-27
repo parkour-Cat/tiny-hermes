@@ -157,3 +157,67 @@ def test_every_failure_is_safe_to_replay() -> None:
 def test_a_round_is_always_one_model_call() -> None:
     assert normalize(body()).model_calls == 1
     assert normalize({}).model_calls == 1
+
+
+# -- §7.4.3 (v2.11): what a failed reply keeps, so the round can recover ------
+
+
+def test_a_malformed_tool_call_keeps_the_usage_the_provider_reported() -> None:
+    """The call reached the provider and was billed. Dropping its usage made
+    the round's cost unknown, and §12.4 never turns an unknown cost back."""
+    bad = choice(
+        finish_reason="tool_calls",
+        message={
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "shell__exec", "arguments": '{"command": "ls"'},
+                }
+            ],
+        },
+    )
+    response = normalize(body(choices=bad))
+
+    assert response.failure == "malformed_tool_arguments"
+    assert response.input_tokens == 11
+    assert response.output_tokens == 7
+    assert response.usage_quality is UsageQuality.PROVIDER
+
+
+def test_a_truncated_text_reply_keeps_what_was_written_and_can_be_continued() -> None:
+    cut = choice(
+        finish_reason="length",
+        message={"role": "assistant", "content": "The first half of a long ans"},
+    )
+    response = normalize(body(choices=cut))
+
+    assert response.failure == "max_output_reached"
+    assert response.text == "The first half of a long ans"
+    assert response.continuable is True
+    assert response.input_tokens == 11
+
+
+def test_a_reply_cut_off_inside_a_tool_call_cannot_be_continued() -> None:
+    """Half a JSON argument cannot be finished by appending text; the model is
+    asked again instead (§7.4.3)."""
+    cut = choice(
+        finish_reason="length",
+        message={
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "file__write", "arguments": '{"path": "a.md", "con'},
+                }
+            ],
+        },
+    )
+    response = normalize(body(choices=cut))
+
+    assert response.failure == "max_output_reached"
+    assert response.continuable is False
