@@ -524,6 +524,43 @@ test("a tool-call limit above fifty reaches the server rather than being clamped
   expect(body.spec.limits.max_tool_calls).toBe(120);
 });
 
+test("a fallback endpoint survives saving the draft", async () => {
+  // The form rebuilds `model_policy` from what it shows, so a field it does
+  // not show is a field one save quietly deletes (§7.4.1, v2.12).
+  const MAIN = "33333333-4444-4555-8666-777777777777";
+  const BACKUP = "44444444-5555-4666-8777-888888888888";
+  const policy = { provider: "openai_compatible", endpoint_id: MAIN, fallback_endpoint_ids: [BACKUP] };
+  loadedAgent(3);
+  const endpoint = (id: string, name: string) => ({
+    id, name, kind: "openai_compatible", base_url: "https://models.example.com/v1", model: name,
+    context_window: 128000, max_output_tokens: 4096, usage_quality: "provider",
+    credential_ref: "KEY", status: "active", created_at: "2026-08-10T00:00:00Z", updated_at: "2026-08-10T00:00:00Z",
+  });
+  const sent: unknown[] = [];
+  server.use(
+    http.get(`/api/v1/agents/${AGENT}/draft`, () =>
+      HttpResponse.json({ ...draftBody(3), spec: { ...SPEC, model_policy: policy } }),
+    ),
+    http.get("/api/v1/model-endpoints", () =>
+      HttpResponse.json([endpoint(MAIN, "main"), endpoint(BACKUP, "backup")]),
+    ),
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  const personality = await screen.findByLabelText("人格");
+  await userEvent.clear(personality);
+  await userEvent.type(personality, "Rewritten.");
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  const body = sent[0] as { spec: { model_policy: unknown } };
+  expect(body.spec.model_policy).toEqual(policy);
+});
+
 test("a draft conflict keeps the typed personality and sends nothing more", async () => {
   loadedAgent(3);
   let attempts = 0;
