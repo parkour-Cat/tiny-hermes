@@ -473,6 +473,12 @@ class WorkerRuntime:
                     return
 
             while True:
+                # §12.1 补充: the boundary — the last round's call and result
+                # are recorded, this round's request is not yet built — is the
+                # one place an end user's addition can go in without splitting
+                # a tool call from its result.
+                async with self._sessions.begin() as session:
+                    await SqlRunStore(session).absorb_steers(workspace_id, claimed.run.id)
                 context = await self._read_context(workspace_id, claimed.run.id)
                 if context is None:
                     return
@@ -552,6 +558,11 @@ class WorkerRuntime:
                     ),
                     evidence,
                 )
+                if verdict.outcome is GoalOutcome.DONE and await self._steer_waiting(claimed):
+                    # §12.1 补充: the end user said something while this round
+                    # was finishing. Ending here would leave it unread; one
+                    # more round, budget permitting, reads it.
+                    verdict = GoalVerdict(GoalOutcome.CONTINUE)
                 # The number the model was given for this round, not the one
                 # the next read would compute: the two differ the moment this
                 # round's own model call is counted.
@@ -2047,6 +2058,10 @@ class WorkerRuntime:
             # ceiling; they carried no usage, so they add no Token or cost.
             merged = replace(merged, model_calls=merged.model_calls + unanswered)
         return merged
+
+    async def _steer_waiting(self, claimed: ClaimedRun) -> bool:
+        async with self._sessions() as session:
+            return await SqlRunStore(session).has_pending_steers(claimed.run.id)
 
     async def _review_for_skills(self, claimed: ClaimedRun) -> None:
         """§15.4: after a Run with enough tool calls completes, ask once

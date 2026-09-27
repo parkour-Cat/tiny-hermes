@@ -582,3 +582,23 @@ class IdempotencyRecordRow(IdMixin, CreatedAtMixin, Base):
     expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class RunSteerRow(IdMixin, CreatedAtMixin, Base):
+    """What an end user added to a Run still at work (§12.1, v2.12 补充).
+
+    Kept apart from the transcript until the Worker writes it in at a round
+    boundary (`absorbed_at`): written straight into `session_messages` it would
+    land between a round's tool call and its result. One that is never
+    absorbed is handed back with the Run rather than lost.
+    """
+
+    __tablename__ = "run_steers"
+    __table_args__ = (Index("ix_run_steers_run_pending", "run_id", "absorbed_at"),)
+
+    run_id: Mapped[UUID] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"))
+    workspace_id: Mapped[UUID] = mapped_column(nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    absorbed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

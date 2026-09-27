@@ -13,6 +13,7 @@ from tiny_hermes.runs.application.service import (
     RetryLimitReached,
     RetryNotSafe,
     RunCoordinationError,
+    RunNotSteerable,
     SessionAgentNotFound,
     StateVersionConflict,
     UnknownRun,
@@ -50,6 +51,13 @@ def as_app_error(error: RunCoordinationError) -> AppError:
         return not_found("session_not_found", "Session not found", "session")
     if isinstance(error, UnknownRun):
         return not_found("run_not_found", "Run not found", "run")
+    if isinstance(error, RunNotSteerable):
+        return AppError(
+            code="run_not_steerable",
+            title="Run cannot take a steer",
+            status=409,
+            detail=f"Nothing was added: {error.reason}. Send it as a new message instead.",
+        )
     if isinstance(error, AgentNotPublished):
         return AppError(
             code="agent_not_published",

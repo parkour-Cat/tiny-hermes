@@ -21,7 +21,7 @@ import { Transcript } from "../chat/Transcript";
 import { SavedFiles } from "../chat/SavedFiles";
 import { useEndUserAgents } from "../chat/useEndUserAgents";
 import { useT } from "../i18n/locale";
-import { cancelEndUserRun, useEndUserRun } from "../runs/useEndUserRun";
+import { cancelEndUserRun, steerEndUserRun, useEndUserRun } from "../runs/useEndUserRun";
 import { useEndUserApprovals } from "../runs/useEndUserApprovals";
 import { isLiveStatus, statusLabel } from "../status";
 
@@ -208,6 +208,7 @@ function ChatConversation({ identity, onIdentityChanged }: {
       if (currentDraftKey.current !== source && currentDraftKey.current !== target) return;
       if (source !== target) setComposerEpoch((epoch) => epoch + 1);
       setRunId(created.id);
+      setSteered(false);
       queryClient.setQueryData(["end-user-run", created.id], created);
       setError(null);
     },
@@ -215,6 +216,16 @@ function ChatConversation({ identity, onIdentityChanged }: {
       setOptimistic(null);
       setError(problemMessage(caught, t));
     },
+  });
+
+  const [steered, setSteered] = useState(false);
+  const steer = useMutation({
+    mutationFn: (input: { runId: string; text: string }) => steerEndUserRun(input.runId, input.text),
+    onSuccess: () => {
+      setSteered(true);
+      setError(null);
+    },
+    onError: (caught) => setError(problemMessage(caught, t)),
   });
 
   const cancel = useMutation({
@@ -318,6 +329,30 @@ function ChatConversation({ identity, onIdentityChanged }: {
           </div>
         </header>
         {error === null ? null : <p className="banner banner-warn">{error}</p>}
+        {steered && live ? (
+          <p className="banner" role="status">
+            {t("steerAccepted")}
+          </p>
+        ) : null}
+        {run !== undefined && run.finished_at !== null && (run.undelivered_steers ?? []).length > 0 ? (
+          <div className="banner banner-warn">
+            <p>{t("steersUndelivered")}</p>
+            <ul>
+              {(run.undelivered_steers ?? []).map((said, index) => (
+                <li key={`${String(index)}-${said}`}>
+                  <span>{said}</span>{" "}
+                  <button
+                    type="button"
+                    disabled={send.isPending}
+                    onClick={() => send.mutate({ text: said, source: draftKey })}
+                  >
+                    {t("steerResend")}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         {blocked ? (
           <p className="banner banner-warn">
             {t("sessionBlocked")}
@@ -373,6 +408,11 @@ function ChatConversation({ identity, onIdentityChanged }: {
           live={Boolean(live)}
           canExport={(messages.data ?? []).length > 0}
           onSend={async (text) => { await send.mutateAsync({ text, source: draftKey }); }}
+          onSteer={
+            run === undefined
+              ? undefined
+              : async (text) => { await steer.mutateAsync({ runId: run.id, text }); }
+          }
           onExport={() => {
             const turns = messages.data ?? [];
             if (turns.length === 0) {

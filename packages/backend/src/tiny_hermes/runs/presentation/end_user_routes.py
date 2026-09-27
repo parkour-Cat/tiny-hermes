@@ -50,6 +50,7 @@ state-changing requests, and a read that only ever returns this end user's
 own data to them is not the shape that check defends against.
 """
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
@@ -72,7 +73,11 @@ from tiny_hermes.identity.presentation.end_user_dependencies import (
     resolve_end_user_caller,
     resolve_end_user_caller_for_write,
 )
-from tiny_hermes.runs.application.service import RunCoordination, RunCoordinationError
+from tiny_hermes.runs.application.service import (
+    MAX_STEER_CHARS,
+    RunCoordination,
+    RunCoordinationError,
+)
 from tiny_hermes.runs.domain.models import (
     RunSnapshot,
     SessionMode,
@@ -101,6 +106,17 @@ class CreateEndUserSessionRequest(BaseModel):
 
 class CreateEndUserRunRequest(BaseModel):
     input: str = Field(min_length=1, max_length=32_768)
+
+
+class SteerEndUserRunRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=MAX_STEER_CHARS)
+
+
+class SteerAcceptedResponse(BaseModel):
+    """Kept for the next round boundary — not yet read by anything."""
+
+    run_id: UUID
+    waiting: int
 
 
 class CancelEndUserRunRequest(BaseModel):
@@ -191,10 +207,16 @@ class EndUserRunResponse(BaseModel):
     state_version: int
     finished_at: datetime | None
     queue: EndUserQueueResponse
+    #: §12.1 补充: what this end user added and the Run ended without reading,
+    #: word for word, so the chat can offer to send it again. Empty for a Run
+    #: that can still read it — and for a Run just created, which has none.
+    undelivered_steers: list[str] = Field(default_factory=list[str])
 
     @classmethod
-    def from_domain(cls, run: RunSnapshot) -> "EndUserRunResponse":
-        return cls.model_validate(run.document())
+    def from_domain(
+        cls, run: RunSnapshot, undelivered: Sequence[str] = ()
+    ) -> "EndUserRunResponse":
+        return cls.model_validate({**run.document(), "undelivered_steers": list(undelivered)})
 
 
 class EndUserSessionMessageResponse(BaseModel):
@@ -432,7 +454,7 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
             found = await runs.get_end_user_run(caller.workspace_id, caller.end_user_id, run_id)
         except RunCoordinationError as error:
             raise as_app_error(error) from error
-        return EndUserRunResponse.from_domain(found)
+        return EndUserRunResponse.from_domain(found, await runs.undelivered_steers(found))
 
     @router.post("/runs/{run_id}/cancel", response_model=EndUserRunResponse)
     async def cancel_run(  # pyright: ignore[reportUnusedFunction]
@@ -460,7 +482,36 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
             )
         except RunCoordinationError as error:
             raise as_app_error(error) from error
-        return EndUserRunResponse.from_domain(cancelled)
+        return EndUserRunResponse.from_domain(
+            cancelled, await runs.undelivered_steers(cancelled)
+        )
+
+    @router.post(
+        "/runs/{run_id}/steer",
+        response_model=SteerAcceptedResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def steer_run(  # pyright: ignore[reportUnusedFunction]
+        run_id: UUID,
+        payload: SteerEndUserRunRequest,
+        request: Request,
+        identity: Annotated[EndUserIdentityService, Depends(identity_dependency, scope="function")],
+        runs: Annotated[RunCoordination, Depends(runs_dependency, scope="function")],
+        end_user_session: EndUserSessionCookie = None,
+    ) -> SteerAcceptedResponse:
+        """§12.1 补充: 本人 only, like cancel. 202 because nothing has read it
+        yet — the Worker writes it into the transcript at the next round
+        boundary, or the Run hands it back if it ends first."""
+        caller = await resolve_end_user_caller_for_write(
+            identity, end_user_session, request.headers
+        )
+        try:
+            waiting = await runs.steer_end_user_run(
+                caller.workspace_id, caller.end_user_id, run_id, payload.text
+            )
+        except RunCoordinationError as error:
+            raise as_app_error(error) from error
+        return SteerAcceptedResponse(run_id=run_id, waiting=waiting)
 
     return router
 

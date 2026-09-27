@@ -512,3 +512,68 @@ test("session-rail actions stay behind the row menu, backed by this device's mem
 
   expect(screen.queryByRole("button", { name: "Summarize yesterday" })).toBeNull();
 });
+
+test("§12.1: while a reply is running, what is typed is added to it rather than stopping it", async () => {
+  const steers: unknown[] = [];
+  let runsPosted = 0;
+  const running = finishedRun({ status: "running", finished_at: null, state_version: 1 });
+  server.use(
+    http.post(`/api/v1/end-user/agents/${ALIAS}/sessions`, () =>
+      HttpResponse.json(sessionRow(), { status: 201 }),
+    ),
+    http.post(`/api/v1/end-user/sessions/${SESSION}/runs`, () => {
+      runsPosted += 1;
+      return HttpResponse.json(running, { status: 201 });
+    }),
+    http.get(`/api/v1/end-user/runs/${RUN}`, () => HttpResponse.json(running)),
+    http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([])),
+    http.post(`/api/v1/end-user/runs/${RUN}/steer`, async ({ request }) => {
+      steers.push(await request.json());
+      return HttpResponse.json({ run_id: RUN, waiting: 1 }, { status: 202 });
+    }),
+  );
+
+  renderChat(`/${ALIAS}`);
+  await userEvent.type(await screen.findByLabelText("写给智能体"), "Start the service");
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+  await screen.findByRole("button", { name: "停止" });
+
+  await userEvent.type(screen.getByLabelText("写给智能体"), "use port 8080");
+  await userEvent.click(screen.getByRole("button", { name: "补充" }));
+
+  await waitFor(() => expect(steers).toEqual([{ text: "use port 8080" }]));
+  expect(runsPosted).toBe(1);
+  expect(await screen.findByText("已补充，智能体会在下一步读到。")).toBeInTheDocument();
+});
+
+test("§12.1: a steer the run never read is offered back to send again", async () => {
+  const posted: unknown[] = [];
+  const running = finishedRun({ status: "running", finished_at: null, state_version: 1 });
+  const ended = finishedRun({
+    status: "cancelled",
+    state_version: 2,
+    undelivered_steers: ["use port 8080"],
+  });
+  server.use(
+    http.post(`/api/v1/end-user/agents/${ALIAS}/sessions`, () =>
+      HttpResponse.json(sessionRow(), { status: 201 }),
+    ),
+    http.post(`/api/v1/end-user/sessions/${SESSION}/runs`, async ({ request }) => {
+      posted.push(await request.json());
+      return HttpResponse.json(posted.length === 1 ? running : finishedRun(), { status: 201 });
+    }),
+    // The run the page is watching ended before it read the steer.
+    http.get(`/api/v1/end-user/runs/${RUN}`, () => HttpResponse.json(ended)),
+    http.get(`/api/v1/end-user/sessions/${SESSION}/messages`, () => HttpResponse.json([])),
+  );
+
+  renderChat(`/${ALIAS}`);
+  await userEvent.type(await screen.findByLabelText("写给智能体"), "Start the service");
+  await userEvent.click(screen.getByRole("button", { name: "发送" }));
+
+  expect(await screen.findByText("use port 8080", {}, { timeout: 5000 })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "重新发送" }));
+
+  await waitFor(() => expect(posted).toHaveLength(2));
+  expect(posted[1]).toEqual({ input: "use port 8080" });
+});

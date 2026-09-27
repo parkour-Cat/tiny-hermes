@@ -18,6 +18,7 @@ export function Composer({
   live,
   canExport,
   onSend,
+  onSteer,
   onStop,
   onExport,
   draftKey,
@@ -28,6 +29,8 @@ export function Composer({
   live: boolean;
   canExport: boolean;
   onSend: (text: string) => void | Promise<void>;
+  /** §12.1 补充: while a reply is live, what is typed goes here instead. */
+  onSteer?: ((text: string) => void | Promise<void>) | undefined;
   onStop: () => void;
   onExport: () => void;
   draftKey?: string;
@@ -52,7 +55,8 @@ export function Composer({
   const submitLock = useRef(false);
   const closeMenu = useCallback(() => setMenu(false), []);
   useDismiss(menu, closeMenu, plus);
-  const busy = disabled || sending || live || submitting;
+  const steering = live && onSteer !== undefined;
+  const busy = disabled || sending || (live && !steering) || submitting;
   const ready = (input.trim() !== "" || files.length > 0) && !busy && missingFiles.length === 0;
   const voice = canDictate();
 
@@ -110,7 +114,7 @@ export function Composer({
           const filesSaved = saveDraftFiles(draftKey, files.map((file) => file.name));
           setDraftSaved(textSaved && filesSaved);
         }
-        await onSend(composed.text);
+        await (steering && onSteer !== undefined ? onSteer(composed.text) : onSend(composed.text));
       } catch {
         // The caller shows the request error; retain the draft and files for retry.
         return;
@@ -358,9 +362,16 @@ export function Composer({
           <p className="composer-hint">{t("composerHint")}</p>
         </div>
         {live ? (
-          <button type="button" className="composer-stop" onClick={onStop}>
-            {t("stopReply")}
-          </button>
+          <>
+            {steering ? (
+              <button type="submit" disabled={!ready}>
+                {t("steerReply")}
+              </button>
+            ) : null}
+            <button type="button" className="composer-stop" onClick={onStop}>
+              {t("stopReply")}
+            </button>
+          </>
         ) : (
           <button type="submit" disabled={!ready}>
             {t("sendMessage")}
