@@ -30,6 +30,7 @@ export type ModelPolicyDocument =
       max_output_tokens?: number | null;
       /** Tried in order when the main endpoint cannot be reached (§7.4.1). */
       fallback_endpoint_ids?: string[];
+      summary_endpoint_id?: string | null;
     };
 
 export type ModelEndpointSummary = {

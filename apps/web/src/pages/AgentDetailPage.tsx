@@ -180,7 +180,7 @@ function valuesOf(draft: AgentDraftResponse): DraftValues {
   };
 }
 
-function specOf(values: DraftValues): AgentSpecDocument {
+function formSpecOf(values: DraftValues): AgentSpecDocument {
   const spec: AgentSpecDocument = {
     schema_version: 1,
     personality: values.personality,
@@ -260,6 +260,58 @@ function specOf(values: DraftValues): AgentSpecDocument {
     };
   }
   return spec;
+}
+
+/**
+ * The keys this form decides. Everything else in a draft — `completion`,
+ * `context_budget`, `delegation`, anything added after this form was written
+ * — is carried over from the draft as it was loaded, untouched.
+ *
+ * The form used to rebuild the whole document from what it shows, so a field
+ * set through the API was deleted by the first save made here, with nothing
+ * on the page saying so.
+ */
+const FORM_KEYS = new Set([
+  "schema_version",
+  "personality",
+  "model_policy",
+  "tools",
+  "limits",
+  "delivery",
+  "end_user_access",
+  "skill_review",
+  "network",
+  "skills",
+  "http_tools",
+  "mcp_tools",
+]);
+
+/** The model policy keys the form decides; the rest of an endpoint policy
+ * (temperature, output cap, summary endpoint…) is carried over. */
+const FORM_POLICY_KEYS = new Set(["provider", "endpoint_id", "fallback_endpoint_ids", "scenario"]);
+
+function specOf(values: DraftValues, base: AgentSpecDocument): AgentSpecDocument {
+  const formed = formSpecOf(values);
+  const kept = Object.fromEntries(
+    Object.entries(base).filter(([key]) => !FORM_KEYS.has(key)),
+  );
+  // Only while the provider stays the same: a deterministic policy has no
+  // temperature, and the server refuses a key it does not know.
+  const policy =
+    base.model_policy.provider === formed.model_policy.provider
+      ? {
+          ...Object.fromEntries(
+            Object.entries(base.model_policy).filter(([key]) => !FORM_POLICY_KEYS.has(key)),
+          ),
+          ...formed.model_policy,
+        }
+      : formed.model_policy;
+  return {
+    ...kept,
+    ...formed,
+    model_policy: policy as AgentSpecDocument["model_policy"],
+    limits: { ...base.limits, ...formed.limits },
+  };
 }
 
 /** How many distinct documents a `versionId::name` list binds. */
@@ -440,7 +492,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
   });
 
   function rememberEdits(values: FormValues, baseDraft: AgentDraftResponse, baseAgent: AgentResponse): void {
-    const unchanged = JSON.stringify(specOf(values)) === JSON.stringify(specOf(valuesOf(baseDraft))) &&
+    const unchanged = JSON.stringify(specOf(values, baseDraft.spec)) === JSON.stringify(specOf(valuesOf(baseDraft), baseDraft.spec)) &&
       values.name === baseAgent.name && values.alias === baseAgent.alias;
     const next = unchanged ? null : { revision: baseDraft.revision, name: baseAgent.name, alias: baseAgent.alias, values };
     setLocalDraft(next);
@@ -448,13 +500,13 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
   }
 
   const saveDraft = useMutation({
-    mutationFn: ({ values, revision }: { values: DraftValues; revision: number }) =>
+    mutationFn: ({ values, revision, base }: { values: DraftValues; revision: number; base: AgentSpecDocument }) =>
       api<AgentDraftResponse>(`/api/v1/agents/${agentId}/draft`, {
         ...scope,
         method: "PUT",
         body: JSON.stringify({
           expected_revision: revision,
-          spec: specOf(values),
+          spec: specOf(values, base),
         }),
       }),
     onSuccess: (saved) => {
@@ -574,9 +626,9 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
           if (values.name !== loadedAgent.name || values.alias !== loadedAgent.alias) {
             await rename.mutateAsync({ name: values.name, alias: values.alias });
           }
-          const changed = JSON.stringify(specOf(values)) !== JSON.stringify(specOf(valuesOf(loadedDraft)));
+          const changed = JSON.stringify(specOf(values, loadedDraft.spec)) !== JSON.stringify(specOf(valuesOf(loadedDraft), loadedDraft.spec));
           const savedRevision = changed
-            ? (await saveDraft.mutateAsync({ values, revision })).revision
+            ? (await saveDraft.mutateAsync({ values, revision, base: loadedDraft.spec })).revision
             : revision;
           await publish.mutateAsync(savedRevision);
         } catch {
@@ -605,11 +657,11 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
     watched !== undefined && watched.personality !== undefined
       ? watched
       : valuesOf(draft.data);
-  const dirty = JSON.stringify(specOf(draftValues)) !== JSON.stringify(specOf(valuesOf(loadedDraft))) ||
+  const dirty = JSON.stringify(specOf(draftValues, loadedDraft.spec)) !== JSON.stringify(specOf(valuesOf(loadedDraft), loadedDraft.spec)) ||
     (watched?.name !== undefined && watched.name !== loadedAgent.name) ||
     (watched?.alias !== undefined && watched.alias !== loadedAgent.alias);
   const saving = saveDraft.isPending || rename.isPending || publish.isPending;
-  const diffEntries = published.data ? specDiff(published.data.spec, specOf(draftValues)) : [];
+  const diffEntries = published.data ? specDiff(published.data.spec, specOf(draftValues, loadedDraft.spec)) : [];
   const fieldLabels: Record<string, MessageKey> = {
     name: "agentName", alias: "agentAlias",
     personality: "personality", model_policy: "modelEndpoints", endpoint_id: "modelEndpoint",
@@ -624,7 +676,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
     provider: "modelProvider", scenario: "modelScenario",
   };
   const localDiff = localDraft === null ? [] : [
-    ...specDiff(specOf(valuesOf(loadedDraft)), specOf(localDraft.values)),
+    ...specDiff(specOf(valuesOf(loadedDraft), loadedDraft.spec), specOf(localDraft.values, loadedDraft.spec)),
     ...(["name", "alias"] as const).filter((field) => loadedAgent[field] !== localDraft.values[field])
       .map((field) => ({ path: field, before: JSON.stringify(loadedAgent[field]), after: JSON.stringify(localDraft.values[field]) })),
   ];
@@ -699,7 +751,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
           </ul>
         )}
       </Card>
-      <details className="page-alert"><summary>{t("diffTechnical")}</summary><pre className="skill-file-body">{JSON.stringify({ published: published.data?.spec ?? null, draft: specOf(draftValues), content_hash: currentVersion?.content_hash ?? null }, null, 2)}</pre></details>
+      <details className="page-alert"><summary>{t("diffTechnical")}</summary><pre className="skill-file-body">{JSON.stringify({ published: published.data?.spec ?? null, draft: specOf(draftValues, loadedDraft.spec), content_hash: currentVersion?.content_hash ?? null }, null, 2)}</pre></details>
       {publishNote === null ? null : (
         <Alert className="page-alert" type="info" title={publishNote} showIcon />
       )}
@@ -743,7 +795,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
           }}
           // `specOf` reads the draft fields by name, so the two name fields
           // sharing this form never reach the spec.
-          onFinish={(values) => { if (!recoveryConflict) saveDraft.mutate({ values, revision: localDraft?.revision ?? loadedDraft.revision }); }}
+          onFinish={(values) => { if (!recoveryConflict) saveDraft.mutate({ values, revision: localDraft?.revision ?? loadedDraft.revision, base: loadedDraft.spec }); }}
         >
           <FormSection
             title={t("agentSectionIdentity")}
