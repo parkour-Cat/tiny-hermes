@@ -558,6 +558,16 @@ class StoredSummary:
 
 
 class RunStore(Protocol):
+    async def add_steer(
+        self, workspace_id: UUID, run_id: UUID, said: str, limit: int
+    ) -> int | None:
+        """Keep one steer; how many now wait, or `None` at ``limit``."""
+        ...
+
+    async def pending_steers(self, run_id: UUID) -> tuple[str, ...]:
+        """Steers not yet written into the transcript, oldest first."""
+        ...
+
     """Run Coordination persistence.
 
     Every method is one explicit database transaction step. No caller may

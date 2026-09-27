@@ -5,6 +5,7 @@ from uuid import UUID
 
 from tiny_hermes.runs.domain.event_cursor import cursor_is_stale
 from tiny_hermes.runs.domain.models import (
+    TERMINAL_STATES,
     Block,
     CallerIdentity,
     CallerType,
@@ -91,6 +92,22 @@ class UnknownSession(RunCoordinationError):
 
 class UnknownRun(RunCoordinationError):
     pass
+
+
+class RunNotSteerable(RunCoordinationError):
+    """§12.1 补充: the Run has ended, or already holds as many undelivered
+    steers as it may."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+#: §12.1: a person adding to a reply, not a document being pasted in.
+MAX_STEER_CHARS = 4_000
+#: Undelivered steers one Run may hold; past this, a new message is the
+#: honest shape of what is being said.
+MAX_PENDING_STEERS = 10
 
 
 class SessionAgentNotFound(RunCoordinationError):
@@ -410,6 +427,28 @@ class RunCoordination:
             raise UnknownRun
         await self.get_end_user_session(workspace_id, end_user_id, run.session_id)
         return run
+
+    async def steer_end_user_run(
+        self, workspace_id: UUID, end_user_id: UUID, run_id: UUID, said: str
+    ) -> int:
+        """§12.1 补充: keep what the end user added for the Run's next round
+        boundary. Returns how many are now waiting. Ownership exactly as
+        `cancel_end_user_run` checks it."""
+        run = await self.get_end_user_run(workspace_id, end_user_id, run_id)
+        if run.state in TERMINAL_STATES:
+            raise RunNotSteerable("the run has ended")
+        waiting = await self._store.add_steer(workspace_id, run_id, said, MAX_PENDING_STEERS)
+        if waiting is None:
+            raise RunNotSteerable(f"at most {MAX_PENDING_STEERS} steers may wait")
+        return waiting
+
+    async def undelivered_steers(self, run: RunSnapshot) -> tuple[str, ...]:
+        """What a finished Run never got to read, oldest first — handed back so
+        nothing the user said is silently dropped. Empty while it can still
+        be read."""
+        if run.state not in TERMINAL_STATES:
+            return ()
+        return await self._store.pending_steers(run.id)
 
     async def cancel_end_user_run(
         self,

@@ -193,6 +193,9 @@ class RunEventType(StrEnum):
     #: `unreadable`, `refused`, `failed`, or `skipped` with a reason), the
     #: proposal it opened, and, when a call was made, what it cost.
     SKILL_REVIEW = "skill_review"
+    #: §12.1 补充: what an end user added mid-reply was written into the
+    #: transcript at a round boundary — how many, never the words.
+    RUN_STEERED = "run_steered"
 
     # Also not derived from a signal, and for the same reason: a
     # summarization call is a real call on a real endpoint (§7.4.2), and

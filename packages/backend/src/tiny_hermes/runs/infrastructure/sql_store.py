@@ -118,6 +118,7 @@ from tiny_hermes.runs.infrastructure.tables import (
     RunBudgetScopeRow,
     RunEventRow,
     RunRow,
+    RunSteerRow,
     SessionCompactionRow,
     SessionMessageRow,
     SessionRow,
@@ -1595,6 +1596,104 @@ class SqlRunStore:
             if isinstance(raw, str):
                 loaded.append(UUID(raw))
         return tuple(loaded)
+
+    async def add_steer(
+        self, workspace_id: UUID, run_id: UUID, said: str, limit: int
+    ) -> int | None:
+        # The Run row is locked so two steers racing for the last slot cannot
+        # both see room.
+        await self._session.execute(
+            select(RunRow.id).where(RunRow.id == run_id).with_for_update()
+        )
+        waiting = await self._count_pending_steers(run_id)
+        if waiting >= limit:
+            return None
+        self._session.add(
+            RunSteerRow(
+                id=uuid4(),
+                run_id=run_id,
+                workspace_id=workspace_id,
+                text=said,
+                created_at=datetime.now(UTC),
+            )
+        )
+        await self._session.flush()
+        return waiting + 1
+
+    async def pending_steers(self, run_id: UUID) -> tuple[str, ...]:
+        found = await self._session.scalars(
+            select(RunSteerRow.text)
+            .where(RunSteerRow.run_id == run_id, RunSteerRow.absorbed_at.is_(None))
+            .order_by(RunSteerRow.created_at, RunSteerRow.id)
+        )
+        return tuple(found)
+
+    async def _count_pending_steers(self, run_id: UUID) -> int:
+        return int(
+            await self._session.scalar(
+                select(func.count())
+                .select_from(RunSteerRow)
+                .where(RunSteerRow.run_id == run_id, RunSteerRow.absorbed_at.is_(None))
+            )
+            or 0
+        )
+
+    async def has_pending_steers(self, run_id: UUID) -> bool:
+        return await self._count_pending_steers(run_id) > 0
+
+    async def absorb_steers(self, workspace_id: UUID, run_id: UUID) -> int:
+        """Write every waiting steer into the transcript as the end user's own
+        turn, oldest first, and mark it absorbed — with its event, in one
+        transaction. Called at a round boundary only (§12.1 补充)."""
+        pending = list(
+            await self._session.scalars(
+                select(RunSteerRow)
+                .where(RunSteerRow.run_id == run_id, RunSteerRow.absorbed_at.is_(None))
+                .order_by(RunSteerRow.created_at, RunSteerRow.id)
+                .with_for_update()
+            )
+        )
+        if not pending:
+            return 0
+        run = await self._session.get(RunRow, run_id)
+        if run is None:
+            return 0
+        session = await self._session.scalar(
+            select(SessionRow).where(SessionRow.id == run.session_id).with_for_update()
+        )
+        if session is None:
+            return 0
+        now = datetime.now(UTC)
+        for steer in pending:
+            self._session.add(
+                SessionMessageRow(
+                    id=uuid4(),
+                    session_id=session.id,
+                    workspace_id=workspace_id,
+                    sequence=session.next_message_sequence,
+                    role="user",
+                    content=CanonicalMessage(
+                        role="user", blocks=(TextBlock(text=steer.text),)
+                    ).document(),
+                    source_run_id=run_id,
+                    redacted=False,
+                    created_at=now,
+                )
+            )
+            session.next_message_sequence += 1
+            steer.absorbed_at = now
+        await self.append_events(
+            AppendEventsCommand(
+                workspace_id=workspace_id,
+                run_id=run_id,
+                events=(
+                    ReservedEvent(
+                        event_type=RunEventType.RUN_STEERED, payload={"count": len(pending)}
+                    ),
+                ),
+            )
+        )
+        return len(pending)
 
     async def status_of(self, workspace_id: UUID, run_id: UUID) -> RunState | None:
         value = await self._session.scalar(
