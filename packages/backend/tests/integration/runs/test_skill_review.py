@@ -281,18 +281,3 @@ async def test_a_patch_to_a_skill_this_agent_was_not_given_is_refused(
 
     assert client.get("/api/v1/skill-proposals", headers=scope).json() == []
     assert [item["outcome"] for item in await _reviews(engine, run)] == ["refused"]
-
-
-async def test_no_room_left_in_the_budget_means_no_review(
-    client: TestClient, scope: dict[str, str], engine: AsyncEngine
-) -> None:
-    """Three rounds on a three-call budget: the Run completes on its last
-    call, and a fourth would take it past the ceiling."""
-    agent = _agent(client, scope, {"min_tool_calls": 2}, limits={"max_model_calls": 3})
-    run = _submit(client, scope, agent)
-    model = Reviewed(json.dumps({"decision": "none"}))
-
-    await _drive(engine, scope["X-Workspace-Id"], model)
-
-    assert model.reviews == []
-    assert await _reviews(engine, run) == [{"outcome": "skipped", "reason": "budget"}]

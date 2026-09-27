@@ -89,3 +89,22 @@ def _json(text: str) -> str:
     import json
 
     return json.dumps(text)
+
+
+def test_a_review_that_would_pass_a_ceiling_is_not_made() -> None:
+    """The review is a real call, so it answers to the same valves a round
+    does. A completed Run always has a call left under the round rules, so
+    the call counter is checked here, where it can be set up directly."""
+    from dataclasses import replace
+
+    from tiny_hermes.runs.application.worker import (
+        _side_call_allowed,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    from .test_skill_load_limits import context
+
+    roomy = context()
+    full = replace(roomy, budget=replace(roomy.budget, consumed_model_calls=20))
+
+    assert _side_call_allowed(roomy, 1_000) is True
+    assert _side_call_allowed(full, 1_000) is False

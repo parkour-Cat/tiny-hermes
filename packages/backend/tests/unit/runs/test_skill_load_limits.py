@@ -54,6 +54,10 @@ class Library:
         self.reads.append((version_id, path))
         return self.text
 
+    async def read_package(self, version_id: UUID) -> tuple[tuple[str, str], ...]:
+        del version_id
+        return ()
+
 
 def context(**overrides: object) -> ExecutionContext:
     fields: dict[str, object] = {
