@@ -41,9 +41,9 @@ from ..egress_support import ProxyHandle
 from .test_openai_provider import (
     CREDENTIAL,
     FakeModel,
-    endpoint,  # noqa: F401 - a fixture
+    endpoint,  # noqa: F401  # pyright: ignore[reportUnusedImport]
     outbound_client,
-    proxy,  # noqa: F401 - a fixture
+    proxy,  # noqa: F401  # pyright: ignore[reportUnusedImport]
 )
 from .test_worker_tools import StandInSandbox, drive, submit
 

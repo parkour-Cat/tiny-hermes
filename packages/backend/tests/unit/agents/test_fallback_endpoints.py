@@ -22,7 +22,10 @@ from tiny_hermes.agents.domain.models import (
 from tiny_hermes.model_catalog.domain.models import EndpointStatus
 
 from .test_agent_models import valid_spec
-from .test_summary_endpoint import _endpoint, _Publisher, publisher  # noqa: F401
+from .test_summary_endpoint import (
+    _endpoint,  # pyright: ignore[reportPrivateUsage]
+    _Publisher,  # pyright: ignore[reportPrivateUsage]
+)
 
 
 def _policy(main: str, *fallbacks: str, summary: str | None = None) -> dict[str, object]:
@@ -74,7 +77,8 @@ def test_no_fallback_carries_no_key_so_old_versions_hash_the_same() -> None:
     assert normalize_agent_spec(empty)[1] == digest
 
 
-async def test_a_published_fallback_is_kept(publisher: _Publisher) -> None:  # noqa: F811
+async def test_a_published_fallback_is_kept() -> None:
+    publisher = _Publisher()
     main, backup = _endpoint(128_000), _endpoint(64_000)
 
     version = await publisher.publish(
@@ -86,9 +90,8 @@ async def test_a_published_fallback_is_kept(publisher: _Publisher) -> None:  # n
     assert policy.fallback_endpoint_ids == (backup.id,)
 
 
-async def test_a_disabled_fallback_is_refused_at_publish(
-    publisher: _Publisher,  # noqa: F811
-) -> None:
+async def test_a_disabled_fallback_is_refused_at_publish() -> None:
+    publisher = _Publisher()
     main = _endpoint(128_000)
     disabled = _endpoint(128_000, status=EndpointStatus.DISABLED)
 
@@ -98,11 +101,10 @@ async def test_a_disabled_fallback_is_refused_at_publish(
         )
 
 
-async def test_a_summary_endpoint_smaller_than_a_fallback_is_refused(
-    publisher: _Publisher,  # noqa: F811
-) -> None:
+async def test_a_summary_endpoint_smaller_than_a_fallback_is_refused() -> None:
     """Once a Run has switched, its conversation is planned against the
     fallback's window, and the summarizer is then asked to read that much."""
+    publisher = _Publisher()
     main, summary, backup = _endpoint(64_000), _endpoint(64_000), _endpoint(128_000)
 
     with pytest.raises(ContextBudgetUnsatisfied):
