@@ -116,6 +116,10 @@ class SummaryEndpointWindowTooSmall:
     summary_endpoint_id: UUID
     summary_window: int
     main_window: int
+    #: Set when the larger window is a fallback endpoint's rather than the
+    #: main one's (§7.4.1, v2.12): a Run that switched is planned against the
+    #: fallback's window, and the summarizer is then asked to read that much.
+    fallback_endpoint_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -164,10 +168,15 @@ class ContextBudgetUnsatisfied(AgentCatalogError):
         threshold: CompactionThresholdOutsideBounds | None = None,
     ) -> None:
         if summary is not None:
+            larger = (
+                "main endpoint's"
+                if summary.fallback_endpoint_id is None
+                else f"fallback endpoint {summary.fallback_endpoint_id}'s"
+            )
             message = (
                 f"summary endpoint {summary.summary_endpoint_id} has a "
                 f"{summary.summary_window}-token window, smaller than the "
-                f"main endpoint's {summary.main_window}"
+                f"{larger} {summary.main_window}"
             )
         elif threshold is not None:
             message = (
@@ -841,6 +850,42 @@ class AgentCatalog:
             raise ModelOutputLimitTooHigh
         self._check_context_budget(spec, endpoint, wanted)
         await self._check_summary_endpoint(endpoints, policy, endpoint)
+        await self._check_fallback_endpoints(endpoints, policy)
+
+    async def _check_fallback_endpoints(
+        self, endpoints: ModelEndpointStore, policy: EndpointModelPolicy
+    ) -> None:
+        """Refuse a fallback that could not answer, and a declared summary
+        endpoint smaller than any fallback.
+
+        A fallback's window is not compared with the main one's: a smaller
+        fallback is the common case, and a request that does not fit it is
+        skipped at the round (§7.4.1). The summary endpoint is different — once
+        a Run has switched, its conversation is planned against the fallback's
+        window, so a summarizer that cannot read that much fails exactly when
+        the fallback is carrying the Run.
+        """
+        summary = (
+            None
+            if policy.summary_endpoint_id is None
+            else await endpoints.read(policy.summary_endpoint_id)
+        )
+        for fallback_id in policy.fallback_endpoint_ids:
+            fallback = await endpoints.read(fallback_id)
+            if fallback is None or not fallback.is_selectable:
+                raise ModelEndpointUnavailable
+            if (
+                summary is not None
+                and summary.spec.context_window < fallback.spec.context_window
+            ):
+                raise ContextBudgetUnsatisfied(
+                    summary=SummaryEndpointWindowTooSmall(
+                        summary_endpoint_id=summary.id,
+                        summary_window=summary.spec.context_window,
+                        main_window=fallback.spec.context_window,
+                        fallback_endpoint_id=fallback.id,
+                    )
+                )
 
     async def _check_summary_endpoint(
         self,

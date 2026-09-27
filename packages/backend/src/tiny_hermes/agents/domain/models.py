@@ -106,6 +106,18 @@ class EndpointModelPolicy(BaseModel):
     #: normalized document when absent (`normalize_agent_spec`), so an Agent
     #: that never names one keeps the content hash it always had.
     summary_endpoint_id: UUID | None = None
+    #: Where a round goes when this endpoint cannot be reached (§7.4.1, v2.12),
+    #: tried in order. Two at most: each one a round waits on is a timeout it
+    #: may sit through first. Omitted from the normalized document when empty,
+    #: for the same hash promise as `summary_endpoint_id`.
+    fallback_endpoint_ids: tuple[UUID, ...] = Field(default=(), max_length=2)
+
+    @model_validator(mode="after")
+    def _distinct_fallbacks(self) -> "EndpointModelPolicy":
+        named = (self.endpoint_id, *self.fallback_endpoint_ids)
+        if len(set(named)) != len(named):
+            raise ValueError("a fallback endpoint repeats the main endpoint or another fallback")
+        return self
 
 
 class ChatCompletionsDelivery(BaseModel):
@@ -838,6 +850,8 @@ def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
         policy_document = cast(dict[str, object], policy)
         if policy_document.get("summary_endpoint_id") is None:
             policy_document.pop("summary_endpoint_id", None)
+        if not policy_document.get("fallback_endpoint_ids"):
+            policy_document.pop("fallback_endpoint_ids", None)
     encoded = json.dumps(
         normalized,
         ensure_ascii=False,

@@ -342,6 +342,9 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
     #: this Run cost, and a Run started before anybody entered one carries
     #: null — which reads as "unknown", never as "free".
     model_pricing_version_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    #: The fallback this Run switched to (§7.4.1, v2.12); `None` while the
+    #: Agent's own endpoint answers.
+    answering_endpoint_id: Mapped[UUID | None] = mapped_column(nullable=True)
     #: The Run that delegated this one, or null for a Run somebody asked for
     #: directly (§13). Null is the ordinary case and carries no meaning beyond
     #: "nobody delegated this".

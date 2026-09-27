@@ -122,6 +122,11 @@ class ModelResponse:
     #: was written so far. False for a reply cut off inside a tool call: half
     #: a JSON argument is not finished by appending more text.
     continuable: bool = False
+    #: A failure that says nothing about the request — the endpoint could not
+    #: be reached, or answered 429 or 5xx through every retry — so another
+    #: endpoint may answer it (§7.4.1). Set by the provider, which saw the
+    #: status line; the Worker never infers it from ``failure``'s wording.
+    transient: bool = False
     #: A thinking model's own reasoning, when the endpoint sent some.
     #: `None` rather than empty, because the two decide different things:
     #: DeepSeek requires this back on the next request, and a field invented

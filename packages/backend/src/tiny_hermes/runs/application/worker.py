@@ -253,6 +253,9 @@ class _Judged:
 
     round: int
     verdict: GoalVerdict
+    #: Which endpoint answered the round — the Agent's own, or the fallback
+    #: the Run switched to (§7.4.1). `None` for the deterministic model.
+    endpoint_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -538,7 +541,11 @@ class WorkerRuntime:
                 # The number the model was given for this round, not the one
                 # the next read would compute: the two differ the moment this
                 # round's own model call is counted.
-                judged = _Judged(round=_round_index(context), verdict=verdict)
+                judged = _Judged(
+                    round=_round_index(context),
+                    verdict=verdict,
+                    endpoint_id=_endpoint_of(after.policy),
+                )
                 if verdict.instruction is not None:
                     # §12.1: continue 生成下一轮指令. Recorded even if the Run
                     # then pauses for some other reason — why the platform
@@ -649,7 +656,10 @@ class WorkerRuntime:
                     appended=appended,
                     events=work.events,
                     judged=judged,
-                    prices=context.prices,
+                    # `after`, not `context`: a round a fallback answered is
+                    # charged at the fallback's price, which only the read
+                    # after the call knows.
+                    prices=after.prices,
                 )
                 if written is False or decision.signal is not None:
                     return
@@ -1951,8 +1961,24 @@ class WorkerRuntime:
         retried = 0
         continued = 0
         current = request
+        unanswered = 0
         while True:
             response = await self._model.complete(current)
+            if response.transient and not attempts:
+                # §7.4.1: nothing came back, so nothing is priced yet and
+                # another endpoint may take the round. Only before any attempt
+                # got a reply — a round is charged at one endpoint's price.
+                switched = await self._fall_back(claimed, context, plan, response)
+                if switched is not None:
+                    context = switched
+                    unanswered += response.model_calls
+                    request = replace(
+                        request,
+                        policy=context.policy,
+                        messages=_without_reasoning(request.messages),
+                    )
+                    current = request
+                    continue
             attempts.append(response)
             if response.stop_reason is not StopReason.FAILED:
                 break
@@ -1992,7 +2018,65 @@ class WorkerRuntime:
                     ),
                 ),
             )
-        return _merged(attempts, "".join(written))
+        merged = _merged(attempts, "".join(written))
+        if unanswered:
+            # The calls that reached nobody still count against the call
+            # ceiling; they carried no usage, so they add no Token or cost.
+            merged = replace(merged, model_calls=merged.model_calls + unanswered)
+        return merged
+
+    async def _fall_back(
+        self,
+        claimed: ClaimedRun,
+        context: ExecutionContext,
+        plan: ContextPlan,
+        failed: ModelResponse,
+    ) -> ExecutionContext | None:
+        """Move the Run to the next fallback that can take this round, and
+        return the context the round continues under — `None` when none can.
+
+        Each one passed over is said on the timeline with its reason, so a
+        round that failed with fallbacks configured shows why none answered.
+        """
+        from_id = _endpoint_of(context.policy)
+        for candidate in context.fallbacks_left:
+            async with self._sessions() as session:
+                route = await SqlRunStore(session).fallback_route(context.spec, candidate)
+            moved: ExecutionContext | None = None
+            if route is None:
+                skipped = "fallback_unavailable"
+            elif plan.input_estimate > route[0].input_allowance:
+                skipped = "fallback_window_too_small"
+            else:
+                moved = replace(
+                    context, answering_endpoint_id=candidate, window=route[0], prices=route[1]
+                )
+                skipped = (
+                    None if _cost_precheck(moved, plan).allowed else "fallback_over_cost_ceiling"
+                )
+            if moved is None or skipped is not None:
+                await self._append_event(
+                    claimed,
+                    RunEventType.MODEL_FALLBACK_SKIPPED,
+                    {"endpoint_id": str(candidate), "reason": skipped},
+                )
+                continue
+            async with self._sessions.begin() as session:
+                await SqlRunStore(session).switch_endpoint(
+                    claimed.run.workspace_id,
+                    claimed.run.id,
+                    candidate,
+                    ReservedEvent(
+                        event_type=RunEventType.MODEL_FALLBACK_USED,
+                        payload={
+                            "from": None if from_id is None else str(from_id),
+                            "to": str(candidate),
+                            "reason": failed.failure,
+                        },
+                    ),
+                )
+            return moved
+        return None
 
     async def _take_compaction_request(self, session_id: UUID) -> bool:
         """`/compact` 的标记，读走并清掉。自己开一个 session，和
@@ -2147,7 +2231,9 @@ class WorkerRuntime:
         is the existing rule working as designed on a new source, not a
         special case invented for it.
         """
-        main_policy = context.spec.model_policy
+        # The endpoint answering this Run, whose price `context.prices` holds:
+        # the Agent's own, or the fallback it switched to (§7.4.1).
+        main_policy = context.policy
         main_endpoint_id = (
             main_policy.endpoint_id
             if isinstance(main_policy, EndpointModelPolicy)
@@ -2390,7 +2476,11 @@ class WorkerRuntime:
             events = (
                 *events,
                 _model_round_event(
-                    judged.round, response, executed_ms, _cost_from(response, prices)
+                    judged.round,
+                    response,
+                    executed_ms,
+                    _cost_from(response, prices),
+                    judged.endpoint_id,
                 ),
                 _verdict_event(judged, _is_preempted(goal_decision, judged)),
             )
@@ -2779,7 +2869,7 @@ def _summary_policy(context: ExecutionContext) -> ModelPolicy:
     (`_check_summary_endpoint`) — the undeclared default trivially clears the
     same bar since it is the same window compared to itself.
     """
-    policy = context.spec.model_policy
+    policy = context.policy
     if isinstance(policy, EndpointModelPolicy) and policy.summary_endpoint_id is not None:
         return policy.model_copy(update={"endpoint_id": policy.summary_endpoint_id})
     return policy
@@ -3098,9 +3188,13 @@ def _request(
     """
     return ModelRequest(
         images=pictures or {},
-        policy=context.spec.model_policy,
+        policy=context.policy,
         personality=_persona(context),
-        messages=plan.messages,
+        messages=(
+            plan.messages
+            if context.answering_endpoint_id is None
+            else _without_reasoning(plan.messages)
+        ),
         round_index=_round_index(context),
         tools=_tool_schemas(context, mcp),
         cache_hint=box.hint if box is not None else None,
@@ -3195,8 +3289,29 @@ def _consecutive_reads(calls: Sequence[ToolCallBlock], position: int) -> list[To
     return run
 
 
+def _endpoint_of(policy: ModelPolicy) -> UUID | None:
+    return policy.endpoint_id if isinstance(policy, EndpointModelPolicy) else None
+
+
+def _without_reasoning(messages: Sequence[CanonicalMessage]) -> tuple[CanonicalMessage, ...]:
+    """The conversation as a fallback is sent it (§7.4.1, v2.12): without the
+    main endpoint's reasoning, which only that endpoint reads. Only the
+    request is changed; the transcript keeps every block."""
+    return tuple(
+        replace(message, blocks=kept)
+        if len(kept := tuple(b for b in message.blocks if not isinstance(b, ReasoningBlock)))
+        != len(message.blocks)
+        else message
+        for message in messages
+    )
+
+
 def _model_round_event(
-    round_number: int, response: ModelResponse, latency_ms: int, cost: Cost | None
+    round_number: int,
+    response: ModelResponse,
+    latency_ms: int,
+    cost: Cost | None,
+    endpoint_id: UUID | None = None,
 ) -> ReservedEvent:
     """§11.6's "Token、预计费用和延迟", for one round, on the timeline.
 
@@ -3208,6 +3323,7 @@ def _model_round_event(
         event_type=RunEventType.MODEL_ROUND,
         payload={
             "round": round_number,
+            "endpoint_id": None if endpoint_id is None else str(endpoint_id),
             "model_calls": response.model_calls,
             "input_tokens": response.input_tokens,
             "cached_input_tokens": response.cached_input_tokens,

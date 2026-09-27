@@ -568,6 +568,11 @@ def as_app_error(error: AgentCatalogError) -> AppError:
             # targets: " sentence with nothing after it and no mention of a
             # summary endpoint at all (Task 4 review).
             summary = error.summary
+            larger = (
+                "main endpoint's"
+                if summary.fallback_endpoint_id is None
+                else f"fallback endpoint {summary.fallback_endpoint_id}'s"
+            )
             return AppError(
                 code="context_budget_unsatisfied",
                 title="Context budget does not fit this endpoint",
@@ -575,7 +580,7 @@ def as_app_error(error: AgentCatalogError) -> AppError:
                 detail=(
                     f"The summary endpoint {summary.summary_endpoint_id} has a "
                     f"{summary.summary_window}-token context window, smaller "
-                    f"than the main endpoint's {summary.main_window}. Name a "
+                    f"than the {larger} {summary.main_window}. Name a "
                     "summary endpoint whose window is at least as large, or "
                     "remove it to use the agent's own endpoint."
                 ),
