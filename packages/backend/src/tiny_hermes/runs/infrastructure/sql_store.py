@@ -3439,6 +3439,7 @@ class SqlRunStore:
             checkpoint_replay_safe=run.checkpoint_replay_safe,
             checkpoint_effect_status=CheckpointEffectStatus(run.checkpoint_effect_status),
             checkpoint_usage_quality=_usage_quality(run.checkpoint),
+            checkpoint_cached_input_tokens=_cached_input_tokens(run.checkpoint),
             failure_reason=_failure_reason(run.checkpoint),
             current_round=_round(run.checkpoint),
             goal_outcome=_goal_outcome(run.checkpoint),
@@ -3868,6 +3869,15 @@ def _failure_reason(checkpoint: dict[str, Any] | None) -> str | None:
         return None
     value: Any = checkpoint.get("failure")
     return str(value) if isinstance(value, str) and value else None
+
+
+def _cached_input_tokens(checkpoint: dict[str, Any] | None) -> int | None:
+    """The last round's cached prompt tokens, out of its checkpoint for the
+    reason `_usage_quality` reads there."""
+    if not checkpoint:
+        return None
+    value: Any = checkpoint.get("cached_input_tokens")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _usage_quality(checkpoint: dict[str, Any] | None) -> str | None:

@@ -1031,6 +1031,10 @@ class RunSnapshot:
     #: count: "nothing was used" and "nobody counted" are different facts, and
     #: only one of them means a Token limit was meaningfully enforced.
     checkpoint_usage_quality: str | None
+    #: How many of the last round's prompt tokens the provider served from its
+    #: cache, or `None` when it did not say (or no round has run). The number
+    #: that shows whether keeping the prompt prefix stable is paying off.
+    checkpoint_cached_input_tokens: int | None
     #: Why this Run failed, in the platform's own words, or `None` while it
     #: has not. Read from the checkpoint for the same reason
     #: `checkpoint_usage_quality` is: the round is described there, and a
@@ -1106,6 +1110,7 @@ class RunSnapshot:
             "checkpoint_replay_safe": self.checkpoint_replay_safe,
             "checkpoint_effect_status": self.checkpoint_effect_status.value,
             "checkpoint_usage_quality": self.checkpoint_usage_quality,
+            "checkpoint_cached_input_tokens": self.checkpoint_cached_input_tokens,
             "failure_reason": self.failure_reason,
             "goal": self._goal_document(),
             "created_at": self.created_at.isoformat(),
