@@ -65,9 +65,4 @@ async def test_asking_above_the_ceiling_is_refused_with_both_numbers() -> None:
 
 
 def test_the_platform_ceiling_is_configurable_and_above_the_default() -> None:
-    settings = Settings(
-        _env_file=None,  # pyright: ignore[reportCallIssue]
-        database_url="postgresql+asyncpg://unused",
-        session_cookie_secret="x" * 32,
-    )
-    assert settings.agent_max_tool_calls == 200
+    assert Settings.model_fields["agent_max_tool_calls"].default == 200
