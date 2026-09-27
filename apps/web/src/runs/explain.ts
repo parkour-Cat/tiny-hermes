@@ -215,6 +215,16 @@ export function eventNote(frame: Pick<RunEventFrame, "event_type" | "payload">):
       ? { key: "modelFallbackUsedNote", values: { reason } }
       : null;
   }
+  if (frame.event_type === "todo_updated") {
+    // Counts only, as the server records them: the items are the model's
+    // words and live in the transcript, not on the timeline.
+    const values = filled(frame.payload, {
+      total: "total",
+      completed: "completed",
+      in_progress: "in_progress",
+    });
+    return values === null ? null : { key: "todoUpdatedNote", values };
+  }
   if (frame.event_type === "model_fallback_skipped") {
     const key = FALLBACK_SKIPPED[String(frame.payload.reason)];
     return key === undefined ? null : { key, values: {} };

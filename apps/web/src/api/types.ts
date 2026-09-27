@@ -493,6 +493,9 @@ export const IMPLEMENTED_TOOLS = [
   // whatever it is handed actually gets opened.
   "agent.delegate",
   "artifact.read",
+  // §16.1 (v2.12). `test_todo.py` compares this list with the backend's, so
+  // a tool added there and forgotten here fails a test rather than a user.
+  "todo.write",
 ] as const;
 
 /**

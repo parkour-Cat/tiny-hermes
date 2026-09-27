@@ -31,6 +31,7 @@ from tiny_hermes.tools.domain.http_calls import (
     BoundOperation,
     schemas_for_operations,
 )
+from tiny_hermes.tools.domain.todo import MAX_TODO_CONTENT_CHARS, MAX_TODO_ITEMS
 
 #: Every tool this platform implements. An AgentVersion may bind a subset;
 #: publishing refuses a name outside it, so a Run cannot fail on its first call
@@ -47,6 +48,7 @@ IMPLEMENTED_TOOLS = (
     "session.search",
     "agent.delegate",
     "artifact.read",
+    "todo.write",
 )
 
 #: Tools the platform answers itself. `authorize` turns a call into a
@@ -64,6 +66,7 @@ PLATFORM_TOOLS = frozenset(
         "session.search",
         "agent.delegate",
         "artifact.read",
+        "todo.write",
     }
 )
 
@@ -79,7 +82,9 @@ PARALLEL_READS = frozenset({"file.read", "file.list"})
 #: (§7.4.2 v2.10, 豁免). `skill.load` refuses an oversized file whole rather
 #: than truncating it, because a model handed half a document cannot tell it
 #: is holding half; the planner cutting it afterwards would undo exactly that.
-UNTRIMMED_TOOLS = frozenset({"skill.load"})
+#: `todo.write` joins it for another reason (§16.1, v2.12): its result is the
+#: task list itself, and there is no other copy of it to fall back on.
+UNTRIMMED_TOOLS = frozenset({"skill.load", "todo.write"})
 
 #: The longest a round may ask to sleep, a little over a day. A Run in
 #: `waiting_external` holds its Session's head, so the model does not get to
@@ -425,6 +430,46 @@ MEMORY_REMEMBER_SCHEMA: dict[str, Any] = {
 
 MEMORY_REMEMBER_ARGUMENTS = frozenset({"body"})
 
+TODO_WRITE_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "todo.write",
+        "description": (
+            "Keep a task list for work that takes several steps. Send the whole "
+            "list every time — it replaces the previous one — and mark the step "
+            "you are on as in_progress. The list comes back as it now stands. "
+            "Use it for multi-step work only; a one-step answer needs no list."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "maxItems": MAX_TODO_ITEMS,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "content": {
+                                "type": "string",
+                                "description": f"At most {MAX_TODO_CONTENT_CHARS} characters.",
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed", "cancelled"],
+                            },
+                        },
+                        "required": ["id", "content", "status"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["items"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 
 def memory_body_of(call: ToolCallBlock) -> str:
     """What `memory.remember` asked to record, or a refusal.
@@ -769,6 +814,8 @@ def schemas_for(bound: tuple[str, ...]) -> list[dict[str, Any]]:
             schemas.append(AGENT_DELEGATE_SCHEMA)
         elif name == "artifact.read":
             schemas.append(ARTIFACT_READ_SCHEMA)
+        elif name == "todo.write":
+            schemas.append(TODO_WRITE_SCHEMA)
         elif name in FILE_SCHEMAS:
             schemas.append(FILE_SCHEMAS[name])
     return schemas

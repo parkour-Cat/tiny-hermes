@@ -377,3 +377,10 @@ test("a fallback passed over says which rule passed it over", () => {
     }),
   ).toBeNull();
 });
+
+test("a task list update says how far along it is", () => {
+  expect(
+    eventNote({ event_type: "todo_updated", payload: { total: 3, completed: 1, in_progress: 1 } }),
+  ).toEqual({ key: "todoUpdatedNote", values: { total: "3", completed: "1", in_progress: "1" } });
+  expect(eventNote({ event_type: "todo_updated", payload: { total: 3 } })).toBeNull();
+});

@@ -37,6 +37,7 @@ from tiny_hermes.runs.application.tool_answers import (
     answer_session_search,
     answer_skill_load,
     answer_skill_propose,
+    answer_todo_write,
     waits_for_approval,
 )
 from tiny_hermes.runs.domain.context_budget import (
@@ -1146,6 +1147,15 @@ class WorkerRuntime:
                     claimed, handle, box, context, reads, reserve, started, ended
                 )
                 results.append(ahead[call.call_id])
+                continue
+            if call.name == "todo.write":
+                # Before `reserve()`: keeping a list has no effect outside the
+                # transcript, and its cost is Token and model calls, which
+                # have ceilings of their own (§16.1, v2.12).
+                answered, event = answer_todo_write(context, call)
+                results.append(answered)
+                if event is not None:
+                    events.append(event)
                 continue
             external = call.name.startswith((f"{MCP_PREFIX}.", f"{HTTP_PREFIX}."))
             # External writes pass their approval gate before spending a call.

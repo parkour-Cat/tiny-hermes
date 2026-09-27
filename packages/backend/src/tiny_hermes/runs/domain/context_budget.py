@@ -310,6 +310,9 @@ SKILL_REINJECT_TOTAL_TOKENS = 25_000
 #: 技能加载工具的名字。和 `tools.domain.registry` 里注册的是同一个——补回段要认出
 #: 哪些工具结果是技能正文；`test_compaction_v2` 断言两处一致。
 SKILL_LOAD_TOOL = "skill.load"
+#: The task list's tool (§16.1): its latest result in a summarized range is put
+#: back, because the transcript is the list's only copy.
+TODO_WRITE_TOOL = "todo.write"
 
 
 def estimate_tokens(text: str, tokenizer: str | None = None) -> int:
@@ -989,6 +992,29 @@ def _put_back(
         parts.append(
             "What the user said in the summarized part, word for word, newest first:\n"
             + "\n".join(f"- {text}" for text in said)
+        )
+
+    todo_calls = {
+        block.call_id
+        for item in covered
+        for block in item.message.blocks
+        if isinstance(block, ToolCallBlock) and block.name == TODO_WRITE_TOOL
+    }
+    latest_list = next(
+        (
+            block.output
+            for item in reversed(covered)
+            for block in reversed(item.message.blocks)
+            if isinstance(block, ToolResultBlock)
+            and block.call_id in todo_calls
+            and not block.failed
+        ),
+        None,
+    )
+    if latest_list is not None:
+        parts.append(
+            "Your task list as it stood at the end of the summarized part "
+            "(a later update below replaces it):\n" + latest_list
         )
 
     calls = {

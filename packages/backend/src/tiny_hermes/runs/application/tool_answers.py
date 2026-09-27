@@ -69,6 +69,12 @@ from tiny_hermes.tools.domain.registry import (
     skill_propose_of,
     wait_seconds_of,
 )
+from tiny_hermes.tools.domain.todo import (
+    TodoArgumentsInvalid,
+    render_todos,
+    todo_counts,
+    todos_of,
+)
 
 
 def refusal(call_id: str, reason: RefusalReason, detail: str = "") -> ToolResultBlock:
@@ -252,6 +258,30 @@ async def answer_skill_propose(
                 "files": len(asked.files),
             },
         ),
+    )
+
+
+def answer_todo_write(
+    context: ExecutionContext, call: ToolCallBlock
+) -> tuple[ToolResultBlock, ReservedEvent | None]:
+    """Keep the model's task list, by answering with it (§16.1, v2.12).
+
+    The answer *is* the list: the transcript is where it lives, so nothing is
+    written anywhere else. The event carries counts only — the items are the
+    model's words and may restate what a user said, and the timeline is read
+    by people the transcript is not shown to.
+    """
+    if "todo.write" not in context.tools:
+        return refusal(call.call_id, RefusalReason.NOT_AUTHORIZED), None
+    try:
+        items = todos_of(call)
+    except TodoArgumentsInvalid as invalid:
+        return refusal(call.call_id, RefusalReason.INVALID_ARGUMENTS, str(invalid)), None
+    return (
+        ToolResultBlock(
+            call_id=call.call_id, output=render_todos(items), exit_code=0, failed=False
+        ),
+        ReservedEvent(event_type=RunEventType.TODO_UPDATED, payload=todo_counts(items)),
     )
 
 
