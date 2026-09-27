@@ -67,6 +67,13 @@ PLATFORM_TOOLS = frozenset(
     }
 )
 
+#: Tools that only read the sandbox, so a run of them in one reply is sent to
+#: the Controller together rather than one after another. Only consecutive
+#: ones: a read after a `shell.exec` in the same reply must see what the
+#: command wrote. `skill.load` is not here although it reads — it counts the
+#: Run's loads as it goes, and concurrent calls would race that count.
+PARALLEL_READS = frozenset({"file.read", "file.list"})
+
 #: Tools whose results are instructions rather than data, and so are never
 #: cut down by the context planner — not capped on entry, not cleared later
 #: (§7.4.2 v2.10, 豁免). `skill.load` refuses an oversized file whole rather
