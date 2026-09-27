@@ -261,6 +261,7 @@ export const enUS: Record<MessageKey, string> = {
   modelFallbackEndpoints: "Fallback models",
   modelFallbackEndpointsHint: "Tried in order when the main model cannot be reached or keeps answering 429/5xx; a run that switched stays switched. Two at most.",
   modelFallbackEndpointsTooMany: "Choose at most two fallback models",
+  todoUpdatedNote: "Task list updated: {total} items, {completed} done, {in_progress} under way.",
   modelFallbackUsedNote: "The main model did not answer ({reason}); a fallback model answers from this round on, and the run stays on it.",
   modelFallbackSkippedWindow: "A fallback model was skipped: this round's request does not fit its context window.",
   modelFallbackSkippedCost: "A fallback model was skipped: at its price this round would pass the cost ceiling.",
