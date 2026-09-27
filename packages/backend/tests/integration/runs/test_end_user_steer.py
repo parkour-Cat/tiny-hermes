@@ -197,7 +197,8 @@ async def test_someone_else_s_run_cannot_be_steered(
     run_id = _submit_run(client, _start_session(client), "steer-4")
     _sign_in(client, workspace_id, "li")
 
-    assert _steer(client, run_id).status_code == 404
+    # The same ownership check, and so the same answer, as cancel.
+    assert _steer(client, run_id).status_code == 403
 
 
 async def test_a_steer_that_never_got_in_comes_back_with_the_run(
