@@ -12,6 +12,7 @@ never acted.
 """
 
 import json
+import re
 from typing import Any
 
 import pytest
@@ -23,7 +24,7 @@ from tiny_hermes.runs.domain.models import (
     ToolCallBlock,
     ToolResultBlock,
 )
-from tiny_hermes.runs.infrastructure.openai_model import build_payload, normalize
+from tiny_hermes.runs.infrastructure.openai_model import build_payload, normalize, wire_names
 from tiny_hermes.runs.ports.model import ModelRequest, StopReason
 
 SPEC = ModelEndpointSpec.model_validate(
@@ -339,3 +340,77 @@ def test_a_replayed_tool_call_goes_out_under_the_wire_name() -> None:
     replayed = [m for m in payload["messages"] if m.get("tool_calls")]
     assert replayed, "the tool call was not replayed at all"
     assert replayed[0]["tool_calls"][0]["function"]["name"] == "shell__exec"
+
+
+# -- names a provider accepts, and the way back (MCP names are not ours) ------
+
+
+def _schema(name: str) -> dict[str, Any]:
+    return {"type": "function", "function": {"name": name, "parameters": {}}}
+
+
+def _called(wire: str) -> dict[str, Any]:
+    return answer(
+        choices=[
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": wire, "arguments": "{}"},
+                        }
+                    ],
+                },
+            }
+        ]
+    )
+
+
+def _round_trip(name: str) -> tuple[str, str]:
+    """The name the provider is shown, and the name a call to it comes back as."""
+    tools = [_schema(name)]
+    wire = sent(tools=tools)["tools"][0]["function"]["name"]
+    back = normalize(_called(wire), names=wire_names(tools))
+    return wire, back.tool_calls[0].name
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # An MCP tool that already has `__` in its name: turned back into
+        # `log.all` by replacing `__` with `.`, it was refused as unbound.
+        "mcp.git.log__all",
+        # `_` next to `.`: `a_.b` -> `a___b` -> `a._b`.
+        "mcp.srv.fetch_.raw",
+        # MCP allows 128 characters; OpenAI function names stop at 64.
+        "mcp.warehouse." + "inventory_reconciliation_" * 5,
+        # And a character OpenAI does not allow in a function name at all.
+        "mcp.srv.search files",
+    ],
+)
+def test_a_name_that_does_not_survive_the_rename_still_comes_back(name: str) -> None:
+    wire, back = _round_trip(name)
+
+    assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", wire), wire
+    assert back == name
+
+
+def test_an_ordinary_name_keeps_its_wire_form() -> None:
+    """Built-in names are shown as they always were: a changed name would
+    change every advertised tool list and break the prompt prefix."""
+    wire, back = _round_trip("shell.exec")
+
+    assert wire == "shell__exec"
+    assert back == "shell.exec"
+
+
+def test_two_names_that_would_collide_are_shown_as_two() -> None:
+    tools = [_schema("mcp.a.b_c"), _schema("mcp.a.b.c"), _schema("mcp.a.b__c")]
+    advertised = [item["function"]["name"] for item in sent(tools=tools)["tools"]]
+
+    assert len(set(advertised)) == 3

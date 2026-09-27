@@ -11,11 +11,10 @@ shared read into a read of everybody's.
 """
 
 from collections.abc import Sequence
-from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.memory.domain.scope import MemoryKind, MemoryScope, MemoryStatus
@@ -30,11 +29,11 @@ class SqlMemoryLibrary:
         self._session = session
 
     async def active_in(
-        self, scope: MemoryScope, *, limit: int, as_of: datetime | None = None
+        self, scope: MemoryScope, *, limit: int, excluding_run: UUID | None = None
     ) -> Sequence[RememberedFact]:
         rows = (
             await self._session.scalars(
-                _as_of(_scoped(scope), as_of)
+                _not_written_by(_scoped(scope), excluding_run)
                 .where(MemoryRow.status == MemoryStatus.ACTIVE.value)
                 .order_by(MemoryRow.created_at.desc(), MemoryRow.id)
                 .limit(limit)
@@ -43,7 +42,12 @@ class SqlMemoryLibrary:
         return [_fact(row, scope) for row in rows]
 
     async def relevant_in(
-        self, scope: MemoryScope, query: str, *, limit: int, as_of: datetime | None = None
+        self,
+        scope: MemoryScope,
+        query: str,
+        *,
+        limit: int,
+        excluding_run: UUID | None = None,
     ) -> Sequence[RememberedFact]:
         """The same scoped read, ordered by keyword relevance to `query`.
 
@@ -59,13 +63,13 @@ class SqlMemoryLibrary:
         """
         cleaned = query.strip()
         if not cleaned:
-            return await self.active_in(scope, limit=limit, as_of=as_of)
+            return await self.active_in(scope, limit=limit, excluding_run=excluding_run)
         rank = func.ts_rank(
             MemoryRow.search, matching(cleaned)
         )
         rows = (
             await self._session.scalars(
-                _as_of(_scoped(scope), as_of)
+                _not_written_by(_scoped(scope), excluding_run)
                 .where(MemoryRow.status == MemoryStatus.ACTIVE.value)
                 # `id` last so equal ranks and timestamps still come back in
                 # one order: a Run reads this every round, and the memory
@@ -77,14 +81,20 @@ class SqlMemoryLibrary:
         return [_fact(row, scope) for row in rows]
 
 
-def _as_of(query: Any, as_of: datetime | None) -> Any:
-    """Only rows last changed at or before ``as_of`` — how a Run reads the
-    memories it was created with, the same set every round (see
-    `SqlRunStore._remembered`). `updated_at` rather than `created_at`: a
-    candidate proposed long ago and approved mid-Run became a memory
-    mid-Run. A memory deleted or rejected mid-Run is gone at once — the status
-    filter is not frozen, and must not be."""
-    return query if as_of is None else query.where(MemoryRow.updated_at <= as_of)
+def _not_written_by(query: Any, run_id: UUID | None) -> Any:
+    """Leave out the memories ``run_id`` wrote itself — how a Run keeps the
+    promise `memory.remember` makes it ("It does not affect this Run").
+
+    By the writer, not by time. #98 compared the memory's `updated_at` with
+    the Run's `created_at`, and the two come from different clocks (the
+    database's for a row written in SQL, the application's for the Run); a
+    database a second ahead hid a memory written before the Run existed.
+    """
+    if run_id is None:
+        return query
+    return query.where(
+        or_(MemoryRow.origin_run_id.is_(None), MemoryRow.origin_run_id != run_id)
+    )
 
 
 def _scoped(scope: MemoryScope):
