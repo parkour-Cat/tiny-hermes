@@ -593,8 +593,11 @@ test("fields the form does not show survive saving the draft", async () => {
   // show — set through the API — was deleted by the first save from here.
   const MAIN = "33333333-4444-4555-8666-777777777777";
   const SUMMARY = "44444444-5555-4666-8777-888888888888";
+  // As the backend normalizes it (`normalize_agent_spec`), not a shape made
+  // up here: that is what a loaded draft actually carries.
   const hidden = {
     ...SPEC,
+    tools: ["file.write"],
     model_policy: {
       provider: "openai_compatible",
       endpoint_id: MAIN,
@@ -602,9 +605,13 @@ test("fields the form does not show survive saving the draft", async () => {
       max_output_tokens: 2048,
       summary_endpoint_id: SUMMARY,
     },
-    completion: { checks: [{ name: "tests", command: "make test" }] },
-    context_budget: { compaction_threshold: 0.8 },
-    delegation: { max_children: 2, allow_agents: [] },
+    completion: {
+      expected_artifacts: ["report.md"],
+      verification_command: null,
+      constraints: null,
+      stop_conditions: { max_rounds: null },
+    },
+    context_budget: { segments: [], compaction_threshold: 0.8 },
   };
   loadedAgent(3);
   const sent: unknown[] = [];
@@ -635,7 +642,7 @@ test("a draft with hidden fields and no edits is not dirty", async () => {
     http.get(`/api/v1/agents/${AGENT}/draft`, () =>
       HttpResponse.json({
         ...draftBody(3),
-        spec: { ...SPEC, completion: { checks: [{ name: "tests", command: "make test" }] } },
+        spec: { ...SPEC, context_budget: { segments: [], compaction_threshold: 0.8 } },
       }),
     ),
   );
