@@ -132,7 +132,7 @@ async def test_a_malformed_tool_call_is_asked_again_and_the_run_goes_on(
     assert "valid JSON" in retry_said
     said = " ".join(content for _, content in await transcript(engine, run))
     assert "valid JSON" not in said
-    assert '"good"' in said
+    assert "'call_id': 'good'" in said
     assert [event["reason"] for event in await _retries(engine, run)] == [
         "malformed_tool_arguments"
     ]
