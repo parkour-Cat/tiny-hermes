@@ -55,7 +55,7 @@ export DATABASE_URL="$TEST_DATABASE_URL"
 
 uv run --no-sync pytest packages/backend/tests/unit -q
 uv run --no-sync pytest packages/backend/tests/integration --ignore=packages/backend/tests/integration/sandbox -q
-uv run ruff check packages/backend migrations && uv run pyright
+uv run ruff check packages/backend migrations scripts && uv run pyright
 pnpm --filter @tiny-hermes/web test && pnpm chat:test
 ```
 
