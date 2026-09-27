@@ -35,9 +35,9 @@ from tiny_hermes.runs.infrastructure.deterministic_model import (
 )
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 from tiny_hermes.runs.infrastructure.openai_model import (
-    SAFETY_PREAMBLE,
     OpenAICompatibleProvider,
     RetryPolicy,
+    safety_preamble,
 )
 from tiny_hermes.runs.ports.model import ModelRequest, StopReason, UsageQuality
 
@@ -230,7 +230,8 @@ async def test_the_platforms_rules_precede_the_agents_persona(
         )
 
     sent = app.seen[0]["messages"]
-    assert sent[0] == {"role": "system", "content": SAFETY_PREAMBLE}
+    # This request binds no tool, so the text-only rules are the ones sent.
+    assert sent[0] == {"role": "system", "content": safety_preamble(tools=False)}
     assert sent[1]["content"] == "You are a careful assistant."
     assert [entry["role"] for entry in sent[2:]] == ["user", "assistant", "user"]
     assert app.seen[0]["max_tokens"] == 512

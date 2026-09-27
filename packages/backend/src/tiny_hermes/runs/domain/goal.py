@@ -53,6 +53,14 @@ class CompletionCheck:
 
     name: str
     met: bool
+    #: What the check printed. The failure the model has to fix is in here,
+    #: not in the fact that the check failed.
+    output: str = ""
+
+
+#: How much of a failing check's output the next round is shown — the end,
+#: where a test runner or a compiler reports what went wrong.
+FAILED_OUTPUT_TAIL_CHARS = 2_000
 
 
 @dataclass(frozen=True)
@@ -85,17 +93,32 @@ class GoalVerdict:
     wait_seconds: int | None = None
 
 
-def _instruction_for(unmet: tuple[str, ...]) -> str:
-    """Name what is still unmet, and nothing else.
+def _instruction_for(failing: tuple[CompletionCheck, ...]) -> str:
+    """Name what is still unmet, and show what it printed.
 
     The task is already in the conversation. Restating it spends context on
-    something the model can read, while the one thing it cannot know is why the
-    platform disagreed with its claim.
+    something the model can read, while the two things it cannot know are
+    why the platform disagreed with its claim and what the check said.
     """
-    if len(unmet) == 1:
-        return f"The task is not finished: {unmet[0]} did not pass. Continue working on it."
-    listed = "; ".join(unmet)
-    return f"The task is not finished: {listed} did not pass. Continue working on them."
+    names = [check.name for check in failing]
+    if len(names) == 1:
+        head = f"The task is not finished: {names[0]} did not pass."
+    else:
+        head = f"The task is not finished: {'; '.join(names)} did not pass."
+    parts = [head]
+    for check in failing:
+        printed = check.output.strip()
+        if not printed:
+            continue
+        if len(printed) > FAILED_OUTPUT_TAIL_CHARS:
+            printed = (
+                f"[…the first {len(printed) - FAILED_OUTPUT_TAIL_CHARS} of "
+                f"{len(printed)} characters are not shown]\n"
+                + printed[-FAILED_OUTPUT_TAIL_CHARS:]
+            )
+        parts.append(f"{check.name} printed:\n{printed}")
+    parts.append("Continue working on it." if len(names) == 1 else "Continue working on them.")
+    return "\n\n".join(parts)
 
 
 def judge(proposal: GoalProposal, evidence: GoalEvidence) -> GoalVerdict:
@@ -113,10 +136,12 @@ def judge(proposal: GoalProposal, evidence: GoalEvidence) -> GoalVerdict:
             return GoalVerdict(GoalOutcome.DONE)
         if not evidence.observable:
             return GoalVerdict(GoalOutcome.UNDECIDABLE)
-        unmet = tuple(check.name for check in evidence.checks if not check.met)
-        if unmet:
+        failing = tuple(check for check in evidence.checks if not check.met)
+        if failing:
             return GoalVerdict(
-                GoalOutcome.CONTINUE, unmet=unmet, instruction=_instruction_for(unmet)
+                GoalOutcome.CONTINUE,
+                unmet=tuple(check.name for check in failing),
+                instruction=_instruction_for(failing),
             )
         if not evidence.checks:
             # A declared goal that nothing has verified is not a met goal. The

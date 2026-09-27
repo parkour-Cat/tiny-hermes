@@ -26,7 +26,6 @@ from tiny_hermes.outbound.client import SafeOutboundClient
 from tiny_hermes.outbound.errors import OutboundError, OutboundRefused
 from tiny_hermes.runs.domain.models import (
     CACHE_RESET_HINT,
-    SAFETY_PREAMBLE,
     CacheStateHint,
     CanonicalMessage,
     ImageBlock,
@@ -34,6 +33,7 @@ from tiny_hermes.runs.domain.models import (
     TextBlock,
     ToolCallBlock,
     ToolResultBlock,
+    safety_preamble,
 )
 from tiny_hermes.runs.ports.model import (
     ModelRequest,
@@ -278,8 +278,12 @@ def build_payload(
     the endpoint was never approved for.
     """
     resolved = images or {}
+    advertised = [
+        _renamed_schema(schema)
+        for schema in (tools if tools is not None else list(request.tools))
+    ]
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": SAFETY_PREAMBLE},
+        {"role": "system", "content": safety_preamble(tools=bool(advertised))},
         {"role": "system", "content": request.personality},
     ]
     if request.skill_summaries:
@@ -306,10 +310,6 @@ def build_payload(
         "messages": messages,
         "max_tokens": spec.max_output_tokens,
     }
-    advertised = [
-        _renamed_schema(schema)
-        for schema in (tools if tools is not None else list(request.tools))
-    ]
     if advertised:
         # §10.2's first step: a model told about no tool cannot correctly ask
         # for one, so an Agent that binds none advertises none.

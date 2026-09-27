@@ -31,9 +31,11 @@ from tiny_hermes.runs.domain.approval import (
     NormalizedCall,
     normalize_call,
 )
+from tiny_hermes.runs.domain.models import ToolCallBlock, ToolResultBlock
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 from tiny_hermes.runs.infrastructure.sql_approvals import SqlApprovalGate
 from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalVerdict
+from tiny_hermes.runs.ports.model import ModelResponse, StopReason
 
 from ..conftest import VALID_SPEC
 from ..egress_support import ProxyHandle
@@ -626,3 +628,99 @@ async def test_a_misspelled_status_is_refused_rather_than_ignored(
     assert refused.status_code == 400, refused.text
     assert "aproved" not in refused.text  # not echoed back
     assert "approved" in refused.json()["detail"]
+
+
+class _BothInOneRound:
+    """Asks for a platform call and a governance write in the same response,
+    every time it is asked, then answers in text once the write has run.
+
+    The shape a real model produces whenever it decides two things at once.
+    The platform call stands for any call with an effect of its own; the one
+    every call has, whatever it does, is the tool-call budget it spends.
+    """
+
+    def __init__(self) -> None:
+        self.rounds = 0
+
+    async def complete(self, request: Any) -> ModelResponse:
+        self.rounds += 1
+        answered = any(
+            isinstance(block, ToolResultBlock) and block.call_id.startswith("order")
+            for message in request.messages
+            for block in message.blocks
+        )
+        if answered:
+            return ModelResponse(stop_reason=StopReason.COMPLETED, text="done")
+        return ModelResponse(
+            stop_reason=StopReason.TOOL_CALL,
+            text="",
+            tool_calls=(
+                ToolCallBlock(
+                    call_id=f"remember-{self.rounds}",
+                    name="memory.remember",
+                    arguments={"body": "I prefer orders in batches of ten."},
+                ),
+                ToolCallBlock(
+                    call_id=f"order-{self.rounds}",
+                    name="http.orders.createOrder",
+                    arguments={},
+                ),
+            ),
+        )
+
+
+async def test_a_round_that_must_wait_for_approval_runs_none_of_its_calls(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    api: tuple[StandIn, str],
+    proxy: ProxyHandle,
+) -> None:
+    """A round is all or nothing when it stops for a person. The Worker used
+    to run the calls ahead of the governance write, then throw the round
+    away: the effects stayed, the transcript forgot them, and after approval
+    the model asked for them again — a memory written twice, a child Run
+    spawned twice, and every one of them charged twice.
+
+    Checked before any call runs, so nothing does. The witness is the budget:
+    two calls in the Run, so two charged — not three."""
+    stand_in, url = api
+    approve_host(client, scope, "127.0.0.1")
+    version_id = register_tool(client, scope, url)
+    agent_id = _agent(client, scope, version_id, "governance")
+    spec = client.get(f"/api/v1/agents/{agent_id}/draft", headers=scope).json()
+    tools = [*spec["spec"]["tools"], "memory.remember"]
+    draft = client.put(
+        f"/api/v1/agents/{agent_id}/draft",
+        headers=scope,
+        json={
+            "expected_revision": spec["revision"],
+            "spec": {**spec["spec"], "tools": tools},
+        },
+    )
+    assert draft.status_code == 200, draft.text
+    published = client.post(
+        f"/api/v1/agents/{agent_id}/publish",
+        headers=scope,
+        json={"expected_revision": draft.json()["revision"]},
+    )
+    assert published.status_code == 201, published.text
+    run = ask(client, scope, session_for(agent_id), "remember and order")
+    model = _BothInOneRound()
+
+    await worker(engine, scope["X-Workspace-Id"], proxy, model).run_once()
+
+    waiting = _status(client, scope, run["id"])
+    assert waiting["status"] == "waiting_approval"
+    assert waiting["budget"]["consumed_tool_calls"] == 0
+    assert stand_in.requests == []
+
+    decided = _decide(client, scope, _pending(client, scope)[0]["id"], "approve")
+    assert decided.status_code == 200, decided.text
+    await worker(engine, scope["X-Workspace-Id"], proxy, model).run_once()
+
+    finished = _status(client, scope, run["id"])
+    assert finished["status"] == "completed"
+    assert stand_in.methods == ["POST"]
+    assert finished["budget"]["consumed_tool_calls"] == 2

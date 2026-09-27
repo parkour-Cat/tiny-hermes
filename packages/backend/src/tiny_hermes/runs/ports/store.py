@@ -206,6 +206,8 @@ class RecordSliceCommand:
     #:
     #: Phase 3A carried a single string here, which could not express a round
     #: that acted rather than answered.
+    #: Which valve set ``limit_reached`` — see `SliceDecision.limit_valve`.
+    limit_valve: str = "budget"
     appended: tuple[CanonicalMessage, ...] = ()
     #: Design §6.3: where the Run must go after this exact sandbox and its
     #: volume are confirmed gone. Recorded in the same transaction as the
@@ -351,6 +353,10 @@ class ExecutionContext:
     #: approval`. `None` only for a Session already gone, the same edge
     #: `_remembered` reads as "no subject" rather than "everybody's".
     caller_type: CallerType | None = None
+    #: How many rounds this Run — not its budget tree — has already judged,
+    #: counted from its `goal_verdict` events. What
+    #: `completion.stop_conditions.max_rounds` is measured against.
+    rounds_judged: int = 0
 
     @property
     def messages(self) -> tuple[CanonicalMessage, ...]:

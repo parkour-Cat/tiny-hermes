@@ -52,6 +52,9 @@ class RoundOutcome:
     #: answer in as a fact, the same way `cancel_requested` and
     #: `pause_requested` arrive as facts rather than lookups.
     user_waiting: bool = False
+    #: The Agent's `completion.stop_conditions.max_rounds` is spent: this Run
+    #: has judged as many rounds as it declared it may.
+    rounds_exhausted: bool = False
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,10 @@ class SliceDecision:
     signal: RunSignal | None
     pause_reason: PauseReason | None = None
     limit_reached: bool = False
+    #: Which safety valve, when ``limit_reached``: written into
+    #: `run_limit_reached` so a person can tell a spent budget (which raising
+    #: the budget fixes) from the Agent's own round ceiling (which it does not).
+    limit_valve: str = "budget"
     #: What this Run is waiting for, set only alongside
     #: ``EXTERNAL_WAIT_STARTED``. ``RunStateMachine`` refuses a
     #: ``waiting_external`` without one, and refuses one on anything else.
@@ -164,6 +171,16 @@ def decide_after_round(outcome: RoundOutcome) -> SliceDecision:
         # The checks could not be run, so the claim is neither accepted nor
         # rejected and a person is asked. Continuing would be guessing.
         return SliceDecision(RunSignal.SAFE_PAUSE_REACHED, PauseReason.OPERATOR)
+    if outcome.rounds_exhausted:
+        # §12.3 最大连续轮数. Below done/failed/undecidable — the ceiling stops
+        # the next round, not the one that already settled the goal — and
+        # above wait, because waking would be the next round.
+        return SliceDecision(
+            RunSignal.SAFE_PAUSE_REACHED,
+            PauseReason.LIMIT,
+            limit_reached=True,
+            limit_valve="max_rounds",
+        )
     if outcome.verdict.outcome is GoalOutcome.WAIT:
         # Whatever this Run is waiting for, it is not the lease or the warm
         # sandbox it is holding.

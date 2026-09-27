@@ -37,6 +37,7 @@ from tiny_hermes.runs.application.tool_answers import (
     answer_session_search,
     answer_skill_load,
     answer_skill_propose,
+    waits_for_approval,
 )
 from tiny_hermes.runs.domain.context_budget import (
     DEFAULT_COMPACTION_THRESHOLD,
@@ -57,7 +58,6 @@ from tiny_hermes.runs.domain.goal import (
     judge,
 )
 from tiny_hermes.runs.domain.models import (
-    SAFETY_PREAMBLE,
     Block,
     BudgetSummary,
     CacheStateHint,
@@ -74,6 +74,7 @@ from tiny_hermes.runs.domain.models import (
     ToolCallBlock,
     ToolResultBlock,
     WorkspaceCleanupTarget,
+    safety_preamble,
 )
 from tiny_hermes.runs.domain.slice_policy import (
     RoundOutcome,
@@ -554,6 +555,7 @@ class WorkerRuntime:
                     _budget_after(after, response, executed_ms) and not work.tool_limit_reached
                 )
                 slice_expired = (monotonic() - started) >= self._settings.max_slice_seconds
+                rounds_exhausted = _rounds_exhausted(context)
                 hold_slice = after.compat_deadline_at is not None and not compat_expired
                 # §12.1: `_has_waiting_run` opens its own transaction, worth
                 # paying only when the answer could change this round's
@@ -580,6 +582,7 @@ class WorkerRuntime:
                         slice_expired=False,
                         compat_window_expired=compat_expired,
                         user_waiting=False,
+                        rounds_exhausted=rounds_exhausted,
                     )
                 )
                 # `_has_waiting_run` reads in its own transaction, separate
@@ -611,6 +614,7 @@ class WorkerRuntime:
                         hold_slice=hold_slice,
                         compat_window_expired=compat_expired,
                         user_waiting=waiting,
+                        rounds_exhausted=rounds_exhausted,
                     )
                 )
 
@@ -884,24 +888,28 @@ class WorkerRuntime:
         for path in condition.expected_artifacts:
             # `test -e` and not a stat of the host: the artifact is a path
             # inside the sandbox, and this is the only place it exists.
-            met = await self._check_holds(
+            held = await self._check_holds(
                 claimed, handle, box, f"test -e {shlex.quote(f'{DATA_ROOT}/{path}')}", 30
             )
-            if met is None:
+            if held is None:
                 return GoalEvidence(declared=True, observable=False)
-            checks.append(CompletionCheck(name=path, met=met))
+            checks.append(CompletionCheck(name=path, met=held[0]))
 
         if condition.verification_command is not None:
-            met = await self._check_holds(
+            held = await self._check_holds(
                 claimed,
                 handle,
                 box,
                 condition.verification_command,
                 _VERIFICATION_TIMEOUT_SECONDS,
             )
-            if met is None:
+            if held is None:
                 return GoalEvidence(declared=True, observable=False)
-            checks.append(CompletionCheck(name=condition.verification_command, met=met))
+            checks.append(
+                CompletionCheck(
+                    name=condition.verification_command, met=held[0], output=held[1]
+                )
+            )
 
         return GoalEvidence(declared=True, checks=tuple(checks))
 
@@ -912,8 +920,9 @@ class WorkerRuntime:
         box: _Sandbox,
         line: str,
         timeout_seconds: int,
-    ) -> bool | None:
-        """Run one check. ``None`` means it did not answer.
+    ) -> tuple[bool, str] | None:
+        """Run one check: whether it held, and what it printed. ``None`` means
+        it did not answer.
 
         A command that was killed on its timeout, or a controller that refused
         to run it, said nothing about whether the goal was met. Reporting
@@ -947,7 +956,7 @@ class WorkerRuntime:
             return None
         if result.timed_out:
             return None
-        return int(result.exit_code) == 0
+        return int(result.exit_code) == 0, str(result.output)
 
     async def _file_safety_holds(
         self, claimed: ClaimedRun, handle: _LeaseHandle, box: _Sandbox
@@ -1102,6 +1111,14 @@ class WorkerRuntime:
                 )
             tool_limit_reached = not accepted
             return accepted
+
+        # All or nothing when the round stops for a person: asked of every call
+        # before any runs, so a round that waits has no effects to forget.
+        # See `waits_for_approval`.
+        for call in response.tool_calls:
+            waiting = await waits_for_approval(context, call, mcp, self._approvals)
+            if waiting is not None:
+                return _RoundWork((), False, approval=waiting)
 
         for call in response.tool_calls:
             external = call.name.startswith((f"{MCP_PREFIX}.", f"{HTTP_PREFIX}."))
@@ -1304,7 +1321,11 @@ class WorkerRuntime:
             claimed,
             handle,
             after.state_version,
-            SliceDecision(None, limit_reached=decision.limit_reached),
+            SliceDecision(
+                None,
+                limit_reached=decision.limit_reached,
+                limit_valve=decision.limit_valve,
+            ),
             response,
             executed_ms,
             appended,
@@ -2233,6 +2254,7 @@ class WorkerRuntime:
             signal=decision.signal,
             pause_reason=decision.pause_reason,
             limit_reached=decision.limit_reached,
+            limit_valve=decision.limit_valve,
             wait_kind=decision.wait_kind,
             wait_seconds=decision.wait_seconds,
             wait_policy=decision.wait_policy,
@@ -2403,12 +2425,64 @@ def _no_round(failure: str | None = None) -> ModelResponse:
     )
 
 
+def _persona(context: ExecutionContext) -> str:
+    """The Agent's personality, followed by how its claim of being finished
+    will be checked.
+
+    A model used to learn the completion conditions only by failing them, and
+    `completion.constraints` — documented as "handed to the model" — reached
+    no model at all. Said once, up front, in the segment that is sent every
+    round and never trimmed. The planner and the request both call this, so
+    the text that is charged is the text that is sent.
+
+    The constraints are the author's words and are not checked by anything;
+    the sentence says so, so the model does not read them as enforced.
+    """
+    personality = context.spec.personality
+    condition = context.spec.completion
+    if condition is None:
+        return personality
+    lines = ["When you say the task is finished, the platform checks it:"]
+    if condition.expected_artifacts:
+        listed = ", ".join(condition.expected_artifacts)
+        lines.append(f"- these files must exist under {DATA_ROOT}: {listed}")
+    if condition.verification_command is not None:
+        lines.append(
+            f"- this command must succeed in your sandbox: {condition.verification_command}"
+        )
+    if condition.constraints:
+        lines.append(
+            "The author of this Agent also set these constraints (nothing checks "
+            f"them automatically; respect them): {condition.constraints}"
+        )
+    if condition.stop_conditions.max_rounds is not None:
+        lines.append(
+            f"This task may take at most {condition.stop_conditions.max_rounds} rounds."
+        )
+    return f"{personality}\n\n" + "\n".join(lines)
+
+
+def _rounds_exhausted(context: ExecutionContext) -> bool:
+    """Whether the round being judged is the last `max_rounds` allows.
+
+    Counted per Run (`rounds_judged`), not from `_round_index`: that one is
+    the budget tree's model calls, which a child's or a retry's rounds also
+    move.
+    """
+    completion = context.spec.completion
+    ceiling = None if completion is None else completion.stop_conditions.max_rounds
+    return ceiling is not None and context.rounds_judged + 1 >= ceiling
+
+
 def _round_index(context: ExecutionContext) -> int:
-    """Which round this is, counted across the Run rather than the slice.
+    """Which round this is, counted across slices rather than within one.
 
     So a scenario that needs a second round still gets one after the Run has
     been re-queued at a slice boundary — and so the number the model is told
     and the number a person reads off the Run are the same number.
+
+    Counted from the budget, which the whole Run tree shares: a child's or a
+    retry's model calls move it too. A per-Run count is `rounds_judged`.
     """
     return context.budget.consumed_model_calls + 1
 
@@ -2701,11 +2775,14 @@ def _plan(
             skill_summaries=tuple(item.text for item in summaries),
             memories=tuple(fact.body for fact in context.memories),
         )
+    schemas = _tool_schemas(context, mcp)
     return plan_context(
         window=context.window,
-        safety_rules=SAFETY_PREAMBLE,
-        personality=context.spec.personality,
-        tool_schemas=_tool_schemas(context, mcp),
+        # Chosen from the same schema list the request advertises, so the
+        # planner charges exactly the preamble the provider sends.
+        safety_rules=safety_preamble(tools=bool(schemas)),
+        personality=_persona(context),
+        tool_schemas=schemas,
         history=context.history,
         skill_summaries=summaries,
         memories=[fact.body for fact in context.memories],
@@ -2775,7 +2852,7 @@ def _request(
     return ModelRequest(
         images=pictures or {},
         policy=context.spec.model_policy,
-        personality=context.spec.personality,
+        personality=_persona(context),
         messages=plan.messages,
         round_index=_round_index(context),
         tools=_tool_schemas(context, mcp),

@@ -47,11 +47,13 @@ from tiny_hermes.runs.ports.searches import SessionSearches
 from tiny_hermes.runs.ports.skills import SkillLibrary
 from tiny_hermes.runs.ports.store import ExecutionContext, ReservedEvent
 from tiny_hermes.tools.domain.http_calls import (
+    HTTP_PREFIX,
     BoundOperation,
     HttpCallRefused,
     HttpRequestPlan,
     http_call_of,
 )
+from tiny_hermes.tools.domain.mcp import MCP_PREFIX
 from tiny_hermes.tools.domain.mcp import call_name as mcp_call_name
 from tiny_hermes.tools.domain.registry import (
     MAX_SKILL_FILE_BYTES,
@@ -771,21 +773,7 @@ async def answer_mcp_call(
                 text_refusal(call.call_id, "no approval gate is configured here"),
                 _mcp_event(entry, "approval_unavailable"),
             )
-        permission = f"mcp.{entry.server_name}.call"
-        normalized = normalize_call(
-            call.name,
-            call.arguments,
-            target=f"mcp://{entry.server_name}/{entry.tool.name}",
-            required_permission=permission,
-        )
-        checked = await approvals.check(
-            run_id=context.run_id,
-            approval_type=_write_approval_type(context),
-            tool=call.name,
-            call_id=call.call_id,
-            call=normalized,
-            required_permission=permission,
-        )
+        checked = await _ask_about_mcp(entry, call, approvals, context)
         if not checked.proceeds:
             # Nothing appended: the Run stops here and asks the model again
             # when it resumes. See `HttpCallOutcome`.
@@ -811,6 +799,85 @@ async def answer_mcp_call(
             failed=False,
         )
     )
+
+
+async def _ask_about_mcp(
+    entry: BoundMcpTool,
+    call: ToolCallBlock,
+    approvals: ApprovalGate,
+    context: ExecutionContext,
+) -> ApprovalCheck:
+    permission = f"mcp.{entry.server_name}.call"
+    normalized = normalize_call(
+        call.name,
+        call.arguments,
+        target=f"mcp://{entry.server_name}/{entry.tool.name}",
+        required_permission=permission,
+    )
+    return await approvals.check(
+        run_id=context.run_id,
+        approval_type=_write_approval_type(context),
+        tool=call.name,
+        call_id=call.call_id,
+        call=normalized,
+        required_permission=permission,
+    )
+
+
+async def waits_for_approval(
+    context: ExecutionContext,
+    call: ToolCallBlock,
+    revalidated: tuple[BoundMcpTool, ...],
+    gate: ApprovalGate | None,
+) -> ApprovalCheck | None:
+    """Whether this call would stop the Run for a person — asked, like the
+    call itself would ask, but without running anything.
+
+    The Worker asks this of every call in a round **before** it runs any of
+    them. A round that stops for approval is discarded and the model is asked
+    again after the decision; running the calls ahead of the write first would
+    leave their effects in place — a memory written, a child Run spawned, a
+    tool call charged — for a round the transcript then forgets, and the
+    model asks for all of them again.
+
+    The same checks `answer_http_call` and `answer_mcp_call` make, through the
+    same helpers, so the two cannot disagree about which call waits. Asking
+    twice is safe: an approved call matches by hash and stays approved, and a
+    Run has at most one pending question (`SqlApprovalGate.check`). A call
+    that would be *refused* is `None` here — refusing is not waiting, and the
+    round's own pass answers it.
+    """
+    if gate is None:
+        return None
+    if call.name.startswith(f"{HTTP_PREFIX}."):
+        bound = list(context.granted_operations)
+        entry = next((item for item in bound if item.call_name == call.name), None)
+        if entry is None:
+            return None
+        try:
+            plan = http_call_of(call, bound)
+        except HttpCallRefused:
+            return None
+        if plan.read_only:
+            return None
+        stopped = await _cleared_to_write(entry, plan, call, gate, context)
+        if stopped is None or stopped.result is not None:
+            return None
+        return stopped.approval
+    if call.name.startswith(f"{MCP_PREFIX}."):
+        mcp_entry = next(
+            (
+                item
+                for item in revalidated
+                if mcp_call_name(item.server_name, item.tool.name) == call.name
+            ),
+            None,
+        )
+        if mcp_entry is None or _mcp_policy(mcp_entry, context) is not WritePolicy.GOVERNANCE:
+            return None
+        checked = await _ask_about_mcp(mcp_entry, call, gate, context)
+        return None if checked.proceeds else checked
+    return None
 
 
 def _mcp_policy(entry: BoundMcpTool, context: ExecutionContext) -> WritePolicy | None:

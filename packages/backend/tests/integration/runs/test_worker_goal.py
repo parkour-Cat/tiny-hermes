@@ -412,3 +412,85 @@ async def test_a_run_that_has_not_run_yet_has_no_verdict_to_report(
         "unmet": [],
         "preempted": False,
     }
+
+
+class KeepsWorking:
+    """A model that never claims to be finished: every round asks for a tool."""
+
+    def __init__(self) -> None:
+        self.requests: list[Any] = []
+
+    async def complete(self, request: Any) -> ModelResponse:
+        self.requests.append(request)
+        return ModelResponse(
+            stop_reason=StopReason.TOOL_CALL,
+            text="",
+            tool_calls=(
+                ToolCallBlock(
+                    call_id=f"c{len(self.requests)}",
+                    name="shell.exec",
+                    arguments={"command": "ls"},
+                ),
+            ),
+        )
+
+
+async def test_max_rounds_stops_a_run_that_never_finishes(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_that_declares: Any
+) -> None:
+    """§12.3 最大连续轮数. `stop_conditions.max_rounds` was validated at publish
+    and read by nothing at runtime, so it stopped nothing; a Run ran on until
+    the shared model-call budget did. It is its own valve, and says so."""
+    agent = agent_that_declares(
+        {"verification_command": "true", "stop_conditions": {"max_rounds": 2}},
+        rounds=10,
+    )
+    run = submit(client, scope, agent, "keep going")
+    model = KeepsWorking()
+
+    await drive(engine, model, StandInSandbox())
+
+    body = status(client, scope, run)
+    assert len(model.requests) == 2
+    assert body["status"] == "paused"
+    assert body["pause_reason"] == "limit"
+    async with engine.connect() as connection:
+        reasons = (
+            await connection.execute(
+                text(
+                    "SELECT payload FROM run_events WHERE run_id = :id "
+                    "AND event_type = 'run_limit_reached'"
+                ),
+                {"id": UUID(run)},
+            )
+        ).scalars().all()
+    assert [payload["reason"] for payload in reasons] == ["max_rounds"]
+
+
+async def test_the_model_is_told_how_it_will_be_checked_and_why_a_check_failed(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_that_declares: Any
+) -> None:
+    """Two things the model could not know. Before: the conditions its claim
+    is checked against — `completion.constraints` said "handed to the model"
+    and nothing handed it. After a failed claim: what the verification
+    printed, not only that it failed."""
+    agent = agent_that_declares(
+        {
+            "verification_command": "pytest -q",
+            "expected_artifacts": ["report.md"],
+            "constraints": "Never edit files under vendor/.",
+        },
+        rounds=2,
+    )
+    submit(client, scope, agent, "write the report")
+    sandbox = ScriptedSandbox(failing=("pytest -q",), output="")
+    model = Recording(claims_done("all done"), claims_done("all done"))
+
+    await drive(engine, model, sandbox)
+
+    first = model.requests[0].personality
+    assert "pytest -q" in first
+    assert "report.md" in first
+    assert "Never edit files under vendor/." in first
+    second = " ".join(message.text for message in model.requests[1].messages)
+    assert "not yet" in second

@@ -152,3 +152,41 @@ def test_a_wait_of_zero_or_less_is_not_a_wait() -> None:
     verdict = judge(GoalProposal(StopReason.CONTINUE, wait_seconds=0), UNDECLARED)
 
     assert verdict.outcome is GoalOutcome.CONTINUE
+
+
+def test_the_next_instruction_carries_what_the_failing_command_printed() -> None:
+    """"`pytest -q` did not pass" tells the model a check failed; the failure
+    it has to fix is in what the command printed, which it never saw."""
+    verdict = judge(
+        GoalProposal(stop_reason=StopReason.COMPLETED),
+        GoalEvidence(
+            declared=True,
+            checks=(
+                CompletionCheck(
+                    name="pytest -q",
+                    met=False,
+                    output="FAILED tests/test_report.py::test_totals - assert 3 == 4",
+                ),
+            ),
+        ),
+    )
+
+    assert verdict.instruction is not None
+    assert "assert 3 == 4" in verdict.instruction
+
+
+def test_a_long_output_is_cut_to_its_end_and_says_so() -> None:
+    """The end, because that is where a test runner or a compiler reports."""
+    output = "noise\n" * 5_000 + "the error that matters"
+    verdict = judge(
+        GoalProposal(stop_reason=StopReason.COMPLETED),
+        GoalEvidence(
+            declared=True,
+            checks=(CompletionCheck(name="make check", met=False, output=output),),
+        ),
+    )
+
+    assert verdict.instruction is not None
+    assert verdict.instruction.count("noise") < 1_000
+    assert "the error that matters" in verdict.instruction
+    assert str(len(output)) in verdict.instruction
