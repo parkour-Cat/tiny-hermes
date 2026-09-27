@@ -242,3 +242,20 @@ test("a blocked version is labelled and cannot be made the default", async () =>
   // bindings to start. Version 1 already is the default, so it is not either.
   expect(screen.queryByRole("button", { name: "设为新绑定起点" })).not.toBeInTheDocument();
 });
+
+test("each version says how many runs loaded it and how they ended", async () => {
+  // §15.4: the evidence a reviewer judges a skill by. Counted in this
+  // workspace, per Run, from a table that outlives the Runs' events.
+  document.cookie = "tiny_hermes_csrf=token-value";
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(USER)),
+    http.get("/api/v1/skills", () => HttpResponse.json([skill(MINE, "rollout", "workspace", V1)])),
+    http.get(`/api/v1/skills/${MINE}/versions`, () =>
+      HttpResponse.json([version(V1, MINE, 1, { usage: { runs: 4, completed: 3, failed: 1 } })]),
+    ),
+  );
+
+  renderSkills();
+
+  expect(await screen.findByText("4 次运行加载过：3 次完成，1 次失败")).toBeInTheDocument();
+});
