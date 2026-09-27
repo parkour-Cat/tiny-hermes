@@ -144,11 +144,12 @@ def _submit(client: TestClient, scope: dict[str, str], agent_id: str) -> str:
 
 async def _drive(engine: AsyncEngine, workspace_id: str, model: Any) -> None:
     sessions = async_sessionmaker(engine, expire_on_commit=False)
+    sandbox: Any = StandInSandbox()
     await WorkerRuntime(
         session_factory=sessions,
         model=model,
         notifier=NullWakeUpNotifier(),
-        sandbox=StandInSandbox(),
+        sandbox=sandbox,
         skills=SqlSkillLibrary(sessions),
         proposals=SqlSkillProposals(sessions),
         settings=WorkerSettings(
