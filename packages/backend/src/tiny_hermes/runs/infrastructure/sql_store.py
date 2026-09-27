@@ -1,5 +1,5 @@
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -1433,11 +1433,14 @@ class SqlRunStore:
         today, and writing the difference down here is what will keep §4.5's
         end-user identity from being wired to the wrong one.
 
-        Frozen for the Run: the memories as they stood when it was created
-        (`as_of`), ranked against its own request, so every round gets the
-        same block. The tool tells the model a memory it writes "does not
-        affect this Run", and a block that changed mid-Run would also stop
-        matching the prefix a provider had cached.
+        Held steady for the Run: ranked against its own request, and without
+        the memories it wrote itself (`excluding_run`), so rounds get the same
+        block. The tool tells the model a memory it writes "does not affect
+        this Run", and a block that changed mid-Run would also stop matching
+        the prefix a provider had cached. Not a full snapshot: a memory
+        another Run writes, or a person approves, while this one is running
+        joins its next round — rare, and by then it is a memory someone
+        decided should be used.
 
         `query` is this Run's own request, and the ordering it produces is
         **keyword relevance, not meaning** (§14.3 excludes vector memory). It
@@ -1466,7 +1469,7 @@ class SqlRunStore:
         ):
             found.extend(
                 await library.relevant_in(
-                    scope, query, limit=MEMORY_READ_LIMIT, as_of=run.created_at
+                    scope, query, limit=MEMORY_READ_LIMIT, excluding_run=run.id
                 )
             )
         return tuple(found)
@@ -1835,6 +1838,9 @@ class SqlRunStore:
             # cut-off sentence cannot tell that it is holding half of one.
             "summary": summary[:MAX_CHILD_SUMMARY],
             "summary_truncated": len(summary) > MAX_CHILD_SUMMARY,
+            # Kept so the line the parent reads can say how much it is not
+            # seeing (`child_report_line`).
+            "summary_length": len(summary),
             "failure_reason": _failure_reason(run.checkpoint),
             # What the child produced, by id. The parent is granted each of
             # them at delivery — §13's eighth clause going upward — so this
@@ -2388,20 +2394,11 @@ class SqlRunStore:
         lines: list[str] = []
         for child in children:
             report = child.delegation_result or {}
-            status = str(report.get("status", child.status))
-            summary = str(report.get("summary", "")).strip()
-            reason = report.get("failure_reason")
-            said = summary or "It reported nothing."
-            if status != RunState.COMPLETED.value:
-                said = f"{said} (reason: {reason})" if reason else said
-            handed = [str(item) for item in report.get("artifacts", [])]
-            for artifact_id in handed:
+            for artifact_id in report.get("artifacts", []):
                 await self._grant_artifact(
-                    parent.workspace_id, UUID(artifact_id), parent.id, "delivered_up"
+                    parent.workspace_id, UUID(str(artifact_id)), parent.id, "delivered_up"
                 )
-            if handed:
-                said = f"{said} Files: {', '.join(handed)}."
-            lines.append(f"- {child.id} [{status}]: {said}")
+            lines.append(child_report_line(child.id, report, fallback_status=child.status))
             child.result_delivered_at = now
         body = (
             "The Agents you delegated to have finished. This is everything they "
@@ -3725,6 +3722,36 @@ def _new_budget(
         cost_quality=CostQuality.PROVIDER.value,
         version=1,
     )
+
+
+def child_report_line(
+    child_id: UUID, report: Mapping[str, Any], *, fallback_status: str | None = None
+) -> str:
+    """The one line a parent reads about one finished child.
+
+    A report cut at `MAX_CHILD_SUMMARY` says so, with the length it had: the
+    parent otherwise holds the first part of a sentence with no way to know
+    it is the first part. Reports recorded before the length was kept still
+    say they were cut.
+    """
+    status = str(report.get("status", fallback_status))
+    summary = str(report.get("summary", "")).strip()
+    said = summary or "It reported nothing."
+    if report.get("summary_truncated"):
+        length = report.get("summary_length")
+        said += (
+            f" […the report was cut: only its first {MAX_CHILD_SUMMARY} of "
+            f"{length} characters are shown]"
+            if isinstance(length, int)
+            else f" […the report was cut: only its first {MAX_CHILD_SUMMARY} characters are shown]"
+        )
+    reason = report.get("failure_reason")
+    if status != RunState.COMPLETED.value and reason:
+        said = f"{said} (reason: {reason})"
+    handed = [str(item) for item in report.get("artifacts", [])]
+    if handed:
+        said = f"{said} Files: {', '.join(handed)}."
+    return f"- {child_id} [{status}]: {said}"
 
 
 def _run_request(history: Sequence[StoredMessage], run_id: UUID) -> str:
