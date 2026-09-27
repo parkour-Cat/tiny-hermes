@@ -53,6 +53,8 @@ type DraftValues = {
   provider: "deterministic" | "openai_compatible";
   scenario: string;
   endpoint_id: string | undefined;
+  /** At most two, in order, never the main one (§7.4.1). */
+  fallback_endpoint_ids: string[];
   max_execution_seconds: number;
   max_elapsed_seconds: number;
   max_model_calls: number;
@@ -149,6 +151,8 @@ function valuesOf(draft: AgentDraftResponse): DraftValues {
     provider: policy.provider,
     scenario: policy.provider === "deterministic" ? policy.scenario : "complete",
     endpoint_id: policy.provider === "openai_compatible" ? policy.endpoint_id : undefined,
+    fallback_endpoint_ids:
+      policy.provider === "openai_compatible" ? [...(policy.fallback_endpoint_ids ?? [])] : [],
     ...draft.spec.limits,
     tools: [...draft.spec.tools],
     delivery_enabled: delivery.enabled,
@@ -177,7 +181,15 @@ function specOf(values: DraftValues): AgentSpecDocument {
     personality: values.personality,
     model_policy:
       values.provider === "openai_compatible"
-        ? { provider: "openai_compatible", endpoint_id: values.endpoint_id ?? "" }
+        ? {
+            provider: "openai_compatible",
+            endpoint_id: values.endpoint_id ?? "",
+            // Left out when none is chosen, so an Agent without one publishes
+            // the document — and the content hash — it published before.
+            ...((values.fallback_endpoint_ids ?? []).length > 0
+              ? { fallback_endpoint_ids: values.fallback_endpoint_ids }
+              : {}),
+          }
         : { provider: "deterministic", scenario: values.scenario },
     tools: values.tools,
     limits: {
@@ -588,6 +600,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
   const fieldLabels: Record<string, MessageKey> = {
     name: "agentName", alias: "agentAlias",
     personality: "personality", model_policy: "modelEndpoints", endpoint_id: "modelEndpoint",
+    fallback_endpoint_ids: "modelFallbackEndpoints",
     tools: "toolsSection", skills: "skills", http_tools: "httpTools", mcp_tools: "mcpServers",
     network: "agentNetwork", limits: "budgetSection", delivery: "deliverySection", end_user_access: "agentSummaryEndUserOn",
     max_execution_seconds: "maxExecutionSeconds", max_elapsed_seconds: "maxElapsedSeconds",
@@ -773,7 +786,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
           <FormSection
             title={t("agentSectionModel")}
             summary=""
-            fields={[provider === "openai_compatible" ? "endpoint_id" : "scenario", ...limits.map((limit) => limit.name)]}
+            fields={[...(provider === "openai_compatible" ? ["endpoint_id", "fallback_endpoint_ids"] : ["scenario"]), ...limits.map((limit) => limit.name)]}
             collapsible={false}
           >
           <Form.Item name="provider" label={t("modelProvider")} rules={[{ required: true }]}>
@@ -794,6 +807,30 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
               <Select
                 options={(endpoints.data ?? [])
                   .filter((entry) => entry.status === "active")
+                  .map((entry) => ({ value: entry.id, label: entry.name }))}
+                loading={endpoints.isLoading}
+              />
+            </Form.Item>
+          ) : null}
+          {provider === "openai_compatible" ? (
+            <Form.Item
+              name="fallback_endpoint_ids"
+              label={t("modelFallbackEndpoints")}
+              extra={t("modelFallbackEndpointsHint")}
+              rules={[
+                {
+                  validator: (_, value: string[] | undefined) =>
+                    (value ?? []).length <= 2
+                      ? Promise.resolve()
+                      : Promise.reject(new Error(t("modelFallbackEndpointsTooMany"))),
+                },
+              ]}
+            >
+              <Select
+                mode="multiple"
+                allowClear
+                options={(endpoints.data ?? [])
+                  .filter((entry) => entry.status === "active" && entry.id !== watched?.endpoint_id)
                   .map((entry) => ({ value: entry.id, label: entry.name }))}
                 loading={endpoints.isLoading}
               />
