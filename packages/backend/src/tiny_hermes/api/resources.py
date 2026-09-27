@@ -371,7 +371,8 @@ class ApplicationResources:
                     SqlAgentStore(session),
                     SqlModelEndpointStore(session),
                     PlatformCeilings(
-                        max_model_calls=self.settings.agent_max_model_calls
+                        max_model_calls=self.settings.agent_max_model_calls,
+                        max_tool_calls=self.settings.agent_max_tool_calls,
                     ),
                     CatalogSkillBindings(SqlSkillStore(session)),
                     # What this workspace approved, so a published version can

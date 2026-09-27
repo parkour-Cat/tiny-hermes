@@ -24,6 +24,7 @@ from tiny_hermes.agents.application.service import (
     SkillBindingUnavailable,
     SkillBoundTwice,
     SkillSummaryBudgetExceeded,
+    ToolCallCeilingExceeded,
     UnknownAgent,
     UnknownAgentExample,
 )
@@ -701,6 +702,16 @@ def as_app_error(error: AgentCatalogError) -> AppError:
             # administrator what the ceiling happens to be today.
             detail=(
                 f"The agent asks for {error.asked} model calls and this "
+                f"platform allows {error.allowed}."
+            ),
+        )
+    if isinstance(error, ToolCallCeilingExceeded):
+        return AppError(
+            code="tool_call_ceiling_exceeded",
+            title="Too many tool calls",
+            status=422,
+            detail=(
+                f"The agent asks for {error.asked} tool calls and this "
                 f"platform allows {error.allowed}."
             ),
         )

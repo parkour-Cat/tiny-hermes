@@ -28,7 +28,10 @@ class AgentLimits(BaseModel):
     # one. The ceiling is checked where a value is *written* instead — see
     # `PlatformCeilings` and `AgentCatalog`.
     max_model_calls: int = Field(default=20, ge=1)
-    max_tool_calls: int = Field(default=50, ge=0, le=50)
+    # No upper literal, for the reason `max_model_calls` has none: the
+    # ceiling is `PlatformCeilings.max_tool_calls`, checked where a value is
+    # written.
+    max_tool_calls: int = Field(default=50, ge=0)
     max_derived_retries: int = Field(default=3, ge=0, le=3)
 
 
@@ -754,12 +757,19 @@ class PlatformCeilings:
     """
 
     max_model_calls: int = 20
+    max_tool_calls: int = 200
 
 
 def rounds_above_ceiling(spec: AgentSpec, ceilings: PlatformCeilings) -> int | None:
     """The asked-for round count when it is above the ceiling, else `None`."""
     asked = spec.limits.max_model_calls
     return asked if asked > ceilings.max_model_calls else None
+
+
+def tool_calls_above_ceiling(spec: AgentSpec, ceilings: PlatformCeilings) -> int | None:
+    """The asked-for tool-call count when it is above the ceiling, else `None`."""
+    asked = spec.limits.max_tool_calls
+    return asked if asked > ceilings.max_tool_calls else None
 
 
 def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
