@@ -8,6 +8,7 @@ Worker 认领这个 Run 之前就已经排好队，用 `session_sequence` 一样
 """
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -57,10 +58,15 @@ async def _mark_started(engine: AsyncEngine, run_id: UUID) -> None:
     `has_waiting_run`, and setting it directly keeps these tests from also
     depending on the claim/lease machinery they are not testing.
     """
+    # The application's clock, as a Worker's claim uses (`_apply_decision`):
+    # `has_waiting_run` compares this with the next message's `created_at`,
+    # which the application stamps too. The database's `now()` here made the
+    # comparison depend on the skew between the two clocks — the test passed
+    # or failed with it.
     async with engine.begin() as connection:
         await connection.execute(
-            text("UPDATE runs SET status = 'running', started_at = now() WHERE id = :id"),
-            {"id": run_id},
+            text("UPDATE runs SET status = 'running', started_at = :now WHERE id = :id"),
+            {"id": run_id, "now": datetime.now(UTC)},
         )
 
 

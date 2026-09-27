@@ -115,6 +115,13 @@ class Settings(BaseSettings):
     #: this cannot break an Agent already published above it.
     agent_max_model_calls: int = Field(default=20, ge=1, le=200)
 
+    #: The most tool calls an Agent author may ask for (§12.3). Was the literal
+    #: `le=50` on `AgentLimits.max_tool_calls`; fifty is a short task — an
+    #: Agent reading a repository and editing a few files ran out mid-way. The
+    #: Agent's own default stays 50; this is how far an author may raise it.
+    #: Checked when written, never when a published version is read back.
+    agent_max_tool_calls: int = Field(default=200, ge=0, le=5_000)
+
     #: Attempts per model round, on the same endpoint. A workspace may lower
     #: this; nothing may raise it.
     model_max_attempts: int = Field(default=3, ge=1, le=3)

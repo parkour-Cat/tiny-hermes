@@ -496,6 +496,34 @@ test("saving sends the loaded revision and a whole phase-two spec", async () => 
   expect(await screen.findByText("草稿修订 4")).toBeInTheDocument();
 });
 
+test("a tool-call limit above fifty reaches the server rather than being clamped", async () => {
+  // The field used to stop at 50, the backend's old literal. The platform
+  // ceiling is an administrator's setting now (default 200) that this page
+  // cannot see, so the server decides and answers with both numbers; the
+  // input must not quietly turn 120 into 50 first.
+  loadedAgent(3);
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4, "You answer support questions."));
+    }),
+  );
+
+  renderDetail();
+  await screen.findByLabelText("人格");
+  await openSection(t("agentSectionCapability"));
+  const calls = screen.getByLabelText("工具调用次数上限");
+  await userEvent.clear(calls);
+  await userEvent.type(calls, "120");
+  await userEvent.tab();
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  const body = sent[0] as { spec: { limits: { max_tool_calls: number } } };
+  expect(body.spec.limits.max_tool_calls).toBe(120);
+});
+
 test("a draft conflict keeps the typed personality and sends nothing more", async () => {
   loadedAgent(3);
   let attempts = 0;

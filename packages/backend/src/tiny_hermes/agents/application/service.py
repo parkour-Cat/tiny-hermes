@@ -19,6 +19,7 @@ from tiny_hermes.agents.domain.models import (
     WritePolicy,
     initial_agent_spec,
     rounds_above_ceiling,
+    tool_calls_above_ceiling,
 )
 from tiny_hermes.agents.ports.http_tools import (
     HttpToolBindingReader,
@@ -422,6 +423,16 @@ class RoundCeilingExceeded(AgentCatalogError):
         self.allowed = allowed
 
 
+class ToolCallCeilingExceeded(AgentCatalogError):
+    """The draft asks for more tool calls than this platform allows. Carries
+    both numbers, as `RoundCeilingExceeded` does."""
+
+    def __init__(self, asked: int, allowed: int) -> None:
+        super().__init__(f"{asked} tool calls asked, {allowed} allowed")
+        self.asked = asked
+        self.allowed = allowed
+
+
 class AgentCatalog:
     """Agent publication rules.
 
@@ -807,6 +818,9 @@ class AgentCatalog:
         asked = rounds_above_ceiling(spec, self._ceilings)
         if asked is not None:
             raise RoundCeilingExceeded(asked, self._ceilings.max_model_calls)
+        calls = tool_calls_above_ceiling(spec, self._ceilings)
+        if calls is not None:
+            raise ToolCallCeilingExceeded(calls, self._ceilings.max_tool_calls)
 
     async def _check_endpoint(self, spec: AgentSpec) -> None:
         """Refuse a version that names an endpoint it cannot actually use."""

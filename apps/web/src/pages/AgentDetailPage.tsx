@@ -296,8 +296,12 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
   const limits: { name: keyof DraftValues; label: MessageKey; min: number; max: number }[] = [
     { name: "max_execution_seconds", label: "maxExecutionSeconds", min: 1, max: 900 },
     { name: "max_elapsed_seconds", label: "maxElapsedSeconds", min: 60, max: 86_400 },
-    { name: "max_model_calls", label: "maxModelCalls", min: 1, max: 20 },
-    { name: "max_tool_calls", label: "maxToolCalls", min: 0, max: 50 },
+    // Model and tool calls stop at the highest ceiling the backend's settings
+    // allow, not at the ceiling in force: that is an administrator's setting
+    // this page cannot see, and the server refuses an over-ceiling draft with
+    // both numbers. A lower `max` here clamped 120 to 50 without saying so.
+    { name: "max_model_calls", label: "maxModelCalls", min: 1, max: 200 },
+    { name: "max_tool_calls", label: "maxToolCalls", min: 0, max: 5000 },
     { name: "max_derived_retries", label: "maxDerivedRetries", min: 0, max: 3 },
   ];
 

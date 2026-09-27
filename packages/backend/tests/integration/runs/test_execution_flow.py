@@ -196,9 +196,11 @@ async def test_three_runs_drain_in_session_order_over_one_stack(
         "run_created",
         "run_lease_acquired",
         "run_slice_ended",
+        "model_round",
         "goal_verdict",
         "run_lease_acquired",
         "run_completed",
+        "model_round",
         "goal_verdict",
     ]
     for frames in transcripts:
@@ -282,8 +284,10 @@ async def test_a_killed_worker_is_recovered_without_losing_or_repeating_work(
         "run_interrupted",
         "run_recovery_approved",
         "run_lease_acquired",
+        "model_round",
         "goal_verdict",
         "run_completed",
+        "model_round",
         "goal_verdict",
     ]
     assert len(model.snapshots) == 2  # the survivor ran both rounds, not the first

@@ -173,6 +173,13 @@ class RunEventType(StrEnum):
     #: continued within the round. Each one is a real, billed model call, so
     #: a round that cost three calls says why.
     MODEL_ROUND_RETRIED = "model_round_retried"
+    #: §11.6: one per round — what the model call cost (calls, Token, cached
+    #: Token, cost) and how long it took. Until now this lived only in the
+    #: last round's checkpoint, overwritten by the next.
+    MODEL_ROUND = "model_round"
+    #: §11.6: one per tool call — which tool, a summary of its arguments
+    #: (keys and sizes, never values), its outcome and how long it took.
+    TOOL_CALLED = "tool_called"
 
     # Also not derived from a signal, and for the same reason: a
     # summarization call is a real call on a real endpoint (§7.4.2), and

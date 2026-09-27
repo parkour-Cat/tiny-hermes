@@ -11,6 +11,7 @@ configuration handed to Docker. The pure policy already proves the platform
 builds the right dict; only the daemon can say what it built.
 """
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -421,3 +422,42 @@ async def _container_of(controller: SandboxController, sandbox_id: UUID) -> str:
     found = await controller.store.read_instance(sandbox_id)
     assert found is not None
     return found.container_id
+
+
+async def test_two_commands_on_one_sandbox_run_at_once_and_each_gets_its_own_output(
+    controller: SandboxController,
+) -> None:
+    """What the Worker's parallel reads rely on: two executes on the same
+    sandbox at the same time neither serialize nor mix their outputs.
+    `test_two_clients_are_served_at_once` (transport) proves the socket does
+    not queue them; this is the Controller and the daemon under it."""
+    box = await acquired(controller)
+    for name, body in (("a.txt", "alpha"), ("b.txt", "bravo")):
+        await controller.execute(
+            run_id=RUN,
+            lease_id=LEASE,
+            sandbox_id=box.sandbox_id,
+            command=command(["sh", "-c", f"printf {body} > /workspace/data/{name}"]),
+        )
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    first, second = await asyncio.gather(
+        controller.execute(
+            run_id=RUN,
+            lease_id=LEASE,
+            sandbox_id=box.sandbox_id,
+            command=command(["sh", "-c", "sleep 1; cat /workspace/data/a.txt"]),
+        ),
+        controller.execute(
+            run_id=RUN,
+            lease_id=LEASE,
+            sandbox_id=box.sandbox_id,
+            command=command(["sh", "-c", "sleep 1; cat /workspace/data/b.txt"]),
+        ),
+    )
+    elapsed = loop.time() - started
+
+    assert first.output == "alpha"
+    assert second.output == "bravo"
+    assert elapsed < 1.8, f"the two executes were serialized ({elapsed:.2f}s)"

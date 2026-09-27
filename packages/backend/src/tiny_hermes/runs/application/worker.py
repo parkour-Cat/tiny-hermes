@@ -2,7 +2,7 @@ import asyncio
 import inspect
 import logging
 import shlex
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from time import monotonic
@@ -150,6 +150,7 @@ from tiny_hermes.tools.domain.mcp import (
 from tiny_hermes.tools.domain.openapi import estimated_tokens_of
 from tiny_hermes.tools.domain.registry import (
     DEFAULT_OUTPUT_BYTES,
+    PARALLEL_READS,
     PLATFORM_TOOLS,
     UNTRIMMED_TOOLS,
     schemas_for_agent,
@@ -1120,7 +1121,22 @@ class WorkerRuntime:
             if waiting is not None:
                 return _RoundWork((), False, approval=waiting)
 
-        for call in response.tool_calls:
+        started: dict[str, float] = {}
+        ended: dict[str, float] = {}
+        ahead: dict[str, ToolResultBlock] = {}
+        for position, call in enumerate(response.tool_calls):
+            if call.call_id in ahead:
+                # Answered with the rest of its run of reads, below.
+                results.append(ahead[call.call_id])
+                continue
+            started[call.call_id] = monotonic()
+            reads = _consecutive_reads(response.tool_calls, position)
+            if len(reads) > 1 and box is not None and self._sandbox is not None:
+                ahead = await self._read_together(
+                    claimed, handle, box, context, reads, reserve, started, ended
+                )
+                results.append(ahead[call.call_id])
+                continue
             external = call.name.startswith((f"{MCP_PREFIX}.", f"{HTTP_PREFIX}."))
             # External writes pass their approval gate before spending a call.
             if not external and not await reserve():
@@ -1244,33 +1260,13 @@ class WorkerRuntime:
                     )
                 )
                 continue
-            answer = await run_tool_call(
-                controller=self._sandbox,
-                run_id=claimed.run.id,
-                lease_id=handle.lease_id,
-                sandbox_id=box.sandbox_id,
-                bound=context.tools,
-                call=call,
-                streamer=_streamer_of(self._sandbox),
-                open_artifact=self._open_artifact(claimed),
-                preview_limit=(
-                    self._workspace.preview_bytes
-                    if self._workspace is not None
-                    else DEFAULT_OUTPUT_BYTES
-                ),
-                artifact_limit=(
-                    None
-                    if self._workspace is None
-                    else self._workspace.artifact_max_bytes
-                ),
-            )
-            if "artifact_store_failed" in answer.output:
-                await self._append_event(
-                    claimed, RunEventType.WORKSPACE_STORAGE_UNAVAILABLE
-                )
+            answer = await self._in_sandbox(claimed, handle, box, context, call)
             if not answer.failed and changes_workspace(call.name):
                 wrote = True
             results.append(answer)
+        events.extend(
+            _tool_events(response.tool_calls, results, started, monotonic(), ended)
+        )
         return _RoundWork(
             (assistant, CanonicalMessage("tool", tuple(results))),
             wrote,
@@ -1279,6 +1275,86 @@ class WorkerRuntime:
             events=tuple(events),
             delegated=delegated,
         )
+
+    async def _in_sandbox(
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        box: "_Sandbox",
+        context: ExecutionContext,
+        call: ToolCallBlock,
+    ) -> ToolResultBlock:
+        """One call sent down to the Controller, and its answer."""
+        if self._sandbox is None:
+            # The callers check this first; answered rather than asserted, for
+            # the reason the sequential branch gives.
+            return ToolResultBlock(
+                call_id=call.call_id,
+                output="refused: sandbox_unavailable",
+                exit_code=126,
+                failed=True,
+            )
+        answer = await run_tool_call(
+            controller=self._sandbox,
+            run_id=claimed.run.id,
+            lease_id=handle.lease_id,
+            sandbox_id=box.sandbox_id,
+            bound=context.tools,
+            call=call,
+            streamer=_streamer_of(self._sandbox),
+            open_artifact=self._open_artifact(claimed),
+            preview_limit=(
+                self._workspace.preview_bytes
+                if self._workspace is not None
+                else DEFAULT_OUTPUT_BYTES
+            ),
+            artifact_limit=(
+                None if self._workspace is None else self._workspace.artifact_max_bytes
+            ),
+        )
+        if "artifact_store_failed" in answer.output:
+            await self._append_event(claimed, RunEventType.WORKSPACE_STORAGE_UNAVAILABLE)
+        return answer
+
+    async def _read_together(
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        box: "_Sandbox",
+        context: ExecutionContext,
+        reads: Sequence[ToolCallBlock],
+        reserve: Callable[[], Awaitable[bool]],
+        started: dict[str, float],
+        ended: dict[str, float],
+    ) -> dict[str, ToolResultBlock]:
+        """A run of consecutive sandbox reads, sent together.
+
+        Each is charged first, in order, exactly as one at a time would be —
+        so a budget that runs out mid-run refuses the same calls it would have
+        refused sequentially — and only the charged ones are sent. Answers come
+        back keyed by call so the reply's order is kept.
+        """
+        charged: list[ToolCallBlock] = []
+        answers: dict[str, ToolResultBlock] = {}
+        for call in reads:
+            started[call.call_id] = monotonic()
+            if await reserve():
+                charged.append(call)
+            else:
+                answers[call.call_id] = ToolResultBlock(
+                    call_id=call.call_id,
+                    output="refused: tool_budget_exceeded",
+                    exit_code=126,
+                    failed=True,
+                )
+                ended[call.call_id] = monotonic()
+
+        async def one(call: ToolCallBlock) -> None:
+            answers[call.call_id] = await self._in_sandbox(claimed, handle, box, context, call)
+            ended[call.call_id] = monotonic()
+
+        await asyncio.gather(*(one(call) for call in charged))
+        return answers
 
     async def _checkpoint_round(
         self,
@@ -2311,7 +2387,13 @@ class WorkerRuntime:
             # got here: the commit that lands a write round, and the plain
             # record that lands every other. A round whose write was rolled
             # back carries none, which is the truth — the verdict did not take.
-            events = (*events, _verdict_event(judged, _is_preempted(goal_decision, judged)))
+            events = (
+                *events,
+                _model_round_event(
+                    judged.round, response, executed_ms, _cost_from(response, prices)
+                ),
+                _verdict_event(judged, _is_preempted(goal_decision, judged)),
+            )
         return RecordSliceCommand(
             workspace_id=claimed.run.workspace_id,
             run_id=claimed.run.id,
@@ -3100,6 +3182,113 @@ def _checkpoint(
         checkpoint["goal_unmet"] = list(judged.verdict.unmet)
         checkpoint["goal_preempted"] = _is_preempted(decision, judged)
     return checkpoint
+
+
+def _consecutive_reads(calls: Sequence[ToolCallBlock], position: int) -> list[ToolCallBlock]:
+    """The run of `PARALLEL_READS` calls starting at ``position`` — empty when
+    the call there is not one."""
+    run: list[ToolCallBlock] = []
+    for call in calls[position:]:
+        if call.name not in PARALLEL_READS:
+            break
+        run.append(call)
+    return run
+
+
+def _model_round_event(
+    round_number: int, response: ModelResponse, latency_ms: int, cost: Cost | None
+) -> ReservedEvent:
+    """§11.6's "Token、预计费用和延迟", for one round, on the timeline.
+
+    ``latency_ms`` is measured from the call to the reply (recovery attempts
+    included), before any tool ran. ``cost`` is `None` when the round could not
+    be priced — the Run's total says unknown for the same reason.
+    """
+    return ReservedEvent(
+        event_type=RunEventType.MODEL_ROUND,
+        payload={
+            "round": round_number,
+            "model_calls": response.model_calls,
+            "input_tokens": response.input_tokens,
+            "cached_input_tokens": response.cached_input_tokens,
+            "output_tokens": response.output_tokens,
+            "usage_quality": response.usage_quality.value,
+            "cost": str(cost.amount) if cost is not None and cost.known else None,
+            "cost_currency": None if cost is None else cost.currency,
+            "latency_ms": latency_ms,
+            "stop_reason": response.stop_reason.value,
+            "failure": response.failure,
+        },
+    )
+
+
+def _argument_shape(arguments: Mapping[str, Any]) -> dict[str, str]:
+    """Each argument's key and the shape of its value — never the value.
+
+    §19 acceptance item 7 asks for secrets to be stopped on every RunEvent
+    serialization path. A summary that holds no value has nothing to stop:
+    a token in a `curl` header shows up as `str:58` and nothing else.
+    """
+    shaped: dict[str, str] = {}
+    for key, value in arguments.items():
+        if isinstance(value, bool):
+            shaped[key] = "bool"
+        elif isinstance(value, str):
+            shaped[key] = f"str:{len(value)}"
+        elif isinstance(value, int | float):
+            shaped[key] = "number"
+        elif isinstance(value, list):
+            shaped[key] = f"list:{len(cast(list[Any], value))}"
+        elif isinstance(value, dict):
+            shaped[key] = f"object:{len(cast(dict[str, Any], value))}"
+        else:
+            shaped[key] = "null" if value is None else type(value).__name__
+    return shaped
+
+
+def _tool_events(
+    calls: Sequence[ToolCallBlock],
+    results: Sequence[Block],
+    started: Mapping[str, float],
+    finished: float,
+    ended: Mapping[str, float] | None = None,
+) -> list[ReservedEvent]:
+    """§11.6's "工具调用、实际参数摘要、结果和耗时": one event per answered call.
+
+    A call run on its own ended when the next began, and the last when the
+    loop did; a call sent with a run of reads recorded its own end (`ended`),
+    since those overlap.
+    """
+    answered = {
+        result.call_id: result for result in results if isinstance(result, ToolResultBlock)
+    }
+    order = [call.call_id for call in calls if call.call_id in started]
+    ends = {
+        call_id: started[order[index + 1]] if index + 1 < len(order) else finished
+        for index, call_id in enumerate(order)
+    }
+    ends.update(ended or {})
+    events: list[ReservedEvent] = []
+    for call in calls:
+        result = answered.get(call.call_id)
+        if result is None or call.call_id not in started:
+            continue
+        refused = result.exit_code == 126 and result.output.startswith("refused")
+        events.append(
+            ReservedEvent(
+                event_type=RunEventType.TOOL_CALLED,
+                payload={
+                    "call_id": call.call_id,
+                    "tool": call.name,
+                    "arguments": _argument_shape(call.arguments),
+                    "outcome": "refused" if refused else "failed" if result.failed else "ok",
+                    "exit_code": result.exit_code,
+                    "output_chars": len(result.output),
+                    "duration_ms": int((ends[call.call_id] - started[call.call_id]) * 1000),
+                },
+            )
+        )
+    return events
 
 
 def _verdict_event(judged: "_Judged", preempted: bool) -> ReservedEvent:
