@@ -48,6 +48,7 @@ from tiny_hermes.runs.domain.context_budget import (
     CoveredSummary,
     SegmentName,
     SkillSummary,
+    estimate_tokens,
     plan_context,
 )
 from tiny_hermes.runs.domain.goal import (
@@ -70,12 +71,18 @@ from tiny_hermes.runs.domain.models import (
     RunEventType,
     RunPurpose,
     RunSignal,
+    RunState,
     StoredMessage,
     TextBlock,
     ToolCallBlock,
     ToolResultBlock,
     WorkspaceCleanupTarget,
     safety_preamble,
+)
+from tiny_hermes.runs.domain.skill_review import (
+    ReviewUnreadable,
+    parse_review,
+    review_prompt,
 )
 from tiny_hermes.runs.domain.slice_policy import (
     RoundOutcome,
@@ -381,6 +388,12 @@ class WorkerRuntime:
         if claimed is None:
             return None
         await self._execute_slice(claimed)
+        try:
+            await self._review_for_skills(claimed)
+        except Exception:
+            # §15.4: a suggestion, attempted after the outcome is recorded. It
+            # must never be the reason a Worker stops taking Runs.
+            logger.exception("skill review failed", extra={"run_id": str(claimed.run.id)})
         return claimed.run.id
 
     async def run_forever(self, stop: asyncio.Event) -> None:
@@ -2035,6 +2048,95 @@ class WorkerRuntime:
             merged = replace(merged, model_calls=merged.model_calls + unanswered)
         return merged
 
+    async def _review_for_skills(self, claimed: ClaimedRun) -> None:
+        """§15.4: after a Run with enough tool calls completes, ask once
+        whether the work is worth a skill, and open a pending proposal if so.
+
+        After the outcome is recorded, so nothing here can delay the answer or
+        change how the Run ended. Best effort: a Worker that stops between the
+        two never reviews that Run, and nothing tracks that it did not.
+        """
+        workspace_id = claimed.run.workspace_id
+        async with self._sessions() as session:
+            store = SqlRunStore(session)
+            status = await store.status_of(workspace_id, claimed.run.id)
+            if status is not RunState.COMPLETED:
+                return
+            context = await store.execution_context(workspace_id, claimed.run.id)
+            if context is None:
+                return
+            review = context.spec.skill_review
+            if review is None or not review.enabled:
+                return
+            if await store.count_events(claimed.run.id, RunEventType.SKILL_REVIEW):
+                return
+            made = await store.count_events(claimed.run.id, RunEventType.TOOL_CALLED)
+        if made < review.min_tool_calls:
+            return
+        prompt = review_prompt(
+            _review_transcript(context, claimed.run.id),
+            [(skill.name, skill.description) for skill in context.granted_skills],
+        )
+        tokenizer = None if context.window is None else context.window.tokenizer
+        if not _side_call_allowed(context, estimate_tokens(prompt, tokenizer)):
+            await self._append_event(
+                claimed, RunEventType.SKILL_REVIEW, {"outcome": "skipped", "reason": "budget"}
+            )
+            return
+        response = await self._model.complete(
+            ModelRequest(
+                policy=_summary_policy(context),
+                personality="",
+                messages=(CanonicalMessage(role="user", blocks=(TextBlock(text=prompt),)),),
+                round_index=0,
+            )
+        )
+        outcome: dict[str, Any] = await self._act_on_review(context, response)
+        await self._bill_summary_call(
+            claimed, context, response, event_type=RunEventType.SKILL_REVIEW, extra=outcome
+        )
+
+    async def _act_on_review(
+        self, context: ExecutionContext, response: ModelResponse
+    ) -> dict[str, Any]:
+        """Open the proposal the review asked for, through the same path
+        `skill.propose` takes, and say what happened."""
+        if response.stop_reason is not StopReason.COMPLETED:
+            return {"outcome": "failed", "reason": response.failure}
+        try:
+            decided = parse_review(response.text)
+        except ReviewUnreadable as unreadable:
+            return {"outcome": "unreadable", "reason": str(unreadable)}
+        if decided.decision == "none":
+            return {"outcome": "none"}
+        if decided.skill_md is None:
+            return {"outcome": "unreadable", "reason": "no skill_md"}
+        base: UUID | None = None
+        files: list[tuple[str, str]] = [("SKILL.md", decided.skill_md)]
+        if decided.decision == "patch":
+            bound = next(
+                (item for item in context.granted_skills if item.name == decided.skill), None
+            )
+            if bound is None:
+                return {"outcome": "refused", "reason": "not a skill this agent was given"}
+            base = bound.skill_version_id
+            if self._skills is not None:
+                # The reviewer rewrites SKILL.md only; the rest of the package
+                # is carried over so the diff shows one change, not deletions.
+                files += [
+                    (path, content)
+                    for path, content in await self._skills.read_package(base)
+                    if path != "SKILL.md"
+                ]
+        if self._proposals is None:
+            return {"outcome": "refused", "reason": "no skill catalog is configured here"}
+        opened = await self._proposals.propose(
+            run_id=context.run_id, skill_version_id=base, files=files
+        )
+        if opened.proposal_id is None:
+            return {"outcome": "refused", "reason": opened.refusal}
+        return {"outcome": "proposed", "proposal_id": str(opened.proposal_id)}
+
     async def _fall_back(
         self,
         claimed: ClaimedRun,
@@ -2197,7 +2299,12 @@ class WorkerRuntime:
         return text
 
     async def _bill_summary_call(
-        self, claimed: ClaimedRun, context: ExecutionContext, response: ModelResponse
+        self,
+        claimed: ClaimedRun,
+        context: ExecutionContext,
+        response: ModelResponse,
+        event_type: RunEventType = RunEventType.CONTEXT_SUMMARY_BILLED,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         """Bill one summarization call to the Run-tree's shared budget, and
         record it as its own `CONTEXT_SUMMARY_BILLED` event, in one write.
@@ -2279,8 +2386,11 @@ class WorkerRuntime:
                     tokens=response.billable_tokens,
                     cost=cost,
                     event=ReservedEvent(
-                        event_type=RunEventType.CONTEXT_SUMMARY_BILLED,
-                        payload=_summary_billed_payload(endpoint_id, model, response, cost),
+                        event_type=event_type,
+                        payload={
+                            **_summary_billed_payload(endpoint_id, model, response, cost),
+                            **(extra or {}),
+                        },
                     ),
                 )
             )
@@ -2829,7 +2939,9 @@ def _calls_precheck(budget: BudgetSummary) -> bool:
     return budget.consumed_model_calls + 1 < budget.max_model_calls
 
 
-def _cost_precheck(context: ExecutionContext, plan: ContextPlan) -> CeilingVerdict:
+def _cost_precheck(
+    context: ExecutionContext, plan: "ContextPlan | _Estimate"
+) -> CeilingVerdict:
     """Whether one more round fits under this Run's spending limit.
 
     A Run with no limit is allowed without asking anything, so a deployment
@@ -3297,6 +3409,41 @@ def _consecutive_reads(calls: Sequence[ToolCallBlock], position: int) -> list[To
             break
         run.append(call)
     return run
+
+
+def _review_transcript(context: ExecutionContext, run_id: UUID) -> str:
+    """This Run's own turns, as the summarizer reads them, cut to half the
+    window so the review prompt fits: the head (what was asked) and as much of
+    the end as there is room for."""
+    text = _transcript_text([item for item in context.history if item.source_run_id == run_id])
+    if context.window is None:
+        return text
+    room = context.window.input_allowance // 2
+    tokenizer = context.window.tokenizer
+    if estimate_tokens(text, tokenizer) <= room:
+        return text
+    head = text[: len(text) // 10]
+    tail = text[len(head) :]
+    while tail and estimate_tokens(head + tail, tokenizer) > room:
+        tail = tail[len(tail) // 4 :]
+    return f"{head}\n[…the middle of the record is not shown…]\n{tail}"
+
+
+def _side_call_allowed(context: ExecutionContext, input_estimate: int) -> bool:
+    """Whether one call outside a round still fits §12.4's valves."""
+    budget = context.budget
+    if budget.consumed_model_calls + 1 > budget.max_model_calls:
+        return False
+    if budget.max_tokens is not None and budget.consumed_tokens >= budget.max_tokens:
+        return False
+    return _cost_precheck(context, _Estimate(input_estimate)).allowed
+
+
+@dataclass(frozen=True)
+class _Estimate:
+    """The one thing `_cost_precheck` reads off a plan."""
+
+    input_estimate: int
 
 
 def _endpoint_of(policy: ModelPolicy) -> UUID | None:

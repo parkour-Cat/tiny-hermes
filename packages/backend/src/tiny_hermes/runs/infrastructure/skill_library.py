@@ -18,6 +18,15 @@ class SqlSkillLibrary:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sessions = session_factory
 
+    async def read_package(self, version_id: UUID) -> tuple[tuple[str, str], ...]:
+        async with self._sessions() as session:
+            rows = await session.execute(
+                select(SkillFileRow.path, SkillFileRow.content)
+                .where(SkillFileRow.skill_version_id == version_id)
+                .order_by(SkillFileRow.path)
+            )
+            return tuple((str(path), str(content)) for path, content in rows.all())
+
     async def read_file(self, version_id: UUID, path: str) -> str | None:
         async with self._sessions() as session:
             return await session.scalar(

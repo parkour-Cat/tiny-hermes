@@ -930,7 +930,15 @@ class SqlRunStore:
         found = await self._session.scalars(scoped.order_by(SessionMessageRow.sequence))
         spec = AgentSpec.model_validate(version.spec)
         history = tuple(
-            StoredMessage(id=row.id, sequence=row.sequence, message=_to_message(row))
+            # `source_run_id` carried: `_run_request` and the post-run review
+            # (§15.4) both pick out this Run's own turns by it, and without it
+            # the first found nothing and quietly fell back to the latest turn.
+            StoredMessage(
+                id=row.id,
+                sequence=row.sequence,
+                message=_to_message(row),
+                source_run_id=row.source_run_id,
+            )
             for row in found
         )
         deadline = None
@@ -1587,6 +1595,24 @@ class SqlRunStore:
             if isinstance(raw, str):
                 loaded.append(UUID(raw))
         return tuple(loaded)
+
+    async def status_of(self, workspace_id: UUID, run_id: UUID) -> RunState | None:
+        value = await self._session.scalar(
+            select(RunRow.status).where(RunRow.id == run_id, RunRow.workspace_id == workspace_id)
+        )
+        return None if value is None else RunState(value)
+
+    async def count_events(self, run_id: UUID, kind: RunEventType) -> int:
+        """How many of one kind this Run has on its timeline — fresh for a Run
+        that just ended, which retention has not reached."""
+        return int(
+            await self._session.scalar(
+                select(func.count())
+                .select_from(RunEventRow)
+                .where(RunEventRow.run_id == run_id, RunEventRow.event_type == kind.value)
+            )
+            or 0
+        )
 
     async def fallback_route(
         self, spec: AgentSpec, endpoint_id: UUID
