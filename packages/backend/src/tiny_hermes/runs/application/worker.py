@@ -2031,6 +2031,7 @@ class WorkerRuntime:
                 input_tokens=response.input_tokens,
                 output_tokens=response.output_tokens,
                 usage_quality=response.usage_quality,
+                cached_input_tokens=response.cached_input_tokens,
             )
             await SqlRunStore(session).record_summary_usage(
                 RecordSummaryUsageCommand(
@@ -2659,6 +2660,7 @@ def _cost_from(response: ModelResponse, prices: TokenPrices | None = None) -> Co
         input_tokens=response.input_tokens,
         output_tokens=response.output_tokens,
         usage_quality=response.usage_quality,
+        cached_input_tokens=response.cached_input_tokens,
     )
 
 
@@ -2688,6 +2690,7 @@ def _summary_billed_payload(
         "model": model,
         "model_calls": response.model_calls,
         "input_tokens": response.input_tokens,
+        "cached_input_tokens": response.cached_input_tokens,
         "output_tokens": response.output_tokens,
         "tokens": response.billable_tokens,
         "cost": str(cost.amount) if cost.known else None,
@@ -2924,6 +2927,11 @@ def _checkpoint(
         "usage_quality": response.usage_quality.value,
         "failure": response.failure,
     }
+    if response.cached_input_tokens is not None:
+        # How much of the prompt the provider served from its cache — the one
+        # number that says whether keeping the prefix stable is working.
+        # Absent rather than 0 when the provider did not say.
+        checkpoint["cached_input_tokens"] = response.cached_input_tokens
     if judged is not None:
         checkpoint["round"] = judged.round
         checkpoint["goal_outcome"] = judged.verdict.outcome.value

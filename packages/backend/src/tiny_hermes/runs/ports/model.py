@@ -104,6 +104,11 @@ class ModelResponse:
     input_tokens: int | None = None
     output_tokens: int | None = None
     usage_quality: UsageQuality = UsageQuality.PROVIDER
+    #: How many of ``input_tokens`` the provider served from its prompt
+    #: cache, as it reported them. ``None`` means it said nothing about its
+    #: cache — not that nothing was cached — and is charged at the full input
+    #: rate, the same as before this was read.
+    cached_input_tokens: int | None = None
     #: Present only when ``stop_reason`` is ``tool_call``. A tuple rather than
     #: one call, because a model may ask for two things at once and answering
     #: only the first leaves a question the model believes it asked.

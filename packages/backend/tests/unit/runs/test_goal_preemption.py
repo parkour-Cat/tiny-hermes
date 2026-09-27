@@ -211,6 +211,7 @@ def _snapshot(**overrides: object) -> RunSnapshot:
         "checkpoint_replay_safe": True,
         "checkpoint_effect_status": CheckpointEffectStatus.NONE,
         "checkpoint_usage_quality": None,
+        "checkpoint_cached_input_tokens": None,
         "failure_reason": None,
         "created_at": now,
         "started_at": None,

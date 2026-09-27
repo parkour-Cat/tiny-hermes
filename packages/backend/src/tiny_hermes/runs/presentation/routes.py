@@ -196,6 +196,7 @@ class RunResponse(BaseModel):
     checkpoint_replay_safe: bool
     checkpoint_effect_status: str
     checkpoint_usage_quality: str | None
+    checkpoint_cached_input_tokens: int | None
     failure_reason: str | None
     #: ``{"round", "outcome", "unmet", "preempted"}`` — which round the Run is
     #: on and what the platform decided about it. A status says a Run is
