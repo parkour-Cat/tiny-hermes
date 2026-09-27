@@ -333,3 +333,40 @@ async def test_another_end_users_memory_is_not_in_the_request(
 
     assert model.requests
     assert "Their salary is confidential." not in model.requests[0].memories
+
+
+async def test_a_memory_is_not_hidden_by_a_clock_the_run_did_not_use(
+    client: TestClient,
+    scope: dict[str, str],
+    workspace_id: str,
+    engine: AsyncEngine,
+    registered_issuer: dict[str, object],
+    published_end_user_agent: str,
+) -> None:
+    """The memory freeze compared the memory's `updated_at` — the database's
+    clock when written by SQL — with the Run's `created_at` — the
+    application's clock. A database a second ahead hid a memory written
+    before the Run existed; the two suites that caught it passed or failed
+    with the skew of the moment. Simulated here as a database clock one second
+    ahead, so it fails every time rather than sometimes."""
+    del registered_issuer
+    end_user_id = _sign_in(client, workspace_id, "zhang")
+    session_id = _start_session(client)
+    await _remember(
+        engine,
+        workspace_id=workspace_id,
+        agent_id=published_end_user_agent,
+        body="Prefers the summary before the detail.",
+        end_user_id=end_user_id,
+    )
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE memories SET updated_at = now() + interval '1 second'")
+        )
+    _submit(client, session_id, "run-skew")
+    model = Recorder()
+
+    await _worker(engine, workspace_id, model).run_once()
+
+    assert model.requests
+    assert "Prefers the summary before the detail." in model.requests[0].memories
