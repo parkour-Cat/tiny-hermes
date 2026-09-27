@@ -560,6 +560,13 @@ export type SkillVersionResponse = {
   created_at: string;
 };
 
+/** How many of this workspace's runs loaded a version, and how they ended
+ * (§15.4). Evidence it was used, not that it caused the outcome. */
+export type SkillUsage = { runs: number; completed: number; failed: number };
+
+/** A version as the version list returns it. */
+export type SkillVersionListItem = SkillVersionResponse & { usage: SkillUsage };
+
 export type SkillFilePayload = {
   path: string;
   content: string;
@@ -599,6 +606,8 @@ export type FileDiffResponse = {
 export type ProposalDetailResponse = ProposalResponse & {
   files: SkillFilePayload[];
   diff: FileDiffResponse[];
+  /** The base version's usage for a patch; null for a new skill. */
+  base_usage: SkillUsage | null;
 };
 
 export type OutboundScopeEntry = {

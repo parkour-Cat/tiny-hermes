@@ -17,6 +17,8 @@ import type { MessageKey } from "../i18n/zh-CN";
 import { useProposalAccess } from "../workspace/useProposalAccess";
 import { moment } from "../i18n/moment";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
+import { fill } from "../runs/explain";
+import { usageValues } from "./skillUsage";
 
 const STATUSES: Record<string, MessageKey> = {
   pending: "proposalPending",
@@ -205,6 +207,11 @@ export function SkillProposalsPage({ focusId }: { focusId?: string }) {
                     }
                     showIcon
                   />
+                ) : null}
+                {openId === proposal.id && opened.data?.base_usage ? (
+                  <Typography.Paragraph type="secondary">
+                    {fill(t("proposalBaseUsage"), usageValues(opened.data.base_usage))}
+                  </Typography.Paragraph>
                 ) : null}
                 {openId === proposal.id ? (
                   <Diff

@@ -6,7 +6,14 @@ import { useState } from "react";
 
 import { api, apiWithStatus } from "../api/client";
 import { problemMessage } from "../api/messages";
-import type { SkillFilePayload, SkillResponse, SkillVersionResponse } from "../api/types";
+import type {
+  SkillFilePayload,
+  SkillResponse,
+  SkillVersionListItem,
+  SkillVersionResponse,
+} from "../api/types";
+import { fill } from "../runs/explain";
+import { usageValues } from "./skillUsage";
 import { useT } from "../i18n/locale";
 import { EmptyState } from "../ui/EmptyState";
 import type { MessageKey } from "../i18n/zh-CN";
@@ -259,7 +266,7 @@ function SkillRow({ skill, editable, onChanged, onError, onNote, confirm }: RowP
 
   const versions = useQuery({
     queryKey: versionsQuery,
-    queryFn: () => api<SkillVersionResponse[]>(`/api/v1/skills/${skill.id}/versions`, scope),
+    queryFn: () => api<SkillVersionListItem[]>(`/api/v1/skills/${skill.id}/versions`, scope),
     enabled: workspaceId !== null,
   });
 
@@ -331,6 +338,11 @@ function SkillRow({ skill, editable, onChanged, onError, onNote, confirm }: RowP
               {t("skillVersion").replace("{number}", String(version.version_number))}
             </Typography.Text>
             <CapabilityUsage kind="skills" versionId={version.id} />
+            {version.usage ? (
+              <Typography.Text type="secondary">
+                {fill(t("skillVersionUsage"), usageValues(version.usage))}
+              </Typography.Text>
+            ) : null}
             <SkillPreview skillId={skill.id} versionId={version.id} />
             <Tag>{t(SOURCES[version.source] ?? "skillSourceUpload")}</Tag>
             <Typography.Text type="secondary">{version.description}</Typography.Text>

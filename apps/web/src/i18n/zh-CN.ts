@@ -231,6 +231,8 @@ export const zhCN = {
   modelFallbackEndpoints: "备用模型",
   modelFallbackEndpointsHint: "主模型连不上或持续返回 429/5xx 时，按顺序换用；切换后本次运行不再切回。最多两个。",
   modelFallbackEndpointsTooMany: "最多选两个备用模型",
+  skillVersionUsage: "{runs} 次运行加载过：{completed} 次完成，{failed} 次失败",
+  proposalBaseUsage: "当前版本 {runs} 次运行加载过：{completed} 次完成，{failed} 次失败",
   todoUpdatedNote: "任务清单已更新：共 {total} 项，已完成 {completed}，进行中 {in_progress}。",
   modelFallbackUsedNote: "主模型没能应答（{reason}），这一轮起改由备用模型应答，本次运行不再切回。",
   modelFallbackSkippedWindow: "跳过了一个备用模型：这一轮的请求放不进它的上下文窗口。",
