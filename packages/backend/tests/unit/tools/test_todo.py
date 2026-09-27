@@ -5,6 +5,8 @@ remember what 1 and 2 were, which is the thing it is using the list to not
 have to remember.
 """
 
+import re
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -90,3 +92,16 @@ def test_the_tool_is_a_platform_tool_that_is_never_trimmed() -> None:
     assert TODO_WRITE_TOOL in UNTRIMMED_TOOLS
     assert schemas_for(("todo.write",)) == [TODO_WRITE_SCHEMA]
     assert TODO_WRITE_SCHEMA["function"]["name"] == TODO_WRITE_TOOL
+
+
+def test_the_console_offers_every_tool_the_platform_implements() -> None:
+    """The console keeps its own copy of the list. A tool missing from it is a
+    tool nobody can tick, so it is unreachable from the console it shipped
+    with — the failure this repository keeps having."""
+    types = Path(__file__).parents[5] / "apps/web/src/api/types.ts"
+    source = types.read_text(encoding="utf-8")
+    block = source[source.index("export const IMPLEMENTED_TOOLS = [") :]
+    block = block[: block.index("] as const;")]
+    offered = set(re.findall(r'^\s*"([a-z_.]+)",', block, flags=re.MULTILINE))
+
+    assert offered == set(IMPLEMENTED_TOOLS)

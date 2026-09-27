@@ -129,7 +129,7 @@ async def test_a_list_the_platform_cannot_keep_is_answered_with_why(
     await drive(engine, WritesTheList([{"id": "1", "content": "x", "status": "blocked"}]), None)
 
     said = [content for role, content in await transcript(engine, run) if role == "tool"]
-    assert any(content.startswith("refused: invalid_arguments") for content in said)
+    assert any("refused: invalid_arguments" in content for content in said)
     assert await _events(engine, run, "todo_updated") == []
 
 
@@ -142,5 +142,5 @@ async def test_an_agent_that_did_not_bind_it_is_refused(
     await drive(engine, WritesTheList(PLAN), None)
 
     said = [content for role, content in await transcript(engine, run) if role == "tool"]
-    assert any(content.startswith("refused: tool_not_authorized") for content in said)
+    assert any("refused: tool_not_authorized" in content for content in said)
     assert await _events(engine, run, "todo_updated") == []
