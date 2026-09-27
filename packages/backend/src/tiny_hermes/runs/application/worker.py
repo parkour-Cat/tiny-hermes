@@ -2,7 +2,7 @@ import asyncio
 import inspect
 import logging
 import shlex
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from time import monotonic
@@ -1120,7 +1120,9 @@ class WorkerRuntime:
             if waiting is not None:
                 return _RoundWork((), False, approval=waiting)
 
+        started: dict[str, float] = {}
         for call in response.tool_calls:
+            started[call.call_id] = monotonic()
             external = call.name.startswith((f"{MCP_PREFIX}.", f"{HTTP_PREFIX}."))
             # External writes pass their approval gate before spending a call.
             if not external and not await reserve():
@@ -1271,6 +1273,7 @@ class WorkerRuntime:
             if not answer.failed and changes_workspace(call.name):
                 wrote = True
             results.append(answer)
+        events.extend(_tool_events(response.tool_calls, results, started, monotonic()))
         return _RoundWork(
             (assistant, CanonicalMessage("tool", tuple(results))),
             wrote,
@@ -2311,7 +2314,13 @@ class WorkerRuntime:
             # got here: the commit that lands a write round, and the plain
             # record that lands every other. A round whose write was rolled
             # back carries none, which is the truth — the verdict did not take.
-            events = (*events, _verdict_event(judged, _is_preempted(goal_decision, judged)))
+            events = (
+                *events,
+                _model_round_event(
+                    judged.round, response, executed_ms, _cost_from(response, prices)
+                ),
+                _verdict_event(judged, _is_preempted(goal_decision, judged)),
+            )
         return RecordSliceCommand(
             workspace_id=claimed.run.workspace_id,
             run_id=claimed.run.id,
@@ -3100,6 +3109,99 @@ def _checkpoint(
         checkpoint["goal_unmet"] = list(judged.verdict.unmet)
         checkpoint["goal_preempted"] = _is_preempted(decision, judged)
     return checkpoint
+
+
+def _model_round_event(
+    round_number: int, response: ModelResponse, latency_ms: int, cost: Cost | None
+) -> ReservedEvent:
+    """§11.6's "Token、预计费用和延迟", for one round, on the timeline.
+
+    ``latency_ms`` is measured from the call to the reply (recovery attempts
+    included), before any tool ran. ``cost`` is `None` when the round could not
+    be priced — the Run's total says unknown for the same reason.
+    """
+    return ReservedEvent(
+        event_type=RunEventType.MODEL_ROUND,
+        payload={
+            "round": round_number,
+            "model_calls": response.model_calls,
+            "input_tokens": response.input_tokens,
+            "cached_input_tokens": response.cached_input_tokens,
+            "output_tokens": response.output_tokens,
+            "usage_quality": response.usage_quality.value,
+            "cost": str(cost.amount) if cost is not None and cost.known else None,
+            "cost_currency": None if cost is None else cost.currency,
+            "latency_ms": latency_ms,
+            "stop_reason": response.stop_reason.value,
+            "failure": response.failure,
+        },
+    )
+
+
+def _argument_shape(arguments: Mapping[str, Any]) -> dict[str, str]:
+    """Each argument's key and the shape of its value — never the value.
+
+    §19 acceptance item 7 asks for secrets to be stopped on every RunEvent
+    serialization path. A summary that holds no value has nothing to stop:
+    a token in a `curl` header shows up as `str:58` and nothing else.
+    """
+    shaped: dict[str, str] = {}
+    for key, value in arguments.items():
+        if isinstance(value, bool):
+            shaped[key] = "bool"
+        elif isinstance(value, str):
+            shaped[key] = f"str:{len(value)}"
+        elif isinstance(value, int | float):
+            shaped[key] = "number"
+        elif isinstance(value, list):
+            shaped[key] = f"list:{len(cast(list[Any], value))}"
+        elif isinstance(value, dict):
+            shaped[key] = f"object:{len(cast(dict[str, Any], value))}"
+        else:
+            shaped[key] = "null" if value is None else type(value).__name__
+    return shaped
+
+
+def _tool_events(
+    calls: Sequence[ToolCallBlock],
+    results: Sequence[Block],
+    started: Mapping[str, float],
+    finished: float,
+) -> list[ReservedEvent]:
+    """§11.6's "工具调用、实际参数摘要、结果和耗时": one event per answered call.
+
+    Calls run one after another, so each one ended when the next began and
+    the last when the loop did.
+    """
+    answered = {
+        result.call_id: result for result in results if isinstance(result, ToolResultBlock)
+    }
+    order = [call.call_id for call in calls if call.call_id in started]
+    ends = {
+        call_id: started[order[index + 1]] if index + 1 < len(order) else finished
+        for index, call_id in enumerate(order)
+    }
+    events: list[ReservedEvent] = []
+    for call in calls:
+        result = answered.get(call.call_id)
+        if result is None or call.call_id not in started:
+            continue
+        refused = result.exit_code == 126 and result.output.startswith("refused")
+        events.append(
+            ReservedEvent(
+                event_type=RunEventType.TOOL_CALLED,
+                payload={
+                    "call_id": call.call_id,
+                    "tool": call.name,
+                    "arguments": _argument_shape(call.arguments),
+                    "outcome": "refused" if refused else "failed" if result.failed else "ok",
+                    "exit_code": result.exit_code,
+                    "output_chars": len(result.output),
+                    "duration_ms": int((ends[call.call_id] - started[call.call_id]) * 1000),
+                },
+            )
+        )
+    return events
 
 
 def _verdict_event(judged: "_Judged", preempted: bool) -> ReservedEvent:
