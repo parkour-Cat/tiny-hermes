@@ -384,3 +384,14 @@ test("a task list update says how far along it is", () => {
   ).toEqual({ key: "todoUpdatedNote", values: { total: "3", completed: "1", in_progress: "1" } });
   expect(eventNote({ event_type: "todo_updated", payload: { total: 3 } })).toBeNull();
 });
+
+test("a skill review says what it decided", () => {
+  expect(
+    eventNote({ event_type: "skill_review", payload: { outcome: "proposed", proposal_id: "p" } }),
+  ).toEqual({ key: "skillReviewProposed", values: {} });
+  expect(eventNote({ event_type: "skill_review", payload: { outcome: "none" } })).toEqual({
+    key: "skillReviewNone",
+    values: {},
+  });
+  expect(eventNote({ event_type: "skill_review", payload: { outcome: "weird" } })).toBeNull();
+});

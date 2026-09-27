@@ -561,6 +561,33 @@ test("a fallback endpoint survives saving the draft", async () => {
   expect(body.spec.model_policy).toEqual(policy);
 });
 
+test("a skill review setting survives saving the draft", async () => {
+  // §15.4. Same shape as the fallback test above: the form rebuilds the spec
+  // from what it shows, so what it does not show is deleted by a save.
+  loadedAgent(3);
+  const review = { enabled: true, min_tool_calls: 5 };
+  const sent: unknown[] = [];
+  server.use(
+    http.get(`/api/v1/agents/${AGENT}/draft`, () =>
+      HttpResponse.json({ ...draftBody(3), spec: { ...SPEC, skill_review: review } }),
+    ),
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  const personality = await screen.findByLabelText("人格");
+  await userEvent.clear(personality);
+  await userEvent.type(personality, "Rewritten.");
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  const body = sent[0] as { spec: { skill_review?: unknown } };
+  expect(body.spec.skill_review).toEqual(review);
+});
+
 test("a draft conflict keeps the typed personality and sends nothing more", async () => {
   loadedAgent(3);
   let attempts = 0;
