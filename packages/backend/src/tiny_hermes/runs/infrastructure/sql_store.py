@@ -1433,11 +1433,14 @@ class SqlRunStore:
         today, and writing the difference down here is what will keep §4.5's
         end-user identity from being wired to the wrong one.
 
-        Frozen for the Run: the memories as they stood when it was created
-        (`as_of`), ranked against its own request, so every round gets the
-        same block. The tool tells the model a memory it writes "does not
-        affect this Run", and a block that changed mid-Run would also stop
-        matching the prefix a provider had cached.
+        Held steady for the Run: ranked against its own request, and without
+        the memories it wrote itself (`excluding_run`), so rounds get the same
+        block. The tool tells the model a memory it writes "does not affect
+        this Run", and a block that changed mid-Run would also stop matching
+        the prefix a provider had cached. Not a full snapshot: a memory
+        another Run writes, or a person approves, while this one is running
+        joins its next round — rare, and by then it is a memory someone
+        decided should be used.
 
         `query` is this Run's own request, and the ordering it produces is
         **keyword relevance, not meaning** (§14.3 excludes vector memory). It
@@ -1466,7 +1469,7 @@ class SqlRunStore:
         ):
             found.extend(
                 await library.relevant_in(
-                    scope, query, limit=MEMORY_READ_LIMIT, as_of=run.created_at
+                    scope, query, limit=MEMORY_READ_LIMIT, excluding_run=run.id
                 )
             )
         return tuple(found)
