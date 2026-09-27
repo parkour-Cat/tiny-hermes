@@ -27,6 +27,7 @@ from tiny_hermes.model_catalog.domain.pricing import TokenPrices
 from tiny_hermes.runs.application.worker import (
     _checkpoint,  # pyright: ignore[reportPrivateUsage]
     _cost_from,  # pyright: ignore[reportPrivateUsage]
+    _summary_billed_payload,  # pyright: ignore[reportPrivateUsage]
 )
 from tiny_hermes.runs.infrastructure.openai_model import normalize
 from tiny_hermes.runs.ports.model import UsageQuality
@@ -138,3 +139,15 @@ def test_the_round_record_says_how_much_was_cached() -> None:
     assert _checkpoint(normalize(_body(OPENAI_USAGE)))["cached_input_tokens"] == 1_920
     silent = normalize(_body({"prompt_tokens": 11, "completion_tokens": 7}))
     assert "cached_input_tokens" not in _checkpoint(silent)
+
+
+def test_the_summary_billing_event_says_how_much_was_cached() -> None:
+    """It lists what the provider reported so an operator can reconcile the
+    cost; the cost now depends on the cached count, so the count is listed."""
+    response = normalize(_body(OPENAI_USAGE))
+    cost = _cost_from(response, PRICES)
+    assert cost is not None
+
+    payload = _summary_billed_payload(None, "acme", response, cost)
+
+    assert payload["cached_input_tokens"] == 1_920
