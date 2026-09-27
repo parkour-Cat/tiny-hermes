@@ -180,6 +180,12 @@ class RunEventType(StrEnum):
     #: §11.6: one per tool call — which tool, a summary of its arguments
     #: (keys and sizes, never values), its outcome and how long it took.
     TOOL_CALLED = "tool_called"
+    #: §7.4.1: the endpoint answering this Run could not be reached and a
+    #: fallback took the round — and every round after it in this Run.
+    MODEL_FALLBACK_USED = "model_fallback_used"
+    #: §7.4.1: a fallback was passed over, with the reason — a request its
+    #: window cannot take, or a round its price would take past the ceiling.
+    MODEL_FALLBACK_SKIPPED = "model_fallback_skipped"
 
     # Also not derived from a signal, and for the same reason: a
     # summarization call is a real call on a real endpoint (§7.4.2), and

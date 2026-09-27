@@ -18,7 +18,7 @@ import logging
 import random
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
 from tiny_hermes.agents.domain.models import EndpointModelPolicy
@@ -676,6 +676,7 @@ class OpenAICompatibleProvider:
                     replay_safe=True,
                     external_effect_unknown=failure.external_effect_unknown,
                     failure="endpoint_unreachable",
+                    transient=True,
                 )
             else:
                 if answer.status_code == 200:
@@ -697,7 +698,7 @@ class OpenAICompatibleProvider:
                 )
                 if answer.status_code not in RETRYABLE_STATUSES:
                     return _failed(f"endpoint_status:{answer.status_code}")
-                last = _failed(f"endpoint_status:{answer.status_code}")
+                last = replace(_failed(f"endpoint_status:{answer.status_code}"), transient=True)
             if attempt < self._policy.max_attempts:
                 await self._sleep(self._policy.backoff_seconds(attempt))
         return last

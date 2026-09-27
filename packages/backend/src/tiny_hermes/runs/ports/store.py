@@ -5,7 +5,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from tiny_hermes.agents.domain.delegation import DelegationScope
-from tiny_hermes.agents.domain.models import AgentSpec
+from tiny_hermes.agents.domain.models import AgentSpec, EndpointModelPolicy, ModelPolicy
 from tiny_hermes.memory.ports.library import RememberedFact
 from tiny_hermes.model_catalog.domain.pricing import Cost, TokenPrices
 from tiny_hermes.runs.domain.context_budget import ContextWindow
@@ -357,6 +357,33 @@ class ExecutionContext:
     #: counted from its `goal_verdict` events. What
     #: `completion.stop_conditions.max_rounds` is measured against.
     rounds_judged: int = 0
+    #: The fallback this Run switched to (§7.4.1), or `None` while the Agent's
+    #: own endpoint answers. ``window`` and ``prices`` above are already that
+    #: endpoint's; read ``policy`` rather than ``spec.model_policy`` to route.
+    answering_endpoint_id: UUID | None = None
+
+    @property
+    def policy(self) -> ModelPolicy:
+        """The policy a round is sent under: the Agent's own, pointed at the
+        fallback once the Run has switched."""
+        policy = self.spec.model_policy
+        if self.answering_endpoint_id is None or not isinstance(policy, EndpointModelPolicy):
+            return policy
+        return policy.model_copy(update={"endpoint_id": self.answering_endpoint_id})
+
+    @property
+    def fallbacks_left(self) -> tuple[UUID, ...]:
+        """The fallbacks after the one answering now, in order — the Run never
+        goes back up the list."""
+        policy = self.spec.model_policy
+        if not isinstance(policy, EndpointModelPolicy):
+            return ()
+        chain = policy.fallback_endpoint_ids
+        if self.answering_endpoint_id is None:
+            return chain
+        if self.answering_endpoint_id not in chain:
+            return ()
+        return chain[chain.index(self.answering_endpoint_id) + 1 :]
 
     @property
     def messages(self) -> tuple[CanonicalMessage, ...]:

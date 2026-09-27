@@ -57,6 +57,12 @@ export function outcomeLabel(outcome: string | null): MessageKey | null {
 /** A sentence for a timeline entry, and the numbers to put in it. */
 export type EventNote = { key: MessageKey; values: Record<string, string> };
 
+const FALLBACK_SKIPPED: Record<string, MessageKey> = {
+  fallback_window_too_small: "modelFallbackSkippedWindow",
+  fallback_over_cost_ceiling: "modelFallbackSkippedCost",
+  fallback_unavailable: "modelFallbackSkippedUnavailable",
+};
+
 const TRIMMED: Record<string, MessageKey> = {
   old_tool_results: "contextTrimmedOldToolResults",
   skill_summaries: "contextTrimmedSkillSummaries",
@@ -200,6 +206,18 @@ export function eventNote(frame: Pick<RunEventFrame, "event_type" | "payload">):
       key: wait === "any" ? "delegatedAnyNote" : "delegatedAllNote",
       values: { count: String(children.length) },
     };
+  }
+  if (frame.event_type === "model_fallback_used") {
+    // §7.4.1: said because nothing else on the page shows that a different
+    // model answered from here on — and that the Run will not switch back.
+    const reason = frame.payload.reason;
+    return typeof reason === "string" && reason !== ""
+      ? { key: "modelFallbackUsedNote", values: { reason } }
+      : null;
+  }
+  if (frame.event_type === "model_fallback_skipped") {
+    const key = FALLBACK_SKIPPED[String(frame.payload.reason)];
+    return key === undefined ? null : { key, values: {} };
   }
   if (frame.event_type === "run_approval_requested") {
     // The one event where "who is waiting" matters more than what happened:

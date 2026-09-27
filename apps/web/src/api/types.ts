@@ -28,6 +28,8 @@ export type ModelPolicyDocument =
       endpoint_id: string;
       temperature?: number | null;
       max_output_tokens?: number | null;
+      /** Tried in order when the main endpoint cannot be reached (§7.4.1). */
+      fallback_endpoint_ids?: string[];
     };
 
 export type ModelEndpointSummary = {

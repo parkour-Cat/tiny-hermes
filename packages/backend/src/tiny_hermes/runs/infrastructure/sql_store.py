@@ -34,6 +34,7 @@ from tiny_hermes.http_tools.infrastructure.tables import (
 from tiny_hermes.memory.domain.scope import scopes_for_run
 from tiny_hermes.memory.infrastructure.sql_library import SqlMemoryLibrary
 from tiny_hermes.memory.ports.library import RememberedFact
+from tiny_hermes.model_catalog.domain.models import EndpointStatus
 from tiny_hermes.model_catalog.domain.pricing import Cost, CostQuality, TokenPrices
 from tiny_hermes.model_catalog.infrastructure.pricing_tables import (
     ModelPricingVersionRow,
@@ -926,12 +927,20 @@ class SqlRunStore:
             cancel_requested=run.cancel_requested_at is not None,
             pause_requested=run.pause_requested_at is not None,
             budget=_budget_summary(budget),
-            window=await self._context_window(spec),
+            window=await self._context_window(spec, run.answering_endpoint_id),
             compat_deadline_at=deadline,
             skills=await self._bound_skills(spec),
             loaded_skills=await self._loaded_skills(run.id),
             http_operations=await self._bound_operations(spec),
-            prices=await self._pinned_prices(run.model_pricing_version_id),
+            # A fallback has no pin of its own — `model_pricing_version_id`
+            # names the main endpoint's price — so, like a declared summary
+            # endpoint, it is charged at the price in force.
+            prices=(
+                await self._pinned_prices(run.model_pricing_version_id)
+                if run.answering_endpoint_id is None
+                else await self.current_prices_for(run.answering_endpoint_id)
+            ),
+            answering_endpoint_id=run.answering_endpoint_id,
             memories=await self._remembered(run, owning, _run_request(history, run.id)),
             depth=run.depth,
             delegated_scope=(
@@ -1562,7 +1571,38 @@ class SqlRunStore:
                 loaded.append(UUID(raw))
         return tuple(loaded)
 
-    async def _context_window(self, spec: AgentSpec) -> ContextWindow | None:
+    async def fallback_route(
+        self, spec: AgentSpec, endpoint_id: UUID
+    ) -> tuple[ContextWindow, TokenPrices | None] | None:
+        """What a fallback would plan against and charge, read before the
+        Worker switches to it — `None` when it is gone or no longer selectable."""
+        endpoint = await self._session.get(ModelEndpointRow, endpoint_id)
+        if endpoint is None or endpoint.status != EndpointStatus.ACTIVE.value:
+            return None
+        window = await self._context_window(spec, endpoint_id)
+        if window is None:
+            return None
+        return window, await self.current_prices_for(endpoint_id)
+
+    async def switch_endpoint(
+        self, workspace_id: UUID, run_id: UUID, endpoint_id: UUID, event: ReservedEvent
+    ) -> None:
+        """Move this Run to a fallback, and say so on its timeline, together.
+
+        Not bumping `state_version`: this changes which endpoint answers, not
+        anything a pause, cancel or recovery decides on."""
+        await self._session.execute(
+            update(RunRow)
+            .where(RunRow.id == run_id, RunRow.workspace_id == workspace_id)
+            .values(answering_endpoint_id=endpoint_id)
+        )
+        await self.append_events(
+            AppendEventsCommand(workspace_id=workspace_id, run_id=run_id, events=(event,))
+        )
+
+    async def _context_window(
+        self, spec: AgentSpec, answering: UUID | None = None
+    ) -> ContextWindow | None:
         """What the endpoint this Run's policy names declared it can take.
 
         Read from the endpoint row rather than guessed from the provider name,
@@ -1576,7 +1616,7 @@ class SqlRunStore:
             # against, and inventing one would trim a stand-in's conversation
             # against a number no endpoint ever gave.
             return None
-        endpoint = await self._session.get(ModelEndpointRow, policy.endpoint_id)
+        endpoint = await self._session.get(ModelEndpointRow, answering or policy.endpoint_id)
         if endpoint is None:
             return None
         return ContextWindow(

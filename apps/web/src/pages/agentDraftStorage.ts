@@ -23,6 +23,10 @@ function validValues(value: unknown): value is FormValues {
     ["delivery_enabled", "end_user_access_enabled"].every((key) => typeof fields[key] === "boolean") &&
     ["deterministic", "openai_compatible"].includes(String(fields.provider)) &&
     (fields.endpoint_id === undefined || typeof fields.endpoint_id === "string") &&
+    // Absent in a draft kept before fallbacks existed; `specOf` reads it as none.
+    (fields.fallback_endpoint_ids === undefined ||
+      (Array.isArray(fields.fallback_endpoint_ids) &&
+        fields.fallback_endpoint_ids.every((item) => typeof item === "string"))) &&
     ["http_write_policy", "mcp_write_policy"].every((key) => fields[key] === undefined ||
       ["disabled", "preauthorized", "governance"].includes(String(fields[key])));
 }
