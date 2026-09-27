@@ -57,6 +57,15 @@ export function outcomeLabel(outcome: string | null): MessageKey | null {
 /** A sentence for a timeline entry, and the numbers to put in it. */
 export type EventNote = { key: MessageKey; values: Record<string, string> };
 
+const SKILL_REVIEW: Record<string, MessageKey> = {
+  proposed: "skillReviewProposed",
+  none: "skillReviewNone",
+  unreadable: "skillReviewUnreadable",
+  refused: "skillReviewRefused",
+  failed: "skillReviewFailed",
+  skipped: "skillReviewSkipped",
+};
+
 const FALLBACK_SKIPPED: Record<string, MessageKey> = {
   fallback_window_too_small: "modelFallbackSkippedWindow",
   fallback_over_cost_ceiling: "modelFallbackSkippedCost",
@@ -214,6 +223,10 @@ export function eventNote(frame: Pick<RunEventFrame, "event_type" | "payload">):
     return typeof reason === "string" && reason !== ""
       ? { key: "modelFallbackUsedNote", values: { reason } }
       : null;
+  }
+  if (frame.event_type === "skill_review") {
+    const key = SKILL_REVIEW[String(frame.payload.outcome)];
+    return key === undefined ? null : { key, values: {} };
   }
   if (frame.event_type === "todo_updated") {
     // Counts only, as the server records them: the items are the model's

@@ -83,6 +83,8 @@ export type AgentSpecDocument = {
    * to agree — opening this grants nothing on its own.
    */
   end_user_access?: { enabled: boolean };
+  /** §15.4: review a completed run for a skill worth proposing. Absent means never. */
+  skill_review?: { enabled: boolean; min_tool_calls: number };
   /**
    * What this Agent may reach on the network, fixed at publish like `tools`.
    *
