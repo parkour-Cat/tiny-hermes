@@ -180,6 +180,35 @@ def _usage(body: dict[str, Any]) -> tuple[int | None, int | None, UsageQuality]:
     return prompt, completion, UsageQuality.PROVIDER
 
 
+def _cached(body: dict[str, Any], prompt_tokens: int | None) -> int | None:
+    """How many prompt tokens the provider served from its cache, or `None`.
+
+    Two spellings, both the providers' own: OpenAI's
+    `usage.prompt_tokens_details.cached_tokens` (optional in `CompletionUsage`),
+    which DeepSeek also returns, and DeepSeek's top-level
+    `usage.prompt_cache_hit_tokens`. A count that cannot be true — not an
+    integer, negative, or more than the prompt — is `None`: the round's usage
+    still stands, and only the discount is withheld.
+    """
+    reported: Any = body.get("usage")
+    if not isinstance(reported, dict) or prompt_tokens is None:
+        return None
+    fields = cast(dict[str, Any], reported)
+    details: Any = fields.get("prompt_tokens_details")
+    count: Any = (
+        cast(dict[str, Any], details).get("cached_tokens")
+        if isinstance(details, dict)
+        else None
+    )
+    if count is None:
+        count = fields.get("prompt_cache_hit_tokens")
+    if isinstance(count, bool) or not isinstance(count, int):
+        return None
+    if count < 0 or count > prompt_tokens:
+        return None
+    return count
+
+
 def normalize(body: dict[str, Any], names: Mapping[str, str] | None = None) -> ModelResponse:
     """One endpoint answer, as one platform round. ``names`` is the request's
     `wire_names`, so a call comes back to the tool that was advertised."""
@@ -217,6 +246,7 @@ def normalize(body: dict[str, Any], names: Mapping[str, str] | None = None) -> M
         input_tokens=prompt_tokens,
         output_tokens=completion_tokens,
         usage_quality=quality,
+        cached_input_tokens=_cached(body, prompt_tokens),
         reasoning=_reasoning(cast(dict[str, Any], message)),
     )
 
@@ -283,6 +313,7 @@ def _tool_round(body: dict[str, Any], message: Any, names: Mapping[str, str]) ->
         input_tokens=prompt_tokens,
         output_tokens=completion_tokens,
         usage_quality=quality,
+        cached_input_tokens=_cached(body, prompt_tokens),
     )
 
 

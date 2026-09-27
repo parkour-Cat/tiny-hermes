@@ -399,6 +399,14 @@ async def test_a_run_reaches_completed_with_text_the_endpoint_produced(
     """
     app, base_url = endpoint
     app.answer = "the model really said this"
+    # `CompletionUsage` as the OpenAI SDK defines it, with part of the prompt
+    # served from the provider's cache.
+    app.usage = {
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+        "prompt_tokens_details": {"cached_tokens": 8},
+    }
 
     registered = client.post(
         "/api/v1/model-endpoints",
@@ -478,6 +486,9 @@ async def test_a_run_reaches_completed_with_text_the_endpoint_produced(
     assert snapshot["status"] == "completed"
     assert snapshot["budget"]["consumed_tokens"] == 18
     assert snapshot["checkpoint_usage_quality"] == "provider"
+    # Read off the provider's usage and shown to the console: the one number
+    # that says whether keeping the prompt prefix stable is paying off.
+    assert snapshot["checkpoint_cached_input_tokens"] == 8
     # The text the endpoint produced, kept where the next round would read it.
     async with engine.connect() as connection:
         rows = await connection.execute(

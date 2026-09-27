@@ -309,6 +309,7 @@ _CONSOLE_ONLY_RUN_FIELDS = {
     "checkpoint_replay_safe",
     "checkpoint_effect_status",
     "checkpoint_usage_quality",
+    "checkpoint_cached_input_tokens",
     "goal",
     "available_actions",
 }
