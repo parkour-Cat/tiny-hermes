@@ -12,10 +12,12 @@ response never arrived — a transport question, decided by the outbound client.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import random
-from collections.abc import Awaitable, Callable
+import re
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -50,9 +52,10 @@ logger = logging.getLogger(__name__)
 #: `tools/domain/registry.py` is right to keep it. The constraint belongs to
 #: this one transport, so the rename lives here and nowhere else.
 #:
-#: A dot is the only character in any implemented name that the pattern
-#: rejects, so `.` ⇄ `__` is a total, reversible mapping over them:
-#: no platform name contains `__`, so nothing collides on the way back.
+#: For the built-in names a dot is the only character the pattern rejects,
+#: so `.` ⇄ `__` is reversible over them. It is not over MCP tool names,
+#: which are a server's own and only length-checked — those are handled by
+#: `_to_wire_name` and come back through `wire_names`.
 #: Pinned by `test_openai_tool_calls.py`, in both directions — renaming
 #: outbound without renaming inbound leaves the model asking for a tool
 #: nothing dispatches, which fails as an authorisation refusal for a tool
@@ -60,12 +63,51 @@ logger = logging.getLogger(__name__)
 _WIRE_SEPARATOR = "__"
 
 
+#: What OpenAI accepts as a function name.
+_WIRE_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
 def _to_wire_name(name: str) -> str:
-    return name.replace(".", _WIRE_SEPARATOR)
+    """The name a provider is shown for one of this platform's tools.
+
+    `.` becomes `__` whenever that is reversible and gives a name the provider
+    accepts — every built-in name, so what is advertised does not change. An
+    MCP tool's name is somebody else's and is only length-checked (up to
+    128): it may already contain `__`, sit `_` next to `.`, run past 64
+    characters, or hold a character a function name may not. Those get a
+    cleaned prefix and an 8-character hash of the full name, and come back
+    through `wire_names` rather than by reversing the replacement.
+    """
+    plain = name.replace(".", _WIRE_SEPARATOR)
+    if _WIRE_NAME.fullmatch(plain) and plain.replace(_WIRE_SEPARATOR, ".") == name:
+        return plain
+    cleaned = re.sub(r"[^A-Za-z0-9_-]", "_", name.replace(".", "_"))
+    digest = hashlib.sha256(name.encode()).hexdigest()[:8]
+    return f"{cleaned[:54]}_h{digest}"
 
 
 def _from_wire_name(name: str) -> str:
     return name.replace(_WIRE_SEPARATOR, ".")
+
+
+def _platform_name(wire: str, names: Mapping[str, str]) -> str:
+    return names.get(wire, _from_wire_name(wire))
+
+
+def wire_names(schemas: Sequence[dict[str, Any]]) -> dict[str, str]:
+    """Advertised name → platform name, for the tools one request advertises.
+
+    How a call comes back to the tool it was made to: reversing the
+    replacement is only right for the names `_to_wire_name` left plain.
+    """
+    table: dict[str, str] = {}
+    for schema in schemas:
+        function = schema.get("function")
+        if isinstance(function, dict):
+            name = cast(dict[str, Any], function).get("name")
+            if isinstance(name, str):
+                table[_to_wire_name(name)] = name
+    return table
 
 
 def _renamed_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -167,8 +209,9 @@ def _cached(body: dict[str, Any], prompt_tokens: int | None) -> int | None:
     return count
 
 
-def normalize(body: dict[str, Any]) -> ModelResponse:
-    """One endpoint answer, as one platform round."""
+def normalize(body: dict[str, Any], names: Mapping[str, str] | None = None) -> ModelResponse:
+    """One endpoint answer, as one platform round. ``names`` is the request's
+    `wire_names`, so a call comes back to the tool that was advertised."""
     choices: Any = body.get("choices")
     if not isinstance(choices, list) or not choices:
         return _failed("empty_response")
@@ -182,7 +225,7 @@ def normalize(body: dict[str, Any]) -> ModelResponse:
     if finish == "tool_calls":
         # Phase 3A refused this, because no tool was bound and a model asking
         # for one had left the contract. One is bound now, so it is a parse.
-        return _tool_round(body, message_any)
+        return _tool_round(body, message_any, names or {})
     if finish == "length":
         return _failed("max_output_reached")
     if finish not in ("stop", None):
@@ -220,7 +263,7 @@ def _reasoning(message: dict[str, Any]) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _tool_round(body: dict[str, Any], message: Any) -> ModelResponse:
+def _tool_round(body: dict[str, Any], message: Any, names: Mapping[str, str]) -> ModelResponse:
     """A round that asked for tools rather than answering."""
     if not isinstance(message, dict):
         return _failed("malformed_choice")
@@ -251,7 +294,7 @@ def _tool_round(body: dict[str, Any], message: Any) -> ModelResponse:
             calls.append(
                 ToolCallBlock(
                     call_id=str(call.get("id") or ""),
-                    name=_from_wire_name(str(signature.get("name") or "")),
+                    name=_platform_name(str(signature.get("name") or ""), names),
                     arguments=cast(dict[str, Any], arguments),
                 )
             )
@@ -604,7 +647,7 @@ class OpenAICompatibleProvider:
                 )
             else:
                 if answer.status_code == 200:
-                    return normalize(_json(answer.text))
+                    return normalize(_json(answer.text), wire_names(list(request.tools)))
                 # The endpoint's own words, kept. `endpoint_status:400` says
                 # somebody refused us and nothing about why, which leaves an
                 # operator with a number and no next step — the same failure
