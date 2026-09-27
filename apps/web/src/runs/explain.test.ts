@@ -350,3 +350,30 @@ test("a delegation the console cannot read fully gets no sentence", () => {
     eventNote({ event_type: "run_delegated", payload: { children: [] } }),
   ).toBeNull();
 });
+
+test("a switch to a fallback model says why and that the run stays there", () => {
+  const note = eventNote({
+    event_type: "model_fallback_used",
+    payload: { from: "a", to: "b", reason: "endpoint_status:503" },
+  });
+  expect(note).toEqual({ key: "modelFallbackUsedNote", values: { reason: "endpoint_status:503" } });
+  // Not going back is the part a reader would not guess.
+  for (const said of [t("modelFallbackUsedNote"), enUS.modelFallbackUsedNote]) {
+    expect(said).toMatch(/不再切回|stays/);
+  }
+});
+
+test("a fallback passed over says which rule passed it over", () => {
+  expect(
+    eventNote({
+      event_type: "model_fallback_skipped",
+      payload: { endpoint_id: "b", reason: "fallback_window_too_small" },
+    }),
+  ).toEqual({ key: "modelFallbackSkippedWindow", values: {} });
+  expect(
+    eventNote({
+      event_type: "model_fallback_skipped",
+      payload: { endpoint_id: "b", reason: "something_new" },
+    }),
+  ).toBeNull();
+});
