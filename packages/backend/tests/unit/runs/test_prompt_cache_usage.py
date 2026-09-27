@@ -129,6 +129,7 @@ def test_a_round_that_hit_the_cache_is_charged_the_cached_rate() -> None:
     uncached = _cost_from(normalize(_body(uncached_usage)), PRICES)
 
     assert cached is not None and uncached is not None
+    assert cached.amount is not None and uncached.amount is not None
     # 128 plain at 2/M + 1,920 cached at 0.5/M + 20 out at 8/M.
     assert cached.amount == Decimal("0.001376")
     assert cached.amount < uncached.amount
