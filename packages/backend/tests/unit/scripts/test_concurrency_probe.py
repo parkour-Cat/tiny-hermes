@@ -150,3 +150,17 @@ def test_docker_memory_strings_become_mebibytes() -> None:
     assert probe.to_mib("512MiB") == pytest.approx(512.0)
     assert probe.to_mib("1.5GiB") == pytest.approx(1536.0)
     assert probe.to_mib("2048KiB") == pytest.approx(2.0)
+
+
+def test_an_integer_setting_is_read_from_a_container_environment() -> None:
+    # `docker inspect` prints one KEY=value per line. A container count alone
+    # stopped describing the stack once one container could hold K Workers.
+    env = "PATH=/usr/bin\nWORKER_CONCURRENCY=8\nDETERMINISTIC_MODEL_DELAY_MS=3000\n"
+
+    assert probe.env_int(env, "WORKER_CONCURRENCY") == 8
+    assert probe.env_int(env, "DETERMINISTIC_MODEL_DELAY_MS") == 3000
+
+
+def test_a_setting_that_is_absent_or_not_a_number_reads_as_unknown() -> None:
+    assert probe.env_int("PATH=/usr/bin\n", "WORKER_CONCURRENCY") is None
+    assert probe.env_int("WORKER_CONCURRENCY=eight\n", "WORKER_CONCURRENCY") is None
