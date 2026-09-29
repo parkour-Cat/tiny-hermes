@@ -1777,12 +1777,22 @@ class SqlRunStore:
     async def renew_lease(self, command: RenewLeaseCommand) -> RenewedLease | None:
         """Extend a lease this worker still holds, or report that it is gone.
 
-        The predicate is the concurrency control, so no row lock is needed: a
-        renewal that matches nothing means the Scheduler already reclaimed the
-        Run and its decision stands.
+        The predicate decides whether the lease is still ours: a renewal that
+        matches nothing means the Scheduler already reclaimed the Run and its
+        decision stands.
+
+        The Run row is locked first anyway, because this transaction also
+        writes it. Every other path that touches both rows — `record_slice`,
+        `reserve_tool_call`, `reclaim_expired_lease` — takes the Run and then
+        the lease. Taking them the other way round here deadlocked a slice
+        record running inside a workspace checkpoint commit, which does not
+        hold the Worker's in-process `_lease_lock` (seen 2026-09-29 at 32
+        concurrent long tasks; `test_lease_lock_order.py` forces it).
         """
         now = datetime.now(UTC)
         expires_at = now + timedelta(seconds=command.lease_seconds)
+        if await self._lock_run(command.workspace_id, command.run_id) is None:
+            return None
         renewed = await self._session.scalar(
             update(WorkerLeaseRow)
             .where(
