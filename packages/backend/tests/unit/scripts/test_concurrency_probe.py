@@ -164,3 +164,22 @@ def test_an_integer_setting_is_read_from_a_container_environment() -> None:
 def test_a_setting_that_is_absent_or_not_a_number_reads_as_unknown() -> None:
     assert probe.env_int("PATH=/usr/bin\n", "WORKER_CONCURRENCY") is None
     assert probe.env_int("WORKER_CONCURRENCY=eight\n", "WORKER_CONCURRENCY") is None
+
+
+def test_runs_split_into_the_groups_the_probe_submitted() -> None:
+    runs = [run("long-1", 0.0, 0.0, 9.0), run("short-1", 1.0, 1.0, 2.0), run("x", 1.0, 1.0, 2.0)]
+
+    long_runs, short_runs = probe.split_runs(runs, {"long-1"}, {"short-1"})
+
+    assert [r.run_id for r in long_runs] == ["long-1"]
+    assert [r.run_id for r in short_runs] == ["short-1"]
+
+
+def test_sandbox_containers_are_counted_by_state() -> None:
+    # `docker ps --format {{.State}}`: a frozen sandbox is a paused container.
+    assert probe.count_states("running\npaused\nrunning\nexited\n") == {
+        "running": 2,
+        "paused": 1,
+        "exited": 1,
+    }
+    assert probe.count_states("") == {}
