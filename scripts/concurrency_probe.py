@@ -172,6 +172,26 @@ def summarize(runs: Sequence[RunTimes], *, observed_until: float) -> dict[str, A
     }
 
 
+#: `Console.publish_agent` caps an Agent at 20 model calls, and a long task
+#: makes one per round plus the one that finishes.
+MAX_LONG_TASK_ROUNDS = 19
+LONG_SCENARIO = "long_task"
+SANDBOX_LABEL = "tiny-hermes.instance"
+
+
+def split_runs(
+    runs: Sequence[RunTimes], long_ids: set[str], short_ids: set[str]
+) -> tuple[list[RunTimes], list[RunTimes]]:
+    return (
+        [run for run in runs if run.run_id in long_ids],
+        [run for run in runs if run.run_id in short_ids],
+    )
+
+
+def count_states(listed: str) -> dict[str, int]:
+    return dict(Counter(line.strip() for line in listed.splitlines() if line.strip()))
+
+
 class _Database:
     """One connection on its own loop, so each sampling thread has its own."""
 
@@ -281,6 +301,10 @@ class _Sampler:
         self.max_connections = 0
         self.worker_mem_mib: dict[str, float] = {}
         self.worker_cpu_percent: dict[str, float] = {}
+        #: Sandbox containers at the busiest sample, by state: a frozen sandbox
+        #: (between two slices of its Run) is a paused container.
+        self.max_sandboxes: dict[str, int] = {}
+        self.max_sandbox_mem_mib = 0.0
         self._threads = [
             threading.Thread(target=self._sample_database, daemon=True),
             threading.Thread(target=self._sample_docker, daemon=True),
@@ -317,14 +341,47 @@ class _Sampler:
                 cpu = float(str(row["CPUPerc"]).rstrip("%") or 0)
                 self.worker_mem_mib[name] = max(self.worker_mem_mib.get(name, 0.0), used)
                 self.worker_cpu_percent[name] = max(self.worker_cpu_percent.get(name, 0.0), cpu)
+            self._sample_sandboxes()
             self._stop.wait(DOCKER_SAMPLE_SECONDS)
+
+    def _sample_sandboxes(self) -> None:
+        label = f"label={SANDBOX_LABEL}"
+        states = count_states(_docker("ps", "-a", "--filter", label, "--format", "{{.State}}"))
+        for state, count in states.items():
+            self.max_sandboxes[state] = max(self.max_sandboxes.get(state, 0), count)
+        names = _docker("ps", "--filter", label, "--format", "{{.Names}}").split()
+        if not names:
+            return
+        listed = _docker("stats", "--no-stream", "--format", "{{json .}}", *names)
+        used = sum(
+            to_mib(str(json.loads(line)["MemUsage"]).split("/")[0].strip())
+            for line in listed.splitlines()
+        )
+        self.max_sandbox_mem_mib = max(self.max_sandbox_mem_mib, used)
 
 
 def _log(message: str) -> None:
     print(message, file=sys.stderr)
 
 
-def probe(rate: float, seconds: float, drain_seconds: float, label: str) -> dict[str, Any]:
+def probe(
+    rate: float,
+    seconds: float,
+    drain_seconds: float,
+    label: str,
+    *,
+    long_tasks: int = 0,
+    rounds: int = 10,
+    lead_seconds: float = 5.0,
+) -> dict[str, Any]:
+    """Short Runs at `rate`, optionally after `long_tasks` long ones start.
+
+    The long tasks are submitted first and the short Runs `lead_seconds`
+    later, so the short ones arrive while long tasks already hold Workers:
+    their wait is the fairness a person sending a message would see.
+    """
+    if not 1 <= rounds <= MAX_LONG_TASK_ROUNDS:
+        raise SystemExit(f"--rounds must be 1..{MAX_LONG_TASK_ROUNDS}")
     offsets = arrival_offsets(rate, seconds)
     workers = worker_containers()
     envs = {name: container_env(name) for name in workers}
@@ -339,6 +396,14 @@ def probe(rate: float, seconds: float, drain_seconds: float, label: str) -> dict
         agent = console.publish_agent(workspace, f"probe-{time.time_ns()}", SCENARIO)
         _log(f"opening {len(offsets)} sessions (one per Run, outside the timed window)")
         sessions = [console.open_session(workspace, agent) for _ in offsets]
+        long_ids: set[str] = set()
+        short_ids: set[str] = set()
+        long_sessions: list[str] = []
+        if long_tasks:
+            long_agent = console.publish_agent(
+                workspace, f"probe-long-{time.time_ns()}", LONG_SCENARIO, tools=["shell.exec"]
+            )
+            long_sessions = [console.open_session(workspace, long_agent) for _ in range(long_tasks)]
 
         create_ms: list[float] = []
         create_errors = 0
@@ -360,10 +425,21 @@ def probe(rate: float, seconds: float, drain_seconds: float, label: str) -> dict
                     create_errors += 1
                 else:
                     create_ms.append(elapsed)
+                    short_ids.add(run_id)
 
         database = _Database(database_url())
         try:
             with _Sampler(workspace, workers) as sampler:
+                for index, session in enumerate(long_sessions):
+                    run_id, status, _ = console.create_run(
+                        workspace, session, f"rounds={rounds}", f"probe-{label}-long-{index}"
+                    )
+                    if run_id is None or status >= 400:
+                        raise SystemExit(f"long task {index} was refused: HTTP {status}")
+                    long_ids.add(run_id)
+                if long_sessions:
+                    _log(f"started {len(long_sessions)} long tasks of {rounds} rounds")
+                    time.sleep(lead_seconds)
                 _log(f"submitting {len(offsets)} Runs at {rate}/s over {seconds:.0f}s")
                 started = time.monotonic()
                 with ThreadPoolExecutor(max_workers=64) as pool:
@@ -376,7 +452,7 @@ def probe(rate: float, seconds: float, drain_seconds: float, label: str) -> dict
                 deadline = time.monotonic() + drain_seconds
                 while time.monotonic() < deadline:
                     counts = database.status_counts(workspace)
-                    if sum(counts.values()) >= len(offsets) and all(
+                    if sum(counts.values()) >= len(offsets) + len(long_ids) and all(
                         status in TERMINAL for status in counts
                     ):
                         break
@@ -387,9 +463,24 @@ def probe(rate: float, seconds: float, drain_seconds: float, label: str) -> dict
             database.close()
 
     summary = summarize(runs, observed_until=observed_until)
+    long_runs, short_runs = split_runs(runs, long_ids, short_ids)
+    groups = (
+        {
+            "long": summarize(long_runs, observed_until=observed_until),
+            "short": summarize(short_runs, observed_until=observed_until),
+        }
+        if long_ids
+        else {}
+    )
     return {
         "label": label,
-        "offered": {"rate_per_s": rate, "seconds": seconds, "runs": len(offsets)},
+        "offered": {
+            "rate_per_s": rate,
+            "seconds": seconds,
+            "runs": len(offsets),
+            "long_tasks": long_tasks,
+            "rounds": rounds if long_tasks else 0,
+        },
         "stack": {
             **host_shape(),
             "workers": len(workers),
@@ -399,12 +490,15 @@ def probe(rate: float, seconds: float, drain_seconds: float, label: str) -> dict
         },
         "create_run": {"errors": create_errors, "latency_ms": _spread(create_ms)},
         "summary": summary,
+        "groups": groups,
         "sampled": {
             "max_queued": max((row.get("queued", 0) for row in sampler.series), default=0),
             "max_running": max((row.get("running", 0) for row in sampler.series), default=0),
             "max_db_connections": sampler.max_connections,
             "worker_mem_mib_max": sampler.worker_mem_mib,
             "worker_cpu_percent_max": sampler.worker_cpu_percent,
+            "max_sandboxes_by_state": sampler.max_sandboxes,
+            "max_sandbox_mem_mib": sampler.max_sandbox_mem_mib,
         },
         "series": sampler.series,
     }
@@ -430,6 +524,18 @@ def _report(result: dict[str, Any]) -> None:
         f"  throughput {summary['throughput_per_s']:.2f}/s, "
         f"peak running {summary['peak_running']}, mean running {summary['mean_running']:.1f}"
     )
+    for name, group in result["groups"].items():
+        group_wait = group["queue_wait_s"]
+        _log(
+            f"  {name}: {group['completed']}/{group['submitted']} done, "
+            f"wait p50 {group_wait['p50']:.1f}s p95 {group_wait['p95']:.1f}s "
+            f"max {group_wait['max']:.1f}s, end-to-end p95 {group['end_to_end_s']['p95']:.1f}s"
+        )
+    if result["sampled"]["max_sandboxes_by_state"]:
+        _log(
+            f"  sandboxes at most {result['sampled']['max_sandboxes_by_state']}, "
+            f"{result['sampled']['max_sandbox_mem_mib']:.0f} MiB"
+        )
 
 
 def main() -> int:
@@ -440,8 +546,19 @@ def main() -> int:
     parser.add_argument("--seconds", type=float, default=60.0, help="submission window")
     parser.add_argument("--drain-seconds", type=float, default=600.0)
     parser.add_argument("--label", default=os.environ.get("PROBE_LABEL", "probe"))
+    parser.add_argument("--long-tasks", type=int, default=0, help="long tasks started first")
+    parser.add_argument("--rounds", type=int, default=10, help="rounds per long task")
+    parser.add_argument("--lead-seconds", type=float, default=5.0)
     arguments = parser.parse_args()
-    result = probe(arguments.rate, arguments.seconds, arguments.drain_seconds, arguments.label)
+    result = probe(
+        arguments.rate,
+        arguments.seconds,
+        arguments.drain_seconds,
+        arguments.label,
+        long_tasks=arguments.long_tasks,
+        rounds=arguments.rounds,
+        lead_seconds=arguments.lead_seconds,
+    )
     _report(result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
