@@ -172,11 +172,60 @@ def summarize(runs: Sequence[RunTimes], *, observed_until: float) -> dict[str, A
     }
 
 
-#: `Console.publish_agent` caps an Agent at 20 model calls, and a long task
-#: makes one per round plus the one that finishes.
-MAX_LONG_TASK_ROUNDS = 19
 LONG_SCENARIO = "long_task"
 SANDBOX_LABEL = "tiny-hermes.instance"
+
+
+class ProbeConsole(BenchmarkConsole):
+    """The drill console, plus an Agent whose budget fits the long task.
+
+    A long task makes one model call per round plus the one that finishes. A
+    Run whose last allowed call is the one that finishes still ends
+    `paused(limit)` (seen 2026-09-29), so the budget leaves one call of room
+    rather than merely fitting. The platform caps it (`AGENT_MAX_MODEL_CALLS`,
+    20 by default), which is what bounds `--rounds`.
+    """
+
+    def publish_long_agent(self, workspace: str, alias: str, rounds: int) -> str:
+        created = self._client.post(
+            "/api/v1/agents",
+            headers=self._headers(workspace),
+            json={"name": alias, "alias": alias},
+        )
+        created.raise_for_status()
+        agent = str(created.json()["id"])
+        draft = self._client.put(
+            f"/api/v1/agents/{agent}/draft",
+            headers=self._headers(workspace),
+            json={
+                "expected_revision": 1,
+                "spec": {
+                    "schema_version": 1,
+                    "personality": "The concurrency probe's long task.",
+                    "model_policy": {"provider": "deterministic", "scenario": LONG_SCENARIO},
+                    "tools": ["shell.exec"],
+                    "limits": {
+                        "max_execution_seconds": 900,
+                        "max_elapsed_seconds": 86_400,
+                        "max_model_calls": rounds + 2,
+                        "max_tool_calls": rounds + 2,
+                        "max_derived_retries": 3,
+                    },
+                },
+            },
+        )
+        if draft.status_code == 422 and "round_ceiling_exceeded" in draft.text:
+            raise SystemExit(
+                f"{rounds} rounds need {rounds + 2} model calls, above this platform's "
+                "ceiling: lower --rounds or raise AGENT_MAX_MODEL_CALLS"
+            )
+        draft.raise_for_status()
+        self._client.post(
+            f"/api/v1/agents/{agent}/publish",
+            headers=self._headers(workspace),
+            json={"expected_revision": 2},
+        ).raise_for_status()
+        return agent
 
 
 def split_runs(
@@ -389,8 +438,8 @@ def probe(
     later, so the short ones arrive while long tasks already hold Workers:
     their wait is the fairness a person sending a message would see.
     """
-    if not 1 <= rounds <= MAX_LONG_TASK_ROUNDS:
-        raise SystemExit(f"--rounds must be 1..{MAX_LONG_TASK_ROUNDS}")
+    if rounds < 1:
+        raise SystemExit("--rounds must be at least 1")
     offsets = arrival_offsets(rate, seconds)
     workers = worker_containers()
     envs = {name: container_env(name) for name in workers}
@@ -399,7 +448,7 @@ def probe(
     # stack once one container could hold K of them.
     per_container = {name: env_int(env, "WORKER_CONCURRENCY") or 1 for name, env in envs.items()}
     with httpx.Client(base_url=API, timeout=30.0, trust_env=False) as client:
-        console = BenchmarkConsole(client)
+        console = ProbeConsole(client)
         console.sign_in()
         workspace = console.create_workspace(f"probe-{time.time_ns()}")
         agent = console.publish_agent(workspace, f"probe-{time.time_ns()}", SCENARIO)
@@ -409,8 +458,8 @@ def probe(
         short_ids: set[str] = set()
         long_sessions: list[str] = []
         if long_tasks:
-            long_agent = console.publish_agent(
-                workspace, f"probe-long-{time.time_ns()}", LONG_SCENARIO, tools=["shell.exec"]
+            long_agent = console.publish_long_agent(
+                workspace, f"probe-long-{time.time_ns()}", rounds
             )
             long_sessions = [console.open_session(workspace, long_agent) for _ in range(long_tasks)]
 
