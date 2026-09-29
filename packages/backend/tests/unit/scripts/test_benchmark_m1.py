@@ -276,3 +276,47 @@ def test_drive_gate_can_exec_the_live_module_without_an_import_crash(
     assert result["passed"] is False
     assert any("SANDBOX_IMAGE_DIGEST" in reason for reason in result["reasons"])
     assert all("AttributeError" not in reason for reason in result["reasons"])
+
+
+def _git_dir(tmp_path: Path, head: str) -> Path:
+    git = tmp_path / ".git"
+    git.mkdir()
+    (git / "HEAD").write_text(head + "\n", encoding="utf-8")
+    return git
+
+
+def test_the_sha_comes_from_a_loose_branch_ref(tmp_path: Path) -> None:
+    git = _git_dir(tmp_path, "ref: refs/heads/main")
+    (git / "refs" / "heads").mkdir(parents=True)
+    (git / "refs" / "heads" / "main").write_text("1111111\n", encoding="utf-8")
+
+    assert benchmark.git_sha(git) == "1111111"
+
+
+def test_the_sha_comes_from_packed_refs_when_the_branch_has_no_loose_file(
+    tmp_path: Path,
+) -> None:
+    # `git gc` and `git pack-refs` move branch refs into one file. A checkout
+    # in that state made `--shape-only` crash before it ever looked at the host.
+    git = _git_dir(tmp_path, "ref: refs/heads/feat/x")
+    (git / "packed-refs").write_text(
+        "# pack-refs with: peeled fully-peeled sorted\n"
+        "2222222 refs/heads/feat/x\n"
+        "3333333 refs/tags/v1\n"
+        "^4444444\n",
+        encoding="utf-8",
+    )
+
+    assert benchmark.git_sha(git) == "2222222"
+
+
+def test_a_detached_head_is_its_own_sha(tmp_path: Path) -> None:
+    assert benchmark.git_sha(_git_dir(tmp_path, "5555555")) == "5555555"
+
+
+def test_a_branch_with_no_commit_yet_reports_unknown_rather_than_crashing(
+    tmp_path: Path,
+) -> None:
+    git = _git_dir(tmp_path, "ref: refs/heads/new")
+
+    assert benchmark.git_sha(git) == "unknown"
