@@ -28,9 +28,7 @@ def _request(scenario: str, round_index: int) -> ModelRequest:
 
 
 async def test_complete_finishes_in_one_round() -> None:
-    response = await DeterministicModelProvider(delay_ms=0).complete(
-        _request("complete", 1)
-    )
+    response = await DeterministicModelProvider(delay_ms=0).complete(_request("complete", 1))
 
     assert response.stop_reason is StopReason.COMPLETED
     assert response.text
@@ -141,3 +139,87 @@ async def test_every_response_reports_one_model_call_and_some_usage() -> None:
 def test_the_delay_is_bounded(delay: int) -> None:
     with pytest.raises(ValueError, match="delay"):
         DeterministicModelProvider(delay_ms=delay)
+
+
+def _long_task(
+    round_index: int, text: str = "rounds=3", *, last_failed: bool = False
+) -> ModelRequest:
+    values = {
+        **valid_spec(),
+        "model_policy": {"provider": "deterministic", "scenario": "long_task"},
+        "tools": ["shell.exec"],
+    }
+    spec = AgentSpec.model_validate(values)
+    messages: tuple[CanonicalMessage, ...] = (
+        CanonicalMessage(role="user", blocks=(TextBlock(text=text),)),
+    )
+    if round_index > 1:
+        messages = (
+            *messages,
+            CanonicalMessage(
+                role="tool",
+                blocks=(
+                    ToolResultBlock(
+                        call_id=f"long-task-{round_index - 1}",
+                        output="",
+                        exit_code=1 if last_failed else 0,
+                        failed=last_failed,
+                    ),
+                ),
+            ),
+        )
+    return ModelRequest(
+        policy=spec.model_policy,
+        personality=spec.personality,
+        messages=messages,
+        round_index=round_index,
+        tools=({"type": "function", "function": {"name": "shell.exec"}},),
+    )
+
+
+async def test_a_long_task_runs_one_workspace_command_per_round() -> None:
+    provider = DeterministicModelProvider(delay_ms=0)
+
+    first = await provider.complete(_long_task(1))
+    third = await provider.complete(_long_task(3))
+
+    assert first.stop_reason is StopReason.TOOL_CALL
+    assert first.tool_calls[0].name == "shell.exec"
+    assert first.tool_calls[0].call_id == "long-task-1"
+    # It writes into the Session workspace, so every round commits a revision
+    # the way real file-producing work does.
+    assert ">> progress.txt" in str(first.tool_calls[0].arguments["command"])
+    assert third.tool_calls[0].call_id == "long-task-3"
+
+
+async def test_a_long_task_finishes_after_the_rounds_its_input_asked_for() -> None:
+    response = await DeterministicModelProvider(delay_ms=0).complete(_long_task(4))
+
+    assert response.stop_reason is StopReason.COMPLETED
+
+
+async def test_a_long_task_counts_rounds_by_the_run_not_by_surviving_results() -> None:
+    # Compaction may drop old tool results from the request; counting them
+    # would restart the task and it would never end.
+    response = await DeterministicModelProvider(delay_ms=0).complete(_long_task(4, "rounds=5"))
+
+    assert response.stop_reason is StopReason.TOOL_CALL
+    assert response.tool_calls[0].call_id == "long-task-4"
+
+
+async def test_a_long_task_fails_when_its_command_failed() -> None:
+    response = await DeterministicModelProvider(delay_ms=0).complete(
+        _long_task(2, last_failed=True)
+    )
+
+    assert response.stop_reason is StopReason.FAILED
+
+
+async def test_a_long_task_without_a_round_count_runs_ten() -> None:
+    provider = DeterministicModelProvider(delay_ms=0)
+
+    tenth = await provider.complete(_long_task(10, "write the report"))
+    done = await provider.complete(_long_task(11, "write the report"))
+
+    assert tenth.stop_reason is StopReason.TOOL_CALL
+    assert done.stop_reason is StopReason.COMPLETED
