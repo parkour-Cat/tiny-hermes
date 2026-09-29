@@ -253,13 +253,16 @@ def worker_containers() -> list[str]:
     return names
 
 
-def model_delay_ms(container: str) -> int | None:
-    env = _docker("inspect", "-f", "{{range .Config.Env}}{{println .}}{{end}}", container)
+def env_int(env: str, wanted: str) -> int | None:
     for line in env.splitlines():
         key, _, value = line.partition("=")
-        if key == "DETERMINISTIC_MODEL_DELAY_MS" and value.isdigit():
+        if key == wanted and value.isdigit():
             return int(value)
     return None
+
+
+def container_env(container: str) -> str:
+    return _docker("inspect", "-f", "{{range .Config.Env}}{{println .}}{{end}}", container)
 
 
 def host_shape() -> dict[str, Any]:
@@ -324,7 +327,11 @@ def _log(message: str) -> None:
 def probe(rate: float, seconds: float, drain_seconds: float, label: str) -> dict[str, Any]:
     offsets = arrival_offsets(rate, seconds)
     workers = worker_containers()
-    delays = {name: model_delay_ms(name) for name in workers}
+    envs = {name: container_env(name) for name in workers}
+    delays = {name: env_int(env, "DETERMINISTIC_MODEL_DELAY_MS") for name, env in envs.items()}
+    # Workers per container. The container count alone stopped describing the
+    # stack once one container could hold K of them.
+    per_container = {name: env_int(env, "WORKER_CONCURRENCY") or 1 for name, env in envs.items()}
     with httpx.Client(base_url=API, timeout=30.0, trust_env=False) as client:
         console = BenchmarkConsole(client)
         console.sign_in()
@@ -386,6 +393,8 @@ def probe(rate: float, seconds: float, drain_seconds: float, label: str) -> dict
         "stack": {
             **host_shape(),
             "workers": len(workers),
+            "worker_concurrency": sorted(set(per_container.values())),
+            "total_workers": sum(per_container.values()),
             "model_delay_ms": sorted({delay for delay in delays.values() if delay is not None}),
         },
         "create_run": {"errors": create_errors, "latency_ms": _spread(create_ms)},
@@ -405,7 +414,8 @@ def _report(result: dict[str, Any]) -> None:
     summary = result["summary"]
     wait = summary["queue_wait_s"]
     _log(
-        f"{result['label']}: workers={result['stack']['workers']} "
+        f"{result['label']}: containers={result['stack']['workers']} "
+        f"workers={result['stack']['total_workers']} "
         f"delay={result['stack']['model_delay_ms']}ms offered={result['offered']['rate_per_s']}/s"
     )
     _log(
