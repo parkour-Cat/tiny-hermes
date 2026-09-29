@@ -7,7 +7,7 @@ import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
 
 import uvicorn
@@ -19,12 +19,6 @@ from tiny_hermes.channels.application.feishu_service import FeishuChannelService
 from tiny_hermes.channels.application.ingestion import ChannelIngestion
 from tiny_hermes.channels.application.outbound import ChannelReplyDispatcher
 from tiny_hermes.channels.application.webhook_service import FeishuWebhookService
-from tiny_hermes.channels.infrastructure.feishu_long_connection import (
-    DeliverFrame,
-    FeishuLongConnection,
-    LongConnectionBinding,
-    RecordAlive,
-)
 from tiny_hermes.channels.infrastructure.feishu_sender import FeishuSender
 from tiny_hermes.channels.infrastructure.run_images import ChannelImageSource
 from tiny_hermes.channels.infrastructure.sql_channel_store import SqlChannelStore
@@ -74,6 +68,16 @@ from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.database import build_session_factory
 from tiny_hermes.shared.errors import AppError
 from tiny_hermes.shared.logging import configure_logging
+
+if TYPE_CHECKING:
+    # Annotations only. The module pulls in the Feishu SDK, which is 10k modules
+    # and about 150 MiB, and only the scheduler opens a long connection;
+    # `_long_connections` imports it where the scheduler actually needs it.
+    from tiny_hermes.channels.infrastructure.feishu_long_connection import (
+        DeliverFrame,
+        FeishuLongConnection,
+        RecordAlive,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -349,7 +353,7 @@ async def _scheduler() -> None:
 
 
 async def _supervised_connection(
-    connection: FeishuLongConnection,
+    connection: "FeishuLongConnection",
     stop: asyncio.Event,
     *,
     first_delay: float = 5.0,
@@ -547,7 +551,7 @@ async def _supervised_connection(
 
 def _deliver_via(
     sessions: async_sessionmaker[AsyncSession], kek: bytes | None
-) -> DeliverFrame:
+) -> "DeliverFrame":
     """One `deliver`, shared by every long-connection binding.
 
     A fresh session per frame — not the session `_long_connections` used to
@@ -699,7 +703,7 @@ def _connection_event_recorder(
     return record
 
 
-def _alive_recorder(sessions: async_sessionmaker[AsyncSession]) -> RecordAlive:
+def _alive_recorder(sessions: async_sessionmaker[AsyncSession]) -> "RecordAlive":
     """「这根 socket 此刻是通的」，写在控制台读得到的那一列上。
 
     一条 UPDATE，覆盖式的，不进审计流水——心跳记的是当下，不是变化，而
@@ -723,7 +727,7 @@ def _alive_recorder(sessions: async_sessionmaker[AsyncSession]) -> RecordAlive:
 
 async def _long_connections(
     settings: Settings, sessions: async_sessionmaker[AsyncSession]
-) -> tuple[FeishuLongConnection, ...]:
+) -> tuple["FeishuLongConnection", ...]:
     """The long-connection binding this scheduler process holds a socket
     for — read once, at process start, never polled again.
 
@@ -778,6 +782,13 @@ async def _long_connections(
     retention or cleanup anywhere in this repository, so nothing here may
     move into a retry or polling path.
     """
+    # Here rather than at the top of the module: this is the scheduler's own
+    # path, and importing the SDK is what the api and every Worker skip.
+    from tiny_hermes.channels.infrastructure.feishu_long_connection import (
+        FeishuLongConnection,
+        LongConnectionBinding,
+    )
+
     kek = optional_kek(settings.tiny_hermes_kek)
     deliver = _deliver_via(sessions, kek)
     #: Bindings whose credentials actually resolve, in `id` order. Ordered by
