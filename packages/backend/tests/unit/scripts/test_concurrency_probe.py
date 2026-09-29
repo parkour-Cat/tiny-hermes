@@ -1,0 +1,152 @@
+"""The concurrency probe's arithmetic: what it reports must follow from the Run rows."""
+
+from __future__ import annotations
+
+import sys
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+_SCRIPTS = Path(__file__).resolve().parents[5] / "scripts"
+
+
+def _load(name: str, path: Path) -> Any:
+    spec = spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_load("restart_drill", _SCRIPTS / "restart_drill.py")
+_load("workspace_drill", _SCRIPTS / "workspace_drill.py")
+probe = _load("tiny_hermes_concurrency_probe", _SCRIPTS / "concurrency_probe.py")
+
+
+def run(
+    run_id: str,
+    created: float,
+    started: float | None,
+    finished: float | None,
+    status: str = "completed",
+) -> Any:
+    return probe.RunTimes(
+        run_id=run_id,
+        status=status,
+        created_at=created,
+        started_at=started,
+        finished_at=finished,
+    )
+
+
+def test_arrivals_are_evenly_spaced_and_stop_before_the_window_ends() -> None:
+    assert probe.arrival_offsets(2.0, 3.0) == [0.0, 0.5, 1.0, 1.5, 2.0, 2.5]
+
+
+def test_a_rate_that_submits_nothing_is_refused() -> None:
+    with pytest.raises(ValueError):
+        probe.arrival_offsets(0.0, 10.0)
+
+
+def test_peak_overlap_counts_runs_executing_at_the_same_instant() -> None:
+    assert probe.peak_overlap([(0.0, 4.0), (1.0, 5.0), (2.0, 3.0)]) == 3
+
+
+def test_a_run_that_starts_as_another_finishes_does_not_overlap_it() -> None:
+    # One Worker hands over at t=3: that is a serial queue, not two at once.
+    assert probe.peak_overlap([(0.0, 3.0), (3.0, 6.0)]) == 1
+
+
+def test_peak_overlap_of_nothing_is_zero() -> None:
+    assert probe.peak_overlap([]) == 0
+
+
+def test_one_worker_serializes_runs_and_the_wait_grows() -> None:
+    # Three Runs a second apart, each needing 3s, one Worker: the second waits
+    # 2s and the third 4s. This is the shape the default stack should show.
+    runs = [
+        run("a", 0.0, 0.0, 3.0),
+        run("b", 1.0, 3.0, 6.0),
+        run("c", 2.0, 6.0, 9.0),
+    ]
+
+    summary = probe.summarize(runs, observed_until=9.0)
+
+    assert summary["peak_running"] == 1
+    assert summary["queue_wait_s"]["max"] == pytest.approx(4.0)
+    assert summary["queue_wait_s"]["p50"] == pytest.approx(2.0)
+    assert summary["service_s"]["p50"] == pytest.approx(3.0)
+    assert summary["end_to_end_s"]["max"] == pytest.approx(7.0)
+    assert summary["throughput_per_s"] == pytest.approx(3 / 9)
+    assert summary["completed"] == 3
+
+
+def test_a_run_that_never_started_still_counts_its_wait_as_a_lower_bound() -> None:
+    # Dropping it would report the Runs that got through and hide the one that
+    # did not, which is the exact failure a saturation probe exists to show.
+    runs = [
+        run("a", 0.0, 0.0, 2.0),
+        run("b", 1.0, None, None, status="queued"),
+    ]
+
+    summary = probe.summarize(runs, observed_until=11.0)
+
+    assert summary["never_started"] == 1
+    assert summary["unfinished"] == 1
+    assert summary["queue_wait_s"]["max"] == pytest.approx(10.0)
+    assert summary["queue_wait_censored"] == 1
+
+
+def test_a_run_still_executing_at_the_end_is_running_until_then() -> None:
+    runs = [
+        run("a", 0.0, 0.0, None, status="running"),
+        run("b", 0.0, 1.0, 2.0),
+    ]
+
+    summary = probe.summarize(runs, observed_until=5.0)
+
+    assert summary["peak_running"] == 2
+    assert summary["unfinished"] == 1
+    # Service time is only reported for Runs that finished.
+    assert summary["service_s"]["max"] == pytest.approx(1.0)
+
+
+def test_failed_runs_are_counted_and_kept_out_of_the_service_time() -> None:
+    runs = [
+        run("a", 0.0, 0.0, 3.0),
+        run("b", 0.0, 0.0, 0.5, status="failed"),
+    ]
+
+    summary = probe.summarize(runs, observed_until=3.0)
+
+    assert summary["failed"] == 1
+    assert summary["completed"] == 1
+    assert summary["service_s"]["max"] == pytest.approx(3.0)
+    assert summary["status_counts"] == {"completed": 1, "failed": 1}
+
+
+def test_mean_running_is_busy_time_over_the_window() -> None:
+    # Little's law read backwards: 2 Runs x 3s busy in a 6s window is an
+    # average of 1 Run executing — the number a Worker count has to cover.
+    runs = [run("a", 0.0, 0.0, 3.0), run("b", 3.0, 3.0, 6.0)]
+
+    summary = probe.summarize(runs, observed_until=6.0)
+
+    assert summary["mean_running"] == pytest.approx(1.0)
+
+
+def test_nothing_submitted_summarizes_to_zeros_rather_than_raising() -> None:
+    summary = probe.summarize([], observed_until=0.0)
+
+    assert summary["submitted"] == 0
+    assert summary["throughput_per_s"] == 0.0
+    assert summary["peak_running"] == 0
+
+
+def test_docker_memory_strings_become_mebibytes() -> None:
+    assert probe.to_mib("512MiB") == pytest.approx(512.0)
+    assert probe.to_mib("1.5GiB") == pytest.approx(1536.0)
+    assert probe.to_mib("2048KiB") == pytest.approx(2.0)
