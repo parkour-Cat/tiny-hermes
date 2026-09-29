@@ -1,7 +1,7 @@
-# tiny-hermes 产品与系统设计 v2.12
+# tiny-hermes 产品与系统设计 v2.13
 
-> 日期：2026-09-27  
-> 版本：v2.12  
+> 日期：2026-09-29  
+> 版本：v2.13  
 > 状态：v2.9.3 已确认；M1 与 M2 已交付，可作为 M3 实施依据（§7.4.2 截至 v2.9.3 的内容与 §12.1 已实现）。**v2.10 对 §7.4.2 的改动实施中，尚未全部实现**，见 §1.10  
 > 目标版本：首个企业预览版  
 > 许可证方向：Apache-2.0
@@ -22,6 +22,16 @@
 ### 1.1 v2.4 修订重点
 
 v2.4 补全重试链共享预算、RunEvent 并发序号、幂等并发创建、工作空间选择、累计执行时间与墙钟期限，并把 Runs API 的“已创建但排队受阻”与 Chat Completions 的 409 `session_blocked` 明确区分。M1 的跨 Run 共享只读层缩小为平台预构建的运行时 Docker 镜像层，不在运行时根据 Agent 依赖构建快照；同时增加 cache 重置信号、沙箱所有权校验、待提交对象登记和 M1 不交付审批系统的安全边界。v2.4 替代 v2.3 中对应定义。
+
+### 1.13 v2.13 修订重点
+
+v2.13 规定 **跨 Session 的领取顺序**（§21.3）：可领取的 head Run 按最近一次进入
+`queued` 的时刻（`queued_at`）领取，不再按创建时间。
+
+此前这一条没有写进规格，实现按 `created_at` 领取。时间片结束回到队列的长任务，创建
+时间永远早于新到的消息，于是 Worker 饱和时，新消息要等所有更早创建的长任务都轮完一遍；
+长任务越多，交互消息越接近饿死。这是在推演「6000 名员工同时跑长任务」时发现的，
+推演见 `docs/superpowers/verification/2026-09-29-concurrency-probe.md`。
 
 ### 1.12 v2.12 修订重点
 
@@ -1597,6 +1607,18 @@ PostgreSQL 中的 Run 是唯一可信状态。Worker 使用 WorkerLease 获取�
 - Worker 定期续租。
 - 租约过期后，只允许安全任务重新领取。
 - Redis 用于立即唤醒 Worker；Redis 消息丢失后，Worker 仍能从数据库发现待执行 Run。
+
+跨 Session 的领取顺序（v2.13）：可领取的 head Run 按 `queued_at` 从早到晚领取，相同时
+按 `id`。`queued_at` 是 Run 最近一次**进入** `queued` 的时刻：新建时写入；时间片结束、从
+等待或暂停恢复、从 `interrupted` 放回队列时刷新。已经在 `queued` 里的 Run 不刷新，包括
+它成为 Session 新 head 的那一刻——它从进入队列起就在等，这段等待要算数。
+
+这样，一个新进入队列的 Run 前面只有比它更早进入队列的 Run，而它们每个最多占一个时间片。
+Worker 饱和时，它的等待有上界：大约是「排在它前面的 Run 数 ÷ Worker 数 × `max_slice_seconds`」。
+同步 Chat Completions Run 在同步窗口内不切片（见下文），不受这条轮转影响。
+
+已知限制：公平的粒度是 Run，不是用户或工作空间。同一用户同时开多个长任务，会占到多份
+轮转份额；按用户或工作空间的并发上限与轮转不在 v2.13 范围内。
 
 sandbox-controller 的每个操作都必须携带适用的 `run_id` 和 `sandbox_id` 并校验 SandboxReservation 归属。Worker 发起的 `acquire`、`execute`、`inspect`、`freeze`、`thaw` 或 `destroy` 都必须校验该 Run 当前持有匹配且未过期的 WorkerLease。租约过期后的 Scheduler inspect/freeze/destroy 使用独立、可审计的清理权限，仍必须匹配 Run 与 SandboxReservation，不能借此操作其他 Run 的沙箱。
 
