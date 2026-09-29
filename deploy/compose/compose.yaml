@@ -24,6 +24,14 @@ x-base-env: &base-env
   # Workers per worker container (1–64). Each concurrent Run can hold a sandbox
   # on this one Docker host, so raising it is a capacity decision.
   WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
+  # How long a Worker keeps a Run before it goes back to the queue (10–300 s).
+  # Shorter slices bound how long a newly queued Run waits behind long tasks
+  # (§21.3); each slice boundary freezes and later thaws a sandbox.
+  WORKER_MAX_SLICE_SECONDS: ${WORKER_MAX_SLICE_SECONDS:-30}
+  # The most model and tool calls an Agent may ask for per Run (§12.3). A long
+  # task makes one model call per round, so this is its round ceiling.
+  AGENT_MAX_MODEL_CALLS: ${AGENT_MAX_MODEL_CALLS:-20}
+  AGENT_MAX_TOOL_CALLS: ${AGENT_MAX_TOOL_CALLS:-200}
   # Outbound safety. The default approves nothing, so only public addresses
   # are reachable; an enterprise private endpoint needs its range named here.
   OUTBOUND_ALLOWED_CIDRS: ${OUTBOUND_ALLOWED_CIDRS:-}
