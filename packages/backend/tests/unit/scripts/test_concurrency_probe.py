@@ -183,3 +183,26 @@ def test_sandbox_containers_are_counted_by_state() -> None:
         "exited": 1,
     }
     assert probe.count_states("") == {}
+
+
+def test_a_container_that_vanishes_mid_sample_does_not_stop_sampling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A sandbox destroyed between `docker ps` and `docker stats` makes the
+    # second call fail. That is the stack working, not the probe breaking: on
+    # 2026-09-29 it killed the sampling thread and the sandbox counts stopped.
+    calls: list[tuple[str, ...]] = []
+
+    def docker(*arguments: str) -> str:
+        calls.append(arguments)
+        if arguments[0] == "stats":
+            raise probe.subprocess.CalledProcessError(1, ["docker", *arguments])
+        return "running\n" if "{{.State}}" in arguments else "gone-already\n"
+
+    monkeypatch.setattr(probe, "_docker", docker)
+    sampler = probe._Sampler("workspace", [])  # pyright: ignore[reportPrivateUsage]
+
+    sampler._sample_sandboxes()  # pyright: ignore[reportPrivateUsage]
+
+    assert sampler.max_sandboxes == {"running": 1}
+    assert any(call[0] == "stats" for call in calls)
