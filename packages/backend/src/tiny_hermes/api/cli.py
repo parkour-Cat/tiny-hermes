@@ -98,19 +98,62 @@ def worker_main() -> None:
 
 async def _worker() -> None:
     settings = get_settings()
-    worker_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
-    notifier = _notifier(settings)
-    sessions = build_session_factory(settings)
+    concurrency = settings.worker_concurrency
+    # One pool for the process, sized for every Worker in it.
+    sessions = build_session_factory(settings, **_worker_pool(concurrency))
     workspace = _workspace(settings)
     await _ensure_bucket(workspace)
     if workspace is not None:
         logger.info(
             "workspace runtime configured: quota_bytes=%s", workspace.quota.max_bytes
         )
+    # A Redis subscription is one connection read by one waiter: shared, the
+    # Worker that read a wake-up would take it from the others, who would then
+    # sleep out their poll interval. So each Worker subscribes on its own.
+    notifiers = [_notifier(settings) for _ in range(concurrency)]
+    # Each Worker holds its own leases, so each needs its own id.
+    worker_ids = [f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}" for _ in notifiers]
+    runtimes = [
+        _worker_runtime(settings, sessions, workspace, notifier, worker_id)
+        for notifier, worker_id in zip(notifiers, worker_ids, strict=True)
+    ]
+    stop = _stop_on_termination()
+    logger.info("worker started", extra={"worker_ids": worker_ids})
+    try:
+        await asyncio.gather(*(runtime.run_forever(stop) for runtime in runtimes))
+    finally:
+        for notifier in notifiers:
+            await notifier.close()
+    logger.info("worker stopped", extra={"worker_ids": worker_ids})
+
+
+def _worker_pool(concurrency: int) -> dict[str, int]:
+    """The engine default (5 + 10) for one Worker, and room for K beyond that.
+
+    A Worker can hold two connections at once — its slice's transaction and
+    its lease renewal's — so K Workers need up to 2K. K stay open; K more are
+    opened under load and closed after.
+    """
+    return {"pool_size": max(5, concurrency), "max_overflow": max(10, concurrency)}
+
+
+def _worker_runtime(
+    settings: Settings,
+    sessions: async_sessionmaker[AsyncSession],
+    workspace: WorkspaceRuntime | None,
+    notifier: WakeUpNotifier,
+    worker_id: str,
+) -> WorkerRuntime:
+    """One Worker: its own id, subscription, sandbox client and model router.
+
+    Only the database pool and the object store are shared with the other
+    Workers in this process. Everything with a connection or a conversation
+    of its own is built per Worker, so K of them behave as K processes would.
+    """
     # One provider port, two providers behind it. Which one answers is decided
     # per round by the Agent Version the Run fixed at creation, so the Worker
     # never learns that endpoints exist.
-    runtime = WorkerRuntime(
+    return WorkerRuntime(
         session_factory=sessions,
         model=ModelRouter(
             deterministic=DeterministicModelProvider(settings.deterministic_model_delay_ms),
@@ -224,13 +267,6 @@ async def _worker() -> None:
             sandbox_idle_ttl_seconds=settings.sandbox_idle_ttl_seconds,
         ),
     )
-    stop = _stop_on_termination()
-    logger.info("worker started", extra={"worker_id": worker_id})
-    try:
-        await runtime.run_forever(stop)
-    finally:
-        await notifier.close()
-    logger.info("worker stopped", extra={"worker_id": worker_id})
 
 
 def _egress(settings: Settings, claim: EgressClaim | None = None) -> EgressRoute | None:

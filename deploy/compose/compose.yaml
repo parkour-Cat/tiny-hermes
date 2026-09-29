@@ -21,6 +21,9 @@ x-base-env: &base-env
   # checkpoint disagree about it, so a drill has to be able to vary it
   # without editing the source. See 2026-08-15-m1-drills-16gb.md.
   WORKER_LEASE_SECONDS: ${WORKER_LEASE_SECONDS:-20}
+  # Workers per worker container (1–64). Each concurrent Run can hold a sandbox
+  # on this one Docker host, so raising it is a capacity decision.
+  WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
   # Outbound safety. The default approves nothing, so only public addresses
   # are reachable; an enterprise private endpoint needs its range named here.
   OUTBOUND_ALLOWED_CIDRS: ${OUTBOUND_ALLOWED_CIDRS:-}
