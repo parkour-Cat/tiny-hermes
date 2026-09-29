@@ -525,6 +525,8 @@ export const MODEL_SCENARIOS = [
   "remember_once",
   "search_once",
   "delegate_once",
+  // The concurrency probe's long task: `rounds=N` in the Run input.
+  "long_task",
 ] as const;
 
 export type SkillResponse = {

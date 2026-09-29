@@ -474,6 +474,8 @@ class DeterministicModelProvider:
                 input_tokens=TOKENS_PER_ROUND // 2,
                 output_tokens=TOKENS_PER_ROUND // 2,
             )
+        if scenario == "long_task":
+            return _long_task(request)
         if scenario == "fail_replay_safe":
             return ModelResponse(
                 stop_reason=StopReason.FAILED,
@@ -496,6 +498,72 @@ class DeterministicModelProvider:
             input_tokens=TOKENS_PER_ROUND // 2,
             output_tokens=TOKENS_PER_ROUND // 2,
         )
+
+
+#: Rounds a `long_task` runs when its input does not say.
+LONG_TASK_ROUNDS = 10
+
+
+def _long_task(request: ModelRequest) -> ModelResponse:
+    """One workspace-writing command per round, `rounds=N` rounds in all.
+
+    Counted by `round_index`, which the Run keeps across slices, rather than
+    by the tool results still in the request: compaction may drop old ones,
+    and a count that went backwards would never finish.
+    """
+    last = next(
+        (
+            block
+            for message in reversed(request.messages)
+            for block in message.blocks
+            if isinstance(block, ToolResultBlock)
+        ),
+        None,
+    )
+    if last is not None and (last.failed or last.exit_code not in (0, None)):
+        return ModelResponse(
+            stop_reason=StopReason.FAILED,
+            text="",
+            input_tokens=TOKENS_PER_ROUND // 2,
+            output_tokens=TOKENS_PER_ROUND // 2,
+            failure="deterministic_long_task_command_failed",
+        )
+    if request.round_index > _requested_rounds(request):
+        return ModelResponse(
+            stop_reason=StopReason.COMPLETED,
+            text=f"The long task finished after {request.round_index - 1} rounds.",
+            input_tokens=TOKENS_PER_ROUND // 2,
+            output_tokens=TOKENS_PER_ROUND // 2,
+        )
+    return ModelResponse(
+        stop_reason=StopReason.TOOL_CALL,
+        text=f"Long task round {request.round_index}.",
+        tool_calls=(
+            ToolCallBlock(
+                call_id=f"long-task-{request.round_index}",
+                name="shell.exec",
+                arguments={
+                    "command": f"printf 'round {request.round_index}\\n' >> progress.txt",
+                    "timeout_seconds": 60,
+                },
+            ),
+        ),
+        input_tokens=TOKENS_PER_ROUND // 2,
+        output_tokens=TOKENS_PER_ROUND // 2,
+    )
+
+
+def _requested_rounds(request: ModelRequest) -> int:
+    index = _last_user_index(request)
+    if index < 0:
+        return LONG_TASK_ROUNDS
+    for block in request.messages[index].blocks:
+        if isinstance(block, TextBlock):
+            for word in block.text.split():
+                key, _, value = word.partition("=")
+                if key == "rounds" and value.isdigit() and int(value) > 0:
+                    return int(value)
+    return LONG_TASK_ROUNDS
 
 
 def _last_user_index(request: ModelRequest) -> int:
