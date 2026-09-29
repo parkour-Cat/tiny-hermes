@@ -333,7 +333,11 @@ class _Sampler:
 
     def _sample_docker(self) -> None:
         while not self._stop.is_set() and self._workers:
-            listed = _docker("stats", "--no-stream", "--format", "{{json .}}", *self._workers)
+            try:
+                listed = _docker("stats", "--no-stream", "--format", "{{json .}}", *self._workers)
+            except subprocess.CalledProcessError:
+                # A Worker container restarting mid-probe; try again next time.
+                listed = ""
             for line in listed.splitlines():
                 row = json.loads(line)
                 name = str(row["Name"])
@@ -352,7 +356,12 @@ class _Sampler:
         names = _docker("ps", "--filter", label, "--format", "{{.Names}}").split()
         if not names:
             return
-        listed = _docker("stats", "--no-stream", "--format", "{{json .}}", *names)
+        try:
+            listed = _docker("stats", "--no-stream", "--format", "{{json .}}", *names)
+        except subprocess.CalledProcessError:
+            # A sandbox destroyed since `docker ps` listed it: the stack at work.
+            # This sample's memory is lost; the next one is taken as usual.
+            return
         used = sum(
             to_mib(str(json.loads(line)["MemUsage"]).split("/")[0].strip())
             for line in listed.splitlines()
