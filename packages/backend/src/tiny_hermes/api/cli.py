@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import importlib
 import logging
 import signal
 import socket
@@ -303,6 +304,12 @@ def _workspace(settings: Settings) -> WorkspaceRuntime | None:
 
 def scheduler_main() -> None:
     configure_logging()
+    # Before `asyncio.run`, not inside it. The Feishu SDK binds a module-level
+    # loop with `asyncio.get_event_loop()` when it is imported and later calls
+    # `run_until_complete` on it from a thread; imported inside the running
+    # loop it would bind that one, and every long connection would fail with
+    # "This event loop is already running".
+    importlib.import_module("tiny_hermes.channels.infrastructure.feishu_long_connection")
     asyncio.run(_scheduler())
 
 
@@ -782,8 +789,9 @@ async def _long_connections(
     retention or cleanup anywhere in this repository, so nothing here may
     move into a retry or polling path.
     """
-    # Here rather than at the top of the module: this is the scheduler's own
-    # path, and importing the SDK is what the api and every Worker skip.
+    # Here rather than at the top of the module, so the api and every Worker
+    # never load the SDK. `scheduler_main` has already imported it before its
+    # loop started; this only names the classes.
     from tiny_hermes.channels.infrastructure.feishu_long_connection import (
         FeishuLongConnection,
         LongConnectionBinding,
