@@ -2170,7 +2170,7 @@ class SqlRunStore:
                 RunRow.blocked_by_run_id.is_(None),
                 RunRow.id.not_in(held),
             )
-            .order_by(RunRow.created_at, RunRow.id)
+            .order_by(RunRow.queued_at, RunRow.id)
             .limit(1)
             .with_for_update(of=RunRow, skip_locked=True)
         )
@@ -4034,6 +4034,10 @@ def _denial_code(error: RunStateError) -> str:
 
 def _apply_decision(run: RunRow, decision: StateDecision, now: datetime) -> None:
     """Write exactly what the state machine returned and nothing else."""
+    # Entering the queue, not being in it: a Run that is already queued keeps
+    # its place, including when it becomes its Session's head.
+    if decision.state is RunState.QUEUED and run.status != RunState.QUEUED.value:
+        run.queued_at = now
     run.status = decision.state.value
     run.pause_reason = None if decision.pause_reason is None else decision.pause_reason.value
     run.wait_kind = decision.wait_kind
