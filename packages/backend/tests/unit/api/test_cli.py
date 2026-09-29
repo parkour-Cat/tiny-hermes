@@ -42,3 +42,37 @@ def test_the_api_and_worker_entrypoints_do_not_load_the_feishu_sdk() -> None:
     Worker. Every Worker process paid for a socket it never opens.
     """
     assert not _loads_feishu_sdk("tiny_hermes.api.cli")
+
+
+def test_the_scheduler_loads_the_feishu_sdk_before_its_event_loop_starts() -> None:
+    """The SDK takes `asyncio.get_event_loop()` when it is imported.
+
+    `lark_oapi/ws/client.py` binds a module-level loop at import time and
+    later calls `run_until_complete` on it from a thread. Imported inside the
+    scheduler's running loop it binds *that* loop, and the long connection dies
+    with "This event loop is already running" — which is what the stack did on
+    2026-09-29 when the import moved into `_long_connections`. The lifecycle
+    tests did not see it: they replace the SDK's channel with a fake.
+    """
+    program = """
+import asyncio, sys
+from tiny_hermes.api import cli
+
+seen = {}
+
+async def scheduler_body():
+    # What `_long_connections` does first, inside the running loop.
+    import tiny_hermes.channels.infrastructure.feishu_long_connection  # noqa: F401
+    seen["bound_to_running_loop"] = (
+        sys.modules["lark_oapi.ws.client"].loop is asyncio.get_running_loop()
+    )
+
+cli._scheduler = scheduler_body
+cli.configure_logging = lambda: None
+cli.scheduler_main()
+print(seen["bound_to_running_loop"])
+"""
+    answer = subprocess.run(  # noqa: S603 - our own interpreter, a literal program
+        [sys.executable, "-c", program], capture_output=True, text=True, check=True
+    )
+    assert answer.stdout.strip() == "False"
