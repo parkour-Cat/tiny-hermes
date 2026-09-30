@@ -94,6 +94,23 @@ class SqlSandboxStore:
         row = found.scalar_one_or_none()
         return None if row is None else _reservation(row)
 
+    async def live_for_run_locked(self, run_id: UUID) -> SandboxReservation | None:
+        """`live_for_run`, holding the row until this transaction ends.
+
+        Taken before thawing, so eviction — which skips locked rows — cannot
+        remove the container between this read and the unpause.
+        """
+        found = await self._session.execute(
+            select(SandboxReservationRow)
+            .where(
+                SandboxReservationRow.run_id == run_id,
+                SandboxReservationRow.status.in_([e.value for e in LIVE_RESERVATIONS]),
+            )
+            .with_for_update()
+        )
+        row = found.scalar_one_or_none()
+        return None if row is None else _reservation(row)
+
     async def read(self, reservation_id: UUID) -> SandboxReservation | None:
         row = await self._session.get(SandboxReservationRow, reservation_id)
         return None if row is None else _reservation(row)
@@ -173,11 +190,25 @@ class SqlSandboxStore:
         )
         return int(total or 0)
 
-    async def keeps_by_deadline(self) -> list[SandboxReservation]:
+    async def evictable_keeps(self) -> list[SandboxReservation]:
+        """Frozen instances under a kept claim, the earliest deadline first.
+
+        Both conditions, because a thawed instance keeps its `kept` claim
+        while it runs. Locked, skipping any row another transaction holds: the
+        Run that owns it may be thawing it right now.
+        """
         found = await self._session.execute(
             select(SandboxReservationRow)
-            .where(SandboxReservationRow.status == ReservationStatus.KEPT.value)
+            .join(
+                SandboxInstanceRow,
+                SandboxInstanceRow.id == SandboxReservationRow.sandbox_instance_id,
+            )
+            .where(
+                SandboxReservationRow.status == ReservationStatus.KEPT.value,
+                SandboxInstanceRow.status == InstanceStatus.FROZEN.value,
+            )
             .order_by(SandboxReservationRow.idle_expires_at, SandboxReservationRow.id)
+            .with_for_update(of=SandboxReservationRow, skip_locked=True)
         )
         return [_reservation(row) for row in found.scalars()]
 

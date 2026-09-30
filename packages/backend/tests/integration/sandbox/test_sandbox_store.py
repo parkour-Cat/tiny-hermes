@@ -334,12 +334,14 @@ async def test_kept_reservations_are_listed_by_the_earliest_deadline_first(
     now = datetime.now(UTC)
     async with opened(sessions) as store:
         later = await store.reserve(run_id=uuid4(), workspace_id=uuid4(), instance=instance())
+        await store.set_instance_status(later.instance_id, InstanceStatus.FROZEN)
         await store.keep(later.id, idle_expires_at=now + timedelta(minutes=4))
         sooner = await store.reserve(run_id=uuid4(), workspace_id=uuid4(), instance=instance())
+        await store.set_instance_status(sooner.instance_id, InstanceStatus.FROZEN)
         await store.keep(sooner.id, idle_expires_at=now + timedelta(minutes=1))
         await store.reserve(run_id=uuid4(), workspace_id=uuid4(), instance=instance())
 
-        kept = await store.keeps_by_deadline()
+        kept = await store.evictable_keeps()
 
     assert [reservation.id for reservation in kept] == [sooner.id, later.id]
 
