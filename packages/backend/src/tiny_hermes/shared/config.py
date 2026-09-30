@@ -236,6 +236,14 @@ class Settings(BaseSettings):
             if part.strip()
         )
 
+    @field_validator("sandbox_memory_budget_mb", mode="before")
+    @classmethod
+    def read_an_empty_budget_as_unset(cls, value: object) -> object:
+        # Compose passes `${SANDBOX_MEMORY_BUDGET_MB:-}`, "" when unset. Only
+        # this field: other empty values here mean something, the controller's
+        # present-but-empty S3 keys among them.
+        return None if value == "" else value
+
     @model_validator(mode="after")
     def reject_a_budget_below_one_sandbox(self) -> "Settings":
         budget = self.sandbox_memory_budget_mb

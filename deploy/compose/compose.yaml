@@ -61,6 +61,10 @@ x-base-env: &base-env
   CONSOLE_BASE_URL: ${CONSOLE_BASE_URL:-}
   SANDBOX_EGRESS_NETWORK: ${SANDBOX_EGRESS_NETWORK:-}
   SANDBOX_IDLE_TTL_SECONDS: ${SANDBOX_IDLE_TTL_SECONDS:-300}
+  # Sandbox memory admission (§21.3): each sandbox's limit, and the sum of
+  # limits the controller admits. An empty budget is half the host's memory.
+  SANDBOX_MEMORY_MB: ${SANDBOX_MEMORY_MB:-1024}
+  SANDBOX_MEMORY_BUDGET_MB: ${SANDBOX_MEMORY_BUDGET_MB:-}
   # Present-but-empty for the controller: Settings requires the fields so a
   # credentialless API deployment fails at startup, and empty is exactly what
   # the controller is entitled to.
