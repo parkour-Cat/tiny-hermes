@@ -316,3 +316,17 @@ async def test_a_round_does_not_inspect_the_container_before_each_call(
     assert any(entry.path == "progress.txt" for entry in scanned)
     assert exported, "the export streamed nothing"
     assert inspected == []
+
+
+async def test_removing_a_container_that_is_already_gone_is_not_an_error(
+    docker_client: Any, image_digest: str
+) -> None:
+    """Eviction and the Scheduler's reclamation can reach one container
+    together; whichever is second finds it gone, which is what both wanted."""
+    engine = DockerEngine(docker_client, extra_labels={LABEL: "1"})
+    container = docker_client.containers.run(
+        image_digest, ["sleep", "60"], detach=True, labels={LABEL: "1"}
+    )
+    container.remove(force=True)
+
+    await engine.remove_if_present(container.id)

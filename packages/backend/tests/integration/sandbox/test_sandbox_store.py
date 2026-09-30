@@ -385,3 +385,39 @@ async def test_an_instance_from_before_the_column_counts_as_the_old_fixed_limit(
 
     assert found is not None
     assert found.memory_mb == 1024
+
+
+async def test_only_a_frozen_instance_under_a_kept_claim_can_be_evicted(
+    sessions: Sessions,
+) -> None:
+    """A thawed instance keeps its `kept` claim while it runs; evicting by the
+    claim alone would destroy a container a Worker is executing in."""
+    until = datetime.now(UTC) + timedelta(minutes=5)
+    async with opened(sessions) as store:
+        frozen = await store.reserve(run_id=uuid4(), workspace_id=uuid4(), instance=instance())
+        await store.set_instance_status(frozen.instance_id, InstanceStatus.FROZEN)
+        await store.keep(frozen.id, idle_expires_at=until)
+        thawed = await store.reserve(run_id=uuid4(), workspace_id=uuid4(), instance=instance())
+        await store.keep(thawed.id, idle_expires_at=until)
+        await store.reserve(run_id=uuid4(), workspace_id=uuid4(), instance=instance())
+
+        candidates = await store.evictable_keeps()
+
+    assert [candidate.id for candidate in candidates] == [frozen.id]
+
+
+async def test_a_claim_its_own_run_is_thawing_is_skipped_by_eviction(
+    sessions: Sessions,
+) -> None:
+    run_id = uuid4()
+    async with opened(sessions) as store:
+        made = await store.reserve(run_id=run_id, workspace_id=uuid4(), instance=instance())
+        await store.set_instance_status(made.instance_id, InstanceStatus.FROZEN)
+        await store.keep(made.id, idle_expires_at=datetime.now(UTC) + timedelta(minutes=5))
+
+    async with sessions() as thawing:
+        held = await SqlSandboxStore(thawing).live_for_run_locked(run_id)
+        assert held is not None
+        async with opened(sessions) as evicting:
+            assert await evicting.evictable_keeps() == []
+        await thawing.commit()
