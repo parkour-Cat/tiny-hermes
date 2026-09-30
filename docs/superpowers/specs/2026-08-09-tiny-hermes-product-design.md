@@ -1655,8 +1655,9 @@ sandbox-controller 为新实例放行前，把所有仍可能占用内存的实�
 
 超出预算时，sandbox-controller 按保温到期时间从早到晚销毁其他 Run 的保温实例（只动
 SandboxReservation 为保温状态的实例），直到放得下。仍放不下时拒绝，拒绝原因为
-`memory_budget_exhausted`：Worker 结束当前时间片，把 Run 放回 `queued`，不记为失败，这条
-通道等待一个空闲轮询间隔后再领取。
+`memory_budget_exhausted`：Worker 结束当前时间片，把 Run 放回 `queued`，不记为失败；这个 Run
+在 10 秒内不会再被领取，Worker 的通道则立即继续领取其他 Run。等待的是这个 Run，不是通道：
+通道若暂停，不需要沙箱的 Run 也要跟着等；Run 若不等，就会被立即领回、再被拒绝，循环往复。
 
 独立 `scheduler` 进程负责：
 
