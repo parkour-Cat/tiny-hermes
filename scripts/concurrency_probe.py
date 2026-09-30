@@ -356,9 +356,11 @@ class _Sampler:
         self.max_connections = 0
         self.worker_mem_mib: dict[str, float] = {}
         self.worker_cpu_percent: dict[str, float] = {}
-        #: Sandbox containers at the busiest sample, by state: a frozen sandbox
-        #: (between two slices of its Run) is a paused container.
+        #: Each state's own peak: a frozen sandbox (between two slices of its
+        #: Run) is a paused container. The peaks come from different samples,
+        #: so they do not add up to how many sandboxes existed at once.
         self.max_sandboxes: dict[str, int] = {}
+        self.max_sandboxes_at_once = 0
         self.max_sandbox_mem_mib = 0.0
         self._threads = [
             threading.Thread(target=self._sample_database, daemon=True),
@@ -408,6 +410,7 @@ class _Sampler:
         states = count_states(_docker("ps", "-a", "--filter", label, "--format", "{{.State}}"))
         for state, count in states.items():
             self.max_sandboxes[state] = max(self.max_sandboxes.get(state, 0), count)
+        self.max_sandboxes_at_once = max(self.max_sandboxes_at_once, sum(states.values()))
         names = _docker("ps", "--filter", label, "--format", "{{.Names}}").split()
         if not names:
             return
@@ -567,6 +570,7 @@ def probe(
             "worker_mem_mib_max": sampler.worker_mem_mib,
             "worker_cpu_percent_max": sampler.worker_cpu_percent,
             "max_sandboxes_by_state": sampler.max_sandboxes,
+            "max_sandboxes_at_once": sampler.max_sandboxes_at_once,
             "max_sandbox_mem_mib": sampler.max_sandbox_mem_mib,
         },
         "series": sampler.series,
@@ -602,8 +606,9 @@ def _report(result: dict[str, Any]) -> None:
         )
     if result["sampled"]["max_sandboxes_by_state"]:
         _log(
-            f"  sandboxes at most {result['sampled']['max_sandboxes_by_state']}, "
-            f"{result['sampled']['max_sandbox_mem_mib']:.0f} MiB"
+            f"  sandboxes at once at most {result['sampled']['max_sandboxes_at_once']}, "
+            f"{result['sampled']['max_sandbox_mem_mib']:.0f} MiB "
+            f"(each state's own peak: {result['sampled']['max_sandboxes_by_state']})"
         )
 
 
