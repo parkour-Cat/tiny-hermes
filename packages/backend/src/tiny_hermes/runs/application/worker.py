@@ -3,6 +3,7 @@ import inspect
 import logging
 import shlex
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from time import monotonic
@@ -381,6 +382,9 @@ class WorkerRuntime:
         # Renewal and slice recording both read the lease version, and both run
         # on this event loop, so one lock removes the interleaving entirely.
         self._lease_lock = asyncio.Lock()
+        # Set when the sandbox memory budget had no room (§21.3): the Run just
+        # requeued would otherwise be claimed straight back and refused again.
+        self._pause_before_claiming = False
 
     async def run_once(self) -> UUID | None:
         """Execute at most one slice. Returns the Run it advanced, if any."""
@@ -403,7 +407,13 @@ class WorkerRuntime:
             except Exception:
                 logger.exception("worker slice failed")
                 advanced = None
-            if advanced is None and not stop.is_set():
+            if self._pause_before_claiming and not stop.is_set():
+                self._pause_before_claiming = False
+                # Not the notifier: a wake-up arrives with every new Run, which
+                # is exactly when there is no room, and would end the pause.
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), self._settings.idle_poll_seconds)
+            elif advanced is None and not stop.is_set():
                 await self._notifier.wait(self._settings.idle_poll_seconds)
 
     async def _claim(self) -> ClaimedRun | None:
@@ -778,14 +788,17 @@ class WorkerRuntime:
                 profile=DEFAULT_PROFILE.name,
             )
         except SandboxRefused as refused:
-            if refused.reason is SandboxRefusal.ALREADY_RESERVED:
-                # A previous slice's container is still being reclaimed. That is
-                # the platform being briefly not ready, not this Run being over,
+            if refused.reason in _NOT_READY:
+                # A previous slice's container is still being reclaimed, or the
+                # sandbox memory budget has no room (§21.3). That is the
+                # platform being briefly not ready, not this Run being over,
                 # so the slice ends and the Run waits its turn again.
                 logger.info(
-                    "sandbox still held, ending the slice",
-                    extra={"run_id": str(claimed.run.id)},
+                    "no sandbox yet, ending the slice",
+                    extra={"run_id": str(claimed.run.id), "reason": refused.reason.value},
                 )
+                if refused.reason is SandboxRefusal.MEMORY_BUDGET_EXHAUSTED:
+                    self._pause_before_claiming = True
                 await self._record(
                     claimed,
                     handle,
@@ -2734,6 +2747,12 @@ class WorkerRuntime:
                     handle.lost = True
                     return
                 handle.version = renewed.version
+
+
+#: Refusals that end the slice and requeue the Run instead of failing it.
+_NOT_READY = frozenset(
+    {SandboxRefusal.ALREADY_RESERVED, SandboxRefusal.MEMORY_BUDGET_EXHAUSTED}
+)
 
 
 def _streamer_of(sandbox: SandboxSession) -> StreamedCommandRunner | None:
