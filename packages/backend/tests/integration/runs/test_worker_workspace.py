@@ -7,6 +7,7 @@ loop — restore, per-round checkpoint, rollback, honest pause — with a fake
 gateway sandbox over real PostgreSQL and MinIO.
 """
 
+import asyncio
 import hashlib
 import io
 import os
@@ -816,3 +817,71 @@ async def test_a_preempted_write_round_still_says_it_was_preempted(
     assert snapshot is not None
     assert snapshot.goal_preempted is True
     assert snapshot.document()["goal"]["preempted"] is True
+
+
+class FullSandbox(GatewaySandbox):
+    """A Controller whose sandbox memory budget has no room (§21.3)."""
+
+    async def acquire(self, **_: Any) -> Any:
+        self.calls.append("acquire")
+        raise SandboxRefused(RefusalReason.MEMORY_BUDGET_EXHAUSTED)
+
+
+async def test_a_run_with_no_sandbox_room_waits_in_the_queue_rather_than_failing(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    objects: MinioObjectStore,
+    tooled_agent: Callable[[list[str]], str],
+) -> None:
+    agent = tooled_agent(["shell.exec"])
+    run, _ = _submit(client, scope, agent)
+    sandbox = FullSandbox()
+    model = Recording(sandbox, _tool())
+
+    await _drive(engine, model, sandbox, objects)
+
+    row = await _run_row(engine, run)
+    assert row.status == "queued"
+    assert "run_failed" not in await _events_of(engine, run)
+    assert model.requests == [], "no model call is spent on a Run that cannot run its tools"
+
+
+async def test_a_worker_refused_sandbox_room_waits_before_claiming_again(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    objects: MinioObjectStore,
+    tooled_agent: Callable[[list[str]], str],
+) -> None:
+    """Without the pause the requeued Run is claimed straight back, refused
+    again, and the lane spins on the database and the controller."""
+    agent = tooled_agent(["shell.exec"])
+    _submit(client, scope, agent)
+    sandbox = FullSandbox()
+    worker = WorkerRuntime(
+        session_factory=async_sessionmaker(engine, expire_on_commit=False),
+        model=Recording(sandbox, _tool()),
+        notifier=NullWakeUpNotifier(),
+        sandbox=sandbox,
+        workspace=WorkspaceRuntime(
+            objects=objects,
+            quota=WorkspaceQuota(max_bytes=10_000_000, max_objects=10_000),
+            staging_ttl_seconds=3_600,
+            export_limit=100 * 1024 * 1024,
+        ),
+        settings=WorkerSettings(
+            worker_id="worker-full",
+            lease_seconds=30,
+            max_slice_seconds=30,
+            idle_poll_seconds=1,
+        ),
+    )
+    stop = asyncio.Event()
+    running = asyncio.create_task(worker.run_forever(stop))
+
+    await asyncio.sleep(1.5)
+    stop.set()
+    await asyncio.wait_for(running, timeout=5)
+
+    assert 1 <= sandbox.calls.count("acquire") <= 2
