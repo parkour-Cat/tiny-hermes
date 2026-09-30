@@ -54,6 +54,9 @@ class RefusalReason(StrEnum):
     NOT_FROZEN = "not_frozen"
     INSTANCE_DIRTY = "instance_dirty"
     IMAGE_NOT_APPROVED = "image_not_approved"
+    #: §21.3: the new instance's limit does not fit, even after evicting the
+    #: frozen instances that could go. The Run waits; it has not failed.
+    MEMORY_BUDGET_EXHAUSTED = "memory_budget_exhausted"
     WORKING_DIRECTORY_NOT_ALLOWED = "working_directory_not_allowed"
 
 
@@ -121,6 +124,7 @@ class SandboxController:
         audit: SandboxAudit | None = None,
         ceiling: ResourceProfile = DEFAULT_PROFILE,
         egress: EgressNetwork | None = None,
+        memory_budget_mb: int | None = None,
     ) -> None:
         self.engine = engine
         self.store = store
@@ -128,6 +132,9 @@ class SandboxController:
         self.leases: LeaseAuthority = leases or _AlwaysHolds()
         self.audit: SandboxAudit = audit or _Recording()
         self.ceiling = ceiling
+        #: The sum of instance memory limits this controller admits (§21.3).
+        #: None admits without counting, which only tests and tools want.
+        self.memory_budget_mb = memory_budget_mb
         # Absent on a deployment with no boundary, and then a sandbox has no
         # network at all — never an unguarded one.
         self.egress = egress
@@ -144,7 +151,9 @@ class SandboxController:
         session_id: UUID | None = None,
     ) -> AcquireResult:
         await self._require_lease(run_id, lease_id)
-        existing = await self.store.live_for_run(run_id)
+        # Locked: eviction skips a claim its own Run holds, so the container
+        # cannot go between this read and the unpause.
+        existing = await self.store.live_for_run_locked(run_id)
         if existing is not None:
             warm = await self._thaw_if_warm(existing)
             if warm is not None:
@@ -157,9 +166,10 @@ class SandboxController:
 
         instance_id = uuid.uuid4()
         try:
+            chosen = profile_named(profile, ceiling=self.ceiling)
             config = container_config(
                 digest=self._digest(),
-                profile=profile_named(profile, ceiling=self.ceiling),
+                profile=chosen,
                 run_id=run_id,
                 instance_id=instance_id,
                 workspace_id=workspace_id,
@@ -172,6 +182,7 @@ class SandboxController:
             # Before Docker is asked, so a refused image leaves nothing behind.
             raise SandboxRefused(RefusalReason.IMAGE_NOT_APPROVED) from refused
 
+        await self._admit(chosen.memory_mb)
         # Explicitly, before the container, and with the full ownership chain
         # in labels: the Scheduler that later reclaims an orphan enumerates by
         # label (design §13), and it can only see what was written.
@@ -187,6 +198,7 @@ class SandboxController:
                 resource_profile=profile,
                 boot_id=uuid.uuid4().hex,
                 status=InstanceStatus.RUNNING,
+                memory_mb=chosen.memory_mb,
             ),
         )
         await self._register_address(container_id, run_id, instance_id)
@@ -354,6 +366,56 @@ class SandboxController:
         await self.engine.unpause(instance.container_id)
         await self.store.set_instance_status(instance.id, InstanceStatus.RUNNING)
         return AcquireResult(sandbox_id=instance.id, cache_state=CacheState.REUSED)
+
+    async def _admit(self, needed_mb: int) -> None:
+        """Make room for `needed_mb` within the budget, or refuse (§21.3).
+
+        Counted by limits, not by use: an instance using little now may grow
+        to its limit later. The lock is held until this call's transaction
+        commits, so the container created after this returns is in the count
+        before any other acquire takes its own.
+        """
+        budget = self.memory_budget_mb
+        if budget is None:
+            return
+        await self.store.lock_admission()
+        shortfall = await self.store.committed_memory_mb() + needed_mb - budget
+        if shortfall <= 0:
+            return
+        chosen: list[tuple[SandboxReservation, SandboxInstance]] = []
+        freed = 0
+        for reservation in await self.store.evictable_keeps():
+            if freed >= shortfall:
+                break
+            instance = await self.store.read_instance(reservation.instance_id)
+            if instance is None:
+                continue
+            chosen.append((reservation, instance))
+            freed += instance.memory_mb
+        if freed < shortfall:
+            # Nothing is evicted: a warm sandbox destroyed without making
+            # enough room is a cold start for its Run and no gain for this one.
+            raise SandboxRefused(RefusalReason.MEMORY_BUDGET_EXHAUSTED)
+        for reservation, instance in chosen:
+            await self._evict(reservation, instance)
+
+    async def _evict(self, reservation: SandboxReservation, instance: SandboxInstance) -> None:
+        """A frozen instance goes the way an expired keep does, early.
+
+        Its Run's next slice starts a new instance from the committed
+        workspace, as after the idle TTL. The volume stays, as in `_discard`.
+        """
+        await self.engine.remove_if_present(instance.container_id)
+        await self.store.set_instance_status(instance.id, InstanceStatus.DESTROYED)
+        await self.store.release(reservation.id)
+        await self.audit.record(
+            AuditEntry(
+                action="sandbox.evict",
+                run_id=reservation.run_id,
+                sandbox_id=instance.id,
+                detail="evicted to fit the sandbox memory budget",
+            )
+        )
 
     async def _discard(self, reservation: SandboxReservation) -> None:
         instance = await self.store.read_instance(reservation.instance_id)

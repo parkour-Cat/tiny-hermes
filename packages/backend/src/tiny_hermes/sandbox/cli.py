@@ -16,6 +16,7 @@ import logging
 import signal
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -30,7 +31,11 @@ from tiny_hermes.sandbox.application.controller import (
     SandboxRefused,
 )
 from tiny_hermes.sandbox.domain.command import SandboxCommand
-from tiny_hermes.sandbox.domain.container_policy import DEFAULT_PROFILE, EgressNetwork
+from tiny_hermes.sandbox.domain.container_policy import (
+    DEFAULT_PROFILE,
+    EgressNetwork,
+    ResourceProfile,
+)
 from tiny_hermes.sandbox.infrastructure.docker_engine import DockerEngine
 from tiny_hermes.sandbox.infrastructure.lease_authority import SqlLeaseAuthority
 from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
@@ -62,6 +67,41 @@ def _egress(settings: Settings) -> EgressNetwork | None:
     )
 
 
+def resource_ceiling(settings: Settings) -> ResourceProfile:
+    """The operator's limits, threaded once at startup: with M1's single
+    profile, "default" is whatever the instance configuration says it is."""
+    return replace(
+        DEFAULT_PROFILE,
+        memory_mb=settings.sandbox_memory_mb,
+        cache_mb=settings.sandbox_cache_mb,
+        cache_inodes=settings.sandbox_cache_inodes,
+    )
+
+
+def memory_budget_mb(settings: Settings, *, meminfo: Path = Path("/proc/meminfo")) -> int:
+    """The configured budget, or half this host's memory (§21.3).
+
+    Read here and not in Settings: only the controller's host is the one whose
+    memory the sandboxes use. A container reads the host's own MemTotal.
+    """
+    if settings.sandbox_memory_budget_mb is not None:
+        return settings.sandbox_memory_budget_mb
+    total_kib = next(
+        int(line.split()[1])
+        for line in meminfo.read_text(encoding="utf-8").splitlines()
+        if line.startswith("MemTotal:")
+    )
+    half = total_kib // 1024 // 2
+    if half < settings.sandbox_memory_mb:
+        # Starting anyway would refuse every tool, forever, without saying why.
+        raise ValueError(
+            f"half of this host's memory is {half} MiB, less than one sandbox of "
+            f"SANDBOX_MEMORY_MB={settings.sandbox_memory_mb}; lower that, or set "
+            f"SANDBOX_MEMORY_BUDGET_MB"
+        )
+    return half
+
+
 def main() -> None:
     configure_logging()
     asyncio.run(_serve())
@@ -70,13 +110,8 @@ def main() -> None:
 async def _serve() -> None:
     settings = get_settings()
     sessions = build_session_factory(settings)
-    # The operator's cache ceiling, threaded once at startup: with M1's single
-    # profile, "default" is whatever the instance configuration says it is.
-    ceiling = replace(
-        DEFAULT_PROFILE,
-        cache_mb=settings.sandbox_cache_mb,
-        cache_inodes=settings.sandbox_cache_inodes,
-    )
+    ceiling = resource_ceiling(settings)
+    budget = memory_budget_mb(settings)
     client: Any = docker.from_env(timeout=_DOCKER_CALL_TIMEOUT_SECONDS)  # noqa: TID251 - the one place, by design
 
     async def dispatch(action: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -95,6 +130,7 @@ async def _serve() -> None:
                 audit=_AuditSink(session),
                 ceiling=ceiling,
                 egress=_egress(settings),
+                memory_budget_mb=budget,
             )
             try:
                 answer = await _invoke(controller, action, payload)
@@ -121,6 +157,7 @@ async def _serve() -> None:
                 audit=_AuditSink(session),
                 ceiling=ceiling,
                 egress=_egress(settings),
+                memory_budget_mb=budget,
             )
             try:
                 answer = await _invoke_stream(controller, action, payload, channel, settings)
@@ -142,7 +179,11 @@ async def _serve() -> None:
     await server.start()
     logger.info(
         "sandbox controller started",
-        extra={"socket": settings.sandbox_controller_socket},
+        extra={
+            "socket": settings.sandbox_controller_socket,
+            "sandbox_memory_mb": ceiling.memory_mb,
+            "sandbox_memory_budget_mb": budget,
+        },
     )
     stop = _stop_on_termination()
     try:
