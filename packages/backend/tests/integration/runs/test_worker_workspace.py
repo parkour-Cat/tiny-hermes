@@ -845,23 +845,29 @@ async def test_a_run_with_no_sandbox_room_waits_in_the_queue_rather_than_failing
     assert row.status == "queued"
     assert "run_failed" not in await _events_of(engine, run)
     assert model.requests == [], "no model call is spent on a Run that cannot run its tools"
+    wait = await _seconds_until_claimable(engine, run)
+    assert 5 < wait <= 10, "§21.3: the Run waits ten seconds before it is claimed again"
 
 
-async def test_a_worker_refused_sandbox_room_waits_before_claiming_again(
-    client: TestClient,
-    scope: dict[str, str],
+async def _seconds_until_claimable(engine: AsyncEngine, run_id: str) -> float:
+    async with engine.connect() as connection:
+        found = await connection.scalar(
+            text("SELECT extract(epoch FROM claimable_after - now()) FROM runs WHERE id = :run"),
+            {"run": run_id},
+        )
+    return float(found)
+
+
+def _full_worker(
     engine: AsyncEngine,
     objects: MinioObjectStore,
-    tooled_agent: Callable[[list[str]], str],
-) -> None:
-    """Without the pause the requeued Run is claimed straight back, refused
-    again, and the lane spins on the database and the controller."""
-    agent = tooled_agent(["shell.exec"])
-    _submit(client, scope, agent)
-    sandbox = FullSandbox()
-    worker = WorkerRuntime(
+    sandbox: GatewaySandbox,
+    *,
+    idle_poll_seconds: int = 1,
+) -> WorkerRuntime:
+    return WorkerRuntime(
         session_factory=async_sessionmaker(engine, expire_on_commit=False),
-        model=Recording(sandbox, _tool()),
+        model=Recording(sandbox),
         notifier=NullWakeUpNotifier(),
         sandbox=sandbox,
         workspace=WorkspaceRuntime(
@@ -874,14 +880,72 @@ async def test_a_worker_refused_sandbox_room_waits_before_claiming_again(
             worker_id="worker-full",
             lease_seconds=30,
             max_slice_seconds=30,
-            idle_poll_seconds=1,
+            idle_poll_seconds=idle_poll_seconds,
         ),
     )
+
+
+async def _run_forever_for(worker: WorkerRuntime, seconds: float) -> None:
     stop = asyncio.Event()
     running = asyncio.create_task(worker.run_forever(stop))
-
-    await asyncio.sleep(1.5)
+    await asyncio.sleep(seconds)
     stop.set()
     await asyncio.wait_for(running, timeout=5)
 
-    assert 1 <= sandbox.calls.count("acquire") <= 2
+
+async def test_a_run_refused_sandbox_room_is_not_claimed_straight_back(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    objects: MinioObjectStore,
+    tooled_agent: Callable[[list[str]], str],
+) -> None:
+    """Claimed straight back, it is refused again: on 2026-09-30 a lane did
+    that 116 times in 1.5 s, and 32 lanes wrote a lease event each time."""
+    _submit(client, scope, tooled_agent(["shell.exec"]))
+    sandbox = FullSandbox()
+
+    await _run_forever_for(_full_worker(engine, objects, sandbox), 1.5)
+
+    assert sandbox.calls.count("acquire") == 1
+
+
+async def test_a_lane_refused_sandbox_room_goes_straight_on_to_a_run_without_tools(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    objects: MinioObjectStore,
+    tooled_agent: Callable[[list[str]], str],
+) -> None:
+    """The Run waits, not the lane: a paused lane made messages that need no
+    sandbox wait too (P95 0.02 s became 2.0 s)."""
+    _submit(client, scope, tooled_agent(["shell.exec"]))
+    message, _ = _submit(client, scope, tooled_agent([]))
+    worker = _full_worker(engine, objects, FullSandbox(), idle_poll_seconds=2)
+
+    await _run_forever_for(worker, 1.0)
+
+    assert (await _run_row(engine, message)).status == "completed"
+
+
+async def test_a_run_refused_sandbox_room_is_claimed_again_once_its_wait_is_over(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    objects: MinioObjectStore,
+    tooled_agent: Callable[[list[str]], str],
+) -> None:
+    run, _ = _submit(client, scope, tooled_agent(["shell.exec"]))
+    sandbox = FullSandbox()
+    worker = _full_worker(engine, objects, sandbox)
+    await worker.run_once()
+    assert await worker.run_once() is None, "the premise: it is waiting"
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE runs SET claimable_after = now() - interval '1 second' WHERE id = :run"),
+            {"run": run},
+        )
+
+    assert await worker.run_once() == UUID(run)
+    assert sandbox.calls.count("acquire") == 2
