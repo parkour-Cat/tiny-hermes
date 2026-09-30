@@ -87,6 +87,10 @@ class DeterministicModelPolicy(BaseModel):
         # and "two children really ran" needs a producer that is not a test
         # double, the same as every other state this provider can reach.
         "delegate_once",
+        # A long task for load probes: one workspace-writing shell command per
+        # round for as many rounds as the Run input asks (`rounds=N`), so it
+        # crosses time slices and commits a workspace revision every round.
+        "long_task",
     ] = "complete"
 
 

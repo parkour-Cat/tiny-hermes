@@ -91,15 +91,19 @@ async def stopped_at_the_limit(
     session_for: Callable[[str], str],
     submit_run: Callable[[str, str], dict[str, Any]],
 ) -> dict[str, Any]:
-    """A Run that has used every model call its budget allows."""
+    """A Run that needs another round and has used every model call it may.
+
+    The ceiling is lowered to one rather than the counter raised to one below
+    it. The round number a model is told is counted from `consumed_model_calls`,
+    so a raised counter made `continue_once` believe it was on a later round and
+    answer `done` — and these tests passed only because a finished round at the
+    limit used to be paused too, which §12.3 no longer does (v2.13).
+    """
     session_id = session_for(agent_with_scenario("continue_once"))
     run = submit_run(session_id, "key-1")
     async with engine.begin() as connection:
         await connection.execute(
-            text(
-                "UPDATE run_budget_scopes "
-                "SET consumed_model_calls = max_model_calls - 1 WHERE root_run_id = :id"
-            ),
+            text("UPDATE run_budget_scopes SET max_model_calls = 1 WHERE root_run_id = :id"),
             {"id": UUID(str(run["budget_root_run_id"]))},
         )
     await _worker(engine, scope["X-Workspace-Id"]).run_once()

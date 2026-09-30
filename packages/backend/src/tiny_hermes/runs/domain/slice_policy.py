@@ -122,13 +122,29 @@ def _awaiting(check: "ApprovalCheck") -> SliceDecision:
     )
 
 
+def _ends_the_run(outcome: RoundOutcome) -> bool:
+    """A round judged done or failed, with no approval or delegation pending.
+
+    `budget_allows` asks whether the budget allows *another* round, and this
+    one has none — the reason `rounds_exhausted` already sits below done and
+    failed. Pausing it instead recorded finished work as `paused(limit)` and
+    left the Run holding its Session's head.
+    """
+    return (
+        outcome.approval is None
+        and outcome.delegated is None
+        and outcome.verdict.outcome in (GoalOutcome.DONE, GoalOutcome.FAILED)
+    )
+
+
 def decide_after_round(outcome: RoundOutcome) -> SliceDecision:
     """Choose what ends this round.
 
     The order is the product rule, not an implementation convenience: a user's
-    cancellation and pause and the shared safety valve all outrank a goal the
-    platform judged met, and slice expiry is the last word only when nothing
-    else applies.
+    cancellation and pause outrank a goal the platform judged met; the shared
+    safety valve outranks every round that would need another, but not one that
+    already ended the Run (§12.3, v2.13); and slice expiry is the last word
+    only when nothing else applies.
 
     This is the single place a verdict becomes a signal. The judge answers what
     happened to the goal; what happens to the Run is decided here and settled
@@ -138,7 +154,7 @@ def decide_after_round(outcome: RoundOutcome) -> SliceDecision:
         return SliceDecision(RunSignal.SAFE_CANCEL_STARTED)
     if outcome.pause_requested:
         return SliceDecision(RunSignal.SAFE_PAUSE_REACHED, PauseReason.MANUAL)
-    if not outcome.budget_allows:
+    if not outcome.budget_allows and not _ends_the_run(outcome):
         return SliceDecision(
             RunSignal.SAFE_PAUSE_REACHED, PauseReason.LIMIT, limit_reached=True
         )

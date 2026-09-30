@@ -1179,8 +1179,11 @@ async def test_a_summary_call_counts_against_the_max_model_calls_ceiling(
     # one call total, matching the ceiling exactly rather than overshooting
     # it by one.
     assert model.calls == 0
-    assert reloaded["status"] == "paused"
-    assert reloaded["pause_reason"] == "limit"
+    # The round's own call answered and the goal was met, so the Run
+    # completes on it: the ceiling stops the next round, not this one (§12.3,
+    # v2.13). Until then this read `paused(limit)`, which recorded finished
+    # work as stopped and kept the Session's head.
+    assert reloaded["status"] == "completed"
     assert reloaded["budget"]["consumed_model_calls"] == 1
 
 

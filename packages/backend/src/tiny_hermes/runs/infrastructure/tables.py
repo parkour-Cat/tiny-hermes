@@ -246,6 +246,15 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
             "parent_run_id",
             postgresql_where=text("result_delivered_at IS NULL"),
         ),
+        # The claim query's own order (§21.3, v2.13), over queued Runs only:
+        # every Worker asks it whenever it is idle, and a finished Run never
+        # needs to be in it.
+        Index(
+            "ix_runs_claim_order",
+            "queued_at",
+            "id",
+            postgresql_where=text("status = 'queued'"),
+        ),
         # §13's third clause, in the schema rather than in a code path. A child
         # Agent may not create a grandchild, and the creation path refuses one
         # — but a refusal somebody can forget to write is a different guarantee
@@ -304,6 +313,12 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
     checkpoint_workspace_revision_id: Mapped[UUID | None] = mapped_column(nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: When this Run last *entered* `queued` (§21.3, v2.13), which is the order
+    #: Workers claim in. Not `created_at`: a long task back from its slice is
+    #: older than any message that arrived meanwhile, and would go first.
+    queued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, server_default=text("now()")
+    )
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     recovery_attempts: Mapped[int] = mapped_column(
         Integer, default=0, server_default=text("0")

@@ -277,3 +277,42 @@ async def test_cache_survives_freeze_thaw_and_dies_with_the_instance(
     )
     gone = await asyncio.to_thread(successor.exec_run, ["cat", "/workspace/cache/state"])
     assert gone[0] != 0, "cache must not outlive the instance it warmed"
+
+
+async def test_a_round_does_not_inspect_the_container_before_each_call(
+    engine: DockerEngine, box: Any, docker_client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The engine is handed the container id; asking the daemon for it first is a round trip.
+
+    A checkpointing tool round is: run the tool, freeze, scan, export, thaw.
+    Each of those used to open with `containers.get`, one `inspect_container`
+    each — five extra daemon calls a round. At 32 concurrent rounds on the
+    2026-09-29 host an inspect took 7 ms at p50 and 22 ms at p95, queued on the
+    same daemon (and the same controller thread pool) as every exec.
+    """
+    inspected: list[str] = []
+    real = docker_client.api.inspect_container
+
+    def counting(container: str) -> Any:
+        inspected.append(container)
+        return real(container)
+
+    monkeypatch.setattr(docker_client.api, "inspect_container", counting)
+
+    tool = SandboxCommand(
+        argv=["sh", "-c", "printf 'round\\n' >> progress.txt"],
+        cwd=DATA,
+        timeout_seconds=30,
+        output_limit=4096,
+    )
+    assert (await engine.execute(box.id, tool)).exit_code == 0
+    streamed = await engine.execute_streamed(box.id, tool, CollectingSink(artifact_limit=4096))
+    assert streamed.exit_code == 0
+    await engine.pause(box.id)
+    scanned = await engine.scan_tree(box.id, DATA)
+    exported = b"".join([chunk async for chunk in engine.export_tree(box.id, DATA)])
+    await engine.unpause(box.id)
+
+    assert any(entry.path == "progress.txt" for entry in scanned)
+    assert exported, "the export streamed nothing"
+    assert inspected == []

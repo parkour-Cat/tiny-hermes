@@ -338,12 +338,13 @@ async def test_the_safety_valve_stops_a_run_before_another_model_call(
 ) -> None:
     session_id = session_for(agent_with_scenario("continue_once"))
     run = submit_run(session_id, "key-1")
+    # The ceiling lowered to one, not the counter raised to one below it: the
+    # round number is counted from `consumed_model_calls`, so a raised counter
+    # made `continue_once` answer `done`, and this passed only because a
+    # finished round at the limit used to be paused too (§12.3, v2.13).
     async with engine.begin() as connection:
         await connection.execute(
-            text(
-                "UPDATE run_budget_scopes "
-                "SET consumed_model_calls = max_model_calls - 1 WHERE root_run_id = :id"
-            ),
+            text("UPDATE run_budget_scopes SET max_model_calls = 1 WHERE root_run_id = :id"),
             {"id": UUID(str(run["budget_root_run_id"]))},
         )
     provider = CountingProvider()

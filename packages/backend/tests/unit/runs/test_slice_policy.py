@@ -213,13 +213,20 @@ def test_only_the_limit_pause_records_the_safety_valve_event() -> None:
     assert manual.limit_reached is False
 
 
-@pytest.mark.parametrize("blocker", ["cancel", "pause", "budget"])
-def test_a_met_goal_does_not_outrank_the_three_things_above_it(blocker: str) -> None:
+@pytest.mark.parametrize("blocker", ["cancel", "pause"])
+def test_a_met_goal_does_not_outrank_a_person_stopping_the_run(blocker: str) -> None:
     """The reason the judge does not decide Run state.
 
     `done` is an answer about the goal. Whether the Run may act on it is a
     different question, and it is answered here, where it was answered before
     the judge existed.
+
+    Until v2.13 the budget was a third blocker here. It was pinned by a
+    refactor that changed nothing observable, not decided for this case, and
+    it contradicted `rounds_exhausted` two checks below. `budget_allows` asks
+    whether another round is allowed; a round judged done has none, so the
+    budget now stops only rounds that need another (§12.3, v2.13;
+    `test_a_round_that_met_the_goal_completes_with_no_budget_left`).
     """
     decision = decide_after_round(
         RoundOutcome(
@@ -506,3 +513,51 @@ def test_the_budget_valve_still_names_itself() -> None:
     )
 
     assert decision.limit_valve == "budget"
+
+
+# -- a finished round and the safety valve (§12.3, v2.13) ----------------------
+#
+# `budget_allows` asks whether the budget allows *another* round. A round that
+# judged the goal done or failed has no other round, so the answer must not
+# rewrite its ending: seen 2026-09-29, a long task that finished on its last
+# allowed model call ended `paused(limit)` and kept its Session's head.
+
+
+def test_a_round_that_met_the_goal_completes_with_no_budget_left() -> None:
+    decision = decide_after_round(_outcome(verdict=DONE, budget_allows=False))
+
+    assert decision.signal is RunSignal.COMPLETED
+    assert decision.limit_reached is False
+
+
+def test_a_round_that_failed_fails_with_no_budget_left() -> None:
+    decision = decide_after_round(_outcome(verdict=FAILED, budget_allows=False))
+
+    assert decision.signal is RunSignal.FAILED
+    assert decision.limit_reached is False
+
+
+@pytest.mark.parametrize("verdict", [CONTINUE, WAIT], ids=["continue", "wait"])
+def test_a_round_that_needs_another_still_stops_at_the_limit(verdict: GoalVerdict) -> None:
+    decision = decide_after_round(_outcome(verdict=verdict, budget_allows=False))
+
+    assert decision.signal is RunSignal.SAFE_PAUSE_REACHED
+    assert decision.pause_reason is PauseReason.LIMIT
+
+
+def test_a_finished_round_holding_an_approval_still_stops_at_the_limit() -> None:
+    # The change is for rounds that end the Run. One that is still waiting on
+    # a person has not ended it.
+    decision = decide_after_round(
+        _outcome(verdict=DONE, budget_allows=False, approval=_check(ApprovalVerdict.REQUESTED))
+    )
+
+    assert decision.pause_reason is PauseReason.LIMIT
+
+
+def test_a_cancel_still_outranks_a_finished_round_at_the_limit() -> None:
+    decision = decide_after_round(
+        _outcome(verdict=DONE, budget_allows=False, cancel_requested=True)
+    )
+
+    assert decision.signal is RunSignal.SAFE_CANCEL_STARTED

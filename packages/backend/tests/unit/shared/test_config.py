@@ -43,6 +43,7 @@ EXECUTION_BOUNDS = [
     ("database_pool_size", 80, 5, 200),
     ("database_max_overflow", 40, 0, 200),
     ("deterministic_model_delay_ms", 50, 0, 5000),
+    ("worker_concurrency", 1, 1, 64),
 ]
 
 

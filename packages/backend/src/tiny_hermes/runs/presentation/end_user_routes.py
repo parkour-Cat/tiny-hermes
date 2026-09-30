@@ -376,7 +376,7 @@ def end_user_run_router(resources: ApplicationResources) -> APIRouter:
             response.headers[REPLAYED_HEADER] = "true"
         else:
             response.status_code = status.HTTP_201_CREATED
-            await resources.wake_up_notifier().publish(caller.workspace_id, accepted.run_id)
+            runs.announce(caller.workspace_id, accepted.run_id)
         return EndUserRunResponse.model_validate(accepted.document)
 
     @router.get(

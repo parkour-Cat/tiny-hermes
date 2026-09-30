@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     worker_lease_seconds: int = Field(default=20, ge=10, le=300)
     worker_max_slice_seconds: int = Field(default=30, ge=10, le=300)
     worker_idle_poll_seconds: int = Field(default=2, ge=1, le=30)
+    #: Workers in one process, sharing its database pool and event loop. A
+    #: Worker spends a Run almost entirely waiting on the model, and each
+    #: process costs about 100 MiB before it does anything, so concurrency
+    #: bought with processes is bought with memory. 1 keeps every deployment
+    #: as it was; raising it multiplies concurrent sandboxes on the one Docker
+    #: host too, which is the operator's call, not a default's.
+    worker_concurrency: int = Field(default=1, ge=1, le=64)
     worker_shutdown_grace_seconds: int = Field(default=20, ge=5, le=120)
     scheduler_interval_seconds: int = Field(default=1, ge=1, le=60)
     max_recovery_attempts: int = Field(default=3, ge=0, le=10)

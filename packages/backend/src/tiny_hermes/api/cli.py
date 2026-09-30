@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import importlib
 import logging
 import signal
 import socket
@@ -7,7 +8,7 @@ import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
 
 import uvicorn
@@ -19,12 +20,6 @@ from tiny_hermes.channels.application.feishu_service import FeishuChannelService
 from tiny_hermes.channels.application.ingestion import ChannelIngestion
 from tiny_hermes.channels.application.outbound import ChannelReplyDispatcher
 from tiny_hermes.channels.application.webhook_service import FeishuWebhookService
-from tiny_hermes.channels.infrastructure.feishu_long_connection import (
-    DeliverFrame,
-    FeishuLongConnection,
-    LongConnectionBinding,
-    RecordAlive,
-)
 from tiny_hermes.channels.infrastructure.feishu_sender import FeishuSender
 from tiny_hermes.channels.infrastructure.run_images import ChannelImageSource
 from tiny_hermes.channels.infrastructure.sql_channel_store import SqlChannelStore
@@ -75,6 +70,16 @@ from tiny_hermes.shared.database import build_session_factory
 from tiny_hermes.shared.errors import AppError
 from tiny_hermes.shared.logging import configure_logging
 
+if TYPE_CHECKING:
+    # Annotations only. The module pulls in the Feishu SDK, which is 10k modules
+    # and about 150 MiB, and only the scheduler opens a long connection;
+    # `_long_connections` imports it where the scheduler actually needs it.
+    from tiny_hermes.channels.infrastructure.feishu_long_connection import (
+        DeliverFrame,
+        FeishuLongConnection,
+        RecordAlive,
+    )
+
 logger = logging.getLogger(__name__)
 
 
@@ -93,19 +98,62 @@ def worker_main() -> None:
 
 async def _worker() -> None:
     settings = get_settings()
-    worker_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
-    notifier = _notifier(settings)
-    sessions = build_session_factory(settings)
+    concurrency = settings.worker_concurrency
+    # One pool for the process, sized for every Worker in it.
+    sessions = build_session_factory(settings, **_worker_pool(concurrency))
     workspace = _workspace(settings)
     await _ensure_bucket(workspace)
     if workspace is not None:
         logger.info(
             "workspace runtime configured: quota_bytes=%s", workspace.quota.max_bytes
         )
+    # A Redis subscription is one connection read by one waiter: shared, the
+    # Worker that read a wake-up would take it from the others, who would then
+    # sleep out their poll interval. So each Worker subscribes on its own.
+    notifiers = [_notifier(settings) for _ in range(concurrency)]
+    # Each Worker holds its own leases, so each needs its own id.
+    worker_ids = [f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}" for _ in notifiers]
+    runtimes = [
+        _worker_runtime(settings, sessions, workspace, notifier, worker_id)
+        for notifier, worker_id in zip(notifiers, worker_ids, strict=True)
+    ]
+    stop = _stop_on_termination()
+    logger.info("worker started", extra={"worker_ids": worker_ids})
+    try:
+        await asyncio.gather(*(runtime.run_forever(stop) for runtime in runtimes))
+    finally:
+        for notifier in notifiers:
+            await notifier.close()
+    logger.info("worker stopped", extra={"worker_ids": worker_ids})
+
+
+def _worker_pool(concurrency: int) -> dict[str, int]:
+    """The engine default (5 + 10) for one Worker, and room for K beyond that.
+
+    A Worker can hold two connections at once — its slice's transaction and
+    its lease renewal's — so K Workers need up to 2K. K stay open; K more are
+    opened under load and closed after.
+    """
+    return {"pool_size": max(5, concurrency), "max_overflow": max(10, concurrency)}
+
+
+def _worker_runtime(
+    settings: Settings,
+    sessions: async_sessionmaker[AsyncSession],
+    workspace: WorkspaceRuntime | None,
+    notifier: WakeUpNotifier,
+    worker_id: str,
+) -> WorkerRuntime:
+    """One Worker: its own id, subscription, sandbox client and model router.
+
+    Only the database pool and the object store are shared with the other
+    Workers in this process. Everything with a connection or a conversation
+    of its own is built per Worker, so K of them behave as K processes would.
+    """
     # One provider port, two providers behind it. Which one answers is decided
     # per round by the Agent Version the Run fixed at creation, so the Worker
     # never learns that endpoints exist.
-    runtime = WorkerRuntime(
+    return WorkerRuntime(
         session_factory=sessions,
         model=ModelRouter(
             deterministic=DeterministicModelProvider(settings.deterministic_model_delay_ms),
@@ -219,13 +267,6 @@ async def _worker() -> None:
             sandbox_idle_ttl_seconds=settings.sandbox_idle_ttl_seconds,
         ),
     )
-    stop = _stop_on_termination()
-    logger.info("worker started", extra={"worker_id": worker_id})
-    try:
-        await runtime.run_forever(stop)
-    finally:
-        await notifier.close()
-    logger.info("worker stopped", extra={"worker_id": worker_id})
 
 
 def _egress(settings: Settings, claim: EgressClaim | None = None) -> EgressRoute | None:
@@ -299,6 +340,12 @@ def _workspace(settings: Settings) -> WorkspaceRuntime | None:
 
 def scheduler_main() -> None:
     configure_logging()
+    # Before `asyncio.run`, not inside it. The Feishu SDK binds a module-level
+    # loop with `asyncio.get_event_loop()` when it is imported and later calls
+    # `run_until_complete` on it from a thread; imported inside the running
+    # loop it would bind that one, and every long connection would fail with
+    # "This event loop is already running".
+    importlib.import_module("tiny_hermes.channels.infrastructure.feishu_long_connection")
     asyncio.run(_scheduler())
 
 
@@ -349,7 +396,7 @@ async def _scheduler() -> None:
 
 
 async def _supervised_connection(
-    connection: FeishuLongConnection,
+    connection: "FeishuLongConnection",
     stop: asyncio.Event,
     *,
     first_delay: float = 5.0,
@@ -547,7 +594,7 @@ async def _supervised_connection(
 
 def _deliver_via(
     sessions: async_sessionmaker[AsyncSession], kek: bytes | None
-) -> DeliverFrame:
+) -> "DeliverFrame":
     """One `deliver`, shared by every long-connection binding.
 
     A fresh session per frame — not the session `_long_connections` used to
@@ -699,7 +746,7 @@ def _connection_event_recorder(
     return record
 
 
-def _alive_recorder(sessions: async_sessionmaker[AsyncSession]) -> RecordAlive:
+def _alive_recorder(sessions: async_sessionmaker[AsyncSession]) -> "RecordAlive":
     """「这根 socket 此刻是通的」，写在控制台读得到的那一列上。
 
     一条 UPDATE，覆盖式的，不进审计流水——心跳记的是当下，不是变化，而
@@ -723,7 +770,7 @@ def _alive_recorder(sessions: async_sessionmaker[AsyncSession]) -> RecordAlive:
 
 async def _long_connections(
     settings: Settings, sessions: async_sessionmaker[AsyncSession]
-) -> tuple[FeishuLongConnection, ...]:
+) -> tuple["FeishuLongConnection", ...]:
     """The long-connection binding this scheduler process holds a socket
     for — read once, at process start, never polled again.
 
@@ -778,6 +825,14 @@ async def _long_connections(
     retention or cleanup anywhere in this repository, so nothing here may
     move into a retry or polling path.
     """
+    # Here rather than at the top of the module, so the api and every Worker
+    # never load the SDK. `scheduler_main` has already imported it before its
+    # loop started; this only names the classes.
+    from tiny_hermes.channels.infrastructure.feishu_long_connection import (
+        FeishuLongConnection,
+        LongConnectionBinding,
+    )
+
     kek = optional_kek(settings.tiny_hermes_kek)
     deliver = _deliver_via(sessions, kek)
     #: Bindings whose credentials actually resolve, in `id` order. Ordered by

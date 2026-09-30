@@ -142,12 +142,27 @@ def host_shape() -> Shape:
     )
 
 
-def git_sha() -> str:
-    head = Path(".git/HEAD").read_text(encoding="utf-8").strip()
-    if head.startswith("ref: "):
-        ref = Path(".git") / head.removeprefix("ref: ")
-        return ref.read_text(encoding="utf-8").strip()
-    return head
+def git_sha(git_dir: Path = Path(".git")) -> str:
+    """The checked-out commit, read from files rather than the git binary.
+
+    A branch's sha is in its own ref file until git packs refs (`git gc`,
+    `git pack-refs`); after that it is only a line in `packed-refs`. A branch
+    with no commit yet has neither, and says so rather than stopping the run.
+    """
+    head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+    if not head.startswith("ref: "):
+        return head
+    name = head.removeprefix("ref: ")
+    loose = git_dir / name
+    if loose.is_file():
+        return loose.read_text(encoding="utf-8").strip()
+    packed = git_dir / "packed-refs"
+    if packed.is_file():
+        for line in packed.read_text(encoding="utf-8").splitlines():
+            sha, _, ref = line.partition(" ")
+            if ref == name:
+                return sha
+    return "unknown"
 
 
 def process_usage() -> Usage:

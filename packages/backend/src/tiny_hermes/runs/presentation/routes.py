@@ -379,10 +379,6 @@ def run_router(resources: ApplicationResources) -> APIRouter:
     runs_dependency = resources.run_coordination
     artifacts_dependency = resources.artifact_service
 
-    async def _announce(workspace_id: UUID, run_id: UUID) -> None:
-        """Tell Workers after the transaction that created work committed."""
-        await resources.wake_up_notifier().publish(workspace_id, run_id)
-
     @router.get("", response_model=list[RunResponse])
     async def list_runs(  # pyright: ignore[reportUnusedFunction]
         auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
@@ -477,7 +473,7 @@ def run_router(resources: ApplicationResources) -> APIRouter:
             raise as_app_error(error) from error
         _apply_acceptance_headers(response, accepted.replayed, accepted.run_id)
         if not accepted.replayed:
-            await _announce(caller.workspace_id, accepted.run_id)
+            runs.announce(caller.workspace_id, accepted.run_id)
         return RunResponse.model_validate(accepted.document)
 
     @router.get("/{run_id}", response_model=RunResponse)
@@ -723,7 +719,7 @@ def run_router(resources: ApplicationResources) -> APIRouter:
             raise as_app_error(error) from error
         _apply_acceptance_headers(response, accepted.replayed, accepted.run_id)
         if not accepted.replayed:
-            await _announce(caller.workspace_id, accepted.run_id)
+            runs.announce(caller.workspace_id, accepted.run_id)
         return RunResponse.model_validate(accepted.document)
 
     @router.post("/{run_id}/pause", response_model=RunResponse)

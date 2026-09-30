@@ -58,11 +58,15 @@ class DockerEngine:
         container = await self._call(self.client.containers.run, **kwargs)
         return str(container.id)
 
+    # Every method below is handed a container id, and the daemon's API takes
+    # that id directly. Looking the container up first (`containers.get`) was
+    # an inspect per call — five a checkpointing round — queued on the same
+    # daemon and controller threads as the execs that do the work. Only
+    # `address_of` still inspects, because the inspect is what it reads.
     async def execute(self, container_id: str, command: SandboxCommand) -> CommandResult:
-        container = await self._call(self.client.containers.get, container_id)
         handle = await self._call(
             self.client.api.exec_create,
-            container.id,
+            container_id,
             cmd=command.argv,
             workdir=command.cwd,
             stdout=True,
@@ -153,21 +157,19 @@ class DockerEngine:
         The daemon extracts; this process never does. What the stream may
         contain was decided by the caller before the first byte got here.
         """
-        container = await self._call(self.client.containers.get, container_id)
         loop = asyncio.get_running_loop()
 
         def upload() -> None:
-            container.put_archive(target, _pulled_from(loop, tar_stream))
+            self.client.api.put_archive(container_id, target, _pulled_from(loop, tar_stream))
 
         await self._call(upload)
 
     async def export_tree(
         self, container_id: str, source: str
     ) -> AsyncIterator[bytes]:
-        container = await self._call(self.client.containers.get, container_id)
 
         def open_archive() -> Iterator[bytes]:
-            stream, _ = container.get_archive(source, chunk_size=_SCAN_CHUNK)
+            stream, _ = self.client.api.get_archive(container_id, source, chunk_size=_SCAN_CHUNK)
             return iter(stream)
 
         chunks = await self._call(open_archive)
@@ -187,10 +189,9 @@ class DockerEngine:
         as they pass. It never calls ``extract*`` and never touches the host
         filesystem — the architecture test bans the alternative outright.
         """
-        container = await self._call(self.client.containers.get, container_id)
 
         def scan() -> tuple[ScannedEntry, ...]:
-            stream, _ = container.get_archive(source, chunk_size=_SCAN_CHUNK)
+            stream, _ = self.client.api.get_archive(container_id, source, chunk_size=_SCAN_CHUNK)
             reader = _IteratorFile(iter(stream))
             entries: list[ScannedEntry] = []
             with tarfile.open(fileobj=cast(Any, reader), mode="r|") as archive:  # noqa: S202 - stream iteration only, never extract*
@@ -233,10 +234,9 @@ class DockerEngine:
         is read and discarded so a noisy child can always finish writing
         instead of blocking on a full pipe (design §11).
         """
-        container = await self._call(self.client.containers.get, container_id)
         handle = await self._call(
             self.client.api.exec_create,
-            container.id,
+            container_id,
             cmd=command.argv,
             workdir=command.cwd,
             stdout=True,
@@ -285,16 +285,13 @@ class DockerEngine:
         )
 
     async def pause(self, container_id: str) -> None:
-        container = await self._call(self.client.containers.get, container_id)
-        await self._call(container.pause)
+        await self._call(self.client.api.pause, container_id)
 
     async def unpause(self, container_id: str) -> None:
-        container = await self._call(self.client.containers.get, container_id)
-        await self._call(container.unpause)
+        await self._call(self.client.api.unpause, container_id)
 
     async def remove(self, container_id: str) -> None:
-        container = await self._call(self.client.containers.get, container_id)
-        await self._call(container.remove, force=True)
+        await self._call(self.client.api.remove_container, container_id, force=True)
 
     def _exec_with_stdin(self, exec_id: str, stdin: bytes) -> bytes:
         """Feed stdin whole, close it, then collect the demuxed output.
