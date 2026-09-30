@@ -74,6 +74,17 @@ def test_the_ceilings_come_from_the_profile() -> None:
     assert answer.pids_limit == 128
 
 
+def test_a_sandbox_cannot_borrow_swap_beyond_its_memory_limit() -> None:
+    """§21.3. Docker's default lets a container swap as much again as its
+    limit; tmpfs pages can be swapped, and on 2026-09-30 sandboxes pushed a
+    whole host into swap before the OOM killer took `dockerd`. Equal to the
+    limit means no swap: the pressure stays inside the sandbox that made it.
+    """
+    kwargs = config().as_docker_kwargs()
+
+    assert kwargs["memswap_limit"] == kwargs["mem_limit"]
+
+
 def test_tmp_is_a_tmpfs_that_cannot_execute() -> None:
     """A writable directory that can execute is a place to stage a binary."""
     options = config().tmpfs[SANDBOX_TMP]
@@ -239,6 +250,7 @@ def test_the_docker_arguments_are_exactly_these_and_no_others() -> None:
         "security_opt",
         "nano_cpus",
         "mem_limit",
+        "memswap_limit",
         "pids_limit",
         "tmpfs",
         "mounts",

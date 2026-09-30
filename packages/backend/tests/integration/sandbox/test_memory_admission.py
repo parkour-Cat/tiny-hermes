@@ -235,3 +235,14 @@ async def test_a_warm_sandbox_is_not_destroyed_when_evicting_it_would_not_make_r
 
     assert await platform.claim_of(parked_run) is ReservationStatus.KEPT
     assert platform.state(await platform.container_of(parked.sandbox_id)) == "paused"
+
+
+async def test_the_created_container_may_not_swap(platform: Platform, docker_client: Any) -> None:
+    """Read back from the daemon: a setting in the dict proves only that we
+    can build a dict."""
+    made = await platform.acquire(uuid4())
+
+    host = docker_client.containers.get(await platform.container_of(made.sandbox_id)).attrs[
+        "HostConfig"
+    ]
+    assert host["MemorySwap"] == host["Memory"] == 256 * MiB
