@@ -83,8 +83,16 @@ x-app-env: &app-env
   # and point an endpoint at its id to exercise rewrap.
   TINY_HERMES_MODEL_KEY_EXAMPLE: ${TINY_HERMES_MODEL_KEY_EXAMPLE:-}
 
+# Every long-running service has `restart: unless-stopped`. When the Docker
+# daemon itself restarts — on 2026-09-30 the OOM killer took it — every
+# container stops with it, and without a policy nothing brings them back.
+# `unless-stopped` rather than `always`: a service an operator stopped stays
+# stopped. A daemon restart starts them all at once and ignores `depends_on`.
+# `migrate` is a one-shot job and has no policy: restarting it would loop the
+# migrations, and the schema it produced outlives the daemon anyway.
 services:
   postgres:
+    restart: unless-stopped
     image: postgres:17.6-alpine
     command: ["postgres", "-c", "max_connections=200"]
     environment:
@@ -102,6 +110,7 @@ services:
     ports: ["5432:5432"]
 
   redis:
+    restart: unless-stopped
     image: redis:8.2.1-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     healthcheck:
@@ -116,6 +125,7 @@ services:
   # `scripts/migrate_object_store.py` (docs/operations.md). The S3 port stays
   # 9000 so nothing that talks to it changes.
   seaweedfs:
+    restart: unless-stopped
     image: chrislusf/seaweedfs:4.47
     command: ["mini", "-dir=/data", "-s3.port=9000"]
     environment:
@@ -141,6 +151,7 @@ services:
         condition: service_healthy
 
   api:
+    restart: unless-stopped
     build:
       context: ../..
       dockerfile: apps/api/Dockerfile
@@ -175,6 +186,7 @@ services:
   # a privileged container has nothing to ask. That is a property of this file
   # rather than of anybody's discipline, which is the point.
   controller:
+    restart: unless-stopped
     build:
       context: ../..
       dockerfile: apps/api/Dockerfile
@@ -212,6 +224,7 @@ services:
       retries: 20
 
   worker:
+    restart: unless-stopped
     build:
       context: ../..
       dockerfile: apps/api/Dockerfile
@@ -240,6 +253,7 @@ services:
     healthcheck: *process-alive
 
   scheduler:
+    restart: unless-stopped
     build:
       context: ../..
       dockerfile: apps/api/Dockerfile
@@ -263,6 +277,7 @@ services:
   # process that decides where traffic may go must not also be worth attacking
   # for what it is carrying.
   egress-proxy:
+    restart: unless-stopped
     build:
       context: ../..
       dockerfile: apps/api/Dockerfile
@@ -282,6 +297,7 @@ services:
     healthcheck: *process-alive
 
   web:
+    restart: unless-stopped
     build:
       context: ../..
       dockerfile: apps/web/Dockerfile
@@ -301,6 +317,7 @@ services:
   # and console.spec.ts's own walk must not become reachable through this
   # one's origin or vice versa.
   chat-web:
+    restart: unless-stopped
     build:
       context: ../..
       dockerfile: apps/chat-web/Dockerfile
