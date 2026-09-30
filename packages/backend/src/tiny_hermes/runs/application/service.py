@@ -202,6 +202,20 @@ class RunCoordination:
 
     def __init__(self, store: RunStore) -> None:
         self._store = store
+        self._announcements: list[tuple[UUID, UUID]] = []
+
+    def announce(self, workspace_id: UUID, run_id: UUID) -> None:
+        """Ask for Workers to be woken for this Run once its transaction commits.
+
+        Recorded, not sent: the caller is still inside the transaction that
+        created the Run, and a Worker woken now would claim from its own
+        connection before the Run exists, then sleep a whole idle poll. Whoever
+        commits the transaction sends these afterwards.
+        """
+        self._announcements.append((workspace_id, run_id))
+
+    def announcements(self) -> tuple[tuple[UUID, UUID], ...]:
+        return tuple(self._announcements)
 
     async def create_session(
         self,

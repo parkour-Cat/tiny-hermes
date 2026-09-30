@@ -392,8 +392,9 @@ class ApplicationResources:
 
     async def run_coordination(self) -> AsyncGenerator[RunCoordination]:
         async with self.session_factory()() as session:
+            coordination = RunCoordination(SqlRunStore(session))
             try:
-                yield RunCoordination(SqlRunStore(session))
+                yield coordination
             except AuditedDenial:
                 await session.commit()
                 raise
@@ -408,6 +409,10 @@ class ApplicationResources:
                 raise
             else:
                 await session.commit()
+                # After the commit, never inside it: a Worker woken earlier
+                # claims before the Run exists and sleeps a whole idle poll.
+                for workspace_id, run_id in coordination.announcements():
+                    await self.wake_up_notifier().publish(workspace_id, run_id)
 
     def object_store(self) -> MinioObjectStore:
         if self._object_store is None:
