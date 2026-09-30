@@ -506,3 +506,51 @@ def test_the_budget_valve_still_names_itself() -> None:
     )
 
     assert decision.limit_valve == "budget"
+
+
+# -- a finished round and the safety valve (§12.3, v2.13) ----------------------
+#
+# `budget_allows` asks whether the budget allows *another* round. A round that
+# judged the goal done or failed has no other round, so the answer must not
+# rewrite its ending: seen 2026-09-29, a long task that finished on its last
+# allowed model call ended `paused(limit)` and kept its Session's head.
+
+
+def test_a_round_that_met_the_goal_completes_with_no_budget_left() -> None:
+    decision = decide_after_round(_outcome(verdict=DONE, budget_allows=False))
+
+    assert decision.signal is RunSignal.COMPLETED
+    assert decision.limit_reached is False
+
+
+def test_a_round_that_failed_fails_with_no_budget_left() -> None:
+    decision = decide_after_round(_outcome(verdict=FAILED, budget_allows=False))
+
+    assert decision.signal is RunSignal.FAILED
+    assert decision.limit_reached is False
+
+
+@pytest.mark.parametrize("verdict", [CONTINUE, WAIT], ids=["continue", "wait"])
+def test_a_round_that_needs_another_still_stops_at_the_limit(verdict: GoalVerdict) -> None:
+    decision = decide_after_round(_outcome(verdict=verdict, budget_allows=False))
+
+    assert decision.signal is RunSignal.SAFE_PAUSE_REACHED
+    assert decision.pause_reason is PauseReason.LIMIT
+
+
+def test_a_finished_round_holding_an_approval_still_stops_at_the_limit() -> None:
+    # The change is for rounds that end the Run. One that is still waiting on
+    # a person has not ended it.
+    decision = decide_after_round(
+        _outcome(verdict=DONE, budget_allows=False, approval=_check(ApprovalVerdict.REQUESTED))
+    )
+
+    assert decision.pause_reason is PauseReason.LIMIT
+
+
+def test_a_cancel_still_outranks_a_finished_round_at_the_limit() -> None:
+    decision = decide_after_round(
+        _outcome(verdict=DONE, budget_allows=False, cancel_requested=True)
+    )
+
+    assert decision.signal is RunSignal.SAFE_CANCEL_STARTED
