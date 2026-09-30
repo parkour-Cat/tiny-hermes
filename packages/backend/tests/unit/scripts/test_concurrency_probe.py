@@ -206,3 +206,8 @@ def test_a_container_that_vanishes_mid_sample_does_not_stop_sampling(
 
     assert sampler.max_sandboxes == {"running": 1}
     assert any(call[0] == "stats" for call in calls)
+
+
+def test_a_long_task_asks_its_sandbox_to_hold_memory_only_when_told_to() -> None:
+    assert probe.long_task_input(12, cache_mb=0) == "rounds=12"
+    assert probe.long_task_input(12, cache_mb=100) == "rounds=12 cache=100"
