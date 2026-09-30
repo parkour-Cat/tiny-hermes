@@ -6,7 +6,8 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from redis.asyncio import Redis
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from tiny_hermes.runs.application.worker import WorkerRuntime, WorkerSettings
 from tiny_hermes.runs.infrastructure.deterministic_model import (
     DeterministicModelProvider,
@@ -172,3 +173,65 @@ async def test_a_notification_for_an_unclaimable_run_is_harmless(
     assert client.get(f"/api/v1/runs/{run['id']}", headers=scope).json()["status"] == (
         "completed"
     )
+
+
+class _CheckingNotifier:
+    """Looks, at the moment of each publish, for the Run from another connection.
+
+    A Worker woken by the publish claims from its own connection straight
+    away. If the Run is not committed yet it finds nothing and sleeps a whole
+    idle poll — on 2026-09-30, every Run on a one-Worker stack waited 2.02 s.
+    """
+
+    def __init__(self, dsn: str) -> None:
+        self._dsn = dsn
+        self.visible: list[bool] = []
+
+    async def publish(self, workspace_id: UUID, run_id: UUID) -> None:
+        del workspace_id
+        # Its own engine: this runs on the app's event loop, not the test's.
+        engine = create_async_engine(self._dsn)
+        try:
+            async with engine.connect() as connection:
+                exists = (
+                    await connection.execute(
+                        text("SELECT EXISTS(SELECT 1 FROM runs WHERE id = :id)"), {"id": run_id}
+                    )
+                ).scalar_one()
+        finally:
+            await engine.dispose()
+        self.visible.append(bool(exists))
+
+    async def wait(self, timeout_seconds: float) -> bool:
+        await asyncio.sleep(timeout_seconds)
+        return False
+
+    async def close(self) -> None:
+        return None
+
+
+async def test_a_new_run_is_committed_before_its_wake_up_is_published(
+    client: TestClient,
+    scope: dict[str, str],
+    session_id: str,
+    settings: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The test above sees the notification only after the response, when the
+    commit has long happened, so it passed while the publish came first."""
+    from tiny_hermes.api.resources import ApplicationResources
+
+    checking = _CheckingNotifier(settings.database_url)
+    def use_checking(_: object) -> Any:
+        return checking
+
+    monkeypatch.setattr(ApplicationResources, "wake_up_notifier", use_checking)
+
+    created = client.post(
+        "/api/v1/runs",
+        headers={**scope, "Idempotency-Key": "key-visible"},
+        json={"session_id": session_id, "input": "hello"},
+    )
+
+    assert created.status_code == 201
+    assert checking.visible == [True]
