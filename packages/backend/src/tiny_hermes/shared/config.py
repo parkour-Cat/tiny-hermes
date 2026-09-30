@@ -1,7 +1,7 @@
 from functools import lru_cache
 from ipaddress import IPv4Network, IPv6Network, ip_network
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from tiny_hermes.egress.domain.decision import ALLOWED_PORTS
@@ -153,6 +153,13 @@ class Settings(BaseSettings):
     #: controller hands Docker is built from these at startup.
     sandbox_cache_mb: int = Field(default=512, ge=64, le=4_096)
     sandbox_cache_inodes: int = Field(default=200_000, ge=10_000, le=1_000_000)
+    #: Each sandbox's memory limit. It bounds the container's processes and its
+    #: tmpfs mounts together, and it is what admission counts (§21.3).
+    sandbox_memory_mb: int = Field(default=1_024, ge=256, le=32_768)
+    #: The sum of sandbox memory limits the controller admits. None means half
+    #: the host's memory, read by the controller when it starts: Settings runs
+    #: in every process and only the controller's host is the one that counts.
+    sandbox_memory_budget_mb: int | None = Field(default=None, ge=256)
     sandbox_start_attempts: int = Field(default=3, ge=1, le=5)
     shell_timeout_seconds: int = Field(default=60, ge=1, le=900)
     shell_output_bytes: int = Field(default=1_048_576, ge=1_024, le=10_485_760)
@@ -228,6 +235,16 @@ class Settings(BaseSettings):
             for part in self.outbound_allowed_cidrs.split(",")
             if part.strip()
         )
+
+    @model_validator(mode="after")
+    def reject_a_budget_below_one_sandbox(self) -> "Settings":
+        budget = self.sandbox_memory_budget_mb
+        if budget is not None and budget < self.sandbox_memory_mb:
+            raise ValueError(
+                f"sandbox_memory_budget_mb={budget} admits no sandbox of "
+                f"sandbox_memory_mb={self.sandbox_memory_mb}"
+            )
+        return self
 
     @field_validator("session_cookie_secret", "bootstrap_token")
     @classmethod
