@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.sandbox.domain.models import (
@@ -46,8 +46,12 @@ def _instance(row: SandboxInstanceRow) -> SandboxInstance:
         resource_profile=row.resource_profile,
         boot_id=row.boot_id,
         status=InstanceStatus(row.status),
+        memory_mb=row.memory_mb,
     )
 
+
+#: Taken by sandbox admission and nothing else.
+_ADMISSION_LOCK_KEY = 591_046_227
 
 class SqlSandboxStore:
     def __init__(self, session: AsyncSession) -> None:
@@ -64,6 +68,7 @@ class SqlSandboxStore:
                 resource_profile=instance.resource_profile,
                 boot_id=instance.boot_id,
                 status=instance.status.value,
+                memory_mb=instance.memory_mb,
             )
         )
         row = SandboxReservationRow(
@@ -140,6 +145,39 @@ class SqlSandboxStore:
                 SandboxReservationRow.idle_expires_at <= now,
             )
             .order_by(SandboxReservationRow.idle_expires_at)
+        )
+        return [_reservation(row) for row in found.scalars()]
+
+    async def lock_admission(self) -> None:
+        """Held until this transaction ends, by every acquire that adds memory.
+
+        Counting, creating and inserting under it is what stops two acquires
+        from both counting the same free space.
+        """
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"), {"key": _ADMISSION_LOCK_KEY}
+        )
+
+    async def committed_memory_mb(self) -> int:
+        """The limits of every container a live claim may still hold.
+
+        Isolated claims count: nobody could confirm their container went.
+        """
+        total = await self._session.scalar(
+            select(func.coalesce(func.sum(SandboxInstanceRow.memory_mb), 0))
+            .join(
+                SandboxReservationRow,
+                SandboxReservationRow.sandbox_instance_id == SandboxInstanceRow.id,
+            )
+            .where(SandboxReservationRow.status.in_([e.value for e in LIVE_RESERVATIONS]))
+        )
+        return int(total or 0)
+
+    async def keeps_by_deadline(self) -> list[SandboxReservation]:
+        found = await self._session.execute(
+            select(SandboxReservationRow)
+            .where(SandboxReservationRow.status == ReservationStatus.KEPT.value)
+            .order_by(SandboxReservationRow.idle_expires_at, SandboxReservationRow.id)
         )
         return [_reservation(row) for row in found.scalars()]
 

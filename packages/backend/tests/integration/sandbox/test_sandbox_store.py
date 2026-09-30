@@ -254,6 +254,8 @@ async def test_sandbox_instances_has_no_host_path_column(engine: AsyncEngine) ->
         "resource_profile",
         "boot_id",
         "status",
+        # An integer: nothing a path could be written into.
+        "memory_mb",
         "created_at",
         "updated_at",
     }
@@ -361,3 +363,25 @@ async def test_the_admission_lock_holds_a_second_transaction_until_the_first_end
         await first.commit()
 
     await asyncio.wait_for(waiting, timeout=5)
+
+
+async def test_an_instance_from_before_the_column_counts_as_the_old_fixed_limit(
+    sessions: Sessions,
+) -> None:
+    """Revision 0067's backfill: every earlier instance was created with 1024."""
+    instance_id = uuid4()
+    async with sessions() as session:
+        await session.execute(
+            text(
+                "INSERT INTO sandbox_instances "
+                "(id, container_id, image_digest, resource_profile, boot_id, status, "
+                " created_at, updated_at) "
+                "VALUES (:id, :container, :digest, 'default', 'boot', 'running', now(), now())"
+            ),
+            {"id": instance_id, "container": "e" * 64, "digest": DIGEST},
+        )
+        found = await SqlSandboxStore(session).read_instance(instance_id)
+        await session.commit()
+
+    assert found is not None
+    assert found.memory_mb == 1024

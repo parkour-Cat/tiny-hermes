@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, text
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from tiny_hermes.runs.infrastructure import tables as run_tables  # noqa: F401
@@ -53,6 +53,7 @@ class SandboxInstanceRow(IdMixin, CreatedAtMixin, Base):
     resource_profile: Mapped[str] = mapped_column(String(40))
     boot_id: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(20))
+    memory_mb: Mapped[int] = mapped_column(Integer, server_default=text("1024"))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
