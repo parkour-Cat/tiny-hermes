@@ -176,6 +176,12 @@ class ContainerConfig:
             "security_opt": list(self.security_opt),
             "nano_cpus": self.nano_cpus,
             "mem_limit": self.mem_limit,
+            # Equal to the limit: no swap. Docker's default lets a container
+            # swap as much again, and tmpfs pages can be swapped, which pushed
+            # a whole host into swap on 2026-09-30 before the OOM killer took
+            # `dockerd` (§21.3). Past its limit a sandbox now meets its own
+            # cgroup's OOM killer instead.
+            "memswap_limit": self.mem_limit,
             "pids_limit": self.pids_limit,
             "tmpfs": dict(self.tmpfs),
             "mounts": [
