@@ -193,3 +193,13 @@ def test_a_budget_smaller_than_one_sandbox_is_refused() -> None:
     assert _settings(sandbox_memory_mb=512, sandbox_memory_budget_mb=512) is not None
     with pytest.raises(ValidationError, match="sandbox_memory_budget_mb"):
         _settings(sandbox_memory_mb=1_024, sandbox_memory_budget_mb=1_023)
+
+
+def test_an_empty_budget_in_the_environment_means_half_the_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compose passes `${SANDBOX_MEMORY_BUDGET_MB:-}`, which is "" when unset;
+    parsed as an integer that stopped every service sharing the variable."""
+    monkeypatch.setenv("SANDBOX_MEMORY_BUDGET_MB", "")
+
+    assert _settings().sandbox_memory_budget_mb is None
