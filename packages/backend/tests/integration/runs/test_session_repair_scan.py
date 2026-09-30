@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterator
 from typing import Any, cast
 from uuid import UUID
 
+import pytest
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
@@ -180,3 +181,34 @@ async def test_the_scan_does_not_read_runs_once_per_session_without_live_work(
     _two_runs(session_for, agent, submit_run)
 
     assert await _executions_over_runs(engine) <= 5
+
+
+@pytest.mark.parametrize(
+    ("table", "name", "must_mention"),
+    [
+        ("runs", "ix_runs_live_by_session", ("completed", "failed", "cancelled")),
+        ("sessions", "ix_sessions_with_head", ("head_run_id IS NOT NULL",)),
+    ],
+)
+async def test_the_scan_has_indexes_the_size_of_live_work(
+    engine: AsyncEngine, table: str, name: str, must_mention: tuple[str, ...]
+) -> None:
+    """Partial, so they grow with live work and not with history.
+
+    Without them the scan still reads every Session and every Run once a
+    second: about 30 ns and 60 ns a row here, so 0.2 s a second by a million
+    of each — and a year of 6,000 people is tens of millions of Runs.
+    """
+    async with engine.connect() as connection:
+        definition = str(
+            (
+                await connection.execute(
+                    text("SELECT indexdef FROM pg_indexes WHERE tablename = :t AND indexname = :n"),
+                    {"t": table, "n": name},
+                )
+            ).scalar_one()
+        )
+
+    assert "WHERE" in definition
+    for word in must_mention:
+        assert word in definition
