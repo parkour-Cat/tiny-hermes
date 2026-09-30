@@ -211,3 +211,24 @@ def test_a_container_that_vanishes_mid_sample_does_not_stop_sampling(
 def test_a_long_task_asks_its_sandbox_to_hold_memory_only_when_told_to() -> None:
     assert probe.long_task_input(12, cache_mb=0) == "rounds=12"
     assert probe.long_task_input(12, cache_mb=100) == "rounds=12 cache=100"
+
+
+def test_sandboxes_alive_at_once_are_counted_apart_from_the_peak_of_each_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The per-state peaks come from different moments. On 2026-09-30 "running
+    # 32, paused 31" was read as 63 sandboxes at once; there were never more
+    # than 32.
+    samples = iter(["running\nrunning\npaused\n", "running\npaused\npaused\n"])
+
+    def docker(*arguments: str) -> str:
+        return next(samples) if "{{.State}}" in arguments else ""
+
+    monkeypatch.setattr(probe, "_docker", docker)
+    sampler = probe._Sampler("workspace", [])  # pyright: ignore[reportPrivateUsage]
+
+    sampler._sample_sandboxes()  # pyright: ignore[reportPrivateUsage]
+    sampler._sample_sandboxes()  # pyright: ignore[reportPrivateUsage]
+
+    assert sampler.max_sandboxes == {"running": 2, "paused": 2}
+    assert sampler.max_sandboxes_at_once == 3
