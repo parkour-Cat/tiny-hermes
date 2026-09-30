@@ -213,13 +213,20 @@ def test_only_the_limit_pause_records_the_safety_valve_event() -> None:
     assert manual.limit_reached is False
 
 
-@pytest.mark.parametrize("blocker", ["cancel", "pause", "budget"])
-def test_a_met_goal_does_not_outrank_the_three_things_above_it(blocker: str) -> None:
+@pytest.mark.parametrize("blocker", ["cancel", "pause"])
+def test_a_met_goal_does_not_outrank_a_person_stopping_the_run(blocker: str) -> None:
     """The reason the judge does not decide Run state.
 
     `done` is an answer about the goal. Whether the Run may act on it is a
     different question, and it is answered here, where it was answered before
     the judge existed.
+
+    Until v2.13 the budget was a third blocker here. It was pinned by a
+    refactor that changed nothing observable, not decided for this case, and
+    it contradicted `rounds_exhausted` two checks below. `budget_allows` asks
+    whether another round is allowed; a round judged done has none, so the
+    budget now stops only rounds that need another (§12.3, v2.13;
+    `test_a_round_that_met_the_goal_completes_with_no_budget_left`).
     """
     decision = decide_after_round(
         RoundOutcome(
