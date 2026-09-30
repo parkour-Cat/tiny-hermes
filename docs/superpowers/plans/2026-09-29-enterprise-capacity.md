@@ -124,7 +124,7 @@ API、Worker、scheduler 已经是无状态的，Run 的真相在 Postgres 里�
 4. **每台主机开多个 Worker 进程**。现在就能做（`--scale worker=N` 配合 K），只差把建议值
    写进运维文档。
 5. **SSE 改成 Redis 推送**。现在每个有人看的 Run，每 0.5 秒查一次库，还没测过。
-6. **沙箱内存没有总量上限**（[记录](../verification/2026-09-30-sandbox-memory.md)）。
+6. ~~**沙箱内存没有总量上限**~~ **已修**（规格 v2.14 §21.3，[验收记录](../verification/2026-09-30-sandbox-admission.md)）：按上限之和准入，默认预算为主机内存的一半，沙箱不得借用 swap。同一场景重跑：474 个 Run 全部完成，VM 最多用 43%，swap 没有增加。代价见第 8 项。原来的记录（[沙箱内存](../verification/2026-09-30-sandbox-memory.md)）：
    每个沙箱上限 1 GiB，另外按 Docker 默认还能用 1 GiB swap；controller 不限制个数，也不看主机
    还剩多少内存。32 条通道全部用上时，理论上需要 32 GiB，而 7.8 GiB 的 VM 按 70% 线只能给
    沙箱留约 2.9 GiB。可选的做法：
@@ -135,9 +135,19 @@ API、Worker、scheduler 已经是无状态的，Run 的真相在 Postgres 里�
    超过物理内存时会发生什么，已经测过（[OOM 记录](../verification/2026-09-30-sandbox-oom.md)）：
    先是变慢（合计 6 GiB 时短消息慢了 5 倍）；合计 9.6 GiB 时 13 秒内耗尽，OOM killer 杀掉了
    `dockerd`，所有容器都停了。占内存的是 tmpfs 页，杀进程释放不了，所以只有准入能防住。
-7. **服务都是 `restart=no`**（同一份记录）。`dockerd` 一重启，整个栈就一直停着。生产用的
-   compose 要加 `restart: unless-stopped`；Linux 主机上可以再开 `live-restore`。平台自己的
-   恢复是好的：重新拉起后，崩溃时在跑的 24 个 Run 全部完成，没有重复执行的轮次。
+7. ~~**服务都是 `restart=no`**~~ **已修**（[验收记录](../verification/2026-09-30-restart-after-daemon.md)）：
+   长期运行的服务都是 `restart: unless-stopped`；杀掉 `dockerd` 后 7 秒内全部 healthy。
+   Linux 主机上可以再开 `live-restore`，还没做。
+8. **准入之后被拒的循环太频繁**（[验收记录](../verification/2026-09-30-sandbox-admission.md)）。
+   没有空间时，要用工具的 Run 一直在「领到 → 被拒 → 放回队列」：约每秒 11 次，每次写一条事件，
+   平均每个长任务多了约 180 条。通道被拒后暂停 2 秒，这段时间里不用工具的短消息也领不到，排队
+   P95 从 0.02 秒变成 2.0 秒。可选的改法：没有空间时领取查询先跳过要用工具的 Run；给被拒的 Run
+   一个「最早何时再试」；被拒的尝试不写事件。
+9. **沙箱在自己内部被 OOM 杀掉之后，它的 Run 会怎样**，还没测。禁止 swap 以后，超出上限的沙箱
+   会被整个杀掉。
+10. **日志看不到 `extra=` 字段**：`configure_logging` 的格式是 `%(message)s`，整个项目的 run_id、
+    拒绝原因、controller 的预算都没有打印出来。
+11. **`SANDBOX_START_ATTEMPTS` 没有任何代码读它**。
 
 **P2：公平与交互体验**：§4 里「还没做」的三项。
 
