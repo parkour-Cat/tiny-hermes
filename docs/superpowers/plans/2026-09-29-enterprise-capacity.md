@@ -114,7 +114,7 @@ API、Worker、scheduler 已经是无状态的，Run 的真相在 Postgres 里�
    [验收记录](../verification/2026-09-29-lease-lock-order.md)）：`renew_lease` 改为先锁
    `runs` 再锁租约，与其他所有路径的顺序一致。强制复现的测试修复前 3/3 死锁，修复后
    5/5 通过。
-2. **在最后一次允许的调用里完成，却判为 `paused(limit)`**，而且还占着 Session 队首。
+2. ~~**在最后一次允许的调用里完成，却判为 `paused(limit)`**~~ **已修**（分支 `fix/limit-on-finishing-round`，[验收记录](../verification/2026-09-29-limit-on-finishing-round.md)，规格 v2.13 §12.3）：判为 done 或 failed 的一轮按判定结束，预算只挡还需要下一轮的轮。顺带发现有三个测试夹具依赖了这个 bug。
 
 **P1：单机容量。**
 
