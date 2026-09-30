@@ -63,6 +63,7 @@
 | 通道数（容器数 × K） | 大于同时推进的长任务数，再加交互那一份 | 通道被长任务占满时，短消息要等一个时间片（[单机档验收](../verification/2026-09-30-tier-a-acceptance.md)第 3 档：P95 31.6 秒） |
 | `WORKER_MAX_SLICE_SECONDS` | 交互为主 15；长任务为主 30 | 新到的 Run 最多等「排在前面的数量 ÷ Worker 数 × 时间片」 |
 | `SANDBOX_IDLE_TTL_SECONDS` | 默认 300；内存紧张时调低 | 轮转让每个在推进的长任务都拿着一个冻结的沙箱 |
+| 沙箱内存预算 | 在推进、用过工具的 Run 数 × 每个沙箱常驻 ≤ 0.7 × 主机内存 − 基础占用 | 一比一占用，冻结的也算；8 核 / 7.8 GiB 的 VM 上约 2.9 GiB（[沙箱内存](../verification/2026-09-30-sandbox-memory.md)） |
 | `AGENT_MAX_MODEL_CALLS` | 按长任务需要的轮数，外加余量 | 默认 20，一个长任务最多约 20 轮 |
 | Postgres `max_connections` | 200（现状）；Worker 路数超过 100 就加连接池代理 | 每路约 1.5 条连接 |
 
@@ -123,6 +124,15 @@ API、Worker、scheduler 已经是无状态的，Run 的真相在 Postgres 里�
 4. **每台主机开多个 Worker 进程**。现在就能做（`--scale worker=N` 配合 K），只差把建议值
    写进运维文档。
 5. **SSE 改成 Redis 推送**。现在每个有人看的 Run，每 0.5 秒查一次库，还没测过。
+6. **沙箱内存没有总量上限**（[记录](../verification/2026-09-30-sandbox-memory.md)）。
+   每个沙箱上限 1 GiB，另外按 Docker 默认还能用 1 GiB swap；controller 不限制个数，也不看主机
+   还剩多少内存。32 条通道全部用上时，理论上需要 32 GiB，而 7.8 GiB 的 VM 按 70% 线只能给
+   沙箱留约 2.9 GiB。可选的做法：
+   - controller 按「已建沙箱的内存上限之和」做准入，超过预算就让新沙箱排队；
+   - 调低默认的内存上限和 tmpfs 大小；
+   - 把 `memswap_limit` 设成等于内存上限，让压力留在沙箱里，而不是把整台主机推进 swap。
+
+   选哪种要先知道超过物理内存时会发生什么，而那一步还没测。
 
 **P2：公平与交互体验**：§4 里「还没做」的三项。
 
