@@ -193,9 +193,10 @@ class SqlSandboxStore:
     async def evictable_keeps(self) -> list[SandboxReservation]:
         """Frozen instances under a kept claim, the earliest deadline first.
 
-        Both conditions, because a thawed instance keeps its `kept` claim
-        while it runs. Locked, skipping any row another transaction holds: the
-        Run that owns it may be thawing it right now.
+        Candidates, not verdicts: a thawed instance keeps its `kept` claim
+        while it runs, and every checkpoint freezes it, so the caller must also
+        see that the Run holds no live lease. Locked, skipping any row another
+        transaction holds: the Run that owns it may be thawing it right now.
         """
         found = await self._session.execute(
             select(SandboxReservationRow)

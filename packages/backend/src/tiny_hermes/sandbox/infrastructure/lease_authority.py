@@ -35,7 +35,8 @@ class SqlLeaseAuthority:
         return found.scalar_one_or_none() is not None
 
     async def any_live(self, run_id: UUID) -> bool:
-        """Used by the Scheduler's cleanup, which must not act while one is live."""
+        """Used by the Scheduler's cleanup and by eviction, neither of which
+        may act while one is live."""
         found = await self._session.execute(
             select(WorkerLeaseRow.id).where(
                 WorkerLeaseRow.run_id == run_id,

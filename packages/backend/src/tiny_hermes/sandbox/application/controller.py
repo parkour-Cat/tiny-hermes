@@ -387,6 +387,13 @@ class SandboxController:
         for reservation in await self.store.evictable_keeps():
             if freed >= shortfall:
                 break
+            # A frozen instance under a kept claim may still belong to a Run
+            # that is executing: every checkpoint freezes the container, and a
+            # Run thawed at a slice boundary keeps its kept claim. Only a Run
+            # between slices has no live lease. On 2026-09-30 skipping this
+            # check evicted a sandbox mid-round and interrupted its Run.
+            if await self.leases.any_live(reservation.run_id):
+                continue
             instance = await self.store.read_instance(reservation.instance_id)
             if instance is None:
                 continue
