@@ -3,7 +3,6 @@ import inspect
 import logging
 import shlex
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from time import monotonic
@@ -382,9 +381,6 @@ class WorkerRuntime:
         # Renewal and slice recording both read the lease version, and both run
         # on this event loop, so one lock removes the interleaving entirely.
         self._lease_lock = asyncio.Lock()
-        # Set when the sandbox memory budget had no room (§21.3): the Run just
-        # requeued would otherwise be claimed straight back and refused again.
-        self._pause_before_claiming = False
 
     async def run_once(self) -> UUID | None:
         """Execute at most one slice. Returns the Run it advanced, if any."""
@@ -407,13 +403,7 @@ class WorkerRuntime:
             except Exception:
                 logger.exception("worker slice failed")
                 advanced = None
-            if self._pause_before_claiming and not stop.is_set():
-                self._pause_before_claiming = False
-                # Not the notifier: a wake-up arrives with every new Run, which
-                # is exactly when there is no room, and would end the pause.
-                with suppress(TimeoutError):
-                    await asyncio.wait_for(stop.wait(), self._settings.idle_poll_seconds)
-            elif advanced is None and not stop.is_set():
+            if advanced is None and not stop.is_set():
                 await self._notifier.wait(self._settings.idle_poll_seconds)
 
     async def _claim(self) -> ClaimedRun | None:
@@ -797,13 +787,21 @@ class WorkerRuntime:
                     "no sandbox yet, ending the slice",
                     extra={"run_id": str(claimed.run.id), "reason": refused.reason.value},
                 )
-                if refused.reason is SandboxRefusal.MEMORY_BUDGET_EXHAUSTED:
-                    self._pause_before_claiming = True
                 await self._record(
                     claimed,
                     handle,
                     context.state_version,
-                    SliceDecision(RunSignal.SLICE_ENDED),
+                    SliceDecision(
+                        RunSignal.SLICE_ENDED,
+                        # The Run waits, not the lane (§21.3): the lane goes on
+                        # to Runs that need no sandbox, and this one is not
+                        # claimed straight back to be refused again.
+                        retry_after_seconds=(
+                            SANDBOX_ROOM_RETRY_SECONDS
+                            if refused.reason is SandboxRefusal.MEMORY_BUDGET_EXHAUSTED
+                            else None
+                        ),
+                    ),
                     _no_round(),
                     executed_ms=0,
                 )
@@ -2644,6 +2642,7 @@ class WorkerRuntime:
             wait_kind=decision.wait_kind,
             wait_seconds=decision.wait_seconds,
             wait_policy=decision.wait_policy,
+            retry_after_seconds=decision.retry_after_seconds,
             checkpoint=_checkpoint(response, judged, goal_decision),
             checkpoint_replay_safe=response.replay_safe,
             checkpoint_effect_status=(
@@ -2748,6 +2747,11 @@ class WorkerRuntime:
                     return
                 handle.version = renewed.version
 
+
+#: How long a Run refused sandbox room waits before it may be claimed again
+#: (§21.3). Churn is the waiting Runs divided by this; a freed slot may sit idle
+#: up to this long.
+SANDBOX_ROOM_RETRY_SECONDS = 10
 
 #: Refusals that end the slice and requeue the Run instead of failing it.
 _NOT_READY = frozenset(

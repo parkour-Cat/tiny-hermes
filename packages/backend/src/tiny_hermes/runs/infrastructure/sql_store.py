@@ -1942,6 +1942,8 @@ class SqlRunStore:
             payload=_slice_payload(command.executed_ms, command.checkpoint),
             extra_events=(*extra, *command.events),
         )
+        if command.retry_after_seconds is not None and run.status == RunState.QUEUED.value:
+            run.claimable_after = now + timedelta(seconds=command.retry_after_seconds)
         lease.released_at = now
         await self._session.flush()
         return await self._snapshot(run, command.capabilities)
@@ -2179,6 +2181,7 @@ class SqlRunStore:
                 SessionRow.head_run_id == RunRow.id,
                 RunRow.blocked_by_run_id.is_(None),
                 RunRow.id.not_in(held),
+                or_(RunRow.claimable_after.is_(None), RunRow.claimable_after <= now),
             )
             .order_by(RunRow.queued_at, RunRow.id)
             .limit(1)

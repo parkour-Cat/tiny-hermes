@@ -319,6 +319,9 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
     queued_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, server_default=text("now()")
     )
+    #: Not claimed before this. Set only when the sandbox memory budget had no
+    #: room (§21.3): claimed straight back, the Run would be refused again.
+    claimable_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     recovery_attempts: Mapped[int] = mapped_column(
         Integer, default=0, server_default=text("0")

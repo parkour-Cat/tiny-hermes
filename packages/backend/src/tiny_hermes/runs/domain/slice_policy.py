@@ -83,6 +83,9 @@ class SliceDecision:
     #: `WAIT_CHILD_RUNS`: a timer and an approval each wait on exactly one
     #: thing, so there is nothing for a policy to choose between.
     wait_policy: WaitPolicy | None = None
+    #: With ``SLICE_ENDED``: seconds before the requeued Run may be claimed
+    #: again. Seconds, not a time, for the reason ``wait_seconds`` gives.
+    retry_after_seconds: int | None = None
 
     @property
     def keeps_lease(self) -> bool:
