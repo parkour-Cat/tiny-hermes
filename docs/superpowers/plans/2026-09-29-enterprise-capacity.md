@@ -132,7 +132,12 @@ API、Worker、scheduler 已经是无状态的，Run 的真相在 Postgres 里�
    - 调低默认的内存上限和 tmpfs 大小；
    - 把 `memswap_limit` 设成等于内存上限，让压力留在沙箱里，而不是把整台主机推进 swap。
 
-   选哪种要先知道超过物理内存时会发生什么，而那一步还没测。
+   超过物理内存时会发生什么，已经测过（[OOM 记录](../verification/2026-09-30-sandbox-oom.md)）：
+   先是变慢（合计 6 GiB 时短消息慢了 5 倍）；合计 9.6 GiB 时 13 秒内耗尽，OOM killer 杀掉了
+   `dockerd`，所有容器都停了。占内存的是 tmpfs 页，杀进程释放不了，所以只有准入能防住。
+7. **服务都是 `restart=no`**（同一份记录）。`dockerd` 一重启，整个栈就一直停着。生产用的
+   compose 要加 `restart: unless-stopped`；Linux 主机上可以再开 `live-restore`。平台自己的
+   恢复是好的：重新拉起后，崩溃时在跑的 24 个 Run 全部完成，没有重复执行的轮次。
 
 **P2：公平与交互体验**：§4 里「还没做」的三项。
 
