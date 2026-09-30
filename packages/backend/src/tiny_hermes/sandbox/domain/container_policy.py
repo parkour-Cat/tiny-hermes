@@ -180,7 +180,8 @@ class ContainerConfig:
             # swap as much again, and tmpfs pages can be swapped, which pushed
             # a whole host into swap on 2026-09-30 before the OOM killer took
             # `dockerd` (§21.3). Past its limit a sandbox now meets its own
-            # cgroup's OOM killer instead.
+            # cgroup's OOM killer instead: filling a tmpfs past it on
+            # 2026-09-30 took that whole container, and only that one.
             "memswap_limit": self.mem_limit,
             "pids_limit": self.pids_limit,
             "tmpfs": dict(self.tmpfs),
