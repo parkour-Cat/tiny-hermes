@@ -6,7 +6,20 @@ from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import Text, column, delete, exists, func, or_, select, text, union, update
+from sqlalchemy import (
+    BindParameter,
+    Text,
+    bindparam,
+    column,
+    delete,
+    exists,
+    func,
+    or_,
+    select,
+    text,
+    union,
+    update,
+)
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB, JSONPATH
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -2312,7 +2325,14 @@ class SqlRunStore:
         7,534 Sessions, run every second ahead of the Scheduler's other work
         (2026-09-30).
         """
-        terminal = [state.value for state in TERMINAL_STATES]
+        # Rendered as literals: a plan cached for a bound list cannot use the
+        # partial indexes this scan relies on.
+        terminal: BindParameter[list[str]] = bindparam(
+            "terminal",
+            sorted(state.value for state in TERMINAL_STATES),
+            expanding=True,
+            literal_execute=True,
+        )
         live = (
             select(
                 RunRow.session_id.label("session_id"),
