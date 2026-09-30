@@ -86,7 +86,9 @@ class Platform:
         )
 
     async def acquire(self, run_id: UUID, **limits: int) -> AcquireResult:
+        """What a Worker does holding a live lease for the Run."""
         lease = self.leases.setdefault(run_id, uuid4())
+        self._leases.renew(run_id=run_id)
         return await self.call(
             lambda c: c.acquire(
                 run_id=run_id, lease_id=lease, workspace_id=WORKSPACE, profile="default"
@@ -95,11 +97,16 @@ class Platform:
         )
 
     async def park(self, run_id: UUID, sandbox_id: UUID) -> None:
-        """What a slice boundary does: freeze, then keep warm."""
-        lease = self.leases[run_id]
-        await self.call(lambda c: c.freeze(run_id=run_id, lease_id=lease, sandbox_id=sandbox_id))
+        """What a slice boundary does: freeze, keep warm, release the lease."""
+        await self.checkpoint(run_id, sandbox_id)
         until = datetime.now(UTC) + timedelta(minutes=5)
         await self.call(lambda c: c.keep(run_id=run_id, sandbox_id=sandbox_id, until=until))
+        self._leases.expire(run_id=run_id)
+
+    async def checkpoint(self, run_id: UUID, sandbox_id: UUID) -> None:
+        """Every round's workspace commit freezes the container first."""
+        lease = self.leases[run_id]
+        await self.call(lambda c: c.freeze(run_id=run_id, lease_id=lease, sandbox_id=sandbox_id))
 
     async def container_of(self, sandbox_id: UUID) -> str:
         async with self._sessions() as session:
@@ -246,3 +253,24 @@ async def test_the_created_container_may_not_swap(platform: Platform, docker_cli
         "HostConfig"
     ]
     assert host["MemorySwap"] == host["Memory"] == 256 * MiB
+
+
+async def test_a_running_runs_sandbox_frozen_for_a_checkpoint_is_not_evicted(
+    platform: Platform,
+) -> None:
+    """Every round's checkpoint freezes the container, and a Run thawed at a
+    slice boundary keeps its `kept` claim: mid-checkpoint, a running Run's
+    sandbox is frozen under a kept claim, like a parked one. On 2026-09-30
+    eviction took such a sandbox and its Run was interrupted mid-round."""
+    running_run = uuid4()
+    made = await platform.acquire(running_run)
+    await platform.park(running_run, made.sandbox_id)
+    assert (await platform.acquire(running_run)).cache_state is CacheState.REUSED
+    await platform.checkpoint(running_run, made.sandbox_id)
+    await platform.acquire(uuid4())
+
+    with pytest.raises(SandboxRefused) as refusal:
+        await platform.acquire(uuid4())
+
+    assert refusal.value.reason is RefusalReason.MEMORY_BUDGET_EXHAUSTED
+    assert platform.state(await platform.container_of(made.sandbox_id)) == "paused"
