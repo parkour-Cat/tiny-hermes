@@ -6,6 +6,7 @@ constraint lives in PostgreSQL and this file proves it does — by asking for th
 `IntegrityError` rather than by asking the store politely.
 """
 
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -278,3 +279,85 @@ async def test_reading_a_reservation_for_an_unknown_run_answers_nothing(
 ) -> None:
     async with opened(sessions) as store:
         assert await store.live_for_run(UUID(int=0)) is None
+
+
+async def test_an_instance_records_the_memory_limit_it_was_created_with(
+    sessions: Sessions,
+) -> None:
+    # Admission counts what each container was given, not what the setting
+    # says now: an operator may lower it while older sandboxes still run.
+    async with opened(sessions) as store:
+        made = await store.reserve(
+            run_id=uuid4(), workspace_id=uuid4(), instance=instance(memory_mb=512)
+        )
+        found = await store.read_instance(made.instance_id)
+
+    assert found is not None
+    assert found.memory_mb == 512
+
+
+async def test_committed_memory_counts_every_claim_that_may_still_hold_a_container(
+    sessions: Sessions,
+) -> None:
+    async with opened(sessions) as store:
+        await store.reserve(run_id=uuid4(), workspace_id=uuid4(), instance=instance(memory_mb=1024))
+        kept = await store.reserve(
+            run_id=uuid4(), workspace_id=uuid4(), instance=instance(memory_mb=512)
+        )
+        await store.keep(kept.id, idle_expires_at=datetime.now(UTC) + timedelta(minutes=5))
+        # Isolated: nobody could confirm the container went, so it still counts.
+        isolated = await store.reserve(
+            run_id=uuid4(), workspace_id=uuid4(), instance=instance(memory_mb=256)
+        )
+        await store.isolate(isolated.id, reason="cleanup_unconfirmed")
+        released = await store.reserve(
+            run_id=uuid4(), workspace_id=uuid4(), instance=instance(memory_mb=2048)
+        )
+        await store.release(released.id)
+
+        committed = await store.committed_memory_mb()
+
+    assert committed == 1024 + 512 + 256
+
+
+async def test_committed_memory_of_nothing_is_zero(sessions: Sessions) -> None:
+    async with opened(sessions) as store:
+        assert await store.committed_memory_mb() == 0
+
+
+async def test_kept_reservations_are_listed_by_the_earliest_deadline_first(
+    sessions: Sessions,
+) -> None:
+    """Eviction's order: the warm sandbox closest to expiring anyway goes first."""
+    now = datetime.now(UTC)
+    async with opened(sessions) as store:
+        later = await store.reserve(run_id=uuid4(), workspace_id=uuid4(), instance=instance())
+        await store.keep(later.id, idle_expires_at=now + timedelta(minutes=4))
+        sooner = await store.reserve(run_id=uuid4(), workspace_id=uuid4(), instance=instance())
+        await store.keep(sooner.id, idle_expires_at=now + timedelta(minutes=1))
+        await store.reserve(run_id=uuid4(), workspace_id=uuid4(), instance=instance())
+
+        kept = await store.keeps_by_deadline()
+
+    assert [reservation.id for reservation in kept] == [sooner.id, later.id]
+
+
+async def test_the_admission_lock_holds_a_second_transaction_until_the_first_ends(
+    sessions: Sessions,
+) -> None:
+    """Two acquires that both counted before either inserted would both fit."""
+    async with sessions() as first:
+        await SqlSandboxStore(first).lock_admission()
+
+        async def second() -> None:
+            async with sessions() as session:
+                await SqlSandboxStore(session).lock_admission()
+                await session.commit()
+
+        waiting = asyncio.create_task(second())
+        await asyncio.sleep(0.3)
+        assert not waiting.done()
+
+        await first.commit()
+
+    await asyncio.wait_for(waiting, timeout=5)
