@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import subprocess
 import sys
 from typing import Any
@@ -7,6 +8,7 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from tiny_hermes.api import cli
 from tiny_hermes.shared.config import Settings
+from tiny_hermes.shared.logging import FieldsFormatter
 
 
 def test_cli_starts_uvicorn_on_public_container_port(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -20,6 +22,29 @@ def test_cli_starts_uvicorn_on_public_container_port(monkeypatch: pytest.MonkeyP
     cli.main()
 
     assert calls == [("tiny_hermes.api.app:app", "0.0.0.0", 8000)]
+
+
+def test_the_api_configures_logging_before_uvicorn_starts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without it the api had no handler of its own: INFO lines were dropped and
+    a WARNING lost its fields. uvicorn's own config leaves the root logger alone."""
+    configured: list[bool] = []
+
+    def fake_run(app: str, *, host: str, port: int) -> None:
+        del app, host, port
+        configured.append(
+            any(isinstance(h.formatter, FieldsFormatter) for h in logging.getLogger().handlers)
+        )
+
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    monkeypatch.setattr(cli.uvicorn, "run", fake_run)
+    try:
+        cli.main()
+    finally:
+        root.handlers[:] = handlers
+        root.setLevel(level)
+
+    assert configured == [True]
 
 
 def _loads_feishu_sdk(module: str) -> bool:
