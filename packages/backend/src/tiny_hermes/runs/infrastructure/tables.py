@@ -579,6 +579,14 @@ class WorkerLeaseRow(IdMixin, Base):
     __tablename__ = "worker_leases"
     __table_args__ = (
         UniqueConstraint("run_id", name="uq_worker_leases_run"),
+        # Every claim excludes Runs holding a live lease. One row per Run ever
+        # claimed; only the unreleased ones belong in this.
+        Index(
+            "ix_worker_leases_live",
+            "expires_at",
+            "run_id",
+            postgresql_where=text("released_at IS NULL"),
+        ),
         CheckConstraint("version > 0", name="ck_worker_leases_version_positive"),
     )
 
