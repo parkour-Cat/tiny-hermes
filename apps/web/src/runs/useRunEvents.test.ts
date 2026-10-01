@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { createElement, type ReactNode } from "react";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 
 import { useRunEvents } from "./useRunEvents";
 import { server } from "../test/server";
@@ -218,13 +218,13 @@ test("a Run the platform does not know stops the reader and is not tried again",
 });
 
 test("leaving the page aborts the connection instead of holding it open", async () => {
-  let signal: AbortSignal | null = null;
-  server.use(
-    http.get(EVENTS_PATH, ({ request }) => {
-      signal = request.signal;
-      return sse([frame(1, "run_created")], true);
-    }),
-  );
+  server.use(http.get(EVENTS_PATH, () => sse([frame(1, "run_created")], true)));
+  // The signal the hook hands to `fetch`, not the handler's `request.signal`.
+  // Node's fetch builds that one as a copy that follows the original through a
+  // WeakRef: after a garbage collection it can miss the abort entirely, so a
+  // busy suite failed this test while the hook had aborted correctly
+  // (2026-10-01: forcing a collection before unmount failed it 10 times of 10).
+  const sent = vi.spyOn(globalThis, "fetch");
 
   const { result, unmount } = renderHook(
     () => useRunEvents({ runId: RUN, workspaceId: WORKSPACE }),
@@ -232,7 +232,12 @@ test("leaving the page aborts the connection instead of holding it open", async 
   );
 
   await waitFor(() => expect(sequences(result.current.entries)).toEqual([1]));
+  const streams = sent.mock.calls
+    .filter(([input]) => String(input).includes(EVENTS_PATH))
+    .map(([, init]) => init?.signal);
+  sent.mockRestore();
   unmount();
 
-  await waitFor(() => expect(signal?.aborted).toBe(true));
+  expect(streams).toHaveLength(1);
+  expect(streams[0]?.aborted).toBe(true);
 });
