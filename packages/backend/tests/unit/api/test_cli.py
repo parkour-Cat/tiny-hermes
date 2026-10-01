@@ -35,14 +35,9 @@ def test_the_api_configures_logging_before_uvicorn_starts(monkeypatch: pytest.Mo
             any(isinstance(h.formatter, FieldsFormatter) for h in logging.getLogger().handlers)
         )
 
-    root = logging.getLogger()
-    handlers, level = list(root.handlers), root.level
     monkeypatch.setattr(cli.uvicorn, "run", fake_run)
-    try:
-        cli.main()
-    finally:
-        root.handlers[:] = handlers
-        root.setLevel(level)
+
+    cli.main()
 
     assert configured == [True]
 

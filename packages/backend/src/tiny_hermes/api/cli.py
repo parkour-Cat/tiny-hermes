@@ -84,6 +84,10 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    # Before uvicorn: its own logging config covers only its loggers, so
+    # without this the api's INFO lines went nowhere and a WARNING lost its
+    # fields. It leaves the root logger alone, so this handler survives it.
+    configure_logging()
     uvicorn.run(
         "tiny_hermes.api.app:app",
         host="0.0.0.0",  # noqa: S104 - container port must accept traffic outside itself

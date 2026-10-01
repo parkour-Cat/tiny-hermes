@@ -1,7 +1,6 @@
 import json
 import logging
 import sys
-from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -9,7 +8,9 @@ import structlog
 from tiny_hermes.shared.logging import FieldsFormatter, configure_logging
 
 
-def test_configure_logging_emits_structured_json(capsys: pytest.CaptureFixture[str]) -> None:
+def test_configure_logging_emits_structured_json(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     configure_logging()
 
     structlog.get_logger("test").info("service_started", request_id="req_1")
@@ -24,15 +25,6 @@ def test_configure_logging_emits_structured_json(capsys: pytest.CaptureFixture[s
 # message alone, so the fields its callers pass as `extra=` were dropped:
 # the Worker's run_id and refusal reason, the controller's memory budget. And
 # the api never configured logging at all, so its INFO lines were dropped too.
-
-
-@pytest.fixture
-def root_handlers() -> Iterator[None]:
-    root = logging.getLogger()
-    handlers, level = list(root.handlers), root.level
-    yield
-    root.handlers[:] = handlers
-    root.setLevel(level)
 
 
 def _record(message: str, **extra: Any) -> logging.LogRecord:
@@ -85,7 +77,7 @@ def test_a_traceback_follows_the_line_that_carries_the_fields() -> None:
 
 
 def test_configured_logging_prints_info_and_its_fields(
-    root_handlers: None, capsys: pytest.CaptureFixture[str]
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     configure_logging()
 
@@ -95,7 +87,7 @@ def test_configured_logging_prints_info_and_its_fields(
 
 
 def test_configuring_twice_does_not_print_everything_twice(
-    root_handlers: None, capsys: pytest.CaptureFixture[str]
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     configure_logging()
     configure_logging()
