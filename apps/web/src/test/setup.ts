@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll } from "vitest";
 
 import { server } from "./server";
@@ -9,6 +9,12 @@ import { server } from "./server";
 // project does not. Without this, a second test in a file queries the first
 // test's tree as well as its own.
 afterEach(cleanup);
+
+// How long `findBy*` and `waitFor` wait before failing; a passing check returns
+// as soon as it holds. The default 1s was too tight for a full page here: the
+// Agent page's first select took 0.6s on an idle machine, and the whole suite
+// under CPU load failed on it in 2 of 3 runs (2026-10-01).
+configure({ asyncUtilTimeout: 5_000 });
 
 beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
 afterEach(() => server.resetHandlers());
