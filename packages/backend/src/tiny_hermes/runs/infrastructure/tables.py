@@ -106,6 +106,15 @@ class SessionMessageRow(IdMixin, CreatedAtMixin, Base):
             ondelete="CASCADE",
         ),
         Index("ix_session_messages_search", "search", postgresql_using="gin"),
+        # A Run's own messages: every Run snapshot reads its first user
+        # message by this, and the reply dispatch its last answer. Without it
+        # each read was a pass over the whole workspace's history.
+        Index(
+            "ix_session_messages_source_run",
+            "source_run_id",
+            "sequence",
+            postgresql_where=text("source_run_id IS NOT NULL"),
+        ),
     )
 
     session_id: Mapped[UUID] = mapped_column(index=True)
@@ -546,6 +555,9 @@ class RunEventRow(IdMixin, Base):
     __table_args__ = (
         UniqueConstraint("run_id", "sequence", name="uq_run_events_sequence"),
         CheckConstraint("sequence > 0", name="ck_run_events_sequence_positive"),
+        # Retention: the Scheduler asks every second for events older than the
+        # cutoff, in the largest table there is.
+        Index("ix_run_events_occurred_at", "occurred_at"),
         CheckConstraint(_in_enum("event_type", RunEventType), name="ck_run_events_event_type"),
         ForeignKeyConstraint(
             ["run_id", "workspace_id"],
@@ -583,6 +595,12 @@ class WorkerLeaseRow(IdMixin, Base):
 class IdempotencyRecordRow(IdMixin, CreatedAtMixin, Base):
     __tablename__ = "idempotency_records"
     __table_args__ = (
+        # Expiry: the Scheduler asks every second which records have expired.
+        Index(
+            "ix_idempotency_records_expiry",
+            "expires_at",
+            postgresql_where=text("expires_at IS NOT NULL"),
+        ),
         UniqueConstraint(
             "workspace_id",
             "caller_type",
