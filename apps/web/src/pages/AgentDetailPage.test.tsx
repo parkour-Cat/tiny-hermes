@@ -430,7 +430,9 @@ test("a developer's edits restore after the real layout finishes loading their r
       <Route path="agents/:agentId" element={<AgentDetailPage />} />
     </Route></Routes></AuthProvider>
   </MemoryRouter></QueryClientProvider></TestTheme>);
-  await waitFor(() => expect(screen.getByRole("button", { name: "保存草稿" })).toBeEnabled(), { timeout: 5000 });
+  // The whole console layout and a role that answers late: on a loaded machine
+  // the button arrived after 6.3-7.6s, never not at all (2026-10-01).
+  await waitFor(() => expect(screen.getByRole("button", { name: "保存草稿" })).toBeEnabled(), { timeout: 15_000 });
   expect(screen.getByLabelText("人格")).toHaveValue("Restore after role check.");
 });
 
