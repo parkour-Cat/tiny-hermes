@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     BindParameter,
+    ColumnElement,
     Text,
     bindparam,
     column,
@@ -25,7 +26,7 @@ from sqlalchemy.dialects.postgresql import JSONB, JSONPATH
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
+from sqlalchemy.orm import InstrumentedAttribute, aliased
 
 from tiny_hermes.agents.domain.delegation import (
     MAX_DELEGATION_DEPTH,
@@ -3579,20 +3580,19 @@ class SqlRunStore:
         if budget is None:
             raise UnknownSession
         summary = _budget_summary(budget)
-        siblings = (
+        # Only the unfinished Runs decide the queue position. Reading every
+        # Run the Session ever had made each snapshot grow with its history: a
+        # long-lived chat Session gains a Run per message (2026-10-01).
+        pending_rows = (
             await self._session.execute(
-                select(RunRow.id, RunRow.status, RunRow.session_sequence)
-                .where(RunRow.session_id == run.session_id)
+                select(RunRow.id, RunRow.status)
+                .where(RunRow.session_id == run.session_id, _unfinished(RunRow.status))
                 .order_by(RunRow.session_sequence)
             )
         ).all()
 
         state = RunState(run.status)
-        pending = [
-            (row_id, RunState(status))
-            for row_id, status, _ in siblings
-            if RunState(status) not in TERMINAL_STATES
-        ]
+        pending = [(row_id, RunState(status)) for row_id, status in pending_rows]
         position, queue_status = _queue_position(run.id, state, pending, session.head_run_id)
         view = RunStateView(
             state=state,
@@ -4214,6 +4214,19 @@ def _text_of(row: SessionMessageRow) -> str:
     on a future block type.
     """
     return _to_message(row).text
+
+
+def _unfinished(status: InstrumentedAttribute[str]) -> ColumnElement[bool]:
+    """Not terminal, with the terminal states rendered as literals: a plan cached
+    for a bound list cannot use `ix_runs_live_by_session`."""
+    return status.not_in(
+        bindparam(
+            "unfinished_states",
+            sorted(state.value for state in TERMINAL_STATES),
+            expanding=True,
+            literal_execute=True,
+        )
+    )
 
 
 def _scan_lock_key(name: str) -> int:

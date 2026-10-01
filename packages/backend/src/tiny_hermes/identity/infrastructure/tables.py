@@ -40,7 +40,11 @@ class UserRow(IdMixin, CreatedAtMixin, Base):
 
 class AuthIdentityRow(IdMixin, CreatedAtMixin, Base):
     __tablename__ = "auth_identities"
-    __table_args__ = (UniqueConstraint("provider", "subject"),)
+    __table_args__ = (
+        UniqueConstraint("provider", "subject"),
+        # Every API request's session check reads the user's first identity.
+        Index("ix_auth_identities_user", "user_id", "created_at"),
+    )
 
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     provider: Mapped[str] = mapped_column(String(32))
