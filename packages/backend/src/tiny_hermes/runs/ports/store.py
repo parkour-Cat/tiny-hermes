@@ -228,6 +228,8 @@ class RecordSliceCommand:
     #: beside a `child_runs` wait — a timer and an approval each wait on one
     #: thing, and there is nothing to choose between.
     wait_policy: WaitPolicy | None = None
+    #: See `SliceDecision.retry_after_seconds`.
+    retry_after_seconds: int | None = None
     #: What this round cost, as `model_catalog.domain.pricing` computed it.
     #: `None` when nothing can be said — no configured price, or an endpoint
     #: that reported no usage — and the store then keeps the Run's total

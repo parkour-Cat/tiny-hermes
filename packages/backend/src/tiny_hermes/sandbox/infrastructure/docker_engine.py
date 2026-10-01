@@ -293,6 +293,21 @@ class DockerEngine:
     async def remove(self, container_id: str) -> None:
         await self._call(self.client.api.remove_container, container_id, force=True)
 
+    async def remove_if_present(self, container_id: str) -> None:
+        """`remove`, where a container that is already gone is what was wanted.
+
+        For eviction, which can reach a container in the same moment as the
+        Scheduler's reclamation of it.
+        """
+        from docker.errors import NotFound  # noqa: PLC0415 - narrow the import
+
+        try:
+            await self.remove(container_id)
+        except DockerUnavailable as failure:
+            if isinstance(failure.__cause__, NotFound):
+                return
+            raise
+
     def _exec_with_stdin(self, exec_id: str, stdin: bytes) -> bytes:
         """Feed stdin whole, close it, then collect the demuxed output.
 

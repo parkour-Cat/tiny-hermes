@@ -192,6 +192,28 @@ async def test_a_long_task_runs_one_workspace_command_per_round() -> None:
     assert third.tool_calls[0].call_id == "long-task-3"
 
 
+async def test_a_long_task_without_a_cache_size_holds_nothing_in_its_sandbox() -> None:
+    # The tier-A acceptance ran this exact command; its numbers stay comparable.
+    response = await DeterministicModelProvider(delay_ms=0).complete(_long_task(1))
+
+    assert response.tool_calls[0].arguments["command"] == "printf 'round 1\\n' >> progress.txt"
+
+
+async def test_a_long_task_can_hold_memory_in_its_sandbox_cache() -> None:
+    response = await DeterministicModelProvider(delay_ms=0).complete(
+        _long_task(2, "rounds=3 cache=64")
+    )
+
+    command = str(response.tool_calls[0].arguments["command"])
+    # The cache is a tmpfs, so a file there is memory the sandbox holds while
+    # frozen. Random bytes, because the VM's swap is zram and zeros would
+    # compress to nothing.
+    assert "head -c 64M /dev/urandom > /workspace/cache/ballast" in command
+    # Written once per sandbox and kept, not once per round.
+    assert "[ -f /workspace/cache/ballast ] ||" in command
+    assert command.endswith("printf 'round 2\\n' >> progress.txt")
+
+
 async def test_a_long_task_finishes_after_the_rounds_its_input_asked_for() -> None:
     response = await DeterministicModelProvider(delay_ms=0).complete(_long_task(4))
 

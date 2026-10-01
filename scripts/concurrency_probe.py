@@ -176,6 +176,12 @@ LONG_SCENARIO = "long_task"
 SANDBOX_LABEL = "tiny-hermes.instance"
 
 
+def long_task_input(rounds: int, *, cache_mb: int) -> str:
+    """A `printf` holds no memory; `cache=` makes the sandbox hold some, the
+    way real tools leave files in a tmpfs cache while the sandbox is frozen."""
+    return f"rounds={rounds}" + (f" cache={cache_mb}" if cache_mb else "")
+
+
 class ProbeConsole(BenchmarkConsole):
     """The drill console, plus an Agent whose budget fits the long task.
 
@@ -350,9 +356,11 @@ class _Sampler:
         self.max_connections = 0
         self.worker_mem_mib: dict[str, float] = {}
         self.worker_cpu_percent: dict[str, float] = {}
-        #: Sandbox containers at the busiest sample, by state: a frozen sandbox
-        #: (between two slices of its Run) is a paused container.
+        #: Each state's own peak: a frozen sandbox (between two slices of its
+        #: Run) is a paused container. The peaks come from different samples,
+        #: so they do not add up to how many sandboxes existed at once.
         self.max_sandboxes: dict[str, int] = {}
+        self.max_sandboxes_at_once = 0
         self.max_sandbox_mem_mib = 0.0
         self._threads = [
             threading.Thread(target=self._sample_database, daemon=True),
@@ -402,6 +410,7 @@ class _Sampler:
         states = count_states(_docker("ps", "-a", "--filter", label, "--format", "{{.State}}"))
         for state, count in states.items():
             self.max_sandboxes[state] = max(self.max_sandboxes.get(state, 0), count)
+        self.max_sandboxes_at_once = max(self.max_sandboxes_at_once, sum(states.values()))
         names = _docker("ps", "--filter", label, "--format", "{{.Names}}").split()
         if not names:
             return
@@ -431,6 +440,7 @@ def probe(
     long_tasks: int = 0,
     rounds: int = 10,
     lead_seconds: float = 5.0,
+    cache_mb: int = 0,
 ) -> dict[str, Any]:
     """Short Runs at `rate`, optionally after `long_tasks` long ones start.
 
@@ -490,7 +500,10 @@ def probe(
             with _Sampler(workspace, workers) as sampler:
                 for index, session in enumerate(long_sessions):
                     run_id, status, _ = console.create_run(
-                        workspace, session, f"rounds={rounds}", f"probe-{label}-long-{index}"
+                        workspace,
+                        session,
+                        long_task_input(rounds, cache_mb=cache_mb),
+                        f"probe-{label}-long-{index}",
                     )
                     if run_id is None or status >= 400:
                         raise SystemExit(f"long task {index} was refused: HTTP {status}")
@@ -538,6 +551,7 @@ def probe(
             "runs": len(offsets),
             "long_tasks": long_tasks,
             "rounds": rounds if long_tasks else 0,
+            "cache_mb": cache_mb if long_tasks else 0,
         },
         "stack": {
             **host_shape(),
@@ -556,6 +570,7 @@ def probe(
             "worker_mem_mib_max": sampler.worker_mem_mib,
             "worker_cpu_percent_max": sampler.worker_cpu_percent,
             "max_sandboxes_by_state": sampler.max_sandboxes,
+            "max_sandboxes_at_once": sampler.max_sandboxes_at_once,
             "max_sandbox_mem_mib": sampler.max_sandbox_mem_mib,
         },
         "series": sampler.series,
@@ -591,8 +606,9 @@ def _report(result: dict[str, Any]) -> None:
         )
     if result["sampled"]["max_sandboxes_by_state"]:
         _log(
-            f"  sandboxes at most {result['sampled']['max_sandboxes_by_state']}, "
-            f"{result['sampled']['max_sandbox_mem_mib']:.0f} MiB"
+            f"  sandboxes at once at most {result['sampled']['max_sandboxes_at_once']}, "
+            f"{result['sampled']['max_sandbox_mem_mib']:.0f} MiB "
+            f"(each state's own peak: {result['sampled']['max_sandboxes_by_state']})"
         )
 
 
@@ -607,6 +623,9 @@ def main() -> int:
     parser.add_argument("--long-tasks", type=int, default=0, help="long tasks started first")
     parser.add_argument("--rounds", type=int, default=10, help="rounds per long task")
     parser.add_argument("--lead-seconds", type=float, default=5.0)
+    parser.add_argument(
+        "--cache-mb", type=int, default=0, help="MiB each long task keeps in its sandbox"
+    )
     arguments = parser.parse_args()
     result = probe(
         arguments.rate,
@@ -616,6 +635,7 @@ def main() -> int:
         long_tasks=arguments.long_tasks,
         rounds=arguments.rounds,
         lead_seconds=arguments.lead_seconds,
+        cache_mb=arguments.cache_mb,
     )
     _report(result)
     print(json.dumps(result, ensure_ascii=False, indent=2))

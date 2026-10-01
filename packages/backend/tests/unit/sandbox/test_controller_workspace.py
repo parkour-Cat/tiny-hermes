@@ -112,6 +112,19 @@ class FakeStore:
         self.reservations[claim.id] = claim
         return claim
 
+    async def live_for_run_locked(self, run_id: UUID) -> SandboxReservation | None:
+        return await self.live_for_run(run_id)
+
+    # Admission: these tests run without a budget, so it never counts.
+    async def lock_admission(self) -> None:
+        return None
+
+    async def committed_memory_mb(self) -> int:
+        return 0
+
+    async def evictable_keeps(self) -> list[SandboxReservation]:
+        return []
+
     async def live_for_run(self, run_id: UUID) -> SandboxReservation | None:
         for claim in self.reservations.values():
             if claim.run_id == run_id and claim.status is not ReservationStatus.RELEASED:

@@ -146,6 +146,10 @@ class StubLeases:
     def expire(self, *, run_id: UUID) -> None:
         self._expired.add(run_id)
 
+    def renew(self, *, run_id: UUID) -> None:
+        """A new slice: the Run holds a live lease again."""
+        self._expired.discard(run_id)
+
     async def holds(self, run_id: UUID, lease_id: UUID) -> bool:
         return (run_id, lease_id) not in self._denied
 

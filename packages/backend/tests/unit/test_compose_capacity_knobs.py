@@ -25,6 +25,9 @@ KNOBS = [
     ("WORKER_MAX_SLICE_SECONDS", "worker"),
     ("WORKER_CONCURRENCY", "worker"),
     ("SANDBOX_IDLE_TTL_SECONDS", "worker"),
+    # Admission is the controller's (§21.3): it sizes each sandbox and counts them.
+    ("SANDBOX_MEMORY_MB", "controller"),
+    ("SANDBOX_MEMORY_BUDGET_MB", "controller"),
 ]
 
 

@@ -510,6 +510,10 @@ def _long_task(request: ModelRequest) -> ModelResponse:
     Counted by `round_index`, which the Run keeps across slices, rather than
     by the tool results still in the request: compaction may drop old ones,
     and a count that went backwards would never finish.
+
+    `cache=M` also keeps M MiB in the sandbox's cache for as long as the
+    sandbox lives. The cache is a tmpfs, so that is memory the sandbox holds
+    between rounds and while frozen, which a `printf` alone never shows.
     """
     last = next(
         (
@@ -543,7 +547,8 @@ def _long_task(request: ModelRequest) -> ModelResponse:
                 call_id=f"long-task-{request.round_index}",
                 name="shell.exec",
                 arguments={
-                    "command": f"printf 'round {request.round_index}\\n' >> progress.txt",
+                    "command": _ballast(_input_number(request, "cache"))
+                    + f"printf 'round {request.round_index}\\n' >> progress.txt",
                     "timeout_seconds": 60,
                 },
             ),
@@ -554,16 +559,31 @@ def _long_task(request: ModelRequest) -> ModelResponse:
 
 
 def _requested_rounds(request: ModelRequest) -> int:
+    return _input_number(request, "rounds") or LONG_TASK_ROUNDS
+
+
+def _input_number(request: ModelRequest, wanted: str) -> int:
+    """A positive `wanted=N` from the latest user message, or 0."""
     index = _last_user_index(request)
     if index < 0:
-        return LONG_TASK_ROUNDS
+        return 0
     for block in request.messages[index].blocks:
         if isinstance(block, TextBlock):
             for word in block.text.split():
                 key, _, value = word.partition("=")
-                if key == "rounds" and value.isdigit() and int(value) > 0:
+                if key == wanted and value.isdigit() and int(value) > 0:
                     return int(value)
-    return LONG_TASK_ROUNDS
+    return 0
+
+
+def _ballast(mebibytes: int) -> str:
+    # Random bytes: the Docker VM this was sized on swaps to zram, where zeros
+    # would compress to almost nothing. Written once per sandbox; a sandbox
+    # recreated after its idle TTL writes it again, as a rebuilt cache would.
+    if not mebibytes:
+        return ""
+    target = "/workspace/cache/ballast"
+    return f"{{ [ -f {target} ] || head -c {mebibytes}M /dev/urandom > {target}; }} && "
 
 
 def _last_user_index(request: ModelRequest) -> int:

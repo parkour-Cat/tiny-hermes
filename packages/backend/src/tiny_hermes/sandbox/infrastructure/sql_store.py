@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.sandbox.domain.models import (
@@ -46,8 +46,12 @@ def _instance(row: SandboxInstanceRow) -> SandboxInstance:
         resource_profile=row.resource_profile,
         boot_id=row.boot_id,
         status=InstanceStatus(row.status),
+        memory_mb=row.memory_mb,
     )
 
+
+#: Taken by sandbox admission and nothing else.
+_ADMISSION_LOCK_KEY = 591_046_227
 
 class SqlSandboxStore:
     def __init__(self, session: AsyncSession) -> None:
@@ -64,6 +68,7 @@ class SqlSandboxStore:
                 resource_profile=instance.resource_profile,
                 boot_id=instance.boot_id,
                 status=instance.status.value,
+                memory_mb=instance.memory_mb,
             )
         )
         row = SandboxReservationRow(
@@ -85,6 +90,23 @@ class SqlSandboxStore:
                 SandboxReservationRow.run_id == run_id,
                 SandboxReservationRow.status.in_([e.value for e in LIVE_RESERVATIONS]),
             )
+        )
+        row = found.scalar_one_or_none()
+        return None if row is None else _reservation(row)
+
+    async def live_for_run_locked(self, run_id: UUID) -> SandboxReservation | None:
+        """`live_for_run`, holding the row until this transaction ends.
+
+        Taken before thawing, so eviction — which skips locked rows — cannot
+        remove the container between this read and the unpause.
+        """
+        found = await self._session.execute(
+            select(SandboxReservationRow)
+            .where(
+                SandboxReservationRow.run_id == run_id,
+                SandboxReservationRow.status.in_([e.value for e in LIVE_RESERVATIONS]),
+            )
+            .with_for_update()
         )
         row = found.scalar_one_or_none()
         return None if row is None else _reservation(row)
@@ -140,6 +162,54 @@ class SqlSandboxStore:
                 SandboxReservationRow.idle_expires_at <= now,
             )
             .order_by(SandboxReservationRow.idle_expires_at)
+        )
+        return [_reservation(row) for row in found.scalars()]
+
+    async def lock_admission(self) -> None:
+        """Held until this transaction ends, by every acquire that adds memory.
+
+        Counting, creating and inserting under it is what stops two acquires
+        from both counting the same free space.
+        """
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"), {"key": _ADMISSION_LOCK_KEY}
+        )
+
+    async def committed_memory_mb(self) -> int:
+        """The limits of every container a live claim may still hold.
+
+        Isolated claims count: nobody could confirm their container went.
+        """
+        total = await self._session.scalar(
+            select(func.coalesce(func.sum(SandboxInstanceRow.memory_mb), 0))
+            .join(
+                SandboxReservationRow,
+                SandboxReservationRow.sandbox_instance_id == SandboxInstanceRow.id,
+            )
+            .where(SandboxReservationRow.status.in_([e.value for e in LIVE_RESERVATIONS]))
+        )
+        return int(total or 0)
+
+    async def evictable_keeps(self) -> list[SandboxReservation]:
+        """Frozen instances under a kept claim, the earliest deadline first.
+
+        Candidates, not verdicts: a thawed instance keeps its `kept` claim
+        while it runs, and every checkpoint freezes it, so the caller must also
+        see that the Run holds no live lease. Locked, skipping any row another
+        transaction holds: the Run that owns it may be thawing it right now.
+        """
+        found = await self._session.execute(
+            select(SandboxReservationRow)
+            .join(
+                SandboxInstanceRow,
+                SandboxInstanceRow.id == SandboxReservationRow.sandbox_instance_id,
+            )
+            .where(
+                SandboxReservationRow.status == ReservationStatus.KEPT.value,
+                SandboxInstanceRow.status == InstanceStatus.FROZEN.value,
+            )
+            .order_by(SandboxReservationRow.idle_expires_at, SandboxReservationRow.id)
+            .with_for_update(of=SandboxReservationRow, skip_locked=True)
         )
         return [_reservation(row) for row in found.scalars()]
 

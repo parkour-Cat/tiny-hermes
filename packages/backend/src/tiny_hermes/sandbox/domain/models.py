@@ -67,6 +67,9 @@ class SandboxInstance:
     #: "the same box" from "a box that looks the same".
     boot_id: str
     status: InstanceStatus
+    #: The limit the container was created with, which admission counts
+    #: (§21.3). 1024 was every instance's limit before it was configurable.
+    memory_mb: int = 1024
 
 
 @dataclass(frozen=True)

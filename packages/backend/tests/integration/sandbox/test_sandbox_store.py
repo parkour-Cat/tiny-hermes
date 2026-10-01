@@ -6,6 +6,7 @@ constraint lives in PostgreSQL and this file proves it does — by asking for th
 `IntegrityError` rather than by asking the store politely.
 """
 
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -253,6 +254,8 @@ async def test_sandbox_instances_has_no_host_path_column(engine: AsyncEngine) ->
         "resource_profile",
         "boot_id",
         "status",
+        # An integer: nothing a path could be written into.
+        "memory_mb",
         "created_at",
         "updated_at",
     }
@@ -278,3 +281,145 @@ async def test_reading_a_reservation_for_an_unknown_run_answers_nothing(
 ) -> None:
     async with opened(sessions) as store:
         assert await store.live_for_run(UUID(int=0)) is None
+
+
+async def test_an_instance_records_the_memory_limit_it_was_created_with(
+    sessions: Sessions,
+) -> None:
+    # Admission counts what each container was given, not what the setting
+    # says now: an operator may lower it while older sandboxes still run.
+    async with opened(sessions) as store:
+        made = await store.reserve(
+            run_id=uuid4(), workspace_id=uuid4(), instance=instance(memory_mb=512)
+        )
+        found = await store.read_instance(made.instance_id)
+
+    assert found is not None
+    assert found.memory_mb == 512
+
+
+async def test_committed_memory_counts_every_claim_that_may_still_hold_a_container(
+    sessions: Sessions,
+) -> None:
+    async with opened(sessions) as store:
+        await store.reserve(run_id=uuid4(), workspace_id=uuid4(), instance=instance(memory_mb=1024))
+        kept = await store.reserve(
+            run_id=uuid4(), workspace_id=uuid4(), instance=instance(memory_mb=512)
+        )
+        await store.keep(kept.id, idle_expires_at=datetime.now(UTC) + timedelta(minutes=5))
+        # Isolated: nobody could confirm the container went, so it still counts.
+        isolated = await store.reserve(
+            run_id=uuid4(), workspace_id=uuid4(), instance=instance(memory_mb=256)
+        )
+        await store.isolate(isolated.id, reason="cleanup_unconfirmed")
+        released = await store.reserve(
+            run_id=uuid4(), workspace_id=uuid4(), instance=instance(memory_mb=2048)
+        )
+        await store.release(released.id)
+
+        committed = await store.committed_memory_mb()
+
+    assert committed == 1024 + 512 + 256
+
+
+async def test_committed_memory_of_nothing_is_zero(sessions: Sessions) -> None:
+    async with opened(sessions) as store:
+        assert await store.committed_memory_mb() == 0
+
+
+async def test_kept_reservations_are_listed_by_the_earliest_deadline_first(
+    sessions: Sessions,
+) -> None:
+    """Eviction's order: the warm sandbox closest to expiring anyway goes first."""
+    now = datetime.now(UTC)
+    async with opened(sessions) as store:
+        later = await store.reserve(run_id=uuid4(), workspace_id=uuid4(), instance=instance())
+        await store.set_instance_status(later.instance_id, InstanceStatus.FROZEN)
+        await store.keep(later.id, idle_expires_at=now + timedelta(minutes=4))
+        sooner = await store.reserve(run_id=uuid4(), workspace_id=uuid4(), instance=instance())
+        await store.set_instance_status(sooner.instance_id, InstanceStatus.FROZEN)
+        await store.keep(sooner.id, idle_expires_at=now + timedelta(minutes=1))
+        await store.reserve(run_id=uuid4(), workspace_id=uuid4(), instance=instance())
+
+        kept = await store.evictable_keeps()
+
+    assert [reservation.id for reservation in kept] == [sooner.id, later.id]
+
+
+async def test_the_admission_lock_holds_a_second_transaction_until_the_first_ends(
+    sessions: Sessions,
+) -> None:
+    """Two acquires that both counted before either inserted would both fit."""
+    async with sessions() as first:
+        await SqlSandboxStore(first).lock_admission()
+
+        async def second() -> None:
+            async with sessions() as session:
+                await SqlSandboxStore(session).lock_admission()
+                await session.commit()
+
+        waiting = asyncio.create_task(second())
+        await asyncio.sleep(0.3)
+        assert not waiting.done()
+
+        await first.commit()
+
+    await asyncio.wait_for(waiting, timeout=5)
+
+
+async def test_an_instance_from_before_the_column_counts_as_the_old_fixed_limit(
+    sessions: Sessions,
+) -> None:
+    """Revision 0067's backfill: every earlier instance was created with 1024."""
+    instance_id = uuid4()
+    async with sessions() as session:
+        await session.execute(
+            text(
+                "INSERT INTO sandbox_instances "
+                "(id, container_id, image_digest, resource_profile, boot_id, status, "
+                " created_at, updated_at) "
+                "VALUES (:id, :container, :digest, 'default', 'boot', 'running', now(), now())"
+            ),
+            {"id": instance_id, "container": "e" * 64, "digest": DIGEST},
+        )
+        found = await SqlSandboxStore(session).read_instance(instance_id)
+        await session.commit()
+
+    assert found is not None
+    assert found.memory_mb == 1024
+
+
+async def test_only_a_frozen_instance_under_a_kept_claim_can_be_evicted(
+    sessions: Sessions,
+) -> None:
+    """A thawed instance keeps its `kept` claim while it runs; evicting by the
+    claim alone would destroy a container a Worker is executing in."""
+    until = datetime.now(UTC) + timedelta(minutes=5)
+    async with opened(sessions) as store:
+        frozen = await store.reserve(run_id=uuid4(), workspace_id=uuid4(), instance=instance())
+        await store.set_instance_status(frozen.instance_id, InstanceStatus.FROZEN)
+        await store.keep(frozen.id, idle_expires_at=until)
+        thawed = await store.reserve(run_id=uuid4(), workspace_id=uuid4(), instance=instance())
+        await store.keep(thawed.id, idle_expires_at=until)
+        await store.reserve(run_id=uuid4(), workspace_id=uuid4(), instance=instance())
+
+        candidates = await store.evictable_keeps()
+
+    assert [candidate.id for candidate in candidates] == [frozen.id]
+
+
+async def test_a_claim_its_own_run_is_thawing_is_skipped_by_eviction(
+    sessions: Sessions,
+) -> None:
+    run_id = uuid4()
+    async with opened(sessions) as store:
+        made = await store.reserve(run_id=run_id, workspace_id=uuid4(), instance=instance())
+        await store.set_instance_status(made.instance_id, InstanceStatus.FROZEN)
+        await store.keep(made.id, idle_expires_at=datetime.now(UTC) + timedelta(minutes=5))
+
+    async with sessions() as thawing:
+        held = await SqlSandboxStore(thawing).live_for_run_locked(run_id)
+        assert held is not None
+        async with opened(sessions) as evicting:
+            assert await evicting.evictable_keeps() == []
+        await thawing.commit()

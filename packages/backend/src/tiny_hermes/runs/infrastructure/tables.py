@@ -53,6 +53,9 @@ class SessionRow(IdMixin, CreatedAtMixin, Base):
     __tablename__ = "sessions"
     __table_args__ = (
         UniqueConstraint("id", "workspace_id", name="uq_sessions_id_workspace"),
+        # The head scan's other starting point: a Session with no head and no
+        # live Run cannot break the FIFO invariant.
+        Index("ix_sessions_with_head", "id", postgresql_where=text("head_run_id IS NOT NULL")),
         CheckConstraint(_in_enum("session_mode", SessionMode), name="ck_sessions_session_mode"),
         CheckConstraint(_in_enum("caller_type", CallerType), name="ck_sessions_caller_type"),
         CheckConstraint("next_run_sequence > 0", name="ck_sessions_next_run_sequence"),
@@ -255,6 +258,14 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
             "id",
             postgresql_where=text("status = 'queued'"),
         ),
+        # The Scheduler's head scan, every second: it must read live Runs, and
+        # a finished Run never needs to be in it (§11.1).
+        Index(
+            "ix_runs_live_by_session",
+            "session_id",
+            "session_sequence",
+            postgresql_where=text("status NOT IN ('completed', 'failed', 'cancelled')"),
+        ),
         # §13's third clause, in the schema rather than in a code path. A child
         # Agent may not create a grandchild, and the creation path refuses one
         # — but a refusal somebody can forget to write is a different guarantee
@@ -319,6 +330,9 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
     queued_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, server_default=text("now()")
     )
+    #: Not claimed before this. Set only when the sandbox memory budget had no
+    #: room (§21.3): claimed straight back, the Run would be refused again.
+    claimable_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     recovery_attempts: Mapped[int] = mapped_column(
         Integer, default=0, server_default=text("0")

@@ -6,7 +6,20 @@ from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import Text, column, delete, exists, func, or_, select, text, update
+from sqlalchemy import (
+    BindParameter,
+    Text,
+    bindparam,
+    column,
+    delete,
+    exists,
+    func,
+    or_,
+    select,
+    text,
+    union,
+    update,
+)
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.dialects.postgresql import JSONB, JSONPATH
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -1942,6 +1955,8 @@ class SqlRunStore:
             payload=_slice_payload(command.executed_ms, command.checkpoint),
             extra_events=(*extra, *command.events),
         )
+        if command.retry_after_seconds is not None and run.status == RunState.QUEUED.value:
+            run.claimable_after = now + timedelta(seconds=command.retry_after_seconds)
         lease.released_at = now
         await self._session.flush()
         return await self._snapshot(run, command.capabilities)
@@ -2179,6 +2194,7 @@ class SqlRunStore:
                 SessionRow.head_run_id == RunRow.id,
                 RunRow.blocked_by_run_id.is_(None),
                 RunRow.id.not_in(held),
+                or_(RunRow.claimable_after.is_(None), RunRow.claimable_after <= now),
             )
             .order_by(RunRow.queued_at, RunRow.id)
             .limit(1)
@@ -2301,47 +2317,60 @@ class SqlRunStore:
         return await self._session.scalar(select(RunRow.workspace_id).where(RunRow.id == run_id))
 
     async def sessions_needing_repair(self, limit: int) -> Sequence[UUID]:
-        """Sessions whose head or blockers disagree with the FIFO invariant."""
+        """Sessions whose head or blockers disagree with the FIFO invariant.
+
+        Every condition below needs a head or a live Run, so the scan starts
+        from Sessions with one or the other and never visits finished history.
+        It used to test every Session and read `runs` once for each: 4 s over
+        7,534 Sessions, run every second ahead of the Scheduler's other work
+        (2026-09-30).
+        """
+        # Rendered as literals: a plan cached for a bound list cannot use the
+        # partial indexes this scan relies on.
+        terminal: BindParameter[list[str]] = bindparam(
+            "terminal",
+            sorted(state.value for state in TERMINAL_STATES),
+            expanding=True,
+            literal_execute=True,
+        )
         live = (
             select(
                 RunRow.session_id.label("session_id"),
                 func.min(RunRow.session_sequence).label("smallest"),
             )
-            .where(RunRow.status.not_in([state.value for state in TERMINAL_STATES]))
+            .where(RunRow.status.not_in(terminal))
             .group_by(RunRow.session_id)
             .subquery()
         )
-        head = select(RunRow.session_id, RunRow.session_sequence, RunRow.status).subquery()
+        candidates = union(
+            select(SessionRow.id.label("id")).where(SessionRow.head_run_id.is_not(None)),
+            select(live.c.session_id.label("id")),
+        ).subquery()
+        # An alias, not SessionRow: SQLAlchemy would correlate SessionRow with
+        # the outer query and run this once per Session again.
+        owner = aliased(SessionRow)
+        misblocked = (
+            select(RunRow.session_id)
+            .join(owner, owner.id == RunRow.session_id)
+            .where(
+                RunRow.status.not_in(terminal),
+                RunRow.id != owner.head_run_id,
+                RunRow.blocked_by_run_id.is_distinct_from(owner.head_run_id),
+            )
+        )
+        head = aliased(RunRow)
         statement = (
             select(SessionRow.id)
+            .join(candidates, candidates.c.id == SessionRow.id)
             .outerjoin(live, live.c.session_id == SessionRow.id)
-            .outerjoin(
-                head,
-                (head.c.session_id == SessionRow.id) & (SessionRow.head_run_id.is_not(None)),
-            )
+            .outerjoin(head, head.id == SessionRow.head_run_id)
             .where(
                 ((SessionRow.head_run_id.is_(None)) & (live.c.smallest.is_not(None)))
                 | ((SessionRow.head_run_id.is_not(None)) & (live.c.smallest.is_(None)))
-                | SessionRow.id.in_(
-                    select(RunRow.session_id).where(
-                        RunRow.status.not_in([state.value for state in TERMINAL_STATES]),
-                        RunRow.id != SessionRow.head_run_id,
-                        RunRow.blocked_by_run_id.is_distinct_from(SessionRow.head_run_id),
-                    )
-                )
-                | SessionRow.id.in_(
-                    select(RunRow.session_id).where(
-                        RunRow.id == SessionRow.head_run_id,
-                        RunRow.session_sequence > live.c.smallest,
-                    )
-                )
-                | SessionRow.head_run_id.in_(
-                    select(RunRow.id).where(
-                        RunRow.status.in_([state.value for state in TERMINAL_STATES])
-                    )
-                )
+                | SessionRow.id.in_(misblocked)
+                | ((head.session_id == SessionRow.id) & (head.session_sequence > live.c.smallest))
+                | head.status.in_(terminal)
             )
-            .distinct()
             .limit(limit)
         )
         rows = await self._session.scalars(statement)

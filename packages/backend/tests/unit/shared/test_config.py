@@ -96,6 +96,7 @@ WORKSPACE_BOUNDS = [
     ("artifact_max_bytes", 104_857_600, 1_048_576, 1_073_741_824),
     ("run_artifact_max_bytes", 524_288_000, 1_048_576, 10_737_418_240),
     ("sandbox_cache_mb", 512, 64, 4_096),
+    ("sandbox_memory_mb", 1_024, 256, 32_768),
     ("sandbox_cache_inodes", 200_000, 10_000, 1_000_000),
 ]
 
@@ -179,3 +180,26 @@ def test_a_port_that_is_not_one_stops_the_process_starting(value: str) -> None:
     """Refused where an operator is looking, rather than at the first call."""
     with pytest.raises(ValidationError):
         _settings(egress_allowed_ports=value)
+
+
+def test_the_sandbox_memory_budget_defaults_to_half_the_host_at_controller_start() -> None:
+    # None here; the controller reads the host's memory, which Settings cannot.
+    assert _settings().sandbox_memory_budget_mb is None
+    assert _settings(sandbox_memory_budget_mb=4_096).sandbox_memory_budget_mb == 4_096
+
+
+def test_a_budget_smaller_than_one_sandbox_is_refused() -> None:
+    # It would admit nothing, and every Run with a tool would wait forever.
+    assert _settings(sandbox_memory_mb=512, sandbox_memory_budget_mb=512) is not None
+    with pytest.raises(ValidationError, match="sandbox_memory_budget_mb"):
+        _settings(sandbox_memory_mb=1_024, sandbox_memory_budget_mb=1_023)
+
+
+def test_an_empty_budget_in_the_environment_means_half_the_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compose passes `${SANDBOX_MEMORY_BUDGET_MB:-}`, which is "" when unset;
+    parsed as an integer that stopped every service sharing the variable."""
+    monkeypatch.setenv("SANDBOX_MEMORY_BUDGET_MB", "")
+
+    assert _settings().sandbox_memory_budget_mb is None

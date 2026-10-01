@@ -778,19 +778,30 @@ class WorkerRuntime:
                 profile=DEFAULT_PROFILE.name,
             )
         except SandboxRefused as refused:
-            if refused.reason is SandboxRefusal.ALREADY_RESERVED:
-                # A previous slice's container is still being reclaimed. That is
-                # the platform being briefly not ready, not this Run being over,
+            if refused.reason in _NOT_READY:
+                # A previous slice's container is still being reclaimed, or the
+                # sandbox memory budget has no room (§21.3). That is the
+                # platform being briefly not ready, not this Run being over,
                 # so the slice ends and the Run waits its turn again.
                 logger.info(
-                    "sandbox still held, ending the slice",
-                    extra={"run_id": str(claimed.run.id)},
+                    "no sandbox yet, ending the slice",
+                    extra={"run_id": str(claimed.run.id), "reason": refused.reason.value},
                 )
                 await self._record(
                     claimed,
                     handle,
                     context.state_version,
-                    SliceDecision(RunSignal.SLICE_ENDED),
+                    SliceDecision(
+                        RunSignal.SLICE_ENDED,
+                        # The Run waits, not the lane (§21.3): the lane goes on
+                        # to Runs that need no sandbox, and this one is not
+                        # claimed straight back to be refused again.
+                        retry_after_seconds=(
+                            SANDBOX_ROOM_RETRY_SECONDS
+                            if refused.reason is SandboxRefusal.MEMORY_BUDGET_EXHAUSTED
+                            else None
+                        ),
+                    ),
                     _no_round(),
                     executed_ms=0,
                 )
@@ -2631,6 +2642,7 @@ class WorkerRuntime:
             wait_kind=decision.wait_kind,
             wait_seconds=decision.wait_seconds,
             wait_policy=decision.wait_policy,
+            retry_after_seconds=decision.retry_after_seconds,
             checkpoint=_checkpoint(response, judged, goal_decision),
             checkpoint_replay_safe=response.replay_safe,
             checkpoint_effect_status=(
@@ -2734,6 +2746,17 @@ class WorkerRuntime:
                     handle.lost = True
                     return
                 handle.version = renewed.version
+
+
+#: How long a Run refused sandbox room waits before it may be claimed again
+#: (§21.3). Churn is the waiting Runs divided by this; a freed slot may sit idle
+#: up to this long.
+SANDBOX_ROOM_RETRY_SECONDS = 10
+
+#: Refusals that end the slice and requeue the Run instead of failing it.
+_NOT_READY = frozenset(
+    {SandboxRefusal.ALREADY_RESERVED, SandboxRefusal.MEMORY_BUDGET_EXHAUSTED}
+)
 
 
 def _streamer_of(sandbox: SandboxSession) -> StreamedCommandRunner | None:
