@@ -143,8 +143,8 @@ API、Worker、scheduler 已经是无状态的，Run 的真相在 Postgres 里�
    现场还暴露并修掉了一个回收 bug：会误删正在检查点的 Run 的沙箱。
 9. **沙箱在自己内部被 OOM 杀掉之后，它的 Run 会怎样**，还没测。禁止 swap 以后，超出上限的沙箱
    会被整个杀掉。
-10. **日志看不到 `extra=` 字段**：`configure_logging` 的格式是 `%(message)s`，整个项目的 run_id、
-    拒绝原因、controller 的预算都没有打印出来。
+10. ~~**日志看不到 `extra=` 字段**~~ **已修**（[验收记录](../verification/2026-09-30-log-fields.md)）：
+    每条日志后面追加 `key=value`；api 进程原来根本没配置日志，INFO 整条丢失，现在也配置了。
 11. **`SANDBOX_START_ATTEMPTS` 没有任何代码读它**。
 12. ~~**调度器的会话队首巡检随历史数据变慢，而且一直占着 Postgres**~~ **已修**
     （[验收记录](../verification/2026-09-30-head-scan.md)）：只从「有队首」或「有未结束 Run」的
