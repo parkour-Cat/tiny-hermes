@@ -61,17 +61,33 @@ async def test_an_unnameable_error_keeps_the_transport_error() -> None:
 class _SilentClient:
     """A client that could not get an answer at all."""
 
+    def __init__(self, failure: ControllerClient.Unreachable) -> None:
+        self._failure = failure
+
     async def call(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         del action, payload
-        raise ControllerClient.Unreachable("the controller closed without answering")
+        raise self._failure
 
 
-async def test_an_acquire_nobody_answered_arrives_as_the_platform_type() -> None:
-    """The Worker waits on this rather than failing the Run, and it should not
-    have to import the socket client to recognise it."""
-    sandbox = SandboxClient(cast(ControllerClient, _SilentClient()))
-
-    with pytest.raises(SandboxUnreachable):
+async def _acquire_against(failure: ControllerClient.Unreachable) -> SandboxUnreachable:
+    sandbox = SandboxClient(cast(ControllerClient, _SilentClient(failure)))
+    with pytest.raises(SandboxUnreachable) as unreachable:
         await sandbox.acquire(
             run_id=uuid4(), lease_id=uuid4(), workspace_id=uuid4(), profile="default"
         )
+    return unreachable.value
+
+
+async def test_an_acquire_that_never_connected_was_not_sent() -> None:
+    """The Worker requeues this one: nothing can have been reserved."""
+    failure = await _acquire_against(ControllerClient.NotConnected("connection refused"))
+
+    assert failure.sent is False
+
+
+async def test_an_acquire_that_connected_and_heard_nothing_may_have_been_sent() -> None:
+    failure = await _acquire_against(
+        ControllerClient.Unreachable("the controller closed without answering")
+    )
+
+    assert failure.sent is True

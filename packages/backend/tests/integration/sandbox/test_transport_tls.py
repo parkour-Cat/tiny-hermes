@@ -138,15 +138,16 @@ async def test_an_expired_caller_certificate_is_not_heard(
     assert spy.calls == []
 
 
-async def test_an_acquire_with_an_expired_certificate_is_one_the_worker_waits_on(
+async def test_an_expired_caller_certificate_cannot_be_told_from_a_lost_answer(
     controller_pki: Pki, tmp_path: Path
 ) -> None:
-    """The case that makes "only a failed connect is retried" the wrong rule.
+    """Why an expired Worker certificate interrupts rather than requeues.
 
     TLS 1.3 finishes the client's half of the handshake before the server has
     looked at the client's certificate, so the refusal arrives after the
     request was written, as a connection closed without an answer. Measured
-    2026-10-21: neither `connect()` nor an `ssl.SSLError` sees it.
+    2026-10-21: neither `connect()` nor an `ssl.SSLError` sees it, and from
+    the Worker's side it is the same as a Controller that acted and then died.
     """
     ca = load_pair(controller_pki.directory / "ca.pem", controller_pki.directory / "ca.key")
     long_ago = datetime.now(UTC) - timedelta(days=400)
@@ -160,7 +161,7 @@ async def test_an_acquire_with_an_expired_certificate_is_one_the_worker_waits_on
     server = await _serve(controller_pki, spy)
     try:
         sandbox = SandboxClient(_client(server, client_context(files)))
-        with pytest.raises(SandboxUnreachable):
+        with pytest.raises(SandboxUnreachable) as unreachable:
             await sandbox.acquire(
                 run_id=uuid4(), lease_id=uuid4(), workspace_id=uuid4(), profile="default"
             )
@@ -168,17 +169,42 @@ async def test_an_acquire_with_an_expired_certificate_is_one_the_worker_waits_on
         await server.stop()
 
     assert spy.calls == []
+    assert unreachable.value.sent is True
 
 
-async def test_an_acquire_with_nothing_listening_is_one_the_worker_waits_on(
-    socket_dir: Path,
+async def test_an_untrusted_controller_is_refused_before_anything_is_sent(
+    controller_pki: Pki, tmp_path: Path
 ) -> None:
+    """The other direction is checked by the client itself, inside `connect()`."""
+    ca = load_pair(controller_pki.directory / "ca.pem", controller_pki.directory / "ca.key")
+    write_pair(tmp_path, "controller", issue(ca, role=Role.CONTROLLER, hosts=["other.internal"]))
+    elsewhere = TlsFiles(
+        ca_file=controller_pki.files(Role.WORKER).ca_file,
+        cert_file=str(tmp_path / "controller.pem"),
+        key_file=str(tmp_path / "controller.key"),
+    )
+    server = await _serve(controller_pki, Spy(), certificate=elsewhere)
+    try:
+        sandbox = SandboxClient(_client(server, client_context(controller_pki.files(Role.WORKER))))
+        with pytest.raises(SandboxUnreachable) as unreachable:
+            await sandbox.acquire(
+                run_id=uuid4(), lease_id=uuid4(), workspace_id=uuid4(), profile="default"
+            )
+    finally:
+        await server.stop()
+
+    assert unreachable.value.sent is False
+
+
+async def test_an_acquire_with_nothing_listening_was_not_sent(socket_dir: Path) -> None:
     sandbox = SandboxClient(ControllerClient(str(socket_dir / "gone.sock"), timeout=5.0))
 
-    with pytest.raises(SandboxUnreachable):
+    with pytest.raises(SandboxUnreachable) as unreachable:
         await sandbox.acquire(
             run_id=uuid4(), lease_id=uuid4(), workspace_id=uuid4(), profile="default"
         )
+
+    assert unreachable.value.sent is False
 
 
 async def test_a_controller_under_another_name_is_not_trusted(

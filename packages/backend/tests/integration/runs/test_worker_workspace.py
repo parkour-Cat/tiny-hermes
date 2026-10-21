@@ -874,6 +874,7 @@ async def test_a_run_with_no_sandbox_room_waits_in_the_queue_rather_than_failing
     assert 5 < wait <= 10, "§21.3: the Run waits ten seconds before it is claimed again"
 
 
+@dataclass
 class UnreachableSandbox(GatewaySandbox):
     """A Controller the Worker could not get an answer from.
 
@@ -881,9 +882,11 @@ class UnreachableSandbox(GatewaySandbox):
     listening, and both Runs it claimed failed for good.
     """
 
+    sent: bool = False
+
     async def acquire(self, **_: Any) -> Any:
         self.calls.append("acquire")
-        raise SandboxUnreachable("the controller closed without answering")
+        raise SandboxUnreachable("no answer", sent=self.sent)
 
 
 class BrokenSandbox(GatewaySandbox):
@@ -915,6 +918,27 @@ async def test_a_run_that_cannot_reach_the_controller_waits_rather_than_failing(
     assert await _roles(engine, run) == ["user"]
     wait = await _seconds_until_claimable(engine, run)
     assert 25 < wait <= 30, "every retry costs a model call, so it waits longer than for room"
+
+
+async def test_an_acquire_that_may_have_reached_the_controller_interrupts(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    objects: MinioObjectStore,
+    tooled_agent: Callable[[list[str]], str],
+) -> None:
+    """It may have made a reservation nobody heard about. Requeued, the Run's
+    next acquire would meet that reservation as `already_reserved` again and
+    again, since only an interrupted Run's reservation is isolated and
+    reclaimed by the Scheduler."""
+    run, _ = _submit(client, scope, tooled_agent(["shell.exec"]))
+    sandbox = UnreachableSandbox(sent=True)
+
+    await _drive(engine, Recording(sandbox, _tool()), sandbox, objects)
+
+    assert (await _run_row(engine, run)).status == "interrupted"
+    assert "run_failed" not in await _events_of(engine, run)
+    assert await _roles(engine, run) == ["user"]
 
 
 async def test_a_controller_answer_the_worker_cannot_use_still_fails_the_run(
