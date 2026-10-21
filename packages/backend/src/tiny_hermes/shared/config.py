@@ -160,7 +160,6 @@ class Settings(BaseSettings):
     #: the host's memory, read by the controller when it starts: Settings runs
     #: in every process and only the controller's host is the one that counts.
     sandbox_memory_budget_mb: int | None = Field(default=None, ge=256)
-    sandbox_start_attempts: int = Field(default=3, ge=1, le=5)
     shell_timeout_seconds: int = Field(default=60, ge=1, le=900)
     shell_output_bytes: int = Field(default=1_048_576, ge=1_024, le=10_485_760)
 
