@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from tiny_hermes.api import cli
+from tiny_hermes.sandbox.transport.tls import Role
 from tiny_hermes.shared.config import Settings
 from tiny_hermes.shared.logging import FieldsFormatter
 
@@ -175,7 +176,10 @@ async def _serve_workers(
     monkeypatch.setattr(cli, "_notifier", new_notifier)
     monkeypatch.setattr(cli, "_workspace", nothing)
     monkeypatch.setattr(cli, "_ensure_bucket", no_bucket)
-    monkeypatch.setattr(cli, "_controller", nothing)
+    def no_controller(_: Settings, __: Role) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "_controller", no_controller)
     monkeypatch.setattr(cli, "WorkerRuntime", FakeRuntime)
     monkeypatch.setattr(cli, "_stop_on_termination", lambda: stop)
 
