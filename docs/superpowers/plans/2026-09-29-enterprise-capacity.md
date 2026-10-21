@@ -145,7 +145,7 @@ API、Worker、scheduler 已经是无状态的，Run 的真相在 Postgres 里�
    会被整个杀掉。
 10. ~~**日志看不到 `extra=` 字段**~~ **已修**（[验收记录](../verification/2026-09-30-log-fields.md)）：
     每条日志后面追加 `key=value`；api 进程原来根本没配置日志，INFO 整条丢失，现在也配置了。
-11. **`SANDBOX_START_ATTEMPTS` 没有任何代码读它**。
+11. ~~**`SANDBOX_START_ATTEMPTS` 没有任何代码读它**~~ **已删**（M1 沙箱设计 §11 已改）：设计原本写的是「确认在容器存在之前失败，就有限次重试」，但重试从来没实现。也不补做：Worker 没法确认「容器还不存在」；能确认的失败大多每次都一样，重试没用；会自己恢复的失败大多表现为超时，偏偏确认不了。所以启动失败直接判 `sandbox_start_failed`，和现在的行为一致。
 12. ~~**调度器的会话队首巡检随历史数据变慢，而且一直占着 Postgres**~~ **已修**
     （[验收记录](../verification/2026-09-30-head-scan.md)）：只从「有队首」或「有未结束 Run」的
     会话出发，并加两个部分索引。本机单次扫描从约 4 秒降到 2–5 毫秒，空闲时 Postgres 从 101% 降到
@@ -158,7 +158,7 @@ API、Worker、scheduler 已经是无状态的，Run 的真相在 Postgres 里�
     API 每个请求的登录校验、Worker 每次领取都缺索引；每个 Run 快照都会读出同一会话里的全部 Run。
     修复后，在大数据量下领取从 1139 ms 降到 4.5 ms，登录校验从 5.6 ms 降到 0.5 ms。渠道收消息的
     路径没有覆盖到。
-15. **前端有 3 条依赖时序的测试不稳定**，会让 CI 偶尔无故变红：`AgentDetailPage` 的「真实布局
+15. ~~**前端有 3 条依赖时序的测试不稳定**~~ **已修**（PR #112，[验收记录](../verification/2026-10-01-flaky-web-tests.md)：`useRunEvents` 那条改为检查 hook 自己的中断信号，另外两条的等待时间按负载下的实测值放宽）。顺带修了出站范围那条偶发的 e2e（PR #114，[验收记录](../verification/2026-10-21-flaky-outbound-e2e.md)）。原来的描述：会让 CI 偶尔无故变红：`AgentDetailPage` 的「真实布局
     加载完后恢复开发者的编辑」、`AgentModelPolicy` 的「确定性选择仍发送确定性策略」、
     `useRunEvents` 的「离开页面时中断连接」。单独跑都能通过，整套跑时偶尔失败；#110 的推送 CI
     就因为第三条失败过一次，重跑后通过。

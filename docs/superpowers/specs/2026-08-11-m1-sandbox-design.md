@@ -338,13 +338,30 @@ parse.
 
 | Failure | Result | Decided by |
 |---|---|---|
-| Start fails, confirmably, before the container exists | bounded retry, then `failed` with `sandbox_start_failed` | Controller reports; Worker retries |
+| Start fails | `failed` with `sandbox_start_failed`, no retry (amended 2026-10-21, see below) | Worker |
 | Command times out | `command_timeout` tool result | Controller; the loop decides next |
 | Connection lost mid-execute | `interrupted` | Worker |
 | Freeze fails at a slice boundary | `interrupted` — never a quiet requeue | Worker |
 | Destroy result unclear | `interrupted`, instance marked `isolated` | Worker or Scheduler |
 | Disk or file-count ceiling reached | safe checkpoint, then `paused(limit)` | Worker |
 | Lease expired with a live instance | isolate, then freeze or destroy, then decide recovery | Scheduler |
+
+**Amended 2026-10-21: a start failure is not retried.** The first version said
+"bounded retry" for a start that fails confirmably before the container exists,
+with `sandbox_start_attempts` (default 3) as the bound. That retry was never
+built and the setting was never read, so it is removed rather than left
+promising a protection nobody has. A retry is not added either, because:
+
+- nothing confirms "before the container exists": past a decided refusal the
+  Controller answers with an exception's class name, and nobody checks whether
+  `create` left a container behind;
+- the failures that *can* be confirmed are mostly deterministic (a missing
+  image, a configuration Docker rejects), and retrying them changes nothing;
+- the transient ones (a daemon restarting, a daemon too busy to answer) mostly
+  surface as timeouts, which are exactly the outcomes that cannot be confirmed.
+
+A memory budget with no room is not a start failure: it is a refusal decided
+before Docker is asked, and the Run waits its turn (product design §21.3).
 
 There is no host-execution fallback anywhere in that table, and a test asserts
 the absence: no code path outside the Controller may start a process, which is
@@ -365,7 +382,6 @@ enforced the way the HTTP ban is — `subprocess`, `os.system`, and
 | `sandbox_tmp_mb` | 256 | |
 | `shell_timeout_seconds` | 60 | per call ceiling |
 | `shell_output_bytes` | 1048576 | into the message |
-| `sandbox_start_attempts` | 3 | |
 
 ## 13. Verification strategy
 
