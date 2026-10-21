@@ -121,7 +121,7 @@ from tiny_hermes.runs.ports.store import (
     StoredSummary,
 )
 from tiny_hermes.sandbox.application.controller import RefusalReason as SandboxRefusal
-from tiny_hermes.sandbox.application.controller import SandboxRefused
+from tiny_hermes.sandbox.application.controller import SandboxRefused, SandboxUnreachable
 from tiny_hermes.sandbox.domain.command import SandboxCommand
 from tiny_hermes.sandbox.domain.container_policy import DEFAULT_PROFILE
 from tiny_hermes.sandbox.domain.models import CacheState
@@ -833,6 +833,29 @@ class WorkerRuntime:
             logger.exception("sandbox refused", extra={"run_id": str(claimed.run.id)})
             await self._fail(
                 claimed, handle, context, f"sandbox_{refused.reason.value}", spent, executed_ms
+            )
+            return None
+        except SandboxUnreachable as unreachable:
+            # The Controller on another host, or this Worker's certificate,
+            # is briefly not there. Failing the Run made a network blip
+            # permanent for whoever sent it (tier B acceptance, finding 1).
+            # Waiting is bounded by the Run's own model-call budget, since
+            # each attempt spends the call that asked for the tool.
+            logger.warning(
+                "controller unreachable at acquire, ending the slice",
+                extra={"run_id": str(claimed.run.id), "error": str(unreachable)},
+            )
+            await self._record(
+                claimed,
+                handle,
+                context.state_version,
+                SliceDecision(
+                    RunSignal.SLICE_ENDED,
+                    retry_after_seconds=CONTROLLER_UNREACHABLE_RETRY_SECONDS,
+                ),
+                spent,
+                executed_ms,
+                prices=context.prices,
             )
             return None
         except Exception:
@@ -2806,6 +2829,11 @@ class WorkerRuntime:
 #: (§21.3). Churn is the waiting Runs divided by this; a freed slot may sit idle
 #: up to this long.
 SANDBOX_ROOM_RETRY_SECONDS = 10
+
+#: How long a Run that could not reach the Controller waits. Longer than for
+#: room: an outage lasts longer than a full budget, and every attempt is a
+#: model call charged to the Run.
+CONTROLLER_UNREACHABLE_RETRY_SECONDS = 30
 
 #: Refusals that end the slice and requeue the Run instead of failing it.
 _NOT_READY = frozenset(

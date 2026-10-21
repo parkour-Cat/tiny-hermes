@@ -17,7 +17,11 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from tiny_hermes.sandbox.application.controller import RefusalReason, SandboxRefused
+from tiny_hermes.sandbox.application.controller import (
+    RefusalReason,
+    SandboxRefused,
+    SandboxUnreachable,
+)
 from tiny_hermes.sandbox.domain.command import (
     CommandResult,
     SandboxCommand,
@@ -77,16 +81,23 @@ class SandboxClient:
         profile: str,
         session_id: UUID | None = None,
     ) -> AcquiredSandbox:
-        answer = await self._call(
-            "acquire",
-            {
-                "run_id": run_id,
-                "lease_id": lease_id,
-                "workspace_id": workspace_id,
-                "session_id": session_id,
-                "profile": profile,
-            },
-        )
+        try:
+            answer = await self._call(
+                "acquire",
+                {
+                    "run_id": run_id,
+                    "lease_id": lease_id,
+                    "workspace_id": workspace_id,
+                    "session_id": session_id,
+                    "profile": profile,
+                },
+            )
+        except ControllerClient.Unreachable as unreachable:
+            # Only acquire is put into the platform's type, because only the
+            # Worker's acquire acts on it. It may have taken effect: a
+            # reservation made by an acquire nobody heard is refused to the
+            # next one as `already_reserved` until the Scheduler reclaims it.
+            raise SandboxUnreachable(str(unreachable)) from unreachable
         return AcquiredSandbox(
             sandbox_id=UUID(str(answer["sandbox_id"])),
             cache_state=CacheState(str(answer["cache_state"])),

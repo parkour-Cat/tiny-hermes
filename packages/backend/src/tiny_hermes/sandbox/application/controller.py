@@ -66,6 +66,15 @@ class SandboxRefused(Exception):
         self.reason = reason
 
 
+class SandboxUnreachable(Exception):
+    """No answer came back from the Controller, so nothing was decided.
+
+    The opposite of `SandboxRefused`: whether the call took effect is unknown.
+    Only the in-process Controller never raises it; across a socket it is a
+    network or a certificate, and waiting can fix either.
+    """
+
+
 class LeaseAuthority(Protocol):
     """Answers whether a Run currently holds a given lease.
 
