@@ -18,9 +18,33 @@ COMPOSE = Path(__file__).resolve().parents[4] / "deploy" / "compose"
 CERTS = "/etc/tiny-hermes/controller"
 
 
+class _ComposeLoader(yaml.SafeLoader):
+    """Compose's own merge tags, read as the value they carry.
+
+    `!override` replaces an extended service's list instead of appending to
+    it, and `!reset` empties one; for what these tests check, the value under
+    the tag is what the service ends up with.
+    """
+
+
+def _untagged(loader: yaml.SafeLoader, node: yaml.Node) -> Any:
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node)
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node)
+    return loader.construct_scalar(node)  # pyright: ignore[reportArgumentType]
+
+
+_ComposeLoader.add_constructor("!override", _untagged)
+_ComposeLoader.add_constructor("!reset", _untagged)
+
+
+def _document(file: str) -> Any:
+    return yaml.load((COMPOSE / file).read_text(encoding="utf-8"), Loader=_ComposeLoader)  # noqa: S506 - SafeLoader plus two tags
+
+
 def _service(file: str, name: str) -> dict[str, Any]:
-    document: Any = yaml.safe_load((COMPOSE / file).read_text(encoding="utf-8"))
-    return dict(document["services"][name])
+    return dict(_document(file)["services"][name])
 
 
 def _keys(service: dict[str, Any]) -> list[str]:
@@ -63,11 +87,7 @@ def test_callers_on_the_sandbox_host_dial_the_controller_by_its_service_name(
 
 
 def test_a_worker_host_runs_the_worker_and_nothing_else() -> None:
-    document: Any = yaml.safe_load(
-        (COMPOSE / "compose.worker-host.yaml").read_text(encoding="utf-8")
-    )
-
-    assert list(document["services"]) == ["worker"]
+    assert list(_document("compose.worker-host.yaml")["services"]) == ["worker"]
 
 
 def test_a_worker_host_reaches_the_controller_over_tls_alone() -> None:
