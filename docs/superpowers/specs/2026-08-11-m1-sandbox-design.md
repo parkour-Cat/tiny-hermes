@@ -348,6 +348,8 @@ parse.
 | Failure | Result | Decided by |
 |---|---|---|
 | Start fails | `failed` with `sandbox_start_failed`, no retry (amended 2026-10-21, see below) | Worker |
+| Controller not reached at acquire, request never sent | slice ends, Run claimable again after 30 s (amended 2026-10-21, second) | Worker |
+| Controller not reached at acquire, request may have been sent | `interrupted` | Worker |
 | Command times out | `command_timeout` tool result | Controller; the loop decides next |
 | Connection lost mid-execute | `interrupted` | Worker |
 | Freeze fails at a slice boundary | `interrupted` — never a quiet requeue | Worker |
@@ -368,6 +370,25 @@ promising a protection nobody has. A retry is not added either, because:
   image, a configuration Docker rejects), and retrying them changes nothing;
 - the transient ones (a daemon restarting, a daemon too busy to answer) mostly
   surface as timeouts, which are exactly the outcomes that cannot be confirmed.
+
+**Amended 2026-10-21, second: an unanswered acquire is not a start failure
+either.** Once the Controller can be on another host (tier B), "no answer"
+is a network or a certificate as often as a broken daemon, and failing the
+Run made a blip permanent. Two cases, told apart by where the client failed:
+
+- failed inside `connect()` (refused, no socket, connect timeout, the
+  Controller's certificate not trusted): nothing was sent, so nothing was
+  reserved. The slice ends and the Run waits 30 s, like a full budget. Each
+  attempt spends the model call that asked for the tool, so the Run's own
+  budget bounds the wait.
+- anything after: the acquire may have reserved a sandbox and lost the
+  answer. Requeued, the next acquire would meet `already_reserved` without
+  end, because the Scheduler isolates and reclaims only an interrupted Run's
+  reservation. So the Run is `interrupted`, and recovery waits for that
+  reservation to be gone.
+
+An expired Worker certificate is in the second case: TLS 1.3 refuses a
+client certificate after the client has written its request.
 
 A memory budget with no room is not a start failure: it is a refusal decided
 before Docker is asked, and the Run waits its turn (product design §21.3).

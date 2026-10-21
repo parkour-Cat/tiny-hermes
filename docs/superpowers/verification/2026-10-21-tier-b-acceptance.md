@@ -153,6 +153,10 @@ uv run --no-sync python scripts/concurrency_probe.py \
 1. **获取沙箱时联系不上 controller，Run 直接失败。**见上面第 6 条。连接阶段（TCP 或 TLS
    握手）就失败时，请求确定没有送到 controller，按理可以像「沙箱名额不够」那样结束时间片、
    稍后重试，而不是判失败。没有改：这改的是 M1 沙箱设计 §11 刚修订过的行为，需要单独决定。
+   **后来改了**（同日，分支 `feat/acquire-unreachable-retry`）：连接阶段失败的，结束时间片、
+   30 秒后重试；连上之后没回答的，走 `interrupted`。这一条的「连接阶段」后来证明不够：
+   Worker 证书过期不在连接阶段暴露，见 M1 沙箱设计 §11 的第二次修订。新行为在单机栈上
+   走过一遍，见文末「补：获取沙箱时联系不上」。
 2. **Worker 自己的出站代理不加密。**Worker 主机经内网连沙箱主机上的 egress-proxy，代理令牌
    明文传输。运维手册写明只在可信内网上这样部署；没有改。
 3. **`compose -f compose.worker-host.yaml down` 也要那些必填变量。**不设就报错退出，容器
@@ -166,6 +170,31 @@ uv run --no-sync python scripts/concurrency_probe.py \
   连接的办法，每次调用都是完整握手。代码注释一开始也照这句话写了，提交前改掉了。
 - §4.2 说到期警告来自「启动日志和健康检查」。只做了启动日志。
 - §4.4 只举了冻结失败的例子，没写获取沙箱时联系不上会让 Run 失败（发现 1）。
+
+## 补：获取沙箱时联系不上（分支 `feat/acquire-unreachable-retry`）
+
+单机栈（Unix socket），确定性模型。`docker compose stop controller`，然后提交一个要
+`shell.exec` 的 Run，每 5 秒看一次：
+
+| 时间 | 状态 | 距离可再领取（秒） | 领取次数 |
+|---|---|---:|---:|
+| 5 s | queued | 25 | 1 |
+| 25 s | queued | 5 | 1 |
+| 30 s | queued | 30 | 2 |
+| 46 s | queued | 14 | 2 |
+
+49 秒时启动 controller，62 秒时 Run `completed`，没有 `run_failed`。共 4 次模型调用：
+两次是没拿到沙箱的那两轮。Worker 日志两条
+`controller unreachable at acquire … sent=False error="[Errno 2] No such file or directory"`：
+controller 停下时删掉了自己的 socket 文件。
+
+镜像不是完整重建的：重建时 `uv sync` 在 OrbStack VM 里下载依赖超时（CLAUDE.md 记的那个
+代理问题），所以是在现有镜像上覆盖了 `packages/backend/src`。依赖没有变化。
+
+**没有走过的**：「可能送到了」那一种（走 `interrupted`）只有自动化测试；Worker 证书在运行中
+过期，只在 TLS 集成测试里测过「判为可能送到了」，没有在运行中的部署上让它真的过期；
+TLS 部署下 controller 停机没有重走，自动化测试里 TLS 和 Unix 的 `connect()` 走同一个
+异常转换。
 
 ## 这一遍没能证明什么
 
