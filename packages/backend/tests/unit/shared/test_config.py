@@ -203,3 +203,62 @@ def test_an_empty_budget_in_the_environment_means_half_the_host(
     monkeypatch.setenv("SANDBOX_MEMORY_BUDGET_MB", "")
 
     assert _settings().sandbox_memory_budget_mb is None
+
+
+DEFAULT_CONTROLLER = "unix:///run/tiny-hermes/controller.sock"
+
+
+def test_a_deployment_that_says_nothing_finds_the_controller_where_it_always_was() -> None:
+    settings = _settings()
+
+    assert str(settings.controller_address) == DEFAULT_CONTROLLER
+    assert str(settings.controller_listen_address) == DEFAULT_CONTROLLER
+
+
+def test_the_caller_and_the_controller_are_configured_separately() -> None:
+    # Separately because in tier B they are on different hosts: the Worker
+    # names the Controller's host, the Controller names its own interface.
+    settings = _settings(
+        sandbox_controller_url="unix:///run/a/controller.sock",
+        sandbox_controller_listen="unix:///run/b/controller.sock",
+    )
+
+    assert settings.controller_address.path == "/run/a/controller.sock"
+    assert settings.controller_listen_address.path == "/run/b/controller.sock"
+
+
+def test_the_old_socket_setting_still_names_both_ends() -> None:
+    settings = _settings(sandbox_controller_socket="/run/old/controller.sock")
+
+    assert settings.controller_address.path == "/run/old/controller.sock"
+    assert settings.controller_listen_address.path == "/run/old/controller.sock"
+
+
+@pytest.mark.parametrize("new", ["sandbox_controller_url", "sandbox_controller_listen"])
+def test_the_old_and_new_spellings_together_are_refused(new: str) -> None:
+    # Which one wins would be a guess, and a wrong guess is a Worker talking
+    # to a socket nobody listens on.
+    with pytest.raises(ValidationError, match="SANDBOX_CONTROLLER_SOCKET"):
+        _settings(
+            sandbox_controller_socket="/run/old/controller.sock",
+            **{new: "unix:///run/new/controller.sock"},
+        )
+
+
+@pytest.mark.parametrize("field", ["sandbox_controller_url", "sandbox_controller_listen"])
+def test_an_address_that_does_not_parse_stops_the_process_starting(field: str) -> None:
+    with pytest.raises(ValidationError, match="tls://"):
+        _settings(**{field: "tcp://sandbox-1.internal:7443"})
+
+
+@pytest.mark.parametrize(
+    "variable",
+    ["SANDBOX_CONTROLLER_URL", "SANDBOX_CONTROLLER_LISTEN", "SANDBOX_CONTROLLER_SOCKET"],
+)
+def test_an_empty_controller_variable_means_unset(
+    variable: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`${VAR:-}` in Compose is "" when unset, which must not read as a path."""
+    monkeypatch.setenv(variable, "")
+
+    assert str(_settings().controller_address) == DEFAULT_CONTROLLER
