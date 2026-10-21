@@ -23,7 +23,7 @@ import pytest
 from tiny_hermes.sandbox.transport.client import ControllerClient
 from tiny_hermes.sandbox.transport.server import ControllerServer, ProtocolError
 
-from .conftest import MAX_SOCKET_PATH
+from .conftest import MAX_SOCKET_PATH, Pki, wire
 
 pytestmark = pytest.mark.skipif(
     not hasattr(socket, "AF_UNIX"),
@@ -61,14 +61,12 @@ class _Refused(Exception):
 
 @pytest.fixture
 async def wired(
-    socket_dir: Path,
+    transport: str, socket_dir: Path, controller_pki: Pki
 ) -> AsyncIterator[tuple[SpyController, ControllerClient]]:
     spy = SpyController()
-    path = str(socket_dir / "c.sock")
-    server = ControllerServer(dispatch=spy.dispatch, path=path)
-    await server.start()
+    server, client = await wire(transport, socket_dir, controller_pki, dispatch=spy.dispatch)
     try:
-        yield spy, ControllerClient(path)
+        yield spy, client
     finally:
         await server.stop()
 
@@ -107,7 +105,7 @@ async def test_the_server_survives_a_malformed_frame(
 ) -> None:
     """One bad client must not take the Controller down for the other one."""
     spy, client = wired
-    reader, writer = await asyncio.open_unix_connection(client.path)
+    reader, writer = await client.connect()
     writer.write(b"this is not json\n")
     await writer.drain()
     error = json.loads(await reader.readline())
@@ -130,7 +128,7 @@ async def test_a_frame_larger_than_the_cap_is_refused(
     than having to guess why its socket died.
     """
     spy, client = wired
-    reader, writer = await asyncio.open_unix_connection(client.path)
+    reader, writer = await client.connect()
     writer.write(b"x" * (ControllerServer.MAX_FRAME_BYTES + 1))
     await writer.drain()
     answer = json.loads(await asyncio.wait_for(reader.readline(), timeout=5))
@@ -196,6 +194,8 @@ async def test_the_socket_is_not_world_writable(
     """The volume is shared with the Worker and the Scheduler and with nothing
     else, but the socket should not be the weak half of that arrangement."""
     _, client = wired
+    if not client.path:
+        pytest.skip("a TLS listener has no file to set a mode on")
     mode = os.stat(client.path).st_mode  # noqa: PTH116 - one stat, no event loop
     assert not mode & 0o007
 

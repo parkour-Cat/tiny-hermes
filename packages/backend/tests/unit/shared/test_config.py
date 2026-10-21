@@ -262,3 +262,53 @@ def test_an_empty_controller_variable_means_unset(
     monkeypatch.setenv(variable, "")
 
     assert str(_settings().controller_address) == DEFAULT_CONTROLLER
+
+
+TLS_FILES = {
+    "sandbox_controller_ca_file": "/etc/tiny-hermes/controller/ca.pem",
+    "sandbox_controller_cert_file": "/etc/tiny-hermes/controller/worker.pem",
+    "sandbox_controller_key_file": "/etc/tiny-hermes/controller/worker.key",
+}
+
+
+@pytest.mark.parametrize("missing", sorted(TLS_FILES))
+@pytest.mark.parametrize(
+    "end", ["sandbox_controller_url", "sandbox_controller_listen"]
+)
+def test_tls_at_either_end_needs_all_three_files(missing: str, end: str) -> None:
+    files = {name: path for name, path in TLS_FILES.items() if name != missing}
+    with pytest.raises(ValidationError, match=missing.upper()):
+        _settings(**{end: "tls://10.0.0.5:7443"}, **files)
+
+
+def test_tls_with_its_files_is_accepted_and_handed_on() -> None:
+    settings = _settings(sandbox_controller_url="tls://sandbox-1.internal:7443", **TLS_FILES)
+
+    files = settings.controller_tls_files
+    assert files is not None
+    assert files.cert_file == "/etc/tiny-hermes/controller/worker.pem"
+
+
+def test_a_unix_deployment_has_no_tls_files_to_hand_on() -> None:
+    assert _settings().controller_tls_files is None
+
+
+@pytest.mark.parametrize("anywhere", ["tls://0.0.0.0:7443", "tls://[::]:7443"])
+def test_the_controller_does_not_listen_everywhere_unless_told_to(anywhere: str) -> None:
+    # It holds the Docker socket; every interface includes ones nobody meant.
+    with pytest.raises(ValidationError, match="SANDBOX_CONTROLLER_LISTEN_ANY"):
+        _settings(sandbox_controller_listen=anywhere, **TLS_FILES)
+
+    allowed = _settings(
+        sandbox_controller_listen=anywhere, sandbox_controller_listen_any=True, **TLS_FILES
+    )
+    assert allowed.controller_listen_address.port == 7443
+
+
+@pytest.mark.parametrize("field", sorted(TLS_FILES))
+def test_an_empty_tls_file_variable_means_unset(
+    field: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(field.upper(), "")
+
+    assert getattr(_settings(), field) is None

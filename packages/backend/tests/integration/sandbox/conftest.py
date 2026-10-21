@@ -14,6 +14,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -28,6 +29,11 @@ from tiny_hermes.sandbox.application.controller import (
 )
 from tiny_hermes.sandbox.infrastructure.docker_engine import DockerEngine
 from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
+from tiny_hermes.sandbox.transport.address import ControllerAddress
+from tiny_hermes.sandbox.transport.certs import issue, issue_ca, write_pair
+from tiny_hermes.sandbox.transport.client import ControllerClient
+from tiny_hermes.sandbox.transport.server import ControllerServer
+from tiny_hermes.sandbox.transport.tls import Role, TlsFiles, client_context, server_context
 
 #: Built by `deploy/sandbox/Dockerfile`. The suite builds it if it is absent
 #: rather than skipping: a sandbox suite that quietly does not run is worse
@@ -74,6 +80,71 @@ def socket_dir() -> Iterator[Path]:
         yield Path(created)
     finally:
         shutil.rmtree(created, ignore_errors=True)
+
+
+@dataclass(frozen=True)
+class Pki:
+    """One deployment's controller certificates, issued by `certs.py` itself."""
+
+    directory: Path
+
+    def files(self, role: Role) -> TlsFiles:
+        return TlsFiles(
+            ca_file=str(self.directory / "ca.pem"),
+            cert_file=str(self.directory / f"{role.value}.pem"),
+            key_file=str(self.directory / f"{role.value}.key"),
+        )
+
+
+@pytest.fixture(scope="session")
+def controller_pki(tmp_path_factory: pytest.TempPathFactory) -> Pki:
+    directory = tmp_path_factory.mktemp("pki")
+    ca = issue_ca()
+    write_pair(directory, "ca", ca)
+    write_pair(
+        directory,
+        Role.CONTROLLER.value,
+        issue(ca, role=Role.CONTROLLER, hosts=["127.0.0.1", "localhost"]),
+    )
+    for caller in (Role.WORKER, Role.SCHEDULER):
+        write_pair(directory, caller.value, issue(ca, role=caller))
+    return Pki(directory)
+
+
+@pytest.fixture(params=["unix", "tls"])
+def transport(request: pytest.FixtureRequest) -> str:
+    """Every wire test runs over both, so TLS is the same protocol and not a
+    second one that happens to pass a smaller suite."""
+    return str(request.param)
+
+
+async def wire(
+    transport: str,
+    socket_dir: Path,
+    pki: Pki,
+    *,
+    role: Role = Role.WORKER,
+    timeout: float = 120.0,
+    **server_options: Any,
+) -> tuple[ControllerServer, ControllerClient]:
+    """A started server and a client pointed at it, over `transport`."""
+    if transport == "unix":
+        path = str(socket_dir / "c.sock")
+        server = ControllerServer(path=path, **server_options)
+        await server.start()
+        return server, ControllerClient(path, timeout=timeout)
+    server = ControllerServer(
+        address=ControllerAddress(scheme="tls", host="127.0.0.1", port=0),
+        tls=server_context(pki.files(Role.CONTROLLER)),
+        **server_options,
+    )
+    await server.start()
+    client = ControllerClient(
+        ControllerAddress(scheme="tls", host="127.0.0.1", port=server.bound_port),
+        tls=client_context(pki.files(role)),
+        timeout=timeout,
+    )
+    return server, client
 
 
 @pytest.fixture(scope="session")
