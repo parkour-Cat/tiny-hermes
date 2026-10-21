@@ -173,14 +173,14 @@ async def _serve() -> None:
     server = ControllerServer(
         dispatch=dispatch,
         stream_dispatch=dispatch_stream,
-        path=settings.sandbox_controller_socket,
+        path=settings.controller_listen_address.path,
         group=settings.sandbox_socket_gid,
     )
     await server.start()
     logger.info(
         "sandbox controller started",
         extra={
-            "socket": settings.sandbox_controller_socket,
+            "listen": str(settings.controller_listen_address),
             "sandbox_memory_mb": ceiling.memory_mb,
             "sandbox_memory_budget_mb": budget,
         },

@@ -372,7 +372,9 @@ enforced the way the HTTP ban is — `subprocess`, `os.system`, and
 
 | Setting | Default | Notes |
 |---|---:|---|
-| `sandbox_controller_socket` | `/run/tiny-hermes/controller.sock` | the shared volume path |
+| `sandbox_controller_url` | `unix:///run/tiny-hermes/controller.sock` | where the Worker and the Scheduler find the Controller (tier B design 2026-10-21 §4.1) |
+| `sandbox_controller_listen` | `unix:///run/tiny-hermes/controller.sock` | where the Controller listens |
+| `sandbox_controller_socket` | unset | the old spelling, a bare path naming both ends; refused together with either of the above |
 | `sandbox_image_digest` | (required when tools are enabled) | approved digest, allowlist of one |
 | `sandbox_idle_ttl_seconds` | 300 | §11.4; 0–1800, workspace may only lower |
 | `sandbox_cpu_limit` | 1.0 | |

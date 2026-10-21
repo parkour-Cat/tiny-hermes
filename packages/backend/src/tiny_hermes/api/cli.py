@@ -299,7 +299,7 @@ def _controller(settings: Settings) -> SandboxClient | None:
     """The Controller over its socket, when this deployment has one."""
     if not settings.sandbox_image_digest:
         return None
-    return SandboxClient(ControllerClient(settings.sandbox_controller_socket))
+    return SandboxClient(ControllerClient(settings.controller_address.path))
 
 
 async def _ensure_bucket(workspace: WorkspaceRuntime | None) -> None:
