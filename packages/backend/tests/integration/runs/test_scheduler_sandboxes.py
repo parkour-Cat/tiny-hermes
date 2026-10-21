@@ -22,13 +22,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from tiny_hermes.runs.application.scheduler import SchedulerRuntime, SchedulerSettings
 from tiny_hermes.runs.application.worker import WorkerRuntime, WorkerSettings
-from tiny_hermes.runs.domain.models import RunCapabilities
-from tiny_hermes.runs.infrastructure.deterministic_model import (
-    DeterministicModelProvider,
-)
+from tiny_hermes.runs.domain.models import RunCapabilities, ToolCallBlock
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
+from tiny_hermes.runs.ports.model import ModelRequest, ModelResponse, StopReason
 from tiny_hermes.runs.ports.store import ClaimRunCommand
+from tiny_hermes.sandbox.domain.command import CommandResult
 from tiny_hermes.sandbox.domain.models import (
     CacheState,
     InstanceStatus,
@@ -116,8 +115,8 @@ class PersistingDestroyFailure:
             await session.commit()
         return AcquiredSandbox(self._instance.id, CacheState.RESET)
 
-    async def execute(self, **_: Any) -> None:
-        raise AssertionError("the complete model scenario does not call a tool")
+    async def execute(self, **_: Any) -> CommandResult:
+        return CommandResult(exit_code=0, output="", truncated=False, timed_out=False)
 
     async def freeze(self, **_: Any) -> None:
         raise AssertionError("the completed Run destroys rather than freezes")
@@ -133,6 +132,27 @@ class PersistingDestroyFailure:
 
     async def cleanup(self, **_: Any) -> None:
         raise AssertionError("a completed Run still holds a lease, so it destroys")
+
+
+class OneCommandThenDone:
+    """One round runs a command, so the slice holds a sandbox (§16, v2.15:
+    a reply in words would take none), and the next round finishes."""
+
+    def __init__(self) -> None:
+        self._rounds = 0
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        del request
+        self._rounds += 1
+        if self._rounds == 1:
+            return ModelResponse(
+                stop_reason=StopReason.TOOL_CALL,
+                text="",
+                tool_calls=(
+                    ToolCallBlock(call_id="c1", name="shell.exec", arguments={"command": "true"}),
+                ),
+            )
+        return ModelResponse(stop_reason=StopReason.COMPLETED, text="done")
 
 
 def instance() -> SandboxInstance:
@@ -458,7 +478,7 @@ async def test_worker_close_failure_is_cleaned_before_the_run_recovers(
 
     await WorkerRuntime(
         session_factory=sessions,
-        model=DeterministicModelProvider(delay_ms=0),
+        model=OneCommandThenDone(),
         notifier=NullWakeUpNotifier(),
         sandbox=PersistingDestroyFailure(sessions),
         settings=WorkerSettings(
