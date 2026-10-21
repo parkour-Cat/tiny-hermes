@@ -24,6 +24,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from tiny_hermes.runs.application.scheduler import SchedulerRuntime, SchedulerSettings
 from tiny_hermes.runs.application.worker import (
     WorkerRuntime,
     WorkerSettings,
@@ -939,6 +940,18 @@ async def test_an_acquire_that_may_have_reached_the_controller_interrupts(
     assert (await _run_row(engine, run)).status == "interrupted"
     assert "run_failed" not in await _events_of(engine, run)
     assert await _roles(engine, run) == ["user"]
+
+    # With nothing reserved there is nothing to reclaim, and the Scheduler
+    # puts it back in the queue on its next pass.
+    await SchedulerRuntime(
+        session_factory=async_sessionmaker(engine, expire_on_commit=False),
+        notifier=NullWakeUpNotifier(),
+        sandbox=sandbox,
+        settings=SchedulerSettings(
+            max_recovery_attempts=3, event_retention_hours=24, batch_size=50
+        ),
+    ).run_once()
+    assert (await _run_row(engine, run)).status == "queued"
 
 
 async def test_a_controller_answer_the_worker_cannot_use_still_fails_the_run(
