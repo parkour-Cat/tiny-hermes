@@ -272,6 +272,15 @@ docker compose -f compose.worker-host.yaml up -d --scale worker=2
 
 少给任何一个地址，Compose 会直接报错，而不是用单机的默认值去连一个不存在的主机。
 
+**停掉 Worker 主机时，`down` 也要同样的变量。**不设的话 `docker compose -f
+compose.worker-host.yaml down` 报错退出，**容器照样在跑**，还会继续领 Run。验收时就这样
+撞到过：controller 已经不在那个地址上了，这个 Worker 领到的带工具的 Run 全判了
+`sandbox_start_failed`。停之前先确认：
+
+```bash
+docker ps --filter label=com.docker.compose.project=tiny-hermes-worker
+```
+
 Worker 自己的出站（模型、飞书等）走 `EGRESS_PROXY_URL`。**这条链路 B 档没有加密**：
 代理在沙箱主机上时，Worker 主机经内网连它，令牌是明文传的。只在可信内网上这样部署；
 要跨不可信网络，需要先在代理前面加 TLS。

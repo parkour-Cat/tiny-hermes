@@ -162,6 +162,15 @@ re-checks:
 
 `acquire` additionally checks that the Run holds no other live Reservation.
 
+**Amended 2026-10-21 (tier B).** When the Worker is on another host it reaches
+the Controller over mutual TLS instead of the socket. The certificate proves
+the same kind of fact the socket did — one of the platform's own processes —
+plus which one: its OU is `worker` or `scheduler`, and a Scheduler certificate
+may only ask for `cleanup`. That is the first time the `sandbox.cleanup`
+authority above is carried by a credential; over the Unix socket it is still a
+name the Controller cannot check. Every check in the list above still runs on
+every call. Design: `2026-10-21-tier-b-networked-controller-design.md`.
+
 ## 6. The Controller's interface
 
 Six actions, per §11.1:

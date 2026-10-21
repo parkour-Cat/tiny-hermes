@@ -483,7 +483,7 @@ flowchart TD
 
 ### 11.1 内部接口
 
-M1 单机 Compose 使用只挂载给 Worker、Scheduler 和 Controller 的 Unix domain socket。Controller 只提供以下受限动作：
+M1 单机 Compose 使用只挂载给 Worker、Scheduler 和 Controller 的 Unix domain socket。Worker 在其他主机上时（产品设计 v2.16 §22，B 档），改用双向 TLS：私有 CA 签发的证书带调用者角色，Scheduler 的证书只能调用 `cleanup`（`2026-10-21-tier-b-networked-controller-design.md`）。Controller 只提供以下受限动作：
 
 - `acquire(run_id, worker_lease_id, agent_version_id, workspace_revision_id, resource_profile)`
 - `execute(run_id, worker_lease_id, sandbox_id, tool_request)`
@@ -494,7 +494,7 @@ M1 单机 Compose 使用只挂载给 Worker、Scheduler 和 Controller 的 Unix 
 
 调用者不能提供任意宿主机路径、Docker capability、Docker socket、镜像外的任意挂载或网络模式。Controller 根据数据库中的 AgentVersion、Run 和平台资源档位生成 Docker 配置。
 
-每次操作都先校验 SandboxReservation 的 `run_id + sandbox_id` 所有权；`acquire` 在实例尚未创建时校验 Run 当前没有其他有效 Reservation。Worker 发起的 `acquire`、`execute`、`inspect`、`freeze`、`thaw` 和 `destroy` 都必须再校验 `worker_lease_id` 属于同一 Run、尚未过期且当前有效。Scheduler 在租约过期后使用独立 `sandbox.cleanup` 内部权限执行 inspect/freeze/destroy，仍必须匹配 Run 与 Reservation，并写 AuditEvent。仅能连接 Unix socket 不能替代这些校验。
+每次操作都先校验 SandboxReservation 的 `run_id + sandbox_id` 所有权；`acquire` 在实例尚未创建时校验 Run 当前没有其他有效 Reservation。Worker 发起的 `acquire`、`execute`、`inspect`、`freeze`、`thaw` 和 `destroy` 都必须再校验 `worker_lease_id` 属于同一 Run、尚未过期且当前有效。Scheduler 在租约过期后使用独立 `sandbox.cleanup` 内部权限执行 inspect/freeze/destroy，仍必须匹配 Run 与 Reservation，并写 AuditEvent。仅能连接 Controller（Unix socket，或通过 TLS 认证）不能替代这些校验。
 
 ### 11.2 容器最低策略
 

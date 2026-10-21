@@ -1,7 +1,7 @@
-# tiny-hermes 产品与系统设计 v2.15
+# tiny-hermes 产品与系统设计 v2.16
 
-> 日期：2026-10-20  
-> 版本：v2.15  
+> 日期：2026-10-21  
+> 版本：v2.16  
 > 状态：v2.9.3 已确认；M1 与 M2 已交付，可作为 M3 实施依据（§7.4.2 截至 v2.9.3 的内容与 §12.1 已实现）。**v2.10 对 §7.4.2 的改动实施中，尚未全部实现**，见 §1.10  
 > 目标版本：首个企业预览版  
 > 许可证方向：Apache-2.0
@@ -22,6 +22,20 @@
 ### 1.1 v2.4 修订重点
 
 v2.4 补全重试链共享预算、RunEvent 并发序号、幂等并发创建、工作空间选择、累计执行时间与墙钟期限，并把 Runs API 的“已创建但排队受阻”与 Chat Completions 的 409 `session_blocked` 明确区分。M1 的跨 Run 共享只读层缩小为平台预构建的运行时 Docker 镜像层，不在运行时根据 Agent 依赖构建快照；同时增加 cache 重置信号、沙箱所有权校验、待提交对象登记和 M1 不交付审批系统的安全边界。v2.4 替代 v2.3 中对应定义。
+
+### 1.16 v2.16 修订重点
+
+v2.16 允许 Worker 跑在沙箱主机以外的机器上（§22，B 档）：Worker 和 Scheduler 通过**双向 TLS**
+调用 sandbox-controller，不再只能经同一台主机上的 Unix socket。单机 Compose 的默认值不变，
+仍是 Unix socket。设计见 `2026-10-21-tier-b-networked-controller-design.md`。
+
+- 证书由部署自己的私有 CA 签发，只用于这一条链路。证书的 OU 是调用者的角色：Scheduler 的证书
+  只能调用 `cleanup`。技术设计 §11.1 所说的 `sandbox.cleanup` 内部权限，在 TLS 下第一次由凭证
+  承载；走 Unix socket 时仍不区分调用者。
+- 证书只证明「这是平台自己的 Worker 或 Scheduler」。每次调用对 SandboxReservation 和
+  WorkerLease 的校验一条不减。
+- 这一档只允许一台沙箱主机：配置只接受一个 controller 地址。准入预算、egress 地址登记、
+  Scheduler 的回收都还假设只有一台，多台沙箱主机是 C 档。
 
 ### 1.15 v2.15 修订重点
 
@@ -1750,7 +1764,14 @@ Docker Compose 首版包含：
 - `redis`
 - `minio`
 
-此清单是 0.3 完整 Compose 形态。M1 必须启动 `api`、`worker`、`scheduler`、最小 `web`、`sandbox-controller`、`postgres`、`redis` 和 `minio`，可信进程使用内置 `SafeOutboundClient`；M2 在交付联网工具前加入 `egress-proxy`，`chat-web` 在 M3 加入。生产 profile 额外包含 `gateway`，默认使用 Caddy 作为反向代理和 TLS 终止点。企业可以替换为现有网关，但必须传递可信代理头并限制管理 API 的暴露范围。
+此清单是 0.3 完整 Compose 形态。
+
+多机部署（v2.16，B 档）：一台沙箱主机运行 `sandbox-controller` 和沙箱，`worker` 可以运行在其他
+主机上，经双向 TLS 调用 controller（`deploy/compose/compose.sandbox-host.yaml` 与
+`compose.worker-host.yaml`，运维手册 §7）。controller 只在沙箱主机的内网地址上对外，等同于
+该主机的 root，只能放行 Worker 与 Scheduler 所在主机。此档只允许一台沙箱主机。
+
+M1 必须启动 `api`、`worker`、`scheduler`、最小 `web`、`sandbox-controller`、`postgres`、`redis` 和 `minio`，可信进程使用内置 `SafeOutboundClient`；M2 在交付联网工具前加入 `egress-proxy`，`chat-web` 在 M3 加入。生产 profile 额外包含 `gateway`，默认使用 Caddy 作为反向代理和 TLS 终止点。企业可以替换为现有网关，但必须传递可信代理头并限制管理 API 的暴露范围。
 
 初始化向导负责：
 
