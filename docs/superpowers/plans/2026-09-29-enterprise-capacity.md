@@ -162,6 +162,11 @@ API、Worker、scheduler 已经是无状态的，Run 的真相在 Postgres 里�
     加载完后恢复开发者的编辑」、`AgentModelPolicy` 的「确定性选择仍发送确定性策略」、
     `useRunEvents` 的「离开页面时中断连接」。单独跑都能通过，整套跑时偶尔失败；#110 的推送 CI
     就因为第三条失败过一次，重跑后通过。
+16. ~~**沙箱从悲观预分配（Eager Allocation）改为惰性按需分配（Lazy Allocation）**~~ **已修**（规格 v2.15，PR #113，[验收记录](../verification/2026-10-21-lazy-sandbox-allocation.md)：绑了工具、只回文字的短消息端到端 P95 从 140 秒降到 2.1 秒；代价是名额紧时有回复被丢弃、要重问）。原来的描述：
+    现状（`worker.py:466`）在调用模型前，只要 Agent 绑定了非平台工具，哪怕用户只是打招呼“你好”，
+    也会提前调用 `_open_sandbox` 占用沙箱名额。导致 60% 以上无需工具的交互消息也白白占用 1 GiB 内存配额，
+    加剧准入排队。改造为：调模型前不建沙箱；当且仅当模型回复包含需要容器的 `tool_call` 时，
+    才动态申请/解冻沙箱。纯文本对话全程 0 沙箱占用。详细设计见 `docs/superpowers/plans/2026-10-12-lazy-sandbox-allocation.md`。
 
 **P2：公平与交互体验**：§4 里「还没做」的三项。
 

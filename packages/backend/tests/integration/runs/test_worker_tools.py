@@ -209,18 +209,67 @@ async def test_a_run_without_tools_never_touches_the_sandbox(
     assert client.get(f"/api/v1/runs/{run}", headers=scope).json()["status"] == "completed"
 
 
-async def test_a_run_with_tools_acquires_before_the_first_model_call(
+async def test_a_reply_in_words_from_a_tooled_agent_never_touches_the_sandbox(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_with_tools: Any
+) -> None:
+    """§16, v2.15: the sandbox is taken by the round that needs one.
+
+    An Agent bound to `shell.exec` is mostly talked to, not run: a greeting
+    that took a container would hold a share of §21.3's memory budget that a
+    Run with a command to run is then refused.
+    """
+    agent = agent_with_tools(["shell.exec"])
+    run = submit(client, scope, agent, "hello")
+    sandbox = StandInSandbox()
+
+    await drive(engine, Recording(_text("hi there")), sandbox)
+
+    assert sandbox.calls == []
+    assert client.get(f"/api/v1/runs/{run}", headers=scope).json()["status"] == "completed"
+
+
+async def test_a_round_of_platform_tools_never_touches_the_sandbox(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_with_tools: Any
+) -> None:
+    """Platform tools are answered by the Worker, so a round of them has
+    nothing to put in a container either."""
+    agent = agent_with_tools(["shell.exec", "todo.write"])
+    run = submit(client, scope, agent, "plan it")
+    keep_a_list = ModelResponse(
+        stop_reason=StopReason.TOOL_CALL,
+        text="",
+        tool_calls=(
+            ToolCallBlock(
+                call_id="t1",
+                name="todo.write",
+                arguments={"items": [{"id": "1", "content": "look", "status": "pending"}]},
+            ),
+        ),
+    )
+    sandbox = StandInSandbox()
+
+    await drive(engine, Recording(keep_a_list, _text("planned")), sandbox)
+
+    assert sandbox.calls == []
+    assert client.get(f"/api/v1/runs/{run}", headers=scope).json()["status"] == "completed"
+
+
+async def test_the_sandbox_is_acquired_after_the_model_asks_for_a_command(
     client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_with_tools: Any
 ) -> None:
     agent = agent_with_tools(["shell.exec"])
     submit(client, scope, agent, "list the files")
-    sandbox = StandInSandbox()
-    model = Recording(_text("done"))
+    asked: list[int] = []
+    model = Recording(_tool(), _text("done"))
 
-    await drive(engine, model, sandbox)
+    class Watching(StandInSandbox):
+        async def acquire(self, **kwargs: Any) -> Any:
+            asked.append(len(model.requests))
+            return await super().acquire(**kwargs)
 
-    assert sandbox.calls[0] == "acquire"
-    assert len(model.requests) == 1
+    await drive(engine, model, Watching())
+
+    assert asked == [1], "acquired once, after the first model call and before its tool ran"
 
 
 async def test_a_worker_with_no_sandbox_fails_a_tool_run_rather_than_ignoring_it(
@@ -231,10 +280,15 @@ async def test_a_worker_with_no_sandbox_fails_a_tool_run_rather_than_ignoring_it
     agent = agent_with_tools(["shell.exec"])
     run = submit(client, scope, agent, "list the files")
 
-    await drive(engine, Recording(_text("done")), None)
+    await drive(engine, Recording(_tool(), _text("done")), None)
 
     snapshot = client.get(f"/api/v1/runs/{run}", headers=scope).json()
     assert snapshot["status"] == "failed"
+    assert snapshot["failure_reason"] == "sandbox_not_configured"
+    # v2.15: the call that asked for the tool was made, so it is charged.
+    assert snapshot["budget"]["consumed_model_calls"] == 1
+    roles = [role for role, _ in await transcript(engine, run)]
+    assert roles == ["user"], "a tool call nobody could run is not kept"
 
 
 # -- the tool round --------------------------------------------------------
@@ -354,12 +408,16 @@ async def test_a_reset_cache_produces_an_event_and_a_protected_hint(
     """
     agent = agent_with_tools(["shell.exec"])
     run = submit(client, scope, agent, "build it")
-    model = Recording(_text("done"))
+    model = Recording(_tool(), _text("done"))
 
     await drive(engine, model, StandInSandbox(cache_state=CacheState.RESET))
 
     assert "sandbox_cache_reset" in await events(engine, run)
-    assert model.requests[0].cache_hint is CacheStateHint.RESET
+    # v2.15: told on the first call after the sandbox was taken, and only then.
+    assert [request.cache_hint for request in model.requests] == [
+        None,
+        CacheStateHint.RESET,
+    ]
 
 
 async def test_a_reused_cache_says_nothing(
@@ -367,12 +425,12 @@ async def test_a_reused_cache_says_nothing(
 ) -> None:
     agent = agent_with_tools(["shell.exec"])
     run = submit(client, scope, agent, "carry on")
-    model = Recording(_text("done"))
+    model = Recording(_tool(), _text("done"))
 
     await drive(engine, model, StandInSandbox(cache_state=CacheState.REUSED))
 
     assert "sandbox_cache_reset" not in await events(engine, run)
-    assert model.requests[0].cache_hint is None
+    assert [request.cache_hint for request in model.requests] == [None, None]
 
 
 async def test_no_marker_file_is_written_into_the_workspace(
@@ -385,9 +443,9 @@ async def test_no_marker_file_is_written_into_the_workspace(
     submit(client, scope, agent, "build it")
     sandbox = StandInSandbox(cache_state=CacheState.RESET)
 
-    await drive(engine, Recording(_text("done")), sandbox)
+    await drive(engine, Recording(_tool(), _text("done")), sandbox)
 
-    assert "execute" not in sandbox.calls
+    assert sandbox.calls.count("execute") == 1, "the Agent's own command, and nothing else"
 
 
 # -- how a slice ends ------------------------------------------------------
@@ -401,7 +459,7 @@ async def test_a_finished_run_destroys_its_sandbox(
     submit(client, scope, agent, "answer")
     sandbox = StandInSandbox()
 
-    await drive(engine, Recording(_text("done")), sandbox)
+    await drive(engine, Recording(_tool(), _text("done")), sandbox)
 
     assert sandbox.calls[-1] == "destroy"
     assert "freeze" not in sandbox.calls
@@ -454,7 +512,9 @@ async def test_a_destroy_that_cannot_be_confirmed_interrupts(
     agent = agent_with_tools(["shell.exec"])
     run = submit(client, scope, agent, "answer")
 
-    await drive(engine, Recording(_text("done")), StandInSandbox(destroy_fails=True))
+    await drive(
+        engine, Recording(_tool(), _text("done")), StandInSandbox(destroy_fails=True)
+    )
 
     snapshot = client.get(f"/api/v1/runs/{run}", headers=scope).json()
     assert snapshot["status"] == "interrupted"

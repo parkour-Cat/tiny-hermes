@@ -532,7 +532,7 @@ async def test_write_round_flow_checkpoints_before_the_next_model_call(
     assert after_execute[-1] == "thaw", "the model speaks to a running container"
 
 
-async def test_fresh_sandbox_restore_flow_runs_before_the_first_model_call(
+async def test_fresh_sandbox_restore_flow_runs_before_the_first_command(
     client: TestClient,
     scope: dict[str, str],
     engine: AsyncEngine,
@@ -547,15 +547,19 @@ async def test_fresh_sandbox_restore_flow_runs_before_the_first_model_call(
 
     second_run, _ = _submit(client, scope, agent, session_id=session)
     fresh = GatewaySandbox()
-    model = Recording(fresh, _text("looked around"))
+    model = Recording(fresh, _tool(), _text("looked around"))
     await _drive(engine, model, fresh, objects)
 
     assert (await _run_row(engine, second_run)).status == "completed"
     assert fresh.files == {"a.txt": b"persisted"}
-    before_model = model.calls_at_request[0]
-    assert before_model[:2] == ["acquire", "freeze"]
-    assert "import" in before_model and "scan" in before_model
-    assert before_model.index("import") < before_model.index("thaw")
+    # v2.15: nothing before the first call; the round that asked for a
+    # command gets the restored tree before the command runs.
+    assert model.calls_at_request[0] == []
+    before_second = model.calls_at_request[1]
+    assert before_second[:2] == ["acquire", "freeze"]
+    assert "import" in before_second and "scan" in before_second
+    assert before_second.index("import") < before_second.index("thaw")
+    assert before_second.index("thaw") < before_second.index("execute")
 
 
 async def test_over_quota_flow_rolls_back_cleans_up_then_pauses_limit(
@@ -819,6 +823,18 @@ async def test_a_preempted_write_round_still_says_it_was_preempted(
     assert snapshot.document()["goal"]["preempted"] is True
 
 
+class AsksForCommand(Recording):
+    """Every round asks for `shell.exec` when it was given tools, and answers
+    in words when it was not, so a refused Run keeps asking and a Run without tools
+    still finishes."""
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        await super().complete(request)
+        if request.tools:
+            return _tool()
+        return _text("no tools here")
+
+
 class FullSandbox(GatewaySandbox):
     """A Controller whose sandbox memory budget has no room (§21.3)."""
 
@@ -844,9 +860,39 @@ async def test_a_run_with_no_sandbox_room_waits_in_the_queue_rather_than_failing
     row = await _run_row(engine, run)
     assert row.status == "queued"
     assert "run_failed" not in await _events_of(engine, run)
-    assert model.requests == [], "no model call is spent on a Run that cannot run its tools"
+    # v2.15: the call that asked for the tool was made, so it is charged, and
+    # the reply it gave is not kept: the next slice asks again from the same
+    # history rather than finding a tool call nobody answered.
+    assert len(model.requests) == 1
+    assert await _consumed_model_calls(engine, run) == 1
+    assert await _roles(engine, run) == ["user"]
     wait = await _seconds_until_claimable(engine, run)
     assert 5 < wait <= 10, "§21.3: the Run waits ten seconds before it is claimed again"
+
+
+async def _consumed_model_calls(engine: AsyncEngine, run_id: str) -> int:
+    async with engine.connect() as connection:
+        found = await connection.scalar(
+            text(
+                "SELECT s.consumed_model_calls FROM run_budget_scopes s "
+                "JOIN runs r ON r.budget_root_run_id = s.root_run_id WHERE r.id = :run"
+            ),
+            {"run": run_id},
+        )
+    return int(found)
+
+
+async def _roles(engine: AsyncEngine, run_id: str) -> list[str]:
+    async with engine.connect() as connection:
+        rows = await connection.execute(
+            text(
+                "SELECT m.role FROM session_messages m "
+                "JOIN runs r ON r.session_id = m.session_id "
+                "WHERE r.id = :run ORDER BY m.sequence"
+            ),
+            {"run": run_id},
+        )
+        return [str(row.role) for row in rows.all()]
 
 
 async def _seconds_until_claimable(engine: AsyncEngine, run_id: str) -> float:
@@ -867,7 +913,7 @@ def _full_worker(
 ) -> WorkerRuntime:
     return WorkerRuntime(
         session_factory=async_sessionmaker(engine, expire_on_commit=False),
-        model=Recording(sandbox),
+        model=AsksForCommand(sandbox),
         notifier=NullWakeUpNotifier(),
         sandbox=sandbox,
         workspace=WorkspaceRuntime(
