@@ -25,6 +25,7 @@ from tiny_hermes.sandbox.application.controller import (
 )
 from tiny_hermes.sandbox.domain.command import SandboxCommand
 from tiny_hermes.sandbox.domain.models import CacheState, InstanceStatus
+from tiny_hermes.sandbox.infrastructure.docker_engine import ContainerNotRunning
 
 from .conftest import RecordingAudit, StubLeases
 
@@ -368,6 +369,20 @@ async def test_freeze_stops_the_container_and_thaw_starts_it(
 
     await controller.thaw(run_id=RUN, lease_id=LEASE, sandbox_id=box.sandbox_id)
     assert docker_client.containers.get(name).status == "running"
+
+
+async def test_freezing_a_container_that_died_says_so_rather_than_blaming_docker(
+    controller: SandboxController, docker_client: Any
+) -> None:
+    # A sandbox past its memory with nothing left to kill, or killed from
+    # outside, is still there but no longer running. The daemon is fine, and
+    # an operator reading "DockerUnavailable" goes looking at the wrong thing.
+    box = await acquired(controller)
+    name = await _container_of(controller, box.sandbox_id)
+    docker_client.containers.get(name).kill()
+
+    with pytest.raises(ContainerNotRunning):
+        await controller.freeze(run_id=RUN, lease_id=LEASE, sandbox_id=box.sandbox_id)
 
 
 async def test_destroy_removes_the_container_and_ends_the_reservation(

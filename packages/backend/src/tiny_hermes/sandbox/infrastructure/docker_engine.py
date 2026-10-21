@@ -38,6 +38,16 @@ class DockerUnavailable(Exception):
     """
 
 
+class ContainerNotRunning(DockerUnavailable):
+    """The daemon answered: the container is there and has stopped.
+
+    A subclass so every caller that treats an engine failure as "the sandbox
+    cannot be vouched for" still does. Only the name changes, because the
+    daemon was reachable and an operator who reads "DockerUnavailable" goes
+    looking at the wrong thing.
+    """
+
+
 @dataclass(frozen=True)
 class VolumeInfo:
     name: str
@@ -285,7 +295,23 @@ class DockerEngine:
         )
 
     async def pause(self, container_id: str) -> None:
-        await self._call(self.client.api.pause, container_id)
+        try:
+            await self._call(self.client.api.pause, container_id)
+        except DockerUnavailable as failure:
+            # A sandbox past its memory with nothing left to kill dies whole,
+            # and the freeze at the end of its slice is the first call to
+            # meet that. Asked once more so the failure says which it was; if
+            # the daemon cannot answer this either, the original stands.
+            try:
+                state = await self._call(self.client.api.inspect_container, container_id)
+            except DockerUnavailable:
+                state = None
+            if state is not None and not state["State"]["Running"]:
+                raise ContainerNotRunning(
+                    f"container exited with {state['State']['ExitCode']}"
+                    f"{' after an OOM kill' if state['State']['OOMKilled'] else ''}"
+                ) from failure
+            raise
 
     async def unpause(self, container_id: str) -> None:
         await self._call(self.client.api.unpause, container_id)
