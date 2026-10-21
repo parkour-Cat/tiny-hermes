@@ -94,10 +94,11 @@ class SandboxClient:
             )
         except ControllerClient.Unreachable as unreachable:
             # Only acquire is put into the platform's type, because only the
-            # Worker's acquire acts on it. It may have taken effect: a
-            # reservation made by an acquire nobody heard is refused to the
-            # next one as `already_reserved` until the Scheduler reclaims it.
-            raise SandboxUnreachable(str(unreachable)) from unreachable
+            # Worker's acquire acts on it.
+            raise SandboxUnreachable(
+                str(unreachable),
+                sent=not isinstance(unreachable, ControllerClient.NotConnected),
+            ) from unreachable
         return AcquiredSandbox(
             sandbox_id=UUID(str(answer["sandbox_id"])),
             cache_state=CacheState(str(answer["cache_state"])),

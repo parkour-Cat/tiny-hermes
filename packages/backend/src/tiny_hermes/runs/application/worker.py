@@ -836,23 +836,35 @@ class WorkerRuntime:
             )
             return None
         except SandboxUnreachable as unreachable:
-            # The Controller on another host, or this Worker's certificate,
-            # is briefly not there. Failing the Run made a network blip
-            # permanent for whoever sent it (tier B acceptance, finding 1).
-            # Waiting is bounded by the Run's own model-call budget, since
-            # each attempt spends the call that asked for the tool.
+            # Failing the Run made a network blip permanent for whoever sent
+            # it (tier B acceptance, finding 1). Which way it waits depends on
+            # whether the acquire may have reserved a sandbox nobody heard of.
             logger.warning(
-                "controller unreachable at acquire, ending the slice",
-                extra={"run_id": str(claimed.run.id), "error": str(unreachable)},
+                "controller unreachable at acquire",
+                extra={
+                    "run_id": str(claimed.run.id),
+                    "sent": unreachable.sent,
+                    "error": str(unreachable),
+                },
             )
+            if unreachable.sent:
+                # Requeued, the next acquire would meet that reservation as
+                # `already_reserved` until the Run's budget ran out: only an
+                # interrupted Run's reservation is isolated and reclaimed, and
+                # recovery waits until it is gone.
+                decision = SliceDecision(RunSignal.INTERRUPTED)
+            else:
+                # Nothing can have been reserved. Bounded by the Run's own
+                # budget: each attempt spends the call that asked for the tool.
+                decision = SliceDecision(
+                    RunSignal.SLICE_ENDED,
+                    retry_after_seconds=CONTROLLER_UNREACHABLE_RETRY_SECONDS,
+                )
             await self._record(
                 claimed,
                 handle,
                 context.state_version,
-                SliceDecision(
-                    RunSignal.SLICE_ENDED,
-                    retry_after_seconds=CONTROLLER_UNREACHABLE_RETRY_SECONDS,
-                ),
+                decision,
                 spent,
                 executed_ms,
                 prices=context.prices,
@@ -2830,9 +2842,9 @@ class WorkerRuntime:
 #: up to this long.
 SANDBOX_ROOM_RETRY_SECONDS = 10
 
-#: How long a Run that could not reach the Controller waits. Longer than for
-#: room: an outage lasts longer than a full budget, and every attempt is a
-#: model call charged to the Run.
+#: How long a Run whose acquire was never sent waits. Longer than for room: an
+#: outage lasts longer than a full budget, and every attempt is a model call
+#: charged to the Run.
 CONTROLLER_UNREACHABLE_RETRY_SECONDS = 30
 
 #: Refusals that end the slice and requeue the Run instead of failing it.
