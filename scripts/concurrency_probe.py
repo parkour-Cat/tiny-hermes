@@ -441,8 +441,13 @@ def probe(
     rounds: int = 10,
     lead_seconds: float = 5.0,
     cache_mb: int = 0,
+    short_tools: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Short Runs at `rate`, optionally after `long_tasks` long ones start.
+
+    `short_tools` binds tools to the short Runs' Agent without the scenario
+    calling any: a person chatting with a tooled Agent, whose message should
+    not wait for a sandbox it never uses (§16, v2.15).
 
     The long tasks are submitted first and the short Runs `lead_seconds`
     later, so the short ones arrive while long tasks already hold Workers:
@@ -461,7 +466,9 @@ def probe(
         console = ProbeConsole(client)
         console.sign_in()
         workspace = console.create_workspace(f"probe-{time.time_ns()}")
-        agent = console.publish_agent(workspace, f"probe-{time.time_ns()}", SCENARIO)
+        agent = console.publish_agent(
+            workspace, f"probe-{time.time_ns()}", SCENARIO, list(short_tools)
+        )
         _log(f"opening {len(offsets)} sessions (one per Run, outside the timed window)")
         sessions = [console.open_session(workspace, agent) for _ in offsets]
         long_ids: set[str] = set()
@@ -552,6 +559,7 @@ def probe(
             "long_tasks": long_tasks,
             "rounds": rounds if long_tasks else 0,
             "cache_mb": cache_mb if long_tasks else 0,
+            "short_tools": list(short_tools),
         },
         "stack": {
             **host_shape(),
@@ -626,6 +634,13 @@ def main() -> int:
     parser.add_argument(
         "--cache-mb", type=int, default=0, help="MiB each long task keeps in its sandbox"
     )
+    parser.add_argument(
+        "--short-tool",
+        dest="short_tools",
+        action="append",
+        default=[],
+        help="a tool bound to the short Runs' Agent, which never calls it (repeatable)",
+    )
     arguments = parser.parse_args()
     result = probe(
         arguments.rate,
@@ -636,6 +651,7 @@ def main() -> int:
         rounds=arguments.rounds,
         lead_seconds=arguments.lead_seconds,
         cache_mb=arguments.cache_mb,
+        short_tools=arguments.short_tools,
     )
     _report(result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
