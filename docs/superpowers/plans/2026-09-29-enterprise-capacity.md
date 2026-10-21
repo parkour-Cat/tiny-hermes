@@ -158,7 +158,7 @@ API、Worker、scheduler 已经是无状态的，Run 的真相在 Postgres 里�
     API 每个请求的登录校验、Worker 每次领取都缺索引；每个 Run 快照都会读出同一会话里的全部 Run。
     修复后，在大数据量下领取从 1139 ms 降到 4.5 ms，登录校验从 5.6 ms 降到 0.5 ms。渠道收消息的
     路径没有覆盖到。
-15. **前端有 3 条依赖时序的测试不稳定**，会让 CI 偶尔无故变红：`AgentDetailPage` 的「真实布局
+15. ~~**前端有 3 条依赖时序的测试不稳定**~~ **已修**（PR #112，[验收记录](../verification/2026-10-01-flaky-web-tests.md)：`useRunEvents` 那条改为检查 hook 自己的中断信号，另外两条的等待时间按负载下的实测值放宽）。顺带修了出站范围那条偶发的 e2e（PR #114，[验收记录](../verification/2026-10-21-flaky-outbound-e2e.md)）。原来的描述：会让 CI 偶尔无故变红：`AgentDetailPage` 的「真实布局
     加载完后恢复开发者的编辑」、`AgentModelPolicy` 的「确定性选择仍发送确定性策略」、
     `useRunEvents` 的「离开页面时中断连接」。单独跑都能通过，整套跑时偶尔失败；#110 的推送 CI
     就因为第三条失败过一次，重跑后通过。
