@@ -69,7 +69,10 @@
 
 验收方法见 §6。
 
-### B. 多台机器跑 Worker（小改造，还没做）
+### B. 多台机器跑 Worker（已做，2026-10-21）
+
+[B 档设计](../specs/2026-10-21-tier-b-networked-controller-design.md)，[验收记录](../verification/2026-10-21-tier-b-acceptance.md)，运维手册 §7。
+Worker 经双向 TLS 调用一台沙箱主机上的 controller；只允许一台沙箱主机。下面是做之前的描述：
 
 API、Worker、scheduler 已经是无状态的，Run 的真相在 Postgres 里，领取用 `SKIP LOCKED`
 加队首校验。唯一的阻塞：带工具的 Run 要通过 Unix socket 找本机的 controller。

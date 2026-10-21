@@ -1,0 +1,53 @@
+# Tier B: this host runs the sandboxes; Workers on other hosts call its
+# controller over mutual TLS (design 2026-10-21-tier-b-networked-controller).
+#
+#   docker compose -f compose.yaml -f compose.sandbox-host.yaml up -d --scale worker=0
+#
+# `--scale worker=0` because the point of tier B is that this host's CPU and
+# memory go to sandboxes; a Worker left here works, over TLS like the others.
+#
+# CONTROLLER_PRIVATE_ADDRESS is this host's address on the private network the
+# Worker hosts share; CONTROLLER_CERT_DIR holds what
+# `scripts/controller_certs.py` issued. Each service mounts the CA, its own
+# certificate and its own key — never the directory, so no container holds
+# another role's key. The worker and scheduler keys must be readable by uid
+# 10001, the user those images run as (docs/operations.md §7).
+services:
+  controller:
+    environment:
+      # Every interface *inside this container*, which is only the
+      # container's. What the host exposes is the `ports` binding below, and
+      # that names the private address.
+      SANDBOX_CONTROLLER_LISTEN: tls://0.0.0.0:7443
+      SANDBOX_CONTROLLER_LISTEN_ANY: "true"
+      SANDBOX_CONTROLLER_CA_FILE: /etc/tiny-hermes/controller/ca.pem
+      SANDBOX_CONTROLLER_CERT_FILE: /etc/tiny-hermes/controller/controller.pem
+      SANDBOX_CONTROLLER_KEY_FILE: /etc/tiny-hermes/controller/controller.key
+    ports:
+      - ${CONTROLLER_PRIVATE_ADDRESS:?}:7443:7443
+    volumes:
+      - ${CONTROLLER_CERT_DIR:?}/ca.pem:/etc/tiny-hermes/controller/ca.pem:ro
+      - ${CONTROLLER_CERT_DIR:?}/controller.pem:/etc/tiny-hermes/controller/controller.pem:ro
+      - ${CONTROLLER_CERT_DIR:?}/controller.key:/etc/tiny-hermes/controller/controller.key:ro
+
+  worker:
+    environment:
+      SANDBOX_CONTROLLER_URL: tls://controller:7443
+      SANDBOX_CONTROLLER_CA_FILE: /etc/tiny-hermes/controller/ca.pem
+      SANDBOX_CONTROLLER_CERT_FILE: /etc/tiny-hermes/controller/worker.pem
+      SANDBOX_CONTROLLER_KEY_FILE: /etc/tiny-hermes/controller/worker.key
+    volumes:
+      - ${CONTROLLER_CERT_DIR:?}/ca.pem:/etc/tiny-hermes/controller/ca.pem:ro
+      - ${CONTROLLER_CERT_DIR:?}/worker.pem:/etc/tiny-hermes/controller/worker.pem:ro
+      - ${CONTROLLER_CERT_DIR:?}/worker.key:/etc/tiny-hermes/controller/worker.key:ro
+
+  scheduler:
+    environment:
+      SANDBOX_CONTROLLER_URL: tls://controller:7443
+      SANDBOX_CONTROLLER_CA_FILE: /etc/tiny-hermes/controller/ca.pem
+      SANDBOX_CONTROLLER_CERT_FILE: /etc/tiny-hermes/controller/scheduler.pem
+      SANDBOX_CONTROLLER_KEY_FILE: /etc/tiny-hermes/controller/scheduler.key
+    volumes:
+      - ${CONTROLLER_CERT_DIR:?}/ca.pem:/etc/tiny-hermes/controller/ca.pem:ro
+      - ${CONTROLLER_CERT_DIR:?}/scheduler.pem:/etc/tiny-hermes/controller/scheduler.pem:ro
+      - ${CONTROLLER_CERT_DIR:?}/scheduler.key:/etc/tiny-hermes/controller/scheduler.key:ro

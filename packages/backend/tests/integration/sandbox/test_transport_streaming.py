@@ -15,7 +15,9 @@ from typing import Any
 
 import pytest
 from tiny_hermes.sandbox.transport.client import ControllerClient
-from tiny_hermes.sandbox.transport.server import ControllerServer, ServerStream
+from tiny_hermes.sandbox.transport.server import ServerStream
+
+from .conftest import Pki, wire
 
 pytestmark = pytest.mark.skipif(
     not hasattr(socket, "AF_UNIX"),
@@ -88,16 +90,18 @@ class _Refused(Exception):
 
 @pytest.fixture
 async def wired(
-    socket_dir: Path,
+    transport: str, socket_dir: Path, controller_pki: Pki
 ) -> AsyncIterator[tuple[SpyStreams, ControllerClient]]:
     spy = SpyStreams()
-    path = str(socket_dir / "c.sock")
-    server = ControllerServer(
-        dispatch=spy.dispatch, stream_dispatch=spy.dispatch_stream, path=path
+    server, client = await wire(
+        transport,
+        socket_dir,
+        controller_pki,
+        dispatch=spy.dispatch,
+        stream_dispatch=spy.dispatch_stream,
     )
-    await server.start()
     try:
-        yield spy, ControllerClient(path)
+        yield spy, client
     finally:
         await server.stop()
 
@@ -177,7 +181,7 @@ async def test_an_aborted_stream_does_not_take_the_server_down(
     """A client that vanishes mid-frames burns its connection and nothing else."""
     spy, client = wired
 
-    reader, writer = await asyncio.open_unix_connection(client.path)
+    reader, writer = await client.connect()
     writer.write(b'{"action": "workspace_import", "payload": {"x": 1}}\n')
     await writer.drain()
     ready = await reader.readline()
@@ -250,7 +254,7 @@ async def test_a_five_thousand_entry_scan_survives_the_socket(
 
 
 async def test_progress_frames_keep_a_silent_stream_inside_the_idle_window(
-    socket_dir: Path,
+    transport: str, socket_dir: Path, controller_pki: Pki
 ) -> None:
     """Design §5.3: a legal silent exec is not killed by the 30s idle rule.
 
@@ -284,20 +288,22 @@ async def test_progress_frames_keep_a_silent_stream_inside_the_idle_window(
             "truncated": False,
         }
 
-    path = str(socket_dir / "c.sock")
-    server = ControllerServer(
-        dispatch=dispatch, stream_dispatch=dispatch_stream, path=path
+    # Shorter than the silence, longer than one heartbeat: without
+    # PROGRESS this call times out; with it, the stream finishes.
+    server, client = await wire(
+        transport,
+        socket_dir,
+        controller_pki,
+        client_timeout=0.12,
+        dispatch=dispatch,
+        stream_dispatch=dispatch_stream,
     )
-    await server.start()
     try:
         received = bytearray()
 
         async def sink(chunk: bytes) -> None:
             received.extend(chunk)
 
-        # Shorter than the silence, longer than one heartbeat: without
-        # PROGRESS this call times out; with it, the stream finishes.
-        client = ControllerClient(path, timeout=0.12)
         answer = await client.receive_stream(
             "execute_stream", {"run_id": "r"}, sink, limit=64
         )
@@ -308,7 +314,7 @@ async def test_progress_frames_keep_a_silent_stream_inside_the_idle_window(
 
 
 async def test_a_silent_stream_without_progress_dies_inside_the_client_window(
-    socket_dir: Path,
+    transport: str, socket_dir: Path, controller_pki: Pki
 ) -> None:
     """The keep-alive is load-bearing: silence alone still trips the deadline."""
 
@@ -325,13 +331,15 @@ async def test_a_silent_stream_without_progress_dies_inside_the_client_window(
         await channel.finish_send()
         return {"exit_code": 0}
 
-    path = str(socket_dir / "c.sock")
-    server = ControllerServer(
-        dispatch=dispatch, stream_dispatch=dispatch_stream, path=path
+    server, client = await wire(
+        transport,
+        socket_dir,
+        controller_pki,
+        client_timeout=0.12,
+        dispatch=dispatch,
+        stream_dispatch=dispatch_stream,
     )
-    await server.start()
     try:
-        client = ControllerClient(path, timeout=0.12)
 
         async def sink(chunk: bytes) -> None:
             del chunk

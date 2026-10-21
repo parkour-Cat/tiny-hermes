@@ -43,7 +43,10 @@ x-base-env: &base-env
   # The sandbox. The image allowlist is empty by default, which is how a
   # deployment that has not chosen an image fails: no tool can run at all.
   SANDBOX_IMAGE_DIGEST: ${SANDBOX_IMAGE_DIGEST:-}
-  SANDBOX_CONTROLLER_SOCKET: /run/tiny-hermes/controller.sock
+  # Where the worker and the scheduler find the controller, and where it
+  # listens: the same socket, in the volume the three of them share.
+  SANDBOX_CONTROLLER_URL: unix:///run/tiny-hermes/controller.sock
+  SANDBOX_CONTROLLER_LISTEN: unix:///run/tiny-hermes/controller.sock
   # The outbound boundary (§16.5). Empty by default in every field, which is
   # what makes an unconfigured deployment send nothing rather than everything:
   # no proxy URL means every outbound call refuses instead of connecting

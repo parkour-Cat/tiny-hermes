@@ -40,6 +40,7 @@ from tiny_hermes.sandbox.infrastructure.docker_engine import DockerEngine
 from tiny_hermes.sandbox.infrastructure.lease_authority import SqlLeaseAuthority
 from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
 from tiny_hermes.sandbox.transport.server import ControllerServer, ServerStream
+from tiny_hermes.sandbox.transport.wiring import controller_listener
 from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.database import build_session_factory
 from tiny_hermes.shared.logging import configure_logging
@@ -170,17 +171,19 @@ async def _serve() -> None:
             await session.commit()
             return answer
 
+    address, tls = controller_listener(settings)
     server = ControllerServer(
         dispatch=dispatch,
         stream_dispatch=dispatch_stream,
-        path=settings.sandbox_controller_socket,
+        address=address,
+        tls=tls,
         group=settings.sandbox_socket_gid,
     )
     await server.start()
     logger.info(
         "sandbox controller started",
         extra={
-            "socket": settings.sandbox_controller_socket,
+            "listen": str(address),
             "sandbox_memory_mb": ceiling.memory_mb,
             "sandbox_memory_budget_mb": budget,
         },

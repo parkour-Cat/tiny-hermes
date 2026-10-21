@@ -1,0 +1,33 @@
+# Tier B: a host that runs Workers and nothing else (design
+# 2026-10-21-tier-b-networked-controller §4.7).
+#
+#   docker compose -f compose.worker-host.yaml up -d --scale worker=N
+#
+# Everything the Worker reaches is on other hosts, so every address is given
+# rather than defaulted: compose.yaml's defaults name services on its own
+# network, which on this host resolve to nothing. The rest of the Worker's
+# configuration — model keys, KEK, capacity knobs — comes from compose.yaml's
+# worker through `extends`, read from the same variables.
+#
+# No socket volume and no Docker socket: this Worker reaches the controller
+# over TLS with its own certificate, and that is all it reaches.
+name: tiny-hermes-worker
+
+services:
+  worker:
+    extends:
+      file: compose.yaml
+      service: worker
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?}
+      REDIS_URL: ${REDIS_URL:?}
+      S3_ENDPOINT: ${S3_ENDPOINT:?}
+      SANDBOX_CONTROLLER_URL: ${SANDBOX_CONTROLLER_URL:?}
+      SANDBOX_CONTROLLER_CA_FILE: /etc/tiny-hermes/controller/ca.pem
+      SANDBOX_CONTROLLER_CERT_FILE: /etc/tiny-hermes/controller/worker.pem
+      SANDBOX_CONTROLLER_KEY_FILE: /etc/tiny-hermes/controller/worker.key
+    volumes: !override
+      - ${CONTROLLER_CERT_DIR:?}/ca.pem:/etc/tiny-hermes/controller/ca.pem:ro
+      - ${CONTROLLER_CERT_DIR:?}/worker.pem:/etc/tiny-hermes/controller/worker.pem:ro
+      - ${CONTROLLER_CERT_DIR:?}/worker.key:/etc/tiny-hermes/controller/worker.key:ro
+    depends_on: !reset []

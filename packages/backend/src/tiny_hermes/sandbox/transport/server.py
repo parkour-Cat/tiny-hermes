@@ -1,11 +1,13 @@
-"""A Unix socket in front of the Controller. No rule lives here.
+"""A socket in front of the Controller: the Unix one, or TLS (tier B §4.1).
 
 Reaching this socket is not authorization — technical design §11.1 is explicit,
-and this file is where that would be easiest to forget. Both the Worker and the
-Scheduler mount the volume it lives in, so anything that arrives here has
-already proven only that it is one of two processes the platform runs. Who may
-do what is decided by `application/controller.py`, which this file calls and
-does not second-guess.
+and this file is where that would be easiest to forget. Over the Unix socket,
+anything that arrives has proven only that it is one of two processes the
+platform runs, both of which mount the volume it lives in. Over TLS, its
+certificate proves the same, plus which of the two (`tls.py`): the one rule
+this file applies is that the Scheduler may only ask for `cleanup`. Whether a
+call may touch *this* Run's sandbox is decided by `application/controller.py`,
+which this file calls and does not second-guess.
 
 Newline-delimited JSON over `asyncio.start_unix_server`, chosen over HTTP so the
 phase-3A ban on building HTTP clients does not need a second exemption for a
@@ -16,12 +18,16 @@ import asyncio
 import hashlib
 import json
 import os
+import socket
+import ssl
 import stat
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from enum import StrEnum
 from typing import Any, cast
 
+from tiny_hermes.sandbox.transport.actions import ACTIONS, STREAM_ACTIONS
+from tiny_hermes.sandbox.transport.address import ControllerAddress
 from tiny_hermes.sandbox.transport.frames import (
     IDLE_SECONDS,
     MAX_FRAME_PAYLOAD,
@@ -32,53 +38,38 @@ from tiny_hermes.sandbox.transport.frames import (
     decode_frame,
     encode_frame,
 )
+from tiny_hermes.sandbox.transport.tls import allowed_actions, role_of
 
 Dispatch = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 StreamDispatch = Callable[
     [str, dict[str, Any], "ServerStream"], Awaitable[dict[str, Any]]
 ]
 
-#: Actions whose connection switches to Task 5 frames after the control line.
-#: `execute_stdin` exists because a `file.write` body must not ride a JSON
-#: control line whose whole point is to stay small; `workspace_scan` is here
-#: for the mirror-image reason — a full-tree scan of a hundred thousand files
-#: is megabytes of metadata, and the drill met a 502-entry scan overflowing
-#: the 64 KiB line before any test wrote one that big.
-STREAM_ACTIONS = frozenset(
-    {
-        "workspace_import",
-        "workspace_export",
-        "workspace_scan",
-        "execute_stream",
-        "execute_stdin",
-    }
-)
-
-#: The Controller's whole vocabulary. An action outside it is refused here
-#: rather than passed on, so a typo cannot become an attribute lookup.
-ACTIONS = (
-    frozenset(
-        {
-            "acquire",
-            "execute",
-            "freeze",
-            "thaw",
-            "destroy",
-            "inspect",
-            "keep",
-            "cleanup",
-            "volume_remove",
-        }
-    )
-    | STREAM_ACTIONS
-)
-
-
 class ProtocolError(StrEnum):
     MALFORMED = "malformed_frame"
     UNKNOWN_ACTION = "unknown_action"
     TOO_LARGE = "frame_too_large"
     STREAM_FAILED = "stream_failed"
+    ROLE_NOT_PERMITTED = "role_not_permitted"
+
+
+def keep_alive(writer: asyncio.StreamWriter) -> None:
+    """Probe an idle TCP connection, so a peer host that vanished is noticed.
+
+    Design §4.4: the stream frames and the call timeout already bound a live
+    exchange; this is for the connection nobody is reading from.
+    """
+    # Untyped on purpose: `socket.socket` is a banned name in this package
+    # (outbound goes through tiny_hermes.outbound), and this one only sets
+    # options on a connection asyncio already made.
+    raw: Any = writer.get_extra_info("socket")
+    if raw is None or raw.family not in (socket.AF_INET, socket.AF_INET6):
+        return
+    raw.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    # Linux spells the idle time TCP_KEEPIDLE; macOS spells it TCP_KEEPALIVE.
+    idle = getattr(socket, "TCP_KEEPIDLE", None) or getattr(socket, "TCP_KEEPALIVE", None)
+    if idle is not None:
+        raw.setsockopt(socket.IPPROTO_TCP, idle, 30)
 
 
 class StreamAborted(Exception):
@@ -216,13 +207,25 @@ class ControllerServer:
         self,
         *,
         dispatch: Dispatch,
-        path: str,
+        path: str | None = None,
+        address: ControllerAddress | None = None,
+        tls: ssl.SSLContext | None = None,
         group: int | None = None,
         stream_dispatch: StreamDispatch | None = None,
     ) -> None:
+        if address is None:
+            if path is None:
+                raise ValueError("a controller server needs a path or an address")
+            address = ControllerAddress(scheme="unix", path=path)
+        if address.is_tls != (tls is not None):
+            # Never a TLS address served in the clear, and never a context
+            # quietly ignored on a socket that has no use for it.
+            raise ValueError(f"{address} needs {'a' if address.is_tls else 'no'} TLS context")
         self._dispatch = dispatch
         self._stream_dispatch = stream_dispatch
-        self._path = path
+        self._address = address
+        self._path = address.path
+        self._tls = tls
         # The gid the platform's own processes run as. The Controller runs as
         # root — see the Compose file for why — so the socket it creates is
         # root:root, and a Worker at 10001:10001 cannot open a 0660 socket
@@ -232,7 +235,20 @@ class ControllerServer:
         self._group = group
         self._server: asyncio.AbstractServer | None = None
 
+    @property
+    def bound_port(self) -> int:
+        """The TCP port actually listened on — the one chosen, when asked for 0."""
+        if self._server is None or not self._address.is_tls:
+            raise RuntimeError("not listening on TCP")
+        listening: Any = self._server
+        return int(listening.sockets[0].getsockname()[1])
+
     async def start(self) -> None:
+        if self._tls is not None:
+            self._server = await asyncio.start_server(
+                self._serve, self._address.host, self._address.port, ssl=self._tls
+            )
+            return
         parent = os.path.dirname(self._path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -256,12 +272,20 @@ class ControllerServer:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
-        with suppress(FileNotFoundError):
-            os.unlink(self._path)
+        if self._tls is None:
+            with suppress(FileNotFoundError):
+                os.unlink(self._path)
 
     async def _serve(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        # None is every action: the Unix socket carries no role to restrict by.
+        allowed = (
+            None
+            if self._tls is None
+            else allowed_actions(role_of(writer.get_extra_info("peercert")))
+        )
+        keep_alive(writer)
         try:
             while True:
                 try:
@@ -277,14 +301,18 @@ class ControllerServer:
                 streaming = self._parse_streaming(line)
                 if streaming is not None:
                     action, payload = streaming
+                    if allowed is not None and action not in allowed:
+                        # Before "ready", so a refused caller never sends a byte.
+                        await self._say(writer, {"error": ProtocolError.ROLE_NOT_PERMITTED.value})
+                        return
                     await self._say(
                         writer, await self._answer_stream(action, payload, reader, writer)
                     )
                     # After a framed exchange — finished or aborted midway —
                     # the byte stream cannot be trusted to frame another call.
                     return
-                await self._say(writer, await self._answer(line))
-        except (ConnectionResetError, BrokenPipeError):
+                await self._say(writer, await self._answer(line, allowed))
+        except (ConnectionResetError, BrokenPipeError, ssl.SSLError):
             # One client going away is not the Controller's problem.
             return
         finally:
@@ -326,7 +354,7 @@ class ControllerServer:
             reason = getattr(refused, "reason", None)
             return {"error": str(getattr(reason, "value", reason) or type(refused).__name__)}
 
-    async def _answer(self, line: bytes) -> dict[str, Any]:
+    async def _answer(self, line: bytes, allowed: frozenset[str] | None) -> dict[str, Any]:
         try:
             frame: Any = json.loads(line)
         except ValueError:
@@ -340,6 +368,8 @@ class ControllerServer:
             return {"error": ProtocolError.MALFORMED.value}
         if action not in ACTIONS:
             return {"error": ProtocolError.UNKNOWN_ACTION.value}
+        if allowed is not None and action not in allowed:
+            return {"error": ProtocolError.ROLE_NOT_PERMITTED.value}
         try:
             return {"result": await self._dispatch(action, cast(dict[str, Any], payload))}
         except Exception as refused:  # noqa: BLE001 - every refusal is a reply

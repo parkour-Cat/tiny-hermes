@@ -5,6 +5,10 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from tiny_hermes.egress.domain.decision import ALLOWED_PORTS
+from tiny_hermes.sandbox.transport.address import ControllerAddress
+from tiny_hermes.sandbox.transport.tls import TlsFiles
+
+DEFAULT_CONTROLLER_URL = "unix:///run/tiny-hermes/controller.sock"
 
 
 class Settings(BaseSettings):
@@ -134,10 +138,22 @@ class Settings(BaseSettings):
     model_max_attempts: int = Field(default=3, ge=1, le=3)
     model_retry_base_ms: int = Field(default=250, ge=10, le=5_000)
 
-    #: The Sandbox Controller's socket, in the volume the Worker and Scheduler
-    #: share with it. They mount this and nothing else; the Docker socket is the
-    #: Controller's alone.
-    sandbox_controller_socket: str = "/run/tiny-hermes/controller.sock"
+    #: Where the Worker and the Scheduler find the Controller, and where the
+    #: Controller listens. Two settings because in tier B they are on different
+    #: hosts (design 2026-10-21 §4.1); in one Compose stack both are the socket
+    #: in the volume the three of them share. None is that socket.
+    sandbox_controller_url: str | None = None
+    sandbox_controller_listen: str | None = None
+    #: The old spelling, a bare path naming both ends. Kept for one release so a
+    #: deployment's `.env` does not stop working on upgrade.
+    sandbox_controller_socket: str | None = None
+    #: This process's half of the TLS link, when either address is `tls://`:
+    #: the private CA, and its own certificate and key (tier B §4.2).
+    sandbox_controller_ca_file: str | None = None
+    sandbox_controller_cert_file: str | None = None
+    sandbox_controller_key_file: str | None = None
+    #: Listening on every interface includes ones nobody meant (tier B §4.3).
+    sandbox_controller_listen_any: bool = False
     #: The group the platform's own processes run as, from the application
     #: image. The Controller runs as root and hands the socket to this group so
     #: the Worker and the Scheduler can open it without it being world-writable.
@@ -192,6 +208,35 @@ class Settings(BaseSettings):
     tiny_hermes_previous_kek_id: str = ""
 
     @property
+    def controller_address(self) -> ControllerAddress:
+        return ControllerAddress.parse(self._controller_url(self.sandbox_controller_url))
+
+    @property
+    def controller_listen_address(self) -> ControllerAddress:
+        return ControllerAddress.parse(self._controller_url(self.sandbox_controller_listen))
+
+    @property
+    def controller_tls_files(self) -> TlsFiles | None:
+        if (
+            self.sandbox_controller_ca_file is None
+            or self.sandbox_controller_cert_file is None
+            or self.sandbox_controller_key_file is None
+        ):
+            return None
+        return TlsFiles(
+            ca_file=self.sandbox_controller_ca_file,
+            cert_file=self.sandbox_controller_cert_file,
+            key_file=self.sandbox_controller_key_file,
+        )
+
+    def _controller_url(self, chosen: str | None) -> str:
+        if chosen is not None:
+            return chosen
+        if self.sandbox_controller_socket is not None:
+            return f"unix://{self.sandbox_controller_socket}"
+        return DEFAULT_CONTROLLER_URL
+
+    @property
     def approved_image_digests(self) -> tuple[str, ...]:
         return (self.sandbox_image_digest,) if self.sandbox_image_digest else ()
 
@@ -242,6 +287,55 @@ class Settings(BaseSettings):
         # this field: other empty values here mean something, the controller's
         # present-but-empty S3 keys among them.
         return None if value == "" else value
+
+    @field_validator(
+        "sandbox_controller_url",
+        "sandbox_controller_listen",
+        "sandbox_controller_socket",
+        "sandbox_controller_ca_file",
+        "sandbox_controller_cert_file",
+        "sandbox_controller_key_file",
+        mode="before",
+    )
+    @classmethod
+    def read_an_empty_controller_setting_as_unset(cls, value: object) -> object:
+        # Compose passes `${VAR:-}`, "" when unset; "" is no path at all.
+        return None if value == "" else value
+
+    @model_validator(mode="after")
+    def reject_an_unreadable_controller_address(self) -> "Settings":
+        if self.sandbox_controller_socket is not None and (
+            self.sandbox_controller_url is not None
+            or self.sandbox_controller_listen is not None
+        ):
+            # Which one wins would be a guess, and a wrong guess is a Worker
+            # talking to a socket nobody listens on.
+            raise ValueError(
+                "SANDBOX_CONTROLLER_SOCKET is the old spelling of SANDBOX_CONTROLLER_URL "
+                "and SANDBOX_CONTROLLER_LISTEN; set one or the other"
+            )
+        # Parsed here so a bad value stops the process at startup rather than at
+        # the first Run that needs a sandbox.
+        caller, listener = self.controller_address, self.controller_listen_address
+        if caller.is_tls or listener.is_tls:
+            for name in (
+                "sandbox_controller_ca_file",
+                "sandbox_controller_cert_file",
+                "sandbox_controller_key_file",
+            ):
+                if getattr(self, name) is None:
+                    raise ValueError(f"a tls:// controller address needs {name.upper()}")
+        if (
+            listener.is_tls
+            and listener.host in ("0.0.0.0", "::")  # noqa: S104 - this is the refusal
+            and not self.sandbox_controller_listen_any
+        ):
+            raise ValueError(
+                f"SANDBOX_CONTROLLER_LISTEN={listener} is every interface; name the "
+                "private one, or set SANDBOX_CONTROLLER_LISTEN_ANY=true on a host whose "
+                "every interface is private"
+            )
+        return self
 
     @model_validator(mode="after")
     def reject_a_budget_below_one_sandbox(self) -> "Settings":

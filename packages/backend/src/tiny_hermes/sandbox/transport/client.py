@@ -10,11 +10,13 @@ other side that a Scheduler cannot bypass by calling the socket directly.
 import asyncio
 import hashlib
 import json
+import ssl
 from collections.abc import AsyncIterator, Awaitable, Callable
 from enum import Enum
 from typing import Any, cast
 from uuid import UUID
 
+from tiny_hermes.sandbox.transport.address import ControllerAddress
 from tiny_hermes.sandbox.transport.frames import (
     MAX_FRAME_PAYLOAD,
     Frame,
@@ -23,6 +25,7 @@ from tiny_hermes.sandbox.transport.frames import (
     decode_frame,
     encode_frame,
 )
+from tiny_hermes.sandbox.transport.server import keep_alive
 
 
 def _plain(value: Any) -> Any:
@@ -56,16 +59,31 @@ class ControllerClient:
             super().__init__(reason)
             self.reason = reason
 
-    def __init__(self, path: str, *, timeout: float = 120.0) -> None:
-        self.path = path
+    def __init__(
+        self,
+        target: str | ControllerAddress,
+        *,
+        tls: ssl.SSLContext | None = None,
+        timeout: float = 120.0,
+    ) -> None:
+        # A bare string is a socket path, which is what every caller passed
+        # before the Controller could be on another host.
+        address = (
+            target
+            if isinstance(target, ControllerAddress)
+            else ControllerAddress(scheme="unix", path=target)
+        )
+        if address.is_tls != (tls is not None):
+            raise ValueError(f"{address} needs {'a' if address.is_tls else 'no'} TLS context")
+        self.address = address
+        #: The socket path; empty for a Controller reached over TLS.
+        self.path = address.path
+        self._tls = tls
         self._timeout = timeout
 
     async def call(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         frame = json.dumps({"action": action, "payload": _plain(payload)}).encode()
-        try:
-            reader, writer = await asyncio.open_unix_connection(self.path)
-        except OSError as unreachable:
-            raise ControllerClient.Unreachable(str(unreachable)) from unreachable
+        reader, writer = await self.connect()
         try:
             writer.write(frame + b"\n")
             await writer.drain()
@@ -88,7 +106,7 @@ class ControllerClient:
         declared_total: int,
     ) -> dict[str, Any]:
         """One streaming upload: control line, ready, frames, final result."""
-        reader, writer = await self._connect()
+        reader, writer = await self.connect()
         # Read the verdict concurrently with the upload. A server that refuses
         # mid-stream stops reading and answers at once; a client that only
         # looked for the answer after the last frame would meet the broken
@@ -165,7 +183,7 @@ class ControllerClient:
         ``limit`` is this caller's own ceiling; a server that declares a
         larger total is refused before the first data byte.
         """
-        reader, writer = await self._connect()
+        reader, writer = await self.connect()
         try:
             await self._open(writer, action, payload)
             await self._expect_ready(reader)
@@ -196,11 +214,31 @@ class ControllerClient:
             raise ControllerClient.Unreachable("the controller closed mid-stream")
         return self._result(line)
 
-    async def _connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    async def connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """One fresh connection, as every call makes; public for the wire tests.
+
+        Not through `tiny_hermes.outbound`: that client guards the platform's
+        calls to the outside world, and this is the platform's own private
+        link, authenticated at both ends — like its database connection.
+        """
         try:
-            return await asyncio.open_unix_connection(self.path)
-        except OSError as unreachable:
+            if self._tls is None:
+                return await asyncio.open_unix_connection(self.path)
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(
+                    self.address.host,
+                    self.address.port,
+                    ssl=self._tls,
+                    server_hostname=self.address.host,
+                ),
+                timeout=self._timeout,
+            )
+        except (OSError, TimeoutError) as unreachable:
+            # A refused handshake is an `ssl.SSLError`, which is an OSError:
+            # the platform could not ask, so the outcome is unknown, never "no".
             raise ControllerClient.Unreachable(str(unreachable)) from unreachable
+        keep_alive(writer)
+        return reader, writer
 
     async def _open(
         self, writer: asyncio.StreamWriter, action: str, payload: dict[str, Any]

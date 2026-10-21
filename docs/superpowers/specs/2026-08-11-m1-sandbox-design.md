@@ -162,6 +162,15 @@ re-checks:
 
 `acquire` additionally checks that the Run holds no other live Reservation.
 
+**Amended 2026-10-21 (tier B).** When the Worker is on another host it reaches
+the Controller over mutual TLS instead of the socket. The certificate proves
+the same kind of fact the socket did — one of the platform's own processes —
+plus which one: its OU is `worker` or `scheduler`, and a Scheduler certificate
+may only ask for `cleanup`. That is the first time the `sandbox.cleanup`
+authority above is carried by a credential; over the Unix socket it is still a
+name the Controller cannot check. Every check in the list above still runs on
+every call. Design: `2026-10-21-tier-b-networked-controller-design.md`.
+
 ## 6. The Controller's interface
 
 Six actions, per §11.1:
@@ -372,7 +381,9 @@ enforced the way the HTTP ban is — `subprocess`, `os.system`, and
 
 | Setting | Default | Notes |
 |---|---:|---|
-| `sandbox_controller_socket` | `/run/tiny-hermes/controller.sock` | the shared volume path |
+| `sandbox_controller_url` | `unix:///run/tiny-hermes/controller.sock` | where the Worker and the Scheduler find the Controller (tier B design 2026-10-21 §4.1) |
+| `sandbox_controller_listen` | `unix:///run/tiny-hermes/controller.sock` | where the Controller listens |
+| `sandbox_controller_socket` | unset | the old spelling, a bare path naming both ends; refused together with either of the above |
 | `sandbox_image_digest` | (required when tools are enabled) | approved digest, allowlist of one |
 | `sandbox_idle_ttl_seconds` | 300 | §11.4; 0–1800, workspace may only lower |
 | `sandbox_cpu_limit` | 1.0 | |
