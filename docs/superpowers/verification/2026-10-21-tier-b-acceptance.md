@@ -191,6 +191,13 @@ controller 停下时删掉了自己的 socket 文件。
 镜像不是完整重建的：重建时 `uv sync` 在 OrbStack VM 里下载依赖超时（CLAUDE.md 记的那个
 代理问题），所以是在现有镜像上覆盖了 `packages/backend/src`。依赖没有变化。
 
+**顺带修掉的一个 B 档缺陷**：跑全量集成测试时，`test_a_declared_total_above_the_server_limit_dies_at_start[tls]`
+失败了一次。单独跑约三次失败一次，main 上也一样，#117 的 CI 是碰巧过的。原因：controller
+拒绝上传后立刻关连接，客户端还没发完的帧没读，TCP 因此发 RST，RST 可能在客户端读到回答之前
+把它冲掉，于是一个明确的「拒绝」变成了「联系不上」（结果未知）。Unix socket 没有 RST，所以只在
+TLS 上出现。改成 controller 回答之后把剩下的输入读掉再关，最多 5 秒。新加的测试连续拒绝 20 次，
+修之前每次跑都失败。
+
 **没有走过的**：「可能送到了」那一种（走 `interrupted`）只有自动化测试；Worker 证书在运行中
 过期，只在 TLS 集成测试里测过「判为可能送到了」，没有在运行中的部署上让它真的过期；
 TLS 部署下 controller 停机没有重走，自动化测试里 TLS 和 Unix 的 `connect()` 走同一个
