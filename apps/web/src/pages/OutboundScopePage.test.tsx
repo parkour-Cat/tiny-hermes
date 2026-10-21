@@ -184,3 +184,23 @@ test("a platform with nothing approved says that nothing can be sent", async () 
     within(platform as HTMLElement).getByText(/尚未批准外部访问目标/),
   ).toBeInTheDocument();
 });
+
+test("each level is its own named region, so the same target can be told apart", async () => {
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(MEMBER)),
+    http.get("/api/v1/outbound-scopes/platform", () => HttpResponse.json([entry({ entry: "api" })])),
+    http.get("/api/v1/outbound-scopes/workspace", () =>
+      HttpResponse.json([entry({ id: "e2", level: "workspace", workspace_id: WORKSPACE, entry: "api" })]),
+    ),
+  );
+
+  renderScopes();
+
+  // A workspace usually chooses exactly what the platform approved, so the
+  // same text is on the page twice. Only the list it sits in says which level
+  // it belongs to.
+  const platform = await screen.findByRole("region", { name: "平台批准" });
+  const workspace = screen.getByRole("region", { name: "本工作空间" });
+  expect(await within(platform).findByText("api")).toBeInTheDocument();
+  expect(await within(workspace).findByText("api")).toBeInTheDocument();
+});
