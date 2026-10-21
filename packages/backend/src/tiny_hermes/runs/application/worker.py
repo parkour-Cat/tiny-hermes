@@ -463,14 +463,6 @@ class WorkerRuntime:
                 # §16.2: measured, never truncated, so the Run stops before it
                 # spends a model call on a tool list it cannot send.
                 return
-            if any(tool not in PLATFORM_TOOLS for tool in first.tools):
-                # Platform tools do not run anywhere. An Agent that binds only
-                # those has nothing to put in a container, and starting one for
-                # it would mean a Run about to wait held an instance while it
-                # waited — the opposite of what §12.3 promises.
-                box = await self._open_sandbox(claimed, handle, first)
-                if box is None:
-                    return
 
             while True:
                 # §12.1 补充: the boundary — the last round's call and result
@@ -528,6 +520,24 @@ class WorkerRuntime:
                     # first one is news.
                     box = replace(box, hint=None)
                 executed_ms = int((monotonic() - round_started) * 1000)
+                if box is None and _needs_sandbox(context, response):
+                    # §16, v2.15: taken by the first round that needs one, not
+                    # before the call. Most rounds of a tooled Agent are words,
+                    # and an instance held for those is a share of §21.3's
+                    # budget refused to a Run with a command to run.
+                    #
+                    # Read again first: a pause or cancel asked for during the
+                    # call bumped the state version, and a refusal recorded
+                    # against the old one would lose the Run instead of
+                    # requeueing it.
+                    current = await self._read_context(workspace_id, claimed.run.id)
+                    if current is None or handle.lost:
+                        return
+                    box = await self._open_sandbox(
+                        claimed, handle, current, spent=response, executed_ms=executed_ms
+                    )
+                    if box is None:
+                        return
 
                 work = await self._answer_tools(
                     claimed, handle, box, response, context, mcp
@@ -758,16 +768,29 @@ class WorkerRuntime:
         return None
 
     async def _open_sandbox(
-        self, claimed: ClaimedRun, handle: _LeaseHandle, context: ExecutionContext
+        self,
+        claimed: ClaimedRun,
+        handle: _LeaseHandle,
+        context: ExecutionContext,
+        *,
+        spent: ModelResponse,
+        executed_ms: int,
     ) -> "_Sandbox | None":
-        """Acquire before the first model call of a slice, or fail the Run.
+        """Acquire for the round that needs it, or end the slice.
 
         `None` means the slice is over: either there is no Controller or it
         would not start a container, and product design §16 leaves no path that
         runs the command anywhere else.
+
+        `spent` is the call that asked for the sandbox. It was made, so every
+        way out of here charges it; its reply is never appended, because a tool
+        call kept without its result would leave the next round answering a
+        question nobody ran.
         """
         if self._sandbox is None:
-            await self._fail(claimed, handle, context, "sandbox_not_configured")
+            await self._fail(
+                claimed, handle, context, "sandbox_not_configured", spent, executed_ms
+            )
             return None
         try:
             acquired = await self._sandbox.acquire(
@@ -802,21 +825,28 @@ class WorkerRuntime:
                             else None
                         ),
                     ),
-                    _no_round(),
-                    executed_ms=0,
+                    spent,
+                    executed_ms,
+                    prices=context.prices,
                 )
                 return None
             logger.exception("sandbox refused", extra={"run_id": str(claimed.run.id)})
-            await self._fail(claimed, handle, context, f"sandbox_{refused.reason.value}")
+            await self._fail(
+                claimed, handle, context, f"sandbox_{refused.reason.value}", spent, executed_ms
+            )
             return None
         except Exception:
             logger.exception("sandbox acquire failed", extra={"run_id": str(claimed.run.id)})
-            await self._fail(claimed, handle, context, "sandbox_start_failed")
+            await self._fail(
+                claimed, handle, context, "sandbox_start_failed", spent, executed_ms
+            )
             return None
 
         if acquired.cache_state is CacheState.RESET:
             # §11.3, and both halves of it: the event a person reads, and the
-            # protected hint the model reads on the next call.
+            # protected hint the model reads on the next call. That call comes
+            # after this round's tools have run (v2.15); a slice that ends first
+            # never delivers it, and the event is then the only record.
             await self._append_event(claimed, RunEventType.SANDBOX_CACHE_RESET)
             box = _Sandbox(acquired.sandbox_id, hint=CacheStateHint.RESET)
         else:
@@ -827,7 +857,9 @@ class WorkerRuntime:
         if any(name.startswith("file.") for name in context.tools):
             if not await self._file_safety_holds(claimed, handle, box):
                 await self._discard_sandbox(claimed, handle, box)
-                await self._fail(claimed, handle, context, "file_safety_unavailable")
+                await self._fail(
+                    claimed, handle, context, "file_safety_unavailable", spent, executed_ms
+                )
                 return None
         if acquired.cache_state is not CacheState.RESET:
             # A warm instance still holds the state this Run itself committed;
@@ -836,7 +868,9 @@ class WorkerRuntime:
                 claimed.run.workspace_id, claimed.run.session_id
             )
             return replace(box, revision=None if record is None else record.revision_id)
-        return await self._restore_workspace(claimed, handle, box, context)
+        return await self._restore_workspace(
+            claimed, handle, box, context, spent, executed_ms
+        )
 
     async def _restore_workspace(
         self,
@@ -844,6 +878,8 @@ class WorkerRuntime:
         handle: _LeaseHandle,
         box: _Sandbox,
         context: ExecutionContext,
+        spent: ModelResponse,
+        executed_ms: int,
     ) -> "_Sandbox | None":
         """Design §7: freeze, verify, stream, re-scan, and only then a model."""
         sandbox = self._sandbox
@@ -883,7 +919,9 @@ class WorkerRuntime:
                 payload={"detail": str(broken)[:200]},
             )
             await self._discard_sandbox(claimed, handle, box)
-            await self._fail(claimed, handle, context, "workspace_integrity_failed")
+            await self._fail(
+                claimed, handle, context, "workspace_integrity_failed", spent, executed_ms
+            )
             return None
         except Exception:
             # Transient storage or transport trouble: interrupted, for bounded
@@ -899,8 +937,9 @@ class WorkerRuntime:
                 handle,
                 context.state_version,
                 SliceDecision(RunSignal.INTERRUPTED),
-                _no_round(),
-                executed_ms=0,
+                spent,
+                executed_ms,
+                prices=context.prices,
             )
             return None
         return replace(box, revision=result.revision_id)
@@ -1301,11 +1340,11 @@ class WorkerRuntime:
                     wait_seconds = seconds
                 continue
             if box is None or self._sandbox is None:
-                # A tool round only follows a slice that opened a sandbox, so
-                # this is unreachable today. Written as an answer rather than
-                # an assertion because if it ever is reached, telling the model
-                # is better than crashing a Worker mid-slice — and an assert
-                # would be stripped under `-O` anyway.
+                # Reached when the Agent binds no sandbox tool and the model
+                # asked for one anyway: `_needs_sandbox` took no container for
+                # it. Written as an answer rather than an assertion because
+                # telling the model is better than crashing a Worker mid-slice
+                # — and an assert would be stripped under `-O` anyway.
                 results.append(
                     ToolResultBlock(
                         call_id=call.call_id,
@@ -1816,14 +1855,29 @@ class WorkerRuntime:
         handle: _LeaseHandle,
         context: ExecutionContext,
         reason: str,
+        spent: ModelResponse | None = None,
+        executed_ms: int = 0,
     ) -> None:
+        """`spent` is a model call this slice already made and must still be
+        charged for; without one, nothing was called and nothing is charged."""
+        if spent is None:
+            await self._record(
+                claimed,
+                handle,
+                context.state_version,
+                SliceDecision(RunSignal.FAILED),
+                _no_round(failure=reason),
+                executed_ms=0,
+            )
+            return
         await self._record(
             claimed,
             handle,
             context.state_version,
             SliceDecision(RunSignal.FAILED),
-            _no_round(failure=reason),
-            executed_ms=0,
+            replace(spent, stop_reason=StopReason.FAILED, failure=reason),
+            executed_ms,
+            prices=context.prices,
         )
 
     async def _record_planning(self, claimed: ClaimedRun, plan: ContextPlan) -> None:
@@ -2804,6 +2858,28 @@ def _with_rollback_results(
         )
         rewritten.append(CanonicalMessage("tool", replaced))
     return tuple(rewritten)
+
+
+def _needs_sandbox(context: ExecutionContext, response: ModelResponse) -> bool:
+    """Would answering this round reach the Controller?
+
+    A tool call does unless the Worker answers it itself — a platform tool, or
+    an HTTP or MCP call, which the platform sends. A claim of completion does
+    when there is a declared condition to check, because the check runs in the
+    sandbox. An Agent that binds no sandbox tool never needs one: a call to a
+    tool it did not bind is refused by `_answer_tools` without a container.
+    """
+    if not any(_runs_in_sandbox(tool) for tool in context.tools):
+        return False
+    if response.stop_reason is StopReason.TOOL_CALL:
+        return any(_runs_in_sandbox(call.name) for call in response.tool_calls)
+    return response.stop_reason is StopReason.COMPLETED and context.spec.completion is not None
+
+
+def _runs_in_sandbox(name: str) -> bool:
+    return name not in PLATFORM_TOOLS and not name.startswith(
+        (f"{MCP_PREFIX}.", f"{HTTP_PREFIX}.")
+    )
 
 
 def _no_round(failure: str | None = None) -> ModelResponse:
