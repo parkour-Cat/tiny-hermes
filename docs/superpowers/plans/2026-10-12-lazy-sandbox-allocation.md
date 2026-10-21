@@ -1,7 +1,7 @@
 # 沙箱按需惰性分配实施计划（Lazy Sandbox Allocation）
 
 > 日期：2026-10-12  
-> 状态：待实施（列入容量路线图 P1 第 16 项）  
+> 状态：已实施（PR #113，[验收记录](../verification/2026-10-21-lazy-sandbox-allocation.md)）  
 > 目标分支：`feat/lazy-sandbox-allocation`  
 > 关联文件：`packages/backend/src/tiny_hermes/runs/application/worker.py`、`docs/superpowers/plans/2026-09-29-enterprise-capacity.md`
 
@@ -31,17 +31,18 @@
 
 ## 3. 实施步骤（遵循 TDD 规范）
 
-- [ ] **Step 1：测试先行（红）**
+- [x] **Step 1：测试先行（红）**
   * 新增测试用例：为一个绑定了 `shell.exec` 的 Agent 发送纯打招呼消息，断言在整个 Run 完结过程中，`ControllerClient.acquire` 调用的次数为 0，沙箱实例数为 0。
   * 在当前代码上运行，该测试应当为 FAIL（因为当前代码在调用模型前就调用了 acquire）。
-- [ ] **Step 2：解耦时间片入口逻辑**
+- [x] **Step 2：解耦时间片入口逻辑**
   * 改造 `worker.py` 的 `_execute_slice`：初始化时将 `box = None`，移除顶层的静态 `_open_sandbox`。
-- [ ] **Step 3：实现惰性激活辅助函数 `_ensure_sandbox`**
+- [x] **Step 3：实现惰性激活辅助函数 `_ensure_sandbox`**
   * 在 `_answer_tools` 真正处理非平台工具调用之前，检查 `box` 是否已就绪；若为空，按需执行 `acquire`。
-- [ ] **Step 4：处理准入异常与退避回滚**
+- [x] **Step 4：处理准入异常与退避回滚**
   * 完善 `SandboxRefusal.MEMORY_BUDGET_EXHAUSTED` 在工具分发阶段的处理，确保模型回复不进历史，任务优雅退回队列。
-- [ ] **Step 5：全量回归测试**
+- [x] **Step 5：全量回归测试**
   * 跑通后端单元测试、沙箱集成测试（`pytest packages/backend/tests/integration/runs`）；
   * 确认现有长任务（多轮工具连续执行）、冻结与解冻（Thaw）、工作区快照提交（SessionWorkspace）测试不受破坏。
-- [ ] **Step 6：并发压测验收**
+- [x] **Step 6：并发压测验收**
   * 使用 `scripts/concurrency_probe.py` 模拟混合负载：在 3 个长任务占满沙箱时，并发注入 10 条纯聊天消息，断言短消息排队 P95 降至 0.0x 秒，证明纯消息不再被沙箱配额阻塞。
+  * 实际做法见验收记录：探针的「排队时间」只算到第一次被领取，被拒后重新排队的时间看不到，所以改看端到端时间（6 个长任务 + 120 条短消息，P95 140 s → 2.1 s）。
