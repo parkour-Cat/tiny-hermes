@@ -71,6 +71,8 @@
 
 ### B. 多台机器跑 Worker（小改造，还没做）
 
+设计见 [B 档设计](../specs/2026-10-21-tier-b-networked-controller-design.md)（2026-10-21，未实现）。
+
 API、Worker、scheduler 已经是无状态的，Run 的真相在 Postgres 里，领取用 `SKIP LOCKED`
 加队首校验。唯一的阻塞：带工具的 Run 要通过 Unix socket 找本机的 controller。
 
