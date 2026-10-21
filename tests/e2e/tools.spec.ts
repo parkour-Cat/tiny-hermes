@@ -74,15 +74,21 @@ async function choose(page: Page, label: string, value: string): Promise<void> {
 }
 
 /** Approves the host at both levels. A workspace may only choose inside the
- *  platform's, so the platform entry has to exist first. */
+ *  platform's, so the platform entry has to exist first.
+ *
+ *  The check reads the level's own list. Under 设置 the platform's list is on
+ *  the page too and already shows the host, so a check across the whole
+ *  section either passes before the workspace's approval lands or finds the
+ *  host twice. */
 async function approveHost(page: Page): Promise<void> {
-  for (const group of ["平台管理", "设置"]) {
+  for (const [group, level] of [["平台管理", "平台批准"], ["设置", "本工作空间"]]) {
     const outbound = await openSection(page, group, "出站范围", "outbound");
-    const form = outbound.locator("form");
+    const list = outbound.getByRole("region", { name: level, exact: true });
+    const form = list.locator("form");
     await expect(form).toHaveCount(1);
     await form.getByLabel("目标").fill(TOOL_HOST);
     await form.getByRole("button", { name: "批准" }).click();
-    await expect(outbound.getByText(TOOL_HOST, { exact: true })).toBeVisible();
+    await expect(list.getByText(TOOL_HOST, { exact: true })).toBeVisible();
   }
 }
 
