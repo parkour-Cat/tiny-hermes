@@ -138,7 +138,12 @@ export function OutboundScopePage({ mode }: { mode?: "workspace" | "platform" })
         <Alert className="page-alert" type="warning" title={error} showIcon />
       )}
 
+      {/* Each level is a named region because the two lists often hold the
+          same target — a workspace mostly chooses exactly what the platform
+          approved — and only the list says which level an entry belongs to. */}
       <Card
+        role="region"
+        aria-label={t("outboundPlatform")}
         title={t("outboundPlatform")}
         variant="borderless"
         className="page-alert"
@@ -186,6 +191,8 @@ export function OutboundScopePage({ mode }: { mode?: "workspace" | "platform" })
       </Card>
 
       {mode !== "platform" ? <Card
+        role="region"
+        aria-label={t("outboundWorkspace")}
         title={t("outboundWorkspace")}
         variant="borderless"
         loading={workspace.isPending}
