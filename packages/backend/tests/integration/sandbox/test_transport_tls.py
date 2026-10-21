@@ -11,8 +11,11 @@ import ssl
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
+from tiny_hermes.sandbox.application.controller import SandboxUnreachable
+from tiny_hermes.sandbox.transport.adapter import SandboxClient
 from tiny_hermes.sandbox.transport.address import ControllerAddress
 from tiny_hermes.sandbox.transport.certs import issue, issue_ca, load_pair, write_pair
 from tiny_hermes.sandbox.transport.client import ControllerClient
@@ -133,6 +136,49 @@ async def test_an_expired_caller_certificate_is_not_heard(
         await server.stop()
 
     assert spy.calls == []
+
+
+async def test_an_acquire_with_an_expired_certificate_is_one_the_worker_waits_on(
+    controller_pki: Pki, tmp_path: Path
+) -> None:
+    """The case that makes "only a failed connect is retried" the wrong rule.
+
+    TLS 1.3 finishes the client's half of the handshake before the server has
+    looked at the client's certificate, so the refusal arrives after the
+    request was written, as a connection closed without an answer. Measured
+    2026-10-21: neither `connect()` nor an `ssl.SSLError` sees it.
+    """
+    ca = load_pair(controller_pki.directory / "ca.pem", controller_pki.directory / "ca.key")
+    long_ago = datetime.now(UTC) - timedelta(days=400)
+    write_pair(tmp_path, "worker", issue(ca, role=Role.WORKER, days=30, now=long_ago))
+    files = TlsFiles(
+        ca_file=controller_pki.files(Role.WORKER).ca_file,
+        cert_file=str(tmp_path / "worker.pem"),
+        key_file=str(tmp_path / "worker.key"),
+    )
+    spy = Spy()
+    server = await _serve(controller_pki, spy)
+    try:
+        sandbox = SandboxClient(_client(server, client_context(files)))
+        with pytest.raises(SandboxUnreachable):
+            await sandbox.acquire(
+                run_id=uuid4(), lease_id=uuid4(), workspace_id=uuid4(), profile="default"
+            )
+    finally:
+        await server.stop()
+
+    assert spy.calls == []
+
+
+async def test_an_acquire_with_nothing_listening_is_one_the_worker_waits_on(
+    socket_dir: Path,
+) -> None:
+    sandbox = SandboxClient(ControllerClient(str(socket_dir / "gone.sock"), timeout=5.0))
+
+    with pytest.raises(SandboxUnreachable):
+        await sandbox.acquire(
+            run_id=uuid4(), lease_id=uuid4(), workspace_id=uuid4(), profile="default"
+        )
 
 
 async def test_a_controller_under_another_name_is_not_trusted(

@@ -50,7 +50,11 @@ from tiny_hermes.runs.ports.store import (
     ClaimRunCommand,
     RecordSliceCommand,
 )
-from tiny_hermes.sandbox.application.controller import RefusalReason, SandboxRefused
+from tiny_hermes.sandbox.application.controller import (
+    RefusalReason,
+    SandboxRefused,
+    SandboxUnreachable,
+)
 from tiny_hermes.sandbox.domain.command import (
     CommandResult,
     SandboxCommand,
@@ -868,6 +872,67 @@ async def test_a_run_with_no_sandbox_room_waits_in_the_queue_rather_than_failing
     assert await _roles(engine, run) == ["user"]
     wait = await _seconds_until_claimable(engine, run)
     assert 5 < wait <= 10, "§21.3: the Run waits ten seconds before it is claimed again"
+
+
+class UnreachableSandbox(GatewaySandbox):
+    """A Controller the Worker could not get an answer from.
+
+    On 2026-10-21 a Worker on another host met a Controller that had stopped
+    listening, and both Runs it claimed failed for good.
+    """
+
+    async def acquire(self, **_: Any) -> Any:
+        self.calls.append("acquire")
+        raise SandboxUnreachable("the controller closed without answering")
+
+
+class BrokenSandbox(GatewaySandbox):
+    """A Controller that answered with something the Worker cannot use."""
+
+    async def acquire(self, **_: Any) -> Any:
+        self.calls.append("acquire")
+        raise RuntimeError("the controller answered with nonsense")
+
+
+async def test_a_run_that_cannot_reach_the_controller_waits_rather_than_failing(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    objects: MinioObjectStore,
+    tooled_agent: Callable[[list[str]], str],
+) -> None:
+    run, _ = _submit(client, scope, tooled_agent(["shell.exec"]))
+    model = Recording(UnreachableSandbox(), _tool())
+
+    await _drive(engine, model, UnreachableSandbox(), objects)
+
+    row = await _run_row(engine, run)
+    assert row.status == "queued"
+    assert "run_failed" not in await _events_of(engine, run)
+    # As with no room: the call that asked was made and is charged, and its
+    # tool call is not kept for the next slice to find unanswered.
+    assert await _consumed_model_calls(engine, run) == 1
+    assert await _roles(engine, run) == ["user"]
+    wait = await _seconds_until_claimable(engine, run)
+    assert 25 < wait <= 30, "every retry costs a model call, so it waits longer than for room"
+
+
+async def test_a_controller_answer_the_worker_cannot_use_still_fails_the_run(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    objects: MinioObjectStore,
+    tooled_agent: Callable[[list[str]], str],
+) -> None:
+    """Only "could not ask" waits. Anything else would retry forever on a fault
+    no amount of waiting fixes."""
+    run, _ = _submit(client, scope, tooled_agent(["shell.exec"]))
+
+    await _drive(engine, Recording(BrokenSandbox(), _tool()), BrokenSandbox(), objects)
+
+    snapshot = client.get(f"/api/v1/runs/{run}", headers=scope).json()
+    assert snapshot["status"] == "failed"
+    assert snapshot["failure_reason"] == "sandbox_start_failed"
 
 
 async def _consumed_model_calls(engine: AsyncEngine, run_id: str) -> int:
