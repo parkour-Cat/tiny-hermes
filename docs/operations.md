@@ -202,7 +202,111 @@ uv run --no-sync python scripts/kek_destruction_drill.py \
 「服务只持有新钥匙、没有 `previous` 可退」来模拟的，那正是从部署里删掉一把 KEK
 之后剩下的样子。
 
-## 7. 这份手册没有覆盖什么
+## 7. 多机部署：Worker 跨主机（B 档）
+
+设计见 [B 档设计](superpowers/specs/2026-10-21-tier-b-networked-controller-design.md)。
+一台**沙箱主机**跑 controller 和沙箱（以及看规模放在这里的 Postgres、Redis、对象存储、
+Scheduler、API、Web）；任意台 **Worker 主机**只跑 Worker，通过双向 TLS 调用 controller。
+
+**这一档只允许一台沙箱主机。**带工具的并发上限还是那一台的上限，见设计 §2。
+
+### 7.1 签发证书
+
+在一台不跑服务的机器上（运维自己的电脑）签发：
+
+```bash
+uv run --no-sync python scripts/controller_certs.py --out certs \
+    --host sandbox-1.internal --host 10.0.0.5
+```
+
+`--host` 写 Worker 主机拨号时用的名字或地址，可以写多个；脚本会自动加上 `controller`，
+那是沙箱主机上 Scheduler 拨号用的 Compose 服务名。输出：
+
+| 文件 | 发给谁 |
+|---|---|
+| `ca.pem` | 每一台主机 |
+| `controller.pem`、`controller.key` | 沙箱主机 |
+| `scheduler.pem`、`scheduler.key` | 沙箱主机 |
+| `worker.pem`、`worker.key` | 每一台 Worker 主机（沙箱主机上若也跑 Worker，也给它） |
+| `ca.key` | **哪台主机都不给。**离线保管，只在续签时用 |
+
+**每台主机只放它自己需要的那几个文件。**Compose 文件逐个挂载文件而不是挂整个目录，
+就是为了让一个容器拿不到别的角色的私钥；把多余的私钥拷到主机上，这层保护就没了。
+
+Worker 和 Scheduler 容器以 uid 10001 运行，所以它们的私钥要让 10001 读得到：
+
+```bash
+sudo chown 10001:10001 worker.key scheduler.key   # 权限保持 0600
+```
+
+controller 以 root 运行，`controller.key` 不用改属主。
+
+### 7.2 沙箱主机
+
+```bash
+cd deploy/compose
+export CONTROLLER_PRIVATE_ADDRESS=10.0.0.5     # 本机在内网上的地址
+export CONTROLLER_CERT_DIR=/srv/tiny-hermes/certs
+docker compose -f compose.yaml -f compose.sandbox-host.yaml up -d --scale worker=0
+```
+
+controller 只在 `CONTROLLER_PRIVATE_ADDRESS:7443` 上对外。**防火墙只放行 Worker 主机
+到这个端口。**它握着 Docker socket，等于这台主机的 root。
+
+Postgres、Redis、对象存储也要让 Worker 主机连得上：给它们发布到内网地址，同样只放行
+Worker 主机。每路 Worker 并发约占 1.5 条 Postgres 连接，总路数超过 100 时加连接池代理。
+
+### 7.3 Worker 主机
+
+```bash
+cd deploy/compose
+export DATABASE_URL=postgresql+asyncpg://tiny_hermes:...@10.0.0.5:5432/tiny_hermes
+export REDIS_URL=redis://10.0.0.5:6379/0
+export S3_ENDPOINT=http://10.0.0.5:9000
+export SANDBOX_CONTROLLER_URL=tls://sandbox-1.internal:7443
+export CONTROLLER_CERT_DIR=/srv/tiny-hermes/certs
+# 其余变量（KEK、对象存储密钥、模型密钥、SANDBOX_IMAGE_DIGEST、容量参数）
+# 和沙箱主机上取同样的值
+docker compose -f compose.worker-host.yaml up -d --scale worker=2
+```
+
+少给任何一个地址，Compose 会直接报错，而不是用单机的默认值去连一个不存在的主机。
+
+Worker 自己的出站（模型、飞书等）走 `EGRESS_PROXY_URL`。**这条链路 B 档没有加密**：
+代理在沙箱主机上时，Worker 主机经内网连它，令牌是明文传的。只在可信内网上这样部署；
+要跨不可信网络，需要先在代理前面加 TLS。
+
+### 7.4 证书到期
+
+证书默认有效 365 天。剩不到 30 天时，每个进程启动时都会在日志里打一条 `controller
+certificate expires`。续签：
+
+```bash
+uv run --no-sync python scripts/controller_certs.py --out certs \
+    --host sandbox-1.internal --host 10.0.0.5 --force
+```
+
+同一个 CA 保留不变，只换各角色的证书和私钥。把新文件发到各主机，然后**逐个重启**
+controller、Scheduler 和 Worker；进程只在启动时读证书。
+
+**过期之后**，握手失败，Worker 调 controller 一律得到「联系不上」。后果按 Run 走到哪一步
+而不同（M1 沙箱设计 §11）：
+
+- 还没拿到沙箱的 Run：判失败，原因 `sandbox_start_failed`，**不会重试**；
+- 已经有沙箱、在时间片边界冻结失败的 Run：进入 `interrupted`，等证书换好由 Scheduler 恢复。
+
+所以证书过期是会让用户的 Run 失败的故障，不是只会变慢。**到期警告出现后就续签**，不要等。
+
+### 7.5 出问题时先看什么
+
+| 现象 | 先查 |
+|---|---|
+| 进程起不来，报 `SANDBOX_CONTROLLER_CERT_FILE=... is a worker certificate; this process is the scheduler` | 证书发错了角色 |
+| 进程起不来，报 `... cannot be read` | 文件没挂进去，或私钥属主不是 10001 |
+| Worker 日志里 controller `Unreachable`，controller 日志里有 TLS 握手错误 | CA 不一致、证书过期，或 Worker 拨的名字不在 controller 证书的 `--host` 里 |
+| Scheduler 调用被拒，原因 `role_not_permitted` | 它拿着 Scheduler 证书在调 `cleanup` 以外的动作：这是缺陷，请报告 |
+
+## 8. 这份手册没有覆盖什么
 
 - **没有在真实生产部署上演练过。** 上面的表和步骤都来自本地容器。
 - ~~没有做过「真的销毁旧 KEK 之后」的演练。~~ **已补（2026-08-23）**：
@@ -214,4 +318,6 @@ uv run --no-sync python scripts/kek_destruction_drill.py \
   所以它证明的是「备份能还原」，不是「备份能搬到另一台机器上还原」。
   对象存储换成 SeaweedFS 之后，这个演练**没有重跑**；它只用 S3 接口，但「应当还能
   跑通」不是跑过。
+- **B 档没有在两台真实的机器上部署过。**本地用两个互不相通的 Docker 网络模拟，
+  测不出真实的网络延迟和带宽。见 B 档的验收记录。
 - **没有测量过规模**：十万条 Secret 的轮换要多久、大库的 `pg_restore` 要多久，都不知道。
