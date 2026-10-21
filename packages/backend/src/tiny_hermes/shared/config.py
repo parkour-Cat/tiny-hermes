@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from tiny_hermes.egress.domain.decision import ALLOWED_PORTS
 from tiny_hermes.sandbox.transport.address import ControllerAddress
+from tiny_hermes.sandbox.transport.tls import TlsFiles
 
 DEFAULT_CONTROLLER_URL = "unix:///run/tiny-hermes/controller.sock"
 
@@ -146,6 +147,13 @@ class Settings(BaseSettings):
     #: The old spelling, a bare path naming both ends. Kept for one release so a
     #: deployment's `.env` does not stop working on upgrade.
     sandbox_controller_socket: str | None = None
+    #: This process's half of the TLS link, when either address is `tls://`:
+    #: the private CA, and its own certificate and key (tier B §4.2).
+    sandbox_controller_ca_file: str | None = None
+    sandbox_controller_cert_file: str | None = None
+    sandbox_controller_key_file: str | None = None
+    #: Listening on every interface includes ones nobody meant (tier B §4.3).
+    sandbox_controller_listen_any: bool = False
     #: The group the platform's own processes run as, from the application
     #: image. The Controller runs as root and hands the socket to this group so
     #: the Worker and the Scheduler can open it without it being world-writable.
@@ -206,6 +214,20 @@ class Settings(BaseSettings):
     @property
     def controller_listen_address(self) -> ControllerAddress:
         return ControllerAddress.parse(self._controller_url(self.sandbox_controller_listen))
+
+    @property
+    def controller_tls_files(self) -> TlsFiles | None:
+        if (
+            self.sandbox_controller_ca_file is None
+            or self.sandbox_controller_cert_file is None
+            or self.sandbox_controller_key_file is None
+        ):
+            return None
+        return TlsFiles(
+            ca_file=self.sandbox_controller_ca_file,
+            cert_file=self.sandbox_controller_cert_file,
+            key_file=self.sandbox_controller_key_file,
+        )
 
     def _controller_url(self, chosen: str | None) -> str:
         if chosen is not None:
@@ -270,6 +292,9 @@ class Settings(BaseSettings):
         "sandbox_controller_url",
         "sandbox_controller_listen",
         "sandbox_controller_socket",
+        "sandbox_controller_ca_file",
+        "sandbox_controller_cert_file",
+        "sandbox_controller_key_file",
         mode="before",
     )
     @classmethod
@@ -291,7 +316,25 @@ class Settings(BaseSettings):
             )
         # Parsed here so a bad value stops the process at startup rather than at
         # the first Run that needs a sandbox.
-        _ = self.controller_address, self.controller_listen_address
+        caller, listener = self.controller_address, self.controller_listen_address
+        if caller.is_tls or listener.is_tls:
+            for name in (
+                "sandbox_controller_ca_file",
+                "sandbox_controller_cert_file",
+                "sandbox_controller_key_file",
+            ):
+                if getattr(self, name) is None:
+                    raise ValueError(f"a tls:// controller address needs {name.upper()}")
+        if (
+            listener.is_tls
+            and listener.host in ("0.0.0.0", "::")  # noqa: S104 - this is the refusal
+            and not self.sandbox_controller_listen_any
+        ):
+            raise ValueError(
+                f"SANDBOX_CONTROLLER_LISTEN={listener} is every interface; name the "
+                "private one, or set SANDBOX_CONTROLLER_LISTEN_ANY=true on a host whose "
+                "every interface is private"
+            )
         return self
 
     @model_validator(mode="after")

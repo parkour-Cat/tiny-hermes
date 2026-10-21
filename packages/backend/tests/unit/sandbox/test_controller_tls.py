@@ -7,8 +7,10 @@ that dict.
 """
 
 import ssl
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from cryptography import x509
@@ -62,9 +64,13 @@ def test_the_role_is_read_from_what_the_handshake_reports(tmp_path: Path) -> Non
     # `_test_decode_cert` is how `ssl` itself turns a PEM file into the dict
     # `getpeercert()` returns; it is the one way to get that shape without a
     # handshake, and the integration tests cover the handshake.
-    decoded = ssl._ssl._test_decode_cert(files.cert_file)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]  # noqa: SLF001
+    decode = cast(
+        "Callable[[str], dict[str, Any]]",
+        getattr(getattr(ssl, "_ssl"), "_test_decode_cert"),  # noqa: B009 - private, untyped
+    )
+    decoded = decode(files.cert_file)
 
-    assert role_of(decoded) is Role.SCHEDULER  # pyright: ignore[reportUnknownArgumentType]
+    assert role_of(decoded) is Role.SCHEDULER
 
 
 @pytest.mark.parametrize("peer", [None, {}, {"subject": ((("commonName", "x"),),)}])

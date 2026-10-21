@@ -124,7 +124,7 @@ async def wire(
     pki: Pki,
     *,
     role: Role = Role.WORKER,
-    timeout: float = 120.0,
+    client_timeout: float = 120.0,
     **server_options: Any,
 ) -> tuple[ControllerServer, ControllerClient]:
     """A started server and a client pointed at it, over `transport`."""
@@ -132,7 +132,7 @@ async def wire(
         path = str(socket_dir / "c.sock")
         server = ControllerServer(path=path, **server_options)
         await server.start()
-        return server, ControllerClient(path, timeout=timeout)
+        return server, ControllerClient(path, timeout=client_timeout)
     server = ControllerServer(
         address=ControllerAddress(scheme="tls", host="127.0.0.1", port=0),
         tls=server_context(pki.files(Role.CONTROLLER)),
@@ -142,7 +142,7 @@ async def wire(
     client = ControllerClient(
         ControllerAddress(scheme="tls", host="127.0.0.1", port=server.bound_port),
         tls=client_context(pki.files(role)),
-        timeout=timeout,
+        timeout=client_timeout,
     )
     return server, client
 

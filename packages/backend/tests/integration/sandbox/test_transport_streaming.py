@@ -294,7 +294,7 @@ async def test_progress_frames_keep_a_silent_stream_inside_the_idle_window(
         transport,
         socket_dir,
         controller_pki,
-        timeout=0.12,
+        client_timeout=0.12,
         dispatch=dispatch,
         stream_dispatch=dispatch_stream,
     )
@@ -335,7 +335,7 @@ async def test_a_silent_stream_without_progress_dies_inside_the_client_window(
         transport,
         socket_dir,
         controller_pki,
-        timeout=0.12,
+        client_timeout=0.12,
         dispatch=dispatch,
         stream_dispatch=dispatch_stream,
     )
