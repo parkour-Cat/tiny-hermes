@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import DateTime
@@ -24,7 +25,11 @@ class CreatedAtMixin:
 
 
 def build_session_factory(
-    settings: Settings, *, pool_size: int = 5, max_overflow: int = 10
+    settings: Settings,
+    *,
+    pool_size: int = 5,
+    max_overflow: int = 10,
+    info: dict[str, Any] | None = None,
 ) -> async_sessionmaker[AsyncSession]:
     # The defaults are SQLAlchemy's own, which every caller had before a Worker
     # process could hold more than one Worker.
@@ -34,7 +39,7 @@ def build_session_factory(
         pool_size=pool_size,
         max_overflow=max_overflow,
     )
-    return async_sessionmaker(engine, expire_on_commit=False)
+    return async_sessionmaker(engine, expire_on_commit=False, info=info or {})
 
 
 async def session_scope(
