@@ -92,8 +92,7 @@ def main() -> None:
     # without this the api's INFO lines went nowhere and a WARNING lost its
     # fields. It leaves the root logger alone, so this handler survives it.
     configure_logging()
-    serve_configured_metrics(get_settings())
-    configure_tracing(get_settings(), service="api")
+    _observe("api")
     uvicorn.run(
         "tiny_hermes.api.app:app",
         host="0.0.0.0",  # noqa: S104 - container port must accept traffic outside itself
@@ -101,10 +100,16 @@ def main() -> None:
     )
 
 
+def _observe(service: str) -> None:
+    """Metrics port and tracing, once per process before its loop starts."""
+    settings = get_settings()
+    serve_configured_metrics(settings)
+    configure_tracing(settings, service=service)
+
+
 def worker_main() -> None:
     configure_logging()
-    serve_configured_metrics(get_settings())
-    configure_tracing(get_settings(), service="worker")
+    _observe("worker")
     asyncio.run(_worker())
 
 
@@ -396,8 +401,7 @@ def scheduler_main() -> None:
     # loop it would bind that one, and every long connection would fail with
     # "This event loop is already running".
     importlib.import_module("tiny_hermes.channels.infrastructure.feishu_long_connection")
-    serve_configured_metrics(get_settings())
-    configure_tracing(get_settings(), service="scheduler")
+    _observe("scheduler")
     asyncio.run(_scheduler())
 
 
