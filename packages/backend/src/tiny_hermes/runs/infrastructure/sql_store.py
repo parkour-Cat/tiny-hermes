@@ -1831,11 +1831,18 @@ class SqlRunStore:
         )
         return RenewedLease(lease_id=command.lease_id, version=renewed, expires_at=expires_at)
 
-    async def reserve_tool_call(self, workspace_id: UUID, run_id: UUID, lease_id: UUID) -> bool:
+    async def reserve_tool_call(
+        self, workspace_id: UUID, run_id: UUID, lease_id: UUID, *, reaches_outside: bool = False
+    ) -> bool:
         """Reserve an attempt before dispatch; children and retries share this row.
 
         The reservation survives uncertain tool outcomes. Refunding after a
         timeout would allow an operation that may have run to evade the limit.
+
+        A call that ``reaches_outside`` marks the checkpoint's effect unknown
+        in the same transaction, before anything is sent: until the round is
+        recorded, which writes the checkpoint again, crash recovery must not
+        replay a round whose effect the far end may already have.
         """
         run = await self._lock_run(workspace_id, run_id)
         if run is None:
@@ -1858,6 +1865,8 @@ class SqlRunStore:
             .returning(RunBudgetScopeRow.root_run_id)
             .execution_options(synchronize_session=False)
         )
+        if reserved is not None and reaches_outside:
+            run.checkpoint_effect_status = CheckpointEffectStatus.UNKNOWN.value
         return reserved is not None
 
     async def record_slice(self, command: RecordSliceCommand) -> RunSnapshot:

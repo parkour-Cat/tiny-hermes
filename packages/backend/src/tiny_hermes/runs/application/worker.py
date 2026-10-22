@@ -1232,16 +1232,29 @@ class WorkerRuntime:
         loaded = list(context.loaded_skills)
         tool_limit_reached = False
 
-        async def reserve() -> bool:
+        async def reserve(*, reaches_outside: bool = False) -> bool:
             nonlocal tool_limit_reached
             if tool_limit_reached:
                 return False
             async with self._sessions.begin() as session:
                 accepted = await SqlRunStore(session).reserve_tool_call(
-                    claimed.run.workspace_id, claimed.run.id, handle.lease_id
+                    claimed.run.workspace_id,
+                    claimed.run.id,
+                    handle.lease_id,
+                    reaches_outside=reaches_outside,
                 )
             tool_limit_reached = not accepted
             return accepted
+
+        async def reserve_outside() -> bool:
+            return await reserve(reaches_outside=True)
+
+        # A command in a sandbox with a network can send a request through the
+        # proxy; one without can change only the workspace, which recovery
+        # restores from the last committed revision.
+        sandbox_reaches_outside = context.spec.network is not None and bool(
+            context.spec.network.allow
+        )
 
         # All or nothing when the round stops for a person: asked of every call
         # before any runs, so a round that waits has no effects to forget.
@@ -1278,7 +1291,9 @@ class WorkerRuntime:
                 continue
             external = call.name.startswith((f"{MCP_PREFIX}.", f"{HTTP_PREFIX}."))
             # External writes pass their approval gate before spending a call.
-            if not external and not await reserve():
+            if not external and not await reserve(
+                reaches_outside=call.name == "shell.exec" and sandbox_reaches_outside
+            ):
                 results.append(
                     ToolResultBlock(
                         call_id=call.call_id,
@@ -1343,7 +1358,7 @@ class WorkerRuntime:
                     mcp,
                     _claim_of(claimed),
                     self._approvals,
-                    before_call=reserve,
+                    before_call=reserve_outside,
                 )
                 if outcome.event is not None:
                     events.append(outcome.event)
@@ -1362,7 +1377,7 @@ class WorkerRuntime:
                     call,
                     _claim_of(claimed),
                     self._approvals,
-                    before_call=reserve,
+                    before_call=reserve_outside,
                 )
                 if outcome.event is not None:
                     events.append(outcome.event)
