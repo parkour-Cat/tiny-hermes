@@ -68,6 +68,13 @@ class Settings(BaseSettings):
     worker_concurrency: int = Field(default=1, ge=1, le=64)
     worker_shutdown_grace_seconds: int = Field(default=20, ge=5, le=120)
     scheduler_interval_seconds: int = Field(default=1, ge=1, le=60)
+    #: The metrics port (observability design §4.1). Its own port, never the
+    #: public API one, and Compose publishes no host port for it. 0 serves
+    #: nothing.
+    metrics_port: int = Field(default=9464, ge=0, le=65535)
+    metrics_host: str = "0.0.0.0"  # noqa: S104 - reached by Prometheus on the Compose network
+    #: How often the Scheduler reads the queue for `tiny_hermes_runs_by_status`.
+    queue_observe_seconds: int = Field(default=15, ge=1, le=300)
     max_recovery_attempts: int = Field(default=3, ge=0, le=10)
     event_retention_hours: int = Field(default=168, ge=1, le=8_760)
     sse_heartbeat_seconds: int = Field(default=15, ge=5, le=60)

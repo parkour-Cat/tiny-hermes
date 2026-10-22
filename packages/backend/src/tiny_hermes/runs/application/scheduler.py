@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -11,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tiny_hermes.artifacts.infrastructure.sql_store import SqlArtifactStore
 from tiny_hermes.runs.domain.models import (
+    TERMINAL_STATES,
     PauseReason,
     RunCapabilities,
     RunSignal,
@@ -28,6 +30,13 @@ from tiny_hermes.session_workspace.application.cleanup import reclaim_upload
 from tiny_hermes.session_workspace.application.gc import RetainedManifestOracle
 from tiny_hermes.session_workspace.infrastructure.sql_store import SqlWorkspaceStore
 from tiny_hermes.session_workspace.ports.objects import ObjectRef, ObjectStore
+from tiny_hermes.shared.metrics import (
+    QUEUE_OLDEST_AGE,
+    RUNS_BY_STATUS,
+    SCAN_ERRORS,
+    SCAN_LAST_SUCCESS,
+    SCAN_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -152,14 +161,49 @@ class SchedulerRuntime:
         )
         failures: list[Exception] = []
         for name, scan in scans:
+            started = time.monotonic()
             try:
                 await scan()
             except Exception as error:
+                SCAN_ERRORS.labels(scan=name).inc()
                 logger.exception("scheduler scan failed", extra={"scan": name})
                 error.add_note(f"scheduler scan: {name}")
                 failures.append(error)
+            else:
+                # Also when another replica held the scan lock and this one
+                # skipped: the scan is alive, which is what the timestamp says.
+                SCAN_LAST_SUCCESS.labels(scan=name).set_to_current_time()
+            finally:
+                SCAN_SECONDS.labels(scan=name).observe(time.monotonic() - started)
         if failures:
             raise ExceptionGroup("scheduler scans failed", failures)
+
+    async def observe_queue(self) -> None:
+        """Publish the queue as the database has it (observability design §5.2)."""
+        now = datetime.now(UTC)
+        async with self._sessions() as session:
+            snapshot = await SqlRunStore(session).queue_snapshot(now)
+        for state in RunState:
+            if state not in TERMINAL_STATES:
+                RUNS_BY_STATUS.labels(status=state.value).set(
+                    snapshot.by_status.get(state.value, 0)
+                )
+        since = snapshot.oldest_claimable_since
+        QUEUE_OLDEST_AGE.set(0 if since is None else max(0.0, (now - since).total_seconds()))
+
+    async def observe_forever(self, stop: asyncio.Event, interval_seconds: int = 15) -> None:
+        """Beside `run_forever`, not one of its scans: the queue is most worth
+        seeing exactly when a scan has gone slow, and as a step of that loop it
+        would stop being published then."""
+        while not stop.is_set():
+            try:
+                await self.observe_queue()
+            except Exception:
+                logger.exception("queue observation failed")
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
+            except TimeoutError:
+                continue
 
     async def run_forever(self, stop: asyncio.Event, interval_seconds: int) -> None:
         while not stop.is_set():

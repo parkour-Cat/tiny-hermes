@@ -144,6 +144,7 @@ from tiny_hermes.session_workspace.infrastructure.sandbox_port import (
     WorkspaceGateway,
 )
 from tiny_hermes.session_workspace.ports.objects import ObjectStore
+from tiny_hermes.shared.metrics import CLAIM_WAIT, WORKER_LANES
 from tiny_hermes.tools.application.execute import (
     ArtifactUpload,
     StreamedCommandRunner,
@@ -393,25 +394,32 @@ class WorkerRuntime:
         claimed = await self._claim()
         if claimed is None:
             return None
-        await self._execute_slice(claimed)
-        try:
-            await self._review_for_skills(claimed)
-        except Exception:
-            # §15.4: a suggestion, attempted after the outcome is recorded. It
-            # must never be the reason a Worker stops taking Runs.
-            logger.exception("skill review failed", extra={"run_id": str(claimed.run.id)})
+        CLAIM_WAIT.observe(claimed.waited_seconds)
+        with WORKER_LANES.labels(state="busy").track_inprogress():
+            await self._execute_slice(claimed)
+            try:
+                await self._review_for_skills(claimed)
+            except Exception:
+                # §15.4: a suggestion, attempted after the outcome is recorded.
+                # It must never be the reason a Worker stops taking Runs.
+                logger.exception("skill review failed", extra={"run_id": str(claimed.run.id)})
         return claimed.run.id
 
     async def run_forever(self, stop: asyncio.Event) -> None:
         self._stopping = stop
-        while not stop.is_set():
-            try:
-                advanced = await self.run_once()
-            except Exception:
-                logger.exception("worker slice failed")
-                advanced = None
-            if advanced is None and not stop.is_set():
-                await self._notifier.wait(self._settings.idle_poll_seconds)
+        lanes = WORKER_LANES.labels(state="total")
+        lanes.inc()
+        try:
+            while not stop.is_set():
+                try:
+                    advanced = await self.run_once()
+                except Exception:
+                    logger.exception("worker slice failed")
+                    advanced = None
+                if advanced is None and not stop.is_set():
+                    await self._notifier.wait(self._settings.idle_poll_seconds)
+        finally:
+            lanes.dec()
 
     def _stop_requested(self) -> bool:
         return self._stopping is not None and self._stopping.is_set()

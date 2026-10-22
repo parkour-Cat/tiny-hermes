@@ -155,6 +155,7 @@ from tiny_hermes.runs.ports.store import (
     ControlRunCommand,
     CreateSessionCommand,
     ExecutionContext,
+    QueueSnapshot,
     RecordSliceCommand,
     RecordSummaryUsageCommand,
     RenewedLease,
@@ -2152,6 +2153,7 @@ class SqlRunStore:
             ),
             RunSignal.LEASE_ACQUIRED,
         )
+        claimable_since = max(candidate.queued_at, candidate.claimable_after or candidate.queued_at)
         _apply_decision(candidate, decision, now)
         candidate.state_version += 1
         candidate.updated_at = now
@@ -2218,25 +2220,15 @@ class SqlRunStore:
             lease_id=lease_id,
             lease_version=lease_version,
             lease_expires_at=expires_at,
+            waited_seconds=max(0.0, (now - claimable_since).total_seconds()),
         )
 
     async def _select_claimable(self, command: ClaimRunCommand, now: datetime) -> RunRow | None:
         """Queued, Session Head, unblocked, and not already leased."""
-        held = (
-            select(WorkerLeaseRow.run_id)
-            .where(WorkerLeaseRow.released_at.is_(None), WorkerLeaseRow.expires_at > now)
-            .scalar_subquery()
-        )
         statement = (
             select(RunRow)
             .join(SessionRow, SessionRow.id == RunRow.session_id)
-            .where(
-                RunRow.status == RunState.QUEUED.value,
-                SessionRow.head_run_id == RunRow.id,
-                RunRow.blocked_by_run_id.is_(None),
-                RunRow.id.not_in(held),
-                or_(RunRow.claimable_after.is_(None), RunRow.claimable_after <= now),
-            )
+            .where(*_claimable(now))
             .order_by(RunRow.queued_at, RunRow.id)
             .limit(1)
             .with_for_update(of=RunRow, skip_locked=True)
@@ -2246,6 +2238,28 @@ class SqlRunStore:
         if command.session_id is not None:
             statement = statement.where(RunRow.session_id == command.session_id)
         return await self._session.scalar(statement)
+
+    async def queue_snapshot(self, now: datetime) -> QueueSnapshot:
+        """Unfinished Runs by status, and the longest wait among claimable ones.
+
+        The wait starts at whichever is later of entering the queue and the end
+        of a deliberate hold-off, the same moment `claim_head` measures from:
+        a Run held back after an admission refusal is not waiting on capacity.
+        """
+        counted = await self._session.execute(
+            select(RunRow.status, func.count())
+            .where(RunRow.status.not_in([state.value for state in TERMINAL_STATES]))
+            .group_by(RunRow.status)
+        )
+        since = await self._session.scalar(
+            select(func.min(_claimable_since()))
+            .join(SessionRow, SessionRow.id == RunRow.session_id)
+            .where(*_claimable(now))
+        )
+        return QueueSnapshot(
+            by_status={str(status): int(count) for status, count in counted.all()},
+            oldest_claimable_since=since,
+        )
 
     async def try_scan_lock(self, name: str) -> bool:
         """Take the advisory lock for one scan family, or report it is taken.
@@ -4324,6 +4338,26 @@ def _unfinished(status: InstrumentedAttribute[str]) -> ColumnElement[bool]:
             literal_execute=True,
         )
     )
+
+
+def _claimable(now: datetime) -> tuple[ColumnElement[bool], ...]:
+    """What `claim_head` may take: queued, Session Head, unblocked, unleased."""
+    held = (
+        select(WorkerLeaseRow.run_id)
+        .where(WorkerLeaseRow.released_at.is_(None), WorkerLeaseRow.expires_at > now)
+        .scalar_subquery()
+    )
+    return (
+        RunRow.status == RunState.QUEUED.value,
+        SessionRow.head_run_id == RunRow.id,
+        RunRow.blocked_by_run_id.is_(None),
+        RunRow.id.not_in(held),
+        or_(RunRow.claimable_after.is_(None), RunRow.claimable_after <= now),
+    )
+
+
+def _claimable_since() -> ColumnElement[datetime]:
+    return func.greatest(RunRow.queued_at, func.coalesce(RunRow.claimable_after, RunRow.queued_at))
 
 
 def _scan_lock_key(name: str) -> int:

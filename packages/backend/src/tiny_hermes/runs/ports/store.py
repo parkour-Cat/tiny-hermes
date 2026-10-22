@@ -518,6 +518,15 @@ class ClaimedRun:
     lease_id: UUID
     lease_version: int
     lease_expires_at: datetime
+    #: From becoming claimable to this claim (observability design §3.1).
+    waited_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
+class QueueSnapshot:
+    by_status: dict[str, int]
+    #: None when nothing is claimable.
+    oldest_claimable_since: datetime | None
 
 
 @dataclass(frozen=True)

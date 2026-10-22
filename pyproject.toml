@@ -19,6 +19,7 @@ dependencies = [
     # `accept_verified` — see channels/infrastructure/feishu_long_connection.py.
     "lark-oapi>=1.7.2",
     "minio>=7.2.20",
+    "prometheus-client>=0.21",
     "pwdlib[argon2]>=0.3.0",
     "pydantic-settings>=2.15.0",
     # End-user credential verification only (identity/domain/end_user_credential.py).
