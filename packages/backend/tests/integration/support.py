@@ -26,3 +26,19 @@ class EventsUrl(Protocol):
     def __call__(
         self, run_id: Any, cursor: int | None = None, workspace_id: str = ""
     ) -> str: ...
+
+
+def metric(name: str, **labels: str) -> float:
+    """The sum of every sample of `name` whose labels include `labels`.
+
+    The Prometheus registry belongs to the test process and outlives each
+    test, so callers compare against a value read before the action.
+    """
+    from prometheus_client import REGISTRY
+
+    return sum(
+        sample.value
+        for family in REGISTRY.collect()
+        for sample in family.samples
+        if sample.name == name and labels.items() <= sample.labels.items()
+    )

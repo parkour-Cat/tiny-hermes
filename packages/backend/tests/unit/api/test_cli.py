@@ -20,10 +20,16 @@ def test_cli_starts_uvicorn_on_public_container_port(monkeypatch: pytest.MonkeyP
         calls.append((app, host, port))
 
     monkeypatch.setattr(cli.uvicorn, "run", fake_run)
+    monkeypatch.setattr(cli, "_observe", _not_observed)
 
     cli.main()
 
     assert calls == [("tiny_hermes.api.app:app", "0.0.0.0", 8000)]
+
+
+def _not_observed(service: str) -> None:
+    """Metrics and tracing read Settings, which this test has none of."""
+    del service
 
 
 def test_the_api_configures_logging_before_uvicorn_starts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -38,6 +44,7 @@ def test_the_api_configures_logging_before_uvicorn_starts(monkeypatch: pytest.Mo
         )
 
     monkeypatch.setattr(cli.uvicorn, "run", fake_run)
+    monkeypatch.setattr(cli, "_observe", _not_observed)
 
     cli.main()
 
@@ -95,6 +102,7 @@ async def scheduler_body():
 
 cli._scheduler = scheduler_body
 cli.configure_logging = lambda: None
+cli._observe = lambda service: None
 cli.scheduler_main()
 print(seen["bound_to_running_loop"])
 """

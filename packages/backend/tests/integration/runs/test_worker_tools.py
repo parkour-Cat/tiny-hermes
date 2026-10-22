@@ -28,6 +28,7 @@ from tiny_hermes.sandbox.domain.command import CommandResult, SandboxCommand
 from tiny_hermes.sandbox.domain.models import CacheState
 
 from ..conftest import VALID_SPEC
+from ..support import metric
 
 
 class Recording:
@@ -581,3 +582,18 @@ async def test_a_worker_asked_to_stop_hands_its_run_back_at_the_next_round(
     # Handed back like any slice boundary: frozen and kept for the next Worker.
     assert "keep" in sandbox.calls
     assert "destroy" not in sandbox.calls
+
+
+async def test_a_tool_call_and_its_sandbox_are_timed_by_kind(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_with_tools: Any
+) -> None:
+    """Observability design §3.2: by kind, never by tool name."""
+    agent = agent_with_tools(["shell.exec"])
+    submit(client, scope, agent, "list")
+    shell = metric("tiny_hermes_tool_call_seconds_count", kind="shell", outcome="ok")
+    cold = metric("tiny_hermes_sandbox_acquire_seconds_count", outcome="cold")
+
+    await drive(engine, Recording(_tool("ls"), _text("done")), StandInSandbox())
+
+    assert metric("tiny_hermes_tool_call_seconds_count", kind="shell", outcome="ok") == shell + 1
+    assert metric("tiny_hermes_sandbox_acquire_seconds_count", outcome="cold") == cold + 1

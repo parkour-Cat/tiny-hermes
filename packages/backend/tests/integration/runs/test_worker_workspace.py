@@ -67,6 +67,7 @@ from tiny_hermes.session_workspace.infrastructure.minio_store import MinioObject
 from tiny_hermes.session_workspace.infrastructure.tables import WorkspaceRevisionRow
 
 from ..conftest import VALID_SPEC
+from ..support import metric
 
 PLATFORM = RunCapabilities(can_control=True, can_retry=True)
 SANDBOX = uuid.uuid4()
@@ -525,11 +526,13 @@ async def test_write_round_flow_checkpoints_before_the_next_model_call(
     run, _ = _submit(client, scope, agent)
     sandbox = GatewaySandbox(effects=[_write_effect("out.txt", b"made by round 1")])
     model = Recording(sandbox, _tool(), _text("wrote it"))
+    commits = metric("tiny_hermes_workspace_commit_seconds_count", outcome="ok")
 
     await _drive(engine, model, sandbox, objects)
 
     assert (await _run_row(engine, run)).status == "completed"
     assert await _revisions(engine) == 1
+    assert metric("tiny_hermes_workspace_commit_seconds_count", outcome="ok") == commits + 1
     # The second model call happened only after the frozen scan and commit.
     second_round = model.calls_at_request[1]
     after_execute = second_round[second_round.index("execute") :]
@@ -859,11 +862,13 @@ async def test_a_run_with_no_sandbox_room_waits_in_the_queue_rather_than_failing
     run, _ = _submit(client, scope, agent)
     sandbox = FullSandbox()
     model = Recording(sandbox, _tool())
+    refused = metric("tiny_hermes_sandbox_acquire_seconds_count", outcome="refused")
 
     await _drive(engine, model, sandbox, objects)
 
     row = await _run_row(engine, run)
     assert row.status == "queued"
+    assert metric("tiny_hermes_sandbox_acquire_seconds_count", outcome="refused") == refused + 1
     assert "run_failed" not in await _events_of(engine, run)
     # v2.15: the call that asked for the tool was made, so it is charged, and
     # the reply it gave is not kept: the next slice asks again from the same

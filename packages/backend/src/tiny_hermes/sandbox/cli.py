@@ -42,11 +42,14 @@ from tiny_hermes.sandbox.domain.container_policy import (
 from tiny_hermes.sandbox.infrastructure.docker_engine import DockerEngine
 from tiny_hermes.sandbox.infrastructure.lease_authority import SqlLeaseAuthority
 from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
+from tiny_hermes.sandbox.observation import observe_forever, publish_sandbox_gauges
 from tiny_hermes.sandbox.transport.server import ControllerServer, ServerStream
 from tiny_hermes.sandbox.transport.wiring import controller_listener
 from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.database import build_session_factory
 from tiny_hermes.shared.logging import configure_logging
+from tiny_hermes.shared.metrics import serve_configured_metrics
+from tiny_hermes.shared.tracing import configure_tracing
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +111,8 @@ def memory_budget_mb(settings: Settings, *, meminfo: Path = Path("/proc/meminfo"
 
 def main() -> None:
     configure_logging()
+    serve_configured_metrics(get_settings())
+    configure_tracing(get_settings(), service="controller")
     asyncio.run(_serve())
 
 
@@ -192,10 +197,19 @@ async def _serve() -> None:
             return result
 
     sweeping = asyncio.create_task(sweep_forever(sweep_once, every=settings.sandbox_sweep_seconds))
+
+    async def publish_once() -> None:
+        async with sessions() as session:
+            await publish_sandbox_gauges(SqlSandboxStore(session), budget_mb=budget)
+
+    observing = asyncio.create_task(
+        observe_forever(publish_once, every=settings.queue_observe_seconds)
+    )
     stop = _stop_on_termination()
     try:
         await stop
     finally:
+        observing.cancel()
         sweeping.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await sweeping

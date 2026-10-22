@@ -11,6 +11,7 @@ an ordinary operational event, and the Run's own failure is where an operator
 should read about it.
 """
 
+import time
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 
@@ -35,6 +36,8 @@ from tiny_hermes.runs.ports.model import (
     UsageQuality,
 )
 from tiny_hermes.secrets.infrastructure.sql_store import SqlSecretStore
+from tiny_hermes.shared.metrics import MODEL_CALL_SECONDS, MODEL_TOKENS
+from tiny_hermes.shared.tracing import tracer
 
 ClientFactory = Callable[[], AbstractAsyncContextManager[SafeOutboundClient]]
 
@@ -68,6 +71,36 @@ class ModelRouter:
         self._kek = kek
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        """Timed here because every round passes here (observability design
+        §3.2). Labelled by provider kind, not endpoint: endpoints are a
+        workspace's to create, and a label per endpoint has no bound."""
+        provider = (
+            "deterministic"
+            if isinstance(request.policy, DeterministicModelPolicy)
+            else "openai_compatible"
+        )
+        started = time.monotonic()
+        with tracer.start_as_current_span(
+            "model.call", attributes={"model.provider": provider}
+        ) as span:
+            try:
+                response = await self._route(request)
+            except BaseException:
+                MODEL_CALL_SECONDS.labels(provider=provider, outcome="error").observe(
+                    time.monotonic() - started
+                )
+                raise
+            span.set_attribute("model.stop_reason", response.stop_reason.value)
+        MODEL_CALL_SECONDS.labels(provider=provider, outcome=response.stop_reason.value).observe(
+            time.monotonic() - started
+        )
+        if response.input_tokens is not None:
+            MODEL_TOKENS.labels(provider=provider, direction="in").inc(response.input_tokens)
+        if response.output_tokens is not None:
+            MODEL_TOKENS.labels(provider=provider, direction="out").inc(response.output_tokens)
+        return response
+
+    async def _route(self, request: ModelRequest) -> ModelResponse:
         policy = request.policy
         if isinstance(policy, DeterministicModelPolicy):
             return await self._deterministic.complete(request)

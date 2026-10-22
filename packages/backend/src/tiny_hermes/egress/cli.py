@@ -27,12 +27,16 @@ from tiny_hermes.outbound.domain.address_policy import Network
 from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.database import build_session_factory
 from tiny_hermes.shared.logging import configure_logging
+from tiny_hermes.shared.metrics import serve_configured_metrics
 
 logger = logging.getLogger(__name__)
 
 
 def main() -> None:
     configure_logging()
+    # Behind a token or not at all: every sandbox can reach every port this
+    # process listens on (observability design §4.2).
+    serve_configured_metrics(get_settings(), needs_token=True)
     asyncio.run(_serve())
 
 

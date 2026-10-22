@@ -31,6 +31,8 @@ from tiny_hermes.outbound.domain.address_policy import (
 )
 from tiny_hermes.outbound.domain.scope import OutboundScope
 
+from ..support import metric
+
 TOKEN = "platform-process-token"  # noqa: S105 - a fixed local test value
 #: `localhost` answers with both families on this host, and the address policy
 #: refuses a name whose answers are not *all* approved — so approving one
@@ -194,6 +196,7 @@ async def test_an_approved_target_is_reached_and_the_answer_comes_back(
 ) -> None:
     directory = MemoryScopeDirectory(platform=OutboundScope.of(["localhost"]))
     proxy = await _proxy(directory)
+    allowed = metric("tiny_hermes_egress_connections_total", decision="allow")
     try:
         status, body = await _through(proxy, target.port)
     finally:
@@ -201,6 +204,7 @@ async def test_an_approved_target_is_reached_and_the_answer_comes_back(
 
     assert status == 200
     assert body == BODY
+    assert metric("tiny_hermes_egress_connections_total", decision="allow") == allowed + 1
     # Rewritten to origin form on the way out, and the proxy's own credential
     # did not travel with it.
     assert target.heads[0].startswith(b"GET /thing HTTP/1.1\r\n")
@@ -278,12 +282,22 @@ async def test_a_wrong_token_is_refused_as_an_unknown_caller(target: Target) -> 
 async def test_a_target_nobody_approved_is_refused_with_a_reason(target: Target) -> None:
     directory = MemoryScopeDirectory(platform=OutboundScope.of(["api.example.com"]))
     proxy = await _proxy(directory)
+    refused = metric(
+        "tiny_hermes_egress_connections_total", decision="deny", reason="target_not_in_scope"
+    )
     try:
         status, body = await _through(proxy, target.port)
     finally:
         await proxy.stop()
 
     assert status == 403
+    # Counted by reason, never by host: the host is the Agent's to choose.
+    assert (
+        metric(
+            "tiny_hermes_egress_connections_total", decision="deny", reason="target_not_in_scope"
+        )
+        == refused + 1
+    )
     # The reason travels, so a misconfigured scope is readable rather than
     # something an operator has to reproduce with a packet capture.
     assert b"target_not_in_scope" in body

@@ -20,9 +20,12 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from opentelemetry import trace
 from tiny_hermes.sandbox.transport.client import ControllerClient
 from tiny_hermes.sandbox.transport.server import ControllerServer, ProtocolError
 
+from ..support import metric
+from ..tracing_support import named, recorded
 from .conftest import MAX_SOCKET_PATH, Pki, wire
 
 pytestmark = pytest.mark.skipif(
@@ -76,11 +79,17 @@ async def test_a_request_reaches_the_controller_and_the_answer_comes_back(
 ) -> None:
     spy, client = wired
     run_id = uuid4()
+    timed = metric("tiny_hermes_controller_action_seconds_count", action="acquire", outcome="ok")
 
     answer = await client.call("acquire", {"run_id": str(run_id), "profile": "default"})
 
     assert spy.calls == [("acquire", {"run_id": str(run_id), "profile": "default"})]
     assert answer == spy.answer
+    # Observability design §3.4: what a Worker waits on, Docker and rows together.
+    assert (
+        metric("tiny_hermes_controller_action_seconds_count", action="acquire", outcome="ok")
+        == timed + 1
+    )
 
 
 async def test_a_refusal_arrives_as_a_refusal_and_not_as_a_dropped_connection(
@@ -93,11 +102,18 @@ async def test_a_refusal_arrives_as_a_refusal_and_not_as_a_dropped_connection(
     """
     spy, client = wired
     spy.refusal = "lease_invalid"
+    timed = metric(
+        "tiny_hermes_controller_action_seconds_count", action="execute", outcome="refused"
+    )
 
     with pytest.raises(ControllerClient.Refused) as refused:
         await client.call("execute", {"sandbox_id": str(uuid4())})
 
     assert refused.value.reason == "lease_invalid"
+    assert (
+        metric("tiny_hermes_controller_action_seconds_count", action="execute", outcome="refused")
+        == timed + 1
+    )
 
 
 async def test_the_server_survives_a_malformed_frame(
@@ -212,3 +228,18 @@ def test_the_socket_path_fits_in_the_kernels_own_field(socket_dir: Path) -> None
     path = socket_dir / "c.sock"
 
     assert len(str(path).encode()) < MAX_SOCKET_PATH, str(path)
+
+
+async def test_a_controller_action_joins_its_caller_s_trace(
+    wired: tuple[SpyController, ControllerClient],
+) -> None:
+    """Design §5.3: the context rides in the control line, beside the action."""
+    spans = recorded()
+    _, client = wired
+
+    with trace.get_tracer("test").start_as_current_span("caller") as caller:
+        await client.call("acquire", {"run_id": str(uuid4()), "profile": "default"})
+
+    [served] = named(spans, "controller.acquire")
+    assert served.context is not None
+    assert served.context.trace_id == caller.get_span_context().trace_id

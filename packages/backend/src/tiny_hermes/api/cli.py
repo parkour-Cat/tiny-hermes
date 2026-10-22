@@ -71,6 +71,8 @@ from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.database import build_session_factory
 from tiny_hermes.shared.errors import AppError
 from tiny_hermes.shared.logging import configure_logging
+from tiny_hermes.shared.metrics import serve_configured_metrics
+from tiny_hermes.shared.tracing import configure_tracing
 
 if TYPE_CHECKING:
     # Annotations only. The module pulls in the Feishu SDK, which is 10k modules
@@ -90,6 +92,7 @@ def main() -> None:
     # without this the api's INFO lines went nowhere and a WARNING lost its
     # fields. It leaves the root logger alone, so this handler survives it.
     configure_logging()
+    _observe("api")
     uvicorn.run(
         "tiny_hermes.api.app:app",
         host="0.0.0.0",  # noqa: S104 - container port must accept traffic outside itself
@@ -97,8 +100,16 @@ def main() -> None:
     )
 
 
+def _observe(service: str) -> None:
+    """Metrics port and tracing, once per process before its loop starts."""
+    settings = get_settings()
+    serve_configured_metrics(settings)
+    configure_tracing(settings, service=service)
+
+
 def worker_main() -> None:
     configure_logging()
+    _observe("worker")
     asyncio.run(_worker())
 
 
@@ -390,6 +401,7 @@ def scheduler_main() -> None:
     # loop it would bind that one, and every long connection would fail with
     # "This event loop is already running".
     importlib.import_module("tiny_hermes.channels.infrastructure.feishu_long_connection")
+    _observe("scheduler")
     asyncio.run(_scheduler())
 
 
@@ -427,6 +439,7 @@ async def _scheduler() -> None:
     try:
         await asyncio.gather(
             runtime.run_forever(stop, settings.scheduler_interval_seconds),
+            runtime.observe_forever(stop, settings.queue_observe_seconds),
             # Shares `stop` with the main loop on purpose: a termination
             # signal has to close both the lease/reply loop and every open
             # socket together, rather than the main loop exiting first and

@@ -1,5 +1,5 @@
 import hashlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -22,11 +22,12 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy import cast as sql_cast
+from sqlalchemy import event as sa_event
 from sqlalchemy.dialects.postgresql import JSONB, JSONPATH
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import InstrumentedAttribute, aliased
+from sqlalchemy.orm import InstrumentedAttribute, Session, aliased
 
 from tiny_hermes.agents.domain.delegation import (
     MAX_DELEGATION_DEPTH,
@@ -155,6 +156,7 @@ from tiny_hermes.runs.ports.store import (
     ControlRunCommand,
     CreateSessionCommand,
     ExecutionContext,
+    QueueSnapshot,
     RecordSliceCommand,
     RecordSummaryUsageCommand,
     RenewedLease,
@@ -167,6 +169,8 @@ from tiny_hermes.runs.ports.store import (
     StoredSummary,
     WidenBudgetCommand,
 )
+from tiny_hermes.shared.metrics import RECOVERIES, RUNS_FINISHED
+from tiny_hermes.shared.tracing import context_from, current_traceparent, tracer
 from tiny_hermes.skills.infrastructure.tables import (
     SkillRow,
     SkillVersionLoadRow,
@@ -347,6 +351,7 @@ class SqlRunStore:
         ceiling = await self._cost_ceiling(command.workspace_id)
         run = RunRow(
             id=run_id,
+            trace_context=current_traceparent(),
             workspace_id=command.workspace_id,
             session_id=session.id,
             agent_version_id=version_id,
@@ -892,6 +897,8 @@ class SqlRunStore:
         )
 
         _apply_decision(run, decision, now)
+        if decision.is_terminal:
+            _count_on_commit(self._session, RUNS_FINISHED.labels(status=decision.state.value).inc)
         # Cleared alongside `wait_kind` rather than left behind: a Run that is
         # no longer waiting on children must not read as one that is waiting
         # for `all` of nothing.
@@ -2152,6 +2159,7 @@ class SqlRunStore:
             ),
             RunSignal.LEASE_ACQUIRED,
         )
+        claimable_since = max(candidate.queued_at, candidate.claimable_after or candidate.queued_at)
         _apply_decision(candidate, decision, now)
         candidate.state_version += 1
         candidate.updated_at = now
@@ -2218,25 +2226,16 @@ class SqlRunStore:
             lease_id=lease_id,
             lease_version=lease_version,
             lease_expires_at=expires_at,
+            waited_seconds=max(0.0, (now - claimable_since).total_seconds()),
+            trace_context=candidate.trace_context,
         )
 
     async def _select_claimable(self, command: ClaimRunCommand, now: datetime) -> RunRow | None:
         """Queued, Session Head, unblocked, and not already leased."""
-        held = (
-            select(WorkerLeaseRow.run_id)
-            .where(WorkerLeaseRow.released_at.is_(None), WorkerLeaseRow.expires_at > now)
-            .scalar_subquery()
-        )
         statement = (
             select(RunRow)
             .join(SessionRow, SessionRow.id == RunRow.session_id)
-            .where(
-                RunRow.status == RunState.QUEUED.value,
-                SessionRow.head_run_id == RunRow.id,
-                RunRow.blocked_by_run_id.is_(None),
-                RunRow.id.not_in(held),
-                or_(RunRow.claimable_after.is_(None), RunRow.claimable_after <= now),
-            )
+            .where(*_claimable(now))
             .order_by(RunRow.queued_at, RunRow.id)
             .limit(1)
             .with_for_update(of=RunRow, skip_locked=True)
@@ -2246,6 +2245,28 @@ class SqlRunStore:
         if command.session_id is not None:
             statement = statement.where(RunRow.session_id == command.session_id)
         return await self._session.scalar(statement)
+
+    async def queue_snapshot(self, now: datetime) -> QueueSnapshot:
+        """Unfinished Runs by status, and the longest wait among claimable ones.
+
+        The wait starts at whichever is later of entering the queue and the end
+        of a deliberate hold-off, the same moment `claim_head` measures from:
+        a Run held back after an admission refusal is not waiting on capacity.
+        """
+        counted = await self._session.execute(
+            select(RunRow.status, func.count())
+            .where(RunRow.status.not_in([state.value for state in TERMINAL_STATES]))
+            .group_by(RunRow.status)
+        )
+        since = await self._session.scalar(
+            select(func.min(_claimable_since()))
+            .join(SessionRow, SessionRow.id == RunRow.session_id)
+            .where(*_claimable(now))
+        )
+        return QueueSnapshot(
+            by_status={str(status): int(count) for status, count in counted.all()},
+            oldest_claimable_since=since,
+        )
 
     async def try_scan_lock(self, name: str) -> bool:
         """Take the advisory lock for one scan family, or report it is taken.
@@ -2301,7 +2322,26 @@ class SqlRunStore:
     async def recover_interrupted(
         self, run_id: UUID, max_attempts: int, request_id: str
     ) -> RunState | None:
-        """Return an interrupted Run to the queue only when that is safe."""
+        """Return an interrupted Run to the queue only when that is safe.
+
+        In the Run's own trace when it has one (observability design §5.3);
+        a Run that was not sampled gets no stray trace of its own here.
+        """
+        traced = await self._session.scalar(
+            select(RunRow.trace_context).where(RunRow.id == run_id)
+        )
+        if traced is None:
+            return await self._recover_interrupted(run_id, max_attempts, request_id)
+        with tracer.start_as_current_span(
+            "run.recover", context=context_from(traced), attributes={"run.id": str(run_id)}
+        ) as span:
+            state = await self._recover_interrupted(run_id, max_attempts, request_id)
+            span.set_attribute("run.state", "unchanged" if state is None else state.value)
+            return state
+
+    async def _recover_interrupted(
+        self, run_id: UUID, max_attempts: int, request_id: str
+    ) -> RunState | None:
         run = await self._lock_run_any_workspace(run_id)
         if run is None or RunState(run.status) is not RunState.INTERRUPTED:
             return None
@@ -2337,6 +2377,9 @@ class SqlRunStore:
         if safe:
             run.recovery_attempts += 1
         signal = RunSignal.RECOVERY_APPROVED if safe else RunSignal.RECOVERY_FAILED
+        _count_on_commit(
+            self._session, RECOVERIES.labels(outcome="approved" if safe else "failed").inc
+        )
         await self._decide_and_write(
             run,
             session,
@@ -3002,6 +3045,7 @@ class SqlRunStore:
         run_id = uuid4()
         run = RunRow(
             id=run_id,
+            trace_context=current_traceparent(),
             workspace_id=command.workspace_id,
             session_id=session.id,
             agent_version_id=source.agent_version_id,
@@ -3208,6 +3252,7 @@ class SqlRunStore:
             child_id = uuid4()
             child = RunRow(
                 id=child_id,
+                trace_context=current_traceparent(),
                 workspace_id=parent.workspace_id,
                 session_id=child_session.id,
                 agent_version_id=child_version_id,
@@ -4324,6 +4369,49 @@ def _unfinished(status: InstrumentedAttribute[str]) -> ColumnElement[bool]:
             literal_execute=True,
         )
     )
+
+
+_ON_COMMIT = "tiny_hermes.metrics_on_commit"
+
+
+def _count_on_commit(session: AsyncSession, count: Callable[[], None]) -> None:
+    """Count when the transaction commits, never before: a transition that
+    rolls back did not happen, and a counter cannot be taken back."""
+    pending: list[Callable[[], None]] = session.sync_session.info.setdefault(_ON_COMMIT, [])
+    pending.append(count)
+
+
+def _counted(session: Session) -> None:
+    for count in session.info.pop(_ON_COMMIT, []):
+        count()
+
+
+def _not_counted(session: Session) -> None:
+    session.info.pop(_ON_COMMIT, None)
+
+
+sa_event.listen(Session, "after_commit", _counted)
+sa_event.listen(Session, "after_rollback", _not_counted)
+
+
+def _claimable(now: datetime) -> tuple[ColumnElement[bool], ...]:
+    """What `claim_head` may take: queued, Session Head, unblocked, unleased."""
+    held = (
+        select(WorkerLeaseRow.run_id)
+        .where(WorkerLeaseRow.released_at.is_(None), WorkerLeaseRow.expires_at > now)
+        .scalar_subquery()
+    )
+    return (
+        RunRow.status == RunState.QUEUED.value,
+        SessionRow.head_run_id == RunRow.id,
+        RunRow.blocked_by_run_id.is_(None),
+        RunRow.id.not_in(held),
+        or_(RunRow.claimable_after.is_(None), RunRow.claimable_after <= now),
+    )
+
+
+def _claimable_since() -> ColumnElement[datetime]:
+    return func.greatest(RunRow.queued_at, func.coalesce(RunRow.claimable_after, RunRow.queued_at))
 
 
 def _scan_lock_key(name: str) -> int:

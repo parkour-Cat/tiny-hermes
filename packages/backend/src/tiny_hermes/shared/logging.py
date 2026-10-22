@@ -3,6 +3,7 @@ import logging
 from typing import Any
 
 import structlog
+from opentelemetry import trace
 
 #: What every LogRecord has; anything else on a record came from `extra=`.
 _STANDARD = frozenset(vars(logging.LogRecord("", logging.INFO, "", 0, "", (), None))) | {
@@ -27,6 +28,10 @@ class FieldsFormatter(logging.Formatter):
         fields = [
             f"{key}={_value(value)}" for key, value in vars(record).items() if key not in _STANDARD
         ]
+        # The line and its trace find each other (observability design §5.3).
+        span = trace.get_current_span().get_span_context()
+        if span.is_valid:
+            fields += [f"trace_id={span.trace_id:032x}", f"span_id={span.span_id:016x}"]
         return " ".join([super().formatMessage(record), *fields])
 
 

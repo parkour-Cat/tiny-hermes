@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from time import monotonic
+from time import monotonic, time_ns
 from typing import Any, Protocol, cast
 from uuid import UUID
 
@@ -144,6 +144,15 @@ from tiny_hermes.session_workspace.infrastructure.sandbox_port import (
     WorkspaceGateway,
 )
 from tiny_hermes.session_workspace.ports.objects import ObjectStore
+from tiny_hermes.shared.metrics import (
+    CLAIM_WAIT,
+    SANDBOX_ACQUIRE_SECONDS,
+    TOOL_CALL_SECONDS,
+    WORKER_LANES,
+    WORKSPACE_COMMIT_SECONDS,
+    timed,
+)
+from tiny_hermes.shared.tracing import context_from, tracer
 from tiny_hermes.tools.application.execute import (
     ArtifactUpload,
     StreamedCommandRunner,
@@ -393,25 +402,42 @@ class WorkerRuntime:
         claimed = await self._claim()
         if claimed is None:
             return None
-        await self._execute_slice(claimed)
-        try:
-            await self._review_for_skills(claimed)
-        except Exception:
-            # §15.4: a suggestion, attempted after the outcome is recorded. It
-            # must never be the reason a Worker stops taking Runs.
-            logger.exception("skill review failed", extra={"run_id": str(claimed.run.id)})
+        CLAIM_WAIT.observe(claimed.waited_seconds)
+        with (
+            WORKER_LANES.labels(state="busy").track_inprogress(),
+            tracer.start_as_current_span(
+                "run.slice",
+                context=context_from(claimed.trace_context),
+                attributes={
+                    "run.id": str(claimed.run.id),
+                    "workspace.id": str(claimed.run.workspace_id),
+                },
+            ),
+        ):
+            await self._execute_slice(claimed)
+            try:
+                await self._review_for_skills(claimed)
+            except Exception:
+                # §15.4: a suggestion, attempted after the outcome is recorded.
+                # It must never be the reason a Worker stops taking Runs.
+                logger.exception("skill review failed", extra={"run_id": str(claimed.run.id)})
         return claimed.run.id
 
     async def run_forever(self, stop: asyncio.Event) -> None:
         self._stopping = stop
-        while not stop.is_set():
-            try:
-                advanced = await self.run_once()
-            except Exception:
-                logger.exception("worker slice failed")
-                advanced = None
-            if advanced is None and not stop.is_set():
-                await self._notifier.wait(self._settings.idle_poll_seconds)
+        lanes = WORKER_LANES.labels(state="total")
+        lanes.inc()
+        try:
+            while not stop.is_set():
+                try:
+                    advanced = await self.run_once()
+                except Exception:
+                    logger.exception("worker slice failed")
+                    advanced = None
+                if advanced is None and not stop.is_set():
+                    await self._notifier.wait(self._settings.idle_poll_seconds)
+        finally:
+            lanes.dec()
 
     def _stop_requested(self) -> bool:
         return self._stopping is not None and self._stopping.is_set()
@@ -804,6 +830,14 @@ class WorkerRuntime:
                 claimed, handle, context, "sandbox_not_configured", spent, executed_ms
             )
             return None
+        asked = monotonic()
+        acquiring = tracer.start_span("sandbox.acquire")
+
+        def acquire_ended(outcome: str) -> None:
+            SANDBOX_ACQUIRE_SECONDS.labels(outcome=outcome).observe(monotonic() - asked)
+            acquiring.set_attribute("sandbox.outcome", outcome)
+            acquiring.end()
+
         try:
             acquired = await self._sandbox.acquire(
                 run_id=claimed.run.id,
@@ -813,6 +847,7 @@ class WorkerRuntime:
                 profile=DEFAULT_PROFILE.name,
             )
         except SandboxRefused as refused:
+            acquire_ended("refused")
             if refused.reason in _NOT_READY:
                 # A previous slice's container is still being reclaimed, or the
                 # sandbox memory budget has no room (§21.3). That is the
@@ -848,6 +883,7 @@ class WorkerRuntime:
             )
             return None
         except SandboxUnreachable as unreachable:
+            acquire_ended("unreachable")
             # Failing the Run made a network blip permanent for whoever sent
             # it (tier B acceptance, finding 1). Which way it waits depends on
             # whether the acquire may have reserved a sandbox nobody heard of.
@@ -883,12 +919,14 @@ class WorkerRuntime:
             )
             return None
         except Exception:
+            acquire_ended("failed")
             logger.exception("sandbox acquire failed", extra={"run_id": str(claimed.run.id)})
             await self._fail(
                 claimed, handle, context, "sandbox_start_failed", spent, executed_ms
             )
             return None
 
+        acquire_ended("cold" if acquired.cache_state is CacheState.RESET else "warm")
         if acquired.cache_state is CacheState.RESET:
             # §11.3, and both halves of it: the event a person reads, and the
             # protected hint the model reads on the next call. That call comes
@@ -1447,9 +1485,10 @@ class WorkerRuntime:
             if not answer.failed and changes_workspace(call.name):
                 wrote = True
             results.append(answer)
-        events.extend(
-            _tool_events(response.tool_calls, results, started, monotonic(), ended)
-        )
+        finished = monotonic()
+        answered = _tool_events(response.tool_calls, results, started, finished, ended)
+        _observe_tool_calls(answered, started, finished)
+        events.extend(answered)
         return _RoundWork(
             (assistant, CanonicalMessage("tool", tuple(results))),
             wrote,
@@ -1612,15 +1651,19 @@ class WorkerRuntime:
             return None
 
         try:
-            result = await service.checkpoint(
-                WorkspaceCheckpoint(
+            result = await timed(
+                WORKSPACE_COMMIT_SECONDS,
+                "workspace.commit",
+                service.checkpoint(
+                    WorkspaceCheckpoint(
                     workspace_id=claimed.run.workspace_id,
                     session_id=claimed.run.session_id,
                     run_id=claimed.run.id,
-                    base_revision_id=box.revision,
-                    quota=runtime.quota,
-                    slice_command=slice_command,
-                )
+                        base_revision_id=box.revision,
+                        quota=runtime.quota,
+                        slice_command=slice_command,
+                    )
+                ),
             )
         except (LeaseLost, StateVersionConflict):
             handle.lost = True
@@ -3725,6 +3768,43 @@ def _argument_shape(arguments: Mapping[str, Any]) -> dict[str, str]:
         else:
             shaped[key] = "null" if value is None else type(value).__name__
     return shaped
+
+
+def _observe_tool_calls(
+    answered: Sequence[ReservedEvent], started: Mapping[str, float], finished: float
+) -> None:
+    """From the events, so the metric, the span and the Run's own record agree
+    on which calls ran and how long each took.
+
+    The spans are written after the round, with the times each call had: the
+    dispatch loop above has a dozen ways out per call, and a span opened inside
+    it would need closing on every one.
+    """
+    wall_finished = time_ns()
+    for event in answered:
+        kind = _tool_kind(str(event.payload["tool"]))
+        outcome = str(event.payload["outcome"])
+        duration_ms = int(event.payload["duration_ms"])
+        TOOL_CALL_SECONDS.labels(kind=kind, outcome=outcome).observe(duration_ms / 1000)
+        began = wall_finished - int((finished - started[str(event.payload["call_id"])]) * 1e9)
+        span = tracer.start_span(
+            f"tool.{kind}",
+            start_time=began,
+            attributes={"tool.name": str(event.payload["tool"]), "tool.outcome": outcome},
+        )
+        span.end(end_time=began + duration_ms * 1_000_000)
+
+
+def _tool_kind(name: str) -> str:
+    if name.startswith(f"{HTTP_PREFIX}."):
+        return "http"
+    if name.startswith(f"{MCP_PREFIX}."):
+        return "mcp"
+    if name.startswith("file."):
+        return "file"
+    if name == "shell.exec":
+        return "shell"
+    return "platform"
 
 
 def _tool_events(

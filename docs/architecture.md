@@ -17,6 +17,57 @@
 
 前端两个：`apps/web`（控制台）与 `apps/chat-web`（终端用户聊天）。
 
+## 一条消息怎么走
+
+```mermaid
+flowchart TB
+  subgraph entry[入口]
+    browser[浏览器<br/>控制台 web · chat-web]
+    caller[外部系统<br/>API Key]
+    feishu[飞书]
+  end
+
+  subgraph trusted[可信进程：不执行用户代码]
+    api[api ×N<br/>鉴权 · 建 Run · SSE]
+    scheduler[scheduler ×1<br/>回收租约 · 恢复中断 · 超时 · 清理 · 飞书长连接]
+    worker[worker 容器 ×M，每个 K 路<br/>SKIP LOCKED 领取 + 租约 · 时间片轮转]
+  end
+
+  subgraph state[状态]
+    pg[(PostgreSQL<br/>Run 队列 · 唯一可信状态 · 事件 · 审计)]
+    redis[(Redis<br/>唤醒 · 事件通知)]
+    s3[(SeaweedFS / S3<br/>工作区版本 · 产物)]
+  end
+
+  subgraph sandboxhost[沙箱主机：B 档只允许一台]
+    controller[controller<br/>唯一能碰 Docker · 内存准入]
+    sandbox[沙箱容器 ×n<br/>跑用户代码 · internal 网络]
+  end
+
+  egress[egress-proxy<br/>唯一的出站路径 · 白名单 · SSRF 防护]
+  outside[外部服务<br/>大模型 API · 业务 HTTP · MCP]
+
+  browser -- HTTPS · SSE --> api
+  caller -- REST --> api
+  scheduler -. 长连接 .-> feishu
+  api -- 建 Run · 读事件 --> pg
+  redis -- 事件通知 --> api
+  scheduler -- 扫描 · 恢复 --> pg
+  redis -- 有新 Run --> worker
+  worker <-- 领取 · 检查点 --> pg
+  worker -- 提交工作区 --> s3
+  worker -- Unix socket 或 mTLS --> controller
+  controller -- 建 · 冻结 · 删 --> sandbox
+  worker -- 模型调用 · HTTP/MCP 工具 --> egress
+  sandbox -- 联网命令 --> egress
+  egress -- 白名单内 --> outside
+```
+
+入口 → `api` 在 PostgreSQL 建 Run → Redis 叫醒一个 `worker` → `worker` 领取并调模型 →
+模型要跑代码时，`worker` 请 `controller` 建沙箱 → 事件写回 PostgreSQL，`api` 经 SSE 推给
+浏览器。模型调用、HTTP/MCP 工具、沙箱里的联网命令，出站都只经过 `egress-proxy`。
+Redis 只管快：它不可用时 Worker 退回轮询、SSE 退回每 0.5 秒查库，状态不丢。
+
 ## 三条不能破的线
 
 **一、出站只有一条路。** 平台内一切出站流量经过 `egress-proxy`。这条线由 ruff 的
@@ -68,6 +119,44 @@ Run 是切片执行的：Worker 领租约、跑一轮、写检查点、让出。
 
 创建走 `create_agent` → `replace_draft` → `publish` 三个既有方法，不另开写入路径：
 绕过 `publish` 的检查往 `agent_versions` 里塞一行，就是第二扇没人看守的门。
+
+## 容量与扩容
+
+容量按「同一时刻正在执行的 Run 数」算，不按员工人数算。等审批、等人回复的 Run 不占
+Worker，也不占沙箱。完整方案见 `docs/superpowers/plans/2026-09-29-enterprise-capacity.md`。
+
+| 项 | 数字 | 依据 | 性质 |
+|---|---|---|---|
+| 一台 8 核 VM 同时执行 | 40 路 | 3 个 worker × 16 路，482 个 Run 全部完成，短消息排队 P95 0.04 秒 | 实测（[单机档验收](superpowers/verification/2026-09-30-tier-a-acceptance.md)） |
+| 超载时 | 只排队 | 32 个长任务占满 32 条通道：短消息排队 P95 31.6 秒，0 失败 | 实测（同上） |
+| 最先撞墙的 | PostgreSQL CPU | 40 路时峰值 224%，随并发涨得最快 | 实测（同上） |
+| 6000 名员工的高峰并发 | 约 120–300 路 | 假设 2%–5% 的人同一时刻有任务在执行 | 估算 |
+
+实测用的是确定性模型替身和 `printf` 工具，环境是 8 核 / 7.8 GiB 的 OrbStack VM，
+不是 §24.1 的参考机。真实模型每路要多少 CPU、真实工具的沙箱要多少内存，都没测过。
+
+`worker` 已经可以放在多台机器上（B 档，[验收](superpowers/verification/2026-10-21-tier-b-acceptance.md)）。
+剩下的单点是沙箱主机，往上扩改的是这一条线：
+
+```mermaid
+flowchart LR
+  subgraph now[现在 · B 档]
+    direction LR
+    w1[worker 主机 1] --> sb[沙箱主机 ×1<br/>它的内存 = 并发沙箱上限]
+    w2[worker 主机 2] --> sb
+    w3[worker 主机 3] --> sb
+  end
+  subgraph next[下一步 · C 档或 K8s]
+    direction LR
+    v1[worker 主机 1] --> hb[沙箱主机 B]
+    v2[worker 主机 2] --> ha[沙箱主机 A]
+    v3[worker 主机 3] --> hc[沙箱主机 C]
+  end
+  now ~~~ next
+```
+
+C 档自己写「新沙箱挑负载低的主机，冻结的沙箱路由回原主机」；K8s 把沙箱变成一次性 Pod，
+调度交给集群。工作区按版本存在对象存储里，所以冷恢复可以落在任何一台上。
 
 ## 更细的地方
 

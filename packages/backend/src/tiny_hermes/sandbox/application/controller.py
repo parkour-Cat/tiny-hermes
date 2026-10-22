@@ -46,6 +46,7 @@ from tiny_hermes.sandbox.infrastructure.docker_engine import (
     DockerUnavailable,
 )
 from tiny_hermes.sandbox.ports.store import SandboxStore
+from tiny_hermes.shared.metrics import SANDBOX_ADMISSION_REJECTED
 
 logger = logging.getLogger(__name__)
 
@@ -484,6 +485,7 @@ class SandboxController:
         if freed < shortfall:
             # Nothing is evicted: a warm sandbox destroyed without making
             # enough room is a cold start for its Run and no gain for this one.
+            SANDBOX_ADMISSION_REJECTED.inc()
             raise SandboxRefused(RefusalReason.MEMORY_BUDGET_EXHAUSTED)
         for reservation, instance in chosen:
             await self._evict(reservation, instance)

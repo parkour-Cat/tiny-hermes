@@ -35,6 +35,7 @@ from tiny_hermes.runs.application.service import (
 from tiny_hermes.runs.ports.store import RunEventRecord, RunEventWindow
 from tiny_hermes.runs.presentation.errors import as_app_error
 from tiny_hermes.shared.errors import AppError
+from tiny_hermes.shared.metrics import SSE_CONNECTIONS
 from tiny_hermes.tenancy.domain.models import Actor
 
 CursorHeader = Annotated[str | None, Header(alias="Last-Event-ID")]
@@ -106,12 +107,22 @@ def run_event_router(resources: ApplicationResources) -> APIRouter:
         except RunCoordinationError as error:
             raise _as_stream_error(error, run_id) from error
         return StreamingResponse(
-            _frames(request, selected, actor, run_id, after),
+            _counted(_frames(request, selected, actor, run_id, after)),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     return router
+
+
+async def _counted(frames: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    """Open from the first frame to the stream's end, however it ends."""
+    SSE_CONNECTIONS.inc()
+    try:
+        async for frame in frames:
+            yield frame
+    finally:
+        SSE_CONNECTIONS.dec()
 
 
 def _frame(record: RunEventRecord) -> bytes:

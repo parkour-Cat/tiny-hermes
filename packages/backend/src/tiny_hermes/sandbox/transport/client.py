@@ -26,6 +26,20 @@ from tiny_hermes.sandbox.transport.frames import (
     encode_frame,
 )
 from tiny_hermes.sandbox.transport.server import keep_alive
+from tiny_hermes.shared.tracing import current_traceparent
+
+
+def _control_line(action: str, payload: dict[str, Any]) -> bytes:
+    """The action, its payload, and the caller's trace when it has one.
+
+    A controller that predates the field ignores it: it reads `action` and
+    `payload` and nothing else, so tier B's two sides can upgrade apart.
+    """
+    line: dict[str, Any] = {"action": action, "payload": _plain(payload)}
+    traceparent = current_traceparent()
+    if traceparent is not None:
+        line["traceparent"] = traceparent
+    return json.dumps(line).encode()
 
 
 def _plain(value: Any) -> Any:
@@ -90,7 +104,7 @@ class ControllerClient:
         self._timeout = timeout
 
     async def call(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
-        frame = json.dumps({"action": action, "payload": _plain(payload)}).encode()
+        frame = _control_line(action, payload)
         reader, writer = await self.connect()
         try:
             writer.write(frame + b"\n")
@@ -251,7 +265,7 @@ class ControllerClient:
     async def _open(
         self, writer: asyncio.StreamWriter, action: str, payload: dict[str, Any]
     ) -> None:
-        frame = json.dumps({"action": action, "payload": _plain(payload)}).encode()
+        frame = _control_line(action, payload)
         writer.write(frame + b"\n")
         await writer.drain()
 
