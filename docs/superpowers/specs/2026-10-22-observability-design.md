@@ -83,13 +83,12 @@ scheduler 的 `run_once` 是串行的 14 项扫描（`runs/application/scheduler
 |---|---|---|---|
 | `scheduler_scan_seconds` | histogram | `scan` | 每一项扫描各自的耗时 |
 | `scheduler_scan_errors_total` | counter | `scan` | |
-| `scheduler_last_cycle_timestamp` | gauge | — | 最近一次**完整**跑完一轮的时间 |
+| `scheduler_scan_last_success_timestamp` | gauge | `scan` | 每一项最近一次成功跑完的时间 |
 
-**读代码时发现的一个问题，这一遍不修：**任何一项扫描抛异常，`run_forever` 只记一条
-`scheduler cycle failed`，这一轮剩下的扫描全部跳过。如果某一项每次都失败（比如某行脏数据
-让它每次都抛），排在它后面的恢复、审批超时、清理就**永远不会执行**，而日志里只有同一条
-错误反复出现。有了 `scheduler_last_cycle_timestamp` 至少能看出来。要不要改成每项单独
-捕获异常，单独决定。
+**读代码时发现的问题已经单独修了**（PR #124，
+[验收记录](../verification/2026-10-22-scheduler-scan-isolation.md)）：原来任何一项扫描抛异常，
+这一轮剩下的全部跳过；现在每项单独捕获，其余照跑。所以「整轮跑完」不再说明什么，要看的是
+**每一项**最近一次成功是什么时候：一项每次都失败，别的照常，只有它自己的时间戳停住。
 
 ### 3.4 边界：沙箱和出口
 
@@ -175,7 +174,7 @@ OpenTelemetry 的 httpx 自动插桩会给每个出站请求加 `traceparent` �
 |---|---|
 | 每个 Worker | M 个进程重复查，数字也重复 |
 | `api`，在被抓取时查 | 每次抓取都要查一次库；N 个 api 进程查 N 次 |
-| **scheduler，独立的 asyncio 任务，每 15 秒查一次** | 只有一份。缺点是 scheduler 挂了数字就停，靠 `scheduler_last_cycle_timestamp` 发现 |
+| **scheduler，独立的 asyncio 任务，每 15 秒查一次** | 只有一份。缺点是 scheduler 挂了数字就停，靠 `scheduler_scan_last_success_timestamp` 发现 |
 
 选第三种。但**不放进 `run_once` 的串行循环**，而是单独一个任务：否则某一项扫描一慢，
 排队数字就跟着停。而扫描变慢的时候，恰恰最需要看排队。查询用现有的部分索引
@@ -216,7 +215,7 @@ Worker、经历好几次中断恢复。trace 上下文要跨过数据库：
 |---|---|---|
 | 排队过久 | `queue_oldest_age_seconds` > 60，持续 5 分钟 | 容量不够的第一个信号 |
 | 通道满 | 所有 Worker 的 busy ÷ 总数 > 0.9，持续 10 分钟 | 该加 Worker 了 |
-| scheduler 停了 | 距 `scheduler_last_cycle_timestamp` 超过 5 倍扫描间隔 | §3.3 的问题 |
+| scheduler 某项停了 | 任一 `scan` 距 `scheduler_scan_last_success_timestamp` 超过 5 倍扫描间隔 | 一项反复失败，或整个 scheduler 停了 |
 | 沙箱准入拒绝 | 每分钟拒绝数 > 0，持续 10 分钟 | 沙箱主机内存不够 |
 | 出口拒绝突增 | 拒绝率是过去 1 小时的 5 倍 | Agent 配错，或有东西在试探 |
 | 登录失败突增 | 每分钟失败 > 30 | 有人在猜密码 |
