@@ -1,8 +1,10 @@
 import asyncio
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
@@ -407,3 +409,43 @@ async def test_a_compat_timeout_pause_older_than_a_day_is_cancelled(
 
     aged = client.get(f"/api/v1/runs/{created['id']}", headers=scope).json()
     assert aged["status"] == "cancelled"
+
+
+class _LeaseScanBroken(SchedulerRuntime):
+    """A scan that throws every cycle, as one bad row would make it."""
+
+    async def _reclaim_expired_leases(self, now: datetime) -> None:
+        raise RuntimeError("lease scan cannot read this row")
+
+
+async def test_a_failing_scan_does_not_starve_the_scans_after_it(
+    engine: AsyncEngine,
+    agent_with_scenario: Callable[..., str],
+    session_for: Callable[[str], str],
+    submit_run: Callable[[str, str], dict[str, Any]],
+) -> None:
+    """The lease scan runs first and retention near the end. If the first
+    always throws and that ends the cycle, nothing after it ever runs again:
+    recovery, approval expiry and cleanup stop, and the log shows one error
+    repeating."""
+    submit_run(session_for(agent_with_scenario("complete")), "key-1")
+    await _worker(engine).run_once()
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE idempotency_records SET expires_at = now() - interval '1 hour'")
+        )
+    scheduler = _LeaseScanBroken(
+        session_factory=async_sessionmaker(engine, expire_on_commit=False),
+        notifier=NullWakeUpNotifier(),
+        settings=SchedulerSettings(
+            max_recovery_attempts=3, event_retention_hours=168, batch_size=50
+        ),
+    )
+
+    # Still raised, after the others ran: a broken scan must not pass quietly.
+    with pytest.raises(ExceptionGroup) as raised:
+        await scheduler.run_once()
+
+    assert await _counts(engine, "SELECT count(*) FROM idempotency_records") == 0
+    [failure] = raised.value.exceptions
+    assert "lease scan cannot read this row" in str(failure)
