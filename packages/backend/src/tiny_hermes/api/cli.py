@@ -46,6 +46,7 @@ from tiny_hermes.runs.application.worker import (
 from tiny_hermes.runs.infrastructure.deterministic_model import (
     DeterministicModelProvider,
 )
+from tiny_hermes.runs.infrastructure.event_push import RedisRunEventPush, announcing
 from tiny_hermes.runs.infrastructure.http_tool_sender import OutboundHttpToolSender
 from tiny_hermes.runs.infrastructure.mcp_gateway import OutboundMcpGateway
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
@@ -105,7 +106,7 @@ async def _worker() -> None:
     settings = get_settings()
     concurrency = settings.worker_concurrency
     # One pool for the process, sized for every Worker in it.
-    sessions = build_session_factory(settings, **_worker_pool(concurrency))
+    sessions = _sessions(settings, **_worker_pool(concurrency))
     workspace = _workspace(settings)
     await _ensure_bucket(workspace)
     if workspace is not None:
@@ -398,7 +399,7 @@ async def _scheduler() -> None:
     workspace = _workspace(settings)
     await _ensure_bucket(workspace)
     senders = _FeishuSenders(settings)
-    sessions = build_session_factory(settings)
+    sessions = _sessions(settings)
     runtime = SchedulerRuntime(
         session_factory=sessions,
         notifier=notifier,
@@ -1065,6 +1066,23 @@ def _channel_replies(
         )
 
     return build
+
+
+def _sessions(
+    settings: Settings, *, pool_size: int = 5, max_overflow: int = 10
+) -> async_sessionmaker[AsyncSession]:
+    """The process's session factory, announcing the Runs its commits touch.
+
+    Capacity plan item 5: the API's event hub holds a watched Run's room until
+    it hears this, so a writer that does not announce is read up to five
+    seconds late. The Redis client lives as long as the process.
+    """
+    info = (
+        {} if not settings.redis_url else announcing(RedisRunEventPush(settings.redis_url).announce)
+    )
+    return build_session_factory(
+        settings, pool_size=pool_size, max_overflow=max_overflow, info=info
+    )
 
 
 def _notifier(settings: Settings) -> WakeUpNotifier:

@@ -4,6 +4,12 @@
 connection serialises on the pool and opens 11–13s gaps. The catch-up of each
 subscriber is still its own read (different cursors); only the live hold is
 shared.
+
+Capacity plan item 5: with a push channel up, a room reads when it is told its
+Run has news (``wake``) and otherwise only every ``pushed_poll_seconds``. A
+watched Run with nothing happening cost two reads a second, 50 of them about
+175 transactions a second on a stack doing nothing else (2026-10-22). Without
+the channel, or the moment it is lost, every room polls as it did before.
 """
 
 from __future__ import annotations
@@ -42,14 +48,46 @@ class _Room:
     encode: Encode
     members: list[_Member] = field(default_factory=list[_Member])
     task: asyncio.Task[None] | None = None
+    wake: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+#: How often a pushed room reads anyway: the longest a lost announcement
+#: delays an event.
+PUSHED_POLL_SECONDS = 5.0
 
 
 class EventStreamHub:
-    def __init__(self, poll: Poll, poll_seconds: float = 0.5) -> None:
+    def __init__(
+        self,
+        poll: Poll,
+        poll_seconds: float = 0.5,
+        pushed_poll_seconds: float = PUSHED_POLL_SECONDS,
+    ) -> None:
         self._poll = poll
         self._poll_seconds = poll_seconds
+        self._pushed_poll_seconds = pushed_poll_seconds
+        self._pushed = False
         self._rooms: dict[tuple[UUID, UUID], _Room] = {}
         self._lock = asyncio.Lock()
+
+    def wake(self, run_id: UUID) -> None:
+        """The Run has committed events; its room, if any, reads now."""
+        for room in self._rooms.values():
+            if room.run_id == run_id:
+                room.wake.set()
+
+    def pushed(self, healthy: bool) -> None:
+        """Whether announcements are reaching this process.
+
+        Every room reads once on a change either way: one that was holding for
+        the long interval must drop to polling now, and whatever was announced
+        while the channel was down was never heard.
+        """
+        if healthy == self._pushed:
+            return
+        self._pushed = healthy
+        for room in self._rooms.values():
+            room.wake.set()
 
     async def frames(
         self,
@@ -139,6 +177,9 @@ class EventStreamHub:
                 if not members:
                     return
                 cursor = min(member.cursor for member in members)
+                # Before the read, not after: an announcement that lands while
+                # it is under way may be about a row it did not see.
+                room.wake.clear()
                 try:
                     records, window = await self._poll(
                         room.workspace_id, room.actor, room.run_id, cursor
@@ -156,12 +197,17 @@ class EventStreamHub:
                     if window.is_terminal and member.cursor + 1 >= window.next_sequence:
                         self._offer(member, None)
                 if not records:
-                    await asyncio.sleep(self._poll_seconds)
+                    await self._hold(room)
         finally:
             async with self._lock:
                 current = self._rooms.get(key)
                 if current is not None and current is room and not current.members:
                     self._rooms.pop(key, None)
+
+    async def _hold(self, room: _Room) -> None:
+        interval = self._pushed_poll_seconds if self._pushed else self._poll_seconds
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(room.wake.wait(), timeout=interval)
 
     @staticmethod
     def _offer(member: _Member, item: bytes | None) -> None:

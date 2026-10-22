@@ -9,7 +9,9 @@ ownership are still checked before a single frame is written, and a
 cross-workspace identifier still returns a generic ``404``.
 
 Catch-up polls committed rows. The live hold shares one poll per Run
-(see ``EventStreamHub``) so 500 subscribers do not open 500 sessions.
+(see ``EventStreamHub``) so 500 subscribers do not open 500 sessions, and with
+Redis up that poll runs when the Run's writer announces a commit, not twice a
+second.
 """
 
 import json
@@ -61,7 +63,7 @@ def run_event_router(resources: ApplicationResources) -> APIRouter:
 
         Catch-up is this subscriber's own read (it may start at a different
         cursor). The live hold shares one poll per Run so 500 connections do
-        not open 500 sessions every half second.
+        not open 500 sessions.
         """
         async for chunk in resources.event_stream_hub(_poll).frames(
             workspace_id,

@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -65,6 +67,7 @@ from tiny_hermes.outbound.infrastructure.tables import ModelDiscoveryGrantRow
 from tiny_hermes.runs.application.approvals import ApprovalService
 from tiny_hermes.runs.application.event_stream import EventStreamHub, Poll
 from tiny_hermes.runs.application.service import RunCoordination
+from tiny_hermes.runs.infrastructure.event_push import RedisRunEventPush, announcing
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 from tiny_hermes.runs.infrastructure.redis_notifier import RedisWakeUpNotifier
 from tiny_hermes.runs.infrastructure.sql_approval_store import SqlApprovalStore
@@ -93,6 +96,8 @@ class ApplicationResources:
         self._notifier: WakeUpNotifier | None = None
         self._object_store: MinioObjectStore | None = None
         self._event_hub: EventStreamHub | None = None
+        self._event_push: RedisRunEventPush | None = None
+        self._event_listener: asyncio.Task[None] | None = None
         # Task-9 review finding E: one cache for the process's whole
         # lifetime, not one per request. `end_user_identity_service` below
         # builds a fresh `EndUserIdentityService`/`OutboundJwksKeySource`
@@ -111,13 +116,28 @@ class ApplicationResources:
 
     def event_stream_hub(self, poll: Poll) -> EventStreamHub:
         if self._event_hub is None:
-            self._event_hub = EventStreamHub(poll)
+            hub = EventStreamHub(poll)
+            push = self.event_push()
+            if push is not None:
+                # Started with the first subscriber, inside the server's loop;
+                # until it has subscribed the hub polls as it always did.
+                self._event_listener = asyncio.create_task(push.listen(hub.wake, hub.pushed))
+            self._event_hub = hub
         return self._event_hub
+
+    def event_push(self) -> RedisRunEventPush | None:
+        """Capacity plan item 5: announcements only, like the wake-up channel."""
+        if self._event_push is None and self.settings.redis_url:
+            self._event_push = RedisRunEventPush(self.settings.redis_url)
+        return self._event_push
 
     def session_factory(self) -> async_sessionmaker[AsyncSession]:
         if self._session_factory is None:
+            push = self.event_push()
             self._session_factory = async_sessionmaker(
-                self.database_engine(), expire_on_commit=False
+                self.database_engine(),
+                expire_on_commit=False,
+                info={} if push is None else announcing(push.announce),
             )
         return self._session_factory
 
@@ -265,6 +285,12 @@ class ApplicationResources:
         return self._notifier
 
     async def close(self) -> None:
+        if self._event_listener is not None:
+            self._event_listener.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._event_listener
+        if self._event_push is not None:
+            await self._event_push.close()
         if self._notifier is not None:
             await self._notifier.close()
         if self._engine is not None:

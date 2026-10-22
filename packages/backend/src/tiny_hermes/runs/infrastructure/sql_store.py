@@ -126,6 +126,7 @@ from tiny_hermes.runs.domain.state_machine import (
     RunStateError,
     RunStateMachine,
 )
+from tiny_hermes.runs.infrastructure.event_push import note_appended
 from tiny_hermes.runs.infrastructure.tables import (
     ApprovalRow,
     IdempotencyRecordRow,
@@ -653,6 +654,7 @@ class SqlRunStore:
             # means something outside this seam wrote events.
             raise EventSequenceConflict from error
         await self._forget_cached_sequence(command.run_id)
+        note_appended(self._session, command.run_id)
         return tuple(written)
 
     async def event_window(self, workspace_id: UUID, run_id: UUID) -> RunEventWindow | None:
