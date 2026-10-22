@@ -79,6 +79,13 @@ class FakeEngine:
     async def unpause(self, container_id: str) -> None:
         self.calls.append(("unpause", container_id))
 
+    async def unpause_if_present(self, container_id: str) -> bool:
+        self.calls.append(("unpause", container_id))
+        return True
+
+    async def remove_if_present(self, container_id: str) -> None:
+        self.calls.append(("remove", container_id))
+
     async def import_tree(
         self, container_id: str, target: str, tar_stream: AsyncIterator[bytes]
     ) -> None:

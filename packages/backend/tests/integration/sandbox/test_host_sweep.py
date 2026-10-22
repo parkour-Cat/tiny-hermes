@@ -150,3 +150,26 @@ async def test_acquire_clears_a_container_its_own_run_left_unrecorded(
     await platform.acquire(run_id)
 
     assert platform.state(lost) is None
+
+
+async def test_a_kept_instance_whose_container_is_gone_is_replaced_not_thawed(
+    platform: Platform, docker_client: Any
+) -> None:
+    """The other half of a leak: a row with no container. An eviction whose
+    transaction rolled back after the container went leaves its claim kept,
+    and so does an operator who removed the container by hand. The Run's next
+    slice must get a new instance, not an error from unpausing nothing."""
+    run_id = uuid4()
+    first = await platform.acquire(run_id)
+    lease = platform.leases[run_id]
+    await platform.call(
+        lambda c: c.freeze(run_id=run_id, lease_id=lease, sandbox_id=first.sandbox_id)
+    )
+    until = datetime.now(UTC) + timedelta(minutes=5)
+    await platform.call(lambda c: c.keep(run_id=run_id, sandbox_id=first.sandbox_id, until=until))
+    docker_client.containers.get(await platform.container_of(first.sandbox_id)).remove(force=True)
+
+    second = await platform.acquire(run_id)
+
+    assert second.sandbox_id != first.sandbox_id
+    assert second.cache_state is CacheState.RESET
