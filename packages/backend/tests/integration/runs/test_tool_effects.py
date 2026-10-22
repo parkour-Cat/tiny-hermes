@@ -48,6 +48,15 @@ async def _effect(engine: AsyncEngine, run_id: str) -> str:
         )
 
 
+async def _sending(engine: AsyncEngine, run_id: str) -> str | None:
+    """The call the Run's recorded round says is going out, if any."""
+    async with engine.connect() as connection:
+        recorded = await connection.scalar(
+            text("SELECT inflight_round FROM runs WHERE id = :id"), {"id": UUID(run_id)}
+        )
+    return None if recorded is None else str(recorded["call_id"])
+
+
 @dataclass
 class WatchingSandbox(StandInSandbox):
     """Reads the Run's checkpoint effect while the command is running."""
@@ -55,11 +64,13 @@ class WatchingSandbox(StandInSandbox):
     engine: Any = None
     run_id: str = ""
     seen: list[str] = field(default_factory=list[str])
+    sending: list[str | None] = field(default_factory=list[str | None])
 
     async def execute(
         self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID, command: SandboxCommand
     ) -> CommandResult:
         self.seen.append(await _effect(self.engine, self.run_id))
+        self.sending.append(await _sending(self.engine, self.run_id))
         return await super().execute(
             run_id=run_id, lease_id=lease_id, sandbox_id=sandbox_id, command=command
         )
@@ -99,6 +110,9 @@ async def test_a_command_with_the_network_marks_the_round_unsafe_while_it_runs(
     await drive(engine, Recording(post, _done()), sandbox)
 
     assert sandbox.seen == ["unknown"]
+    # Written down with the round, so recovery can tell the model which call
+    # it was (§17.2, v2.17).
+    assert sandbox.sending == ["c1"]
     # The round was recorded with its result: replaying from there no longer
     # repeats the command.
     assert await _effect(engine, run) == "none"
@@ -115,6 +129,7 @@ async def test_a_command_with_no_network_leaves_the_round_safe(
     await drive(engine, Recording(shell_call("ls"), _done()), sandbox)
 
     assert sandbox.seen == ["none"]
+    assert sandbox.sending == [None]
 
 
 @pytest.mark.parametrize("operation", ["listOrders", "createOrder"])

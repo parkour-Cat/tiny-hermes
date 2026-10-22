@@ -92,3 +92,33 @@ async def test_a_write_sends_its_body(
     assert stand_in.methods == ["POST"]
     assert json.loads(stand_in.bodies[0]) == ORDER
     assert stand_in.requests[0][2]["content-type"] == "application/json"
+
+
+async def test_each_write_carries_its_own_idempotency_key_and_a_read_none(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    session_for: Callable[[str], str],
+    api: tuple[StandIn, str],
+    proxy: ProxyHandle,
+) -> None:
+    """Two identical orders in one round are two orders: the key says which
+    request this is, not what it contains."""
+    stand_in, url = api
+    agent_id = ordering_agent(client, scope, url, ["listOrders", "createOrder"])
+    ask(client, scope, session_for(agent_id), "order")
+    model = Recording(
+        calls(
+            ("c1", "createOrder", {"body": ORDER}),
+            ("c2", "createOrder", {"body": ORDER}),
+            ("c3", "listOrders", {}),
+        )
+    )
+
+    await worker(engine, scope["X-Workspace-Id"], proxy, model).run_once()
+
+    first, second, read = (headers for _, _, headers in stand_in.requests)
+    assert first["idempotency-key"]
+    assert second["idempotency-key"]
+    assert first["idempotency-key"] != second["idempotency-key"]
+    assert "idempotency-key" not in read
