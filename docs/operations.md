@@ -321,7 +321,108 @@ controller、Scheduler 和 Worker；进程只在启动时读证书。
 | Worker 日志里 controller `Unreachable`，controller 日志里有 TLS 握手错误 | CA 不一致、证书过期，或 Worker 拨的名字不在 controller 证书的 `--host` 里 |
 | Scheduler 调用被拒，原因 `role_not_permitted` | 它拿着 Scheduler 证书在调 `cleanup` 以外的动作：这是缺陷，请报告 |
 
-## 8. 这份手册没有覆盖什么
+## 8. 一台主机开几个 Worker
+
+带工具和不带工具的 Run 都要占一条 Worker **通道**。通道不够时，新消息要等前面某个 Run
+的时间片结束，最长一个时间片（默认 30 秒）。
+
+### 8.1 两个旋钮
+
+| | 是什么 | 代价 |
+|---|---|---|
+| `WORKER_CONCURRENCY`（K） | 一个进程里跑几个 Worker，共享事件循环和数据库连接池 | 每个进程固定约 96 MiB，每条通道再加约 1 MiB；一个进程最多用满一个核 |
+| `--scale worker=N` | 开几个 Worker 进程（容器） | 每个容器一份固定开销，也多一个连接池 |
+
+**通道数 = N × K**，B 档下把所有 Worker 主机的加在一起。
+
+### 8.2 建议值
+
+来自[单机档验收](superpowers/verification/2026-09-30-tier-a-acceptance.md)，
+用的是确定性模型（见 8.6 节）：
+
+- **K = 16。**一个进程跑 32 路带工具的 Run 时，用到了一个核的 82%。
+- **N = 核数 ÷ 4，至少 1。**8 核给 2 个，就是 32 条通道。
+- **通道数要大于同时在推进的长任务数，再加上交互那一份。**交互那一份约等于「每秒到达的
+  消息数 × 每条执行的秒数」。验收第 3 档就是反例：32 个长任务占满 32 条通道，短消息排队
+  P95 31.6 秒；多开一个容器（48 条）之后回到 0.04 秒。
+
+```bash
+WORKER_CONCURRENCY=16 docker compose up -d --scale worker=2
+```
+
+### 8.3 数据库连接：按池的上限算，不按平时用到的算
+
+每个进程的连接池都有上限，它们加起来必须不超过 Postgres 的 `max_connections`
+（默认 200，用 `POSTGRES_MAX_CONNECTIONS` 调）：
+
+| 进程 | 每个进程的上限 |
+|---|---|
+| Worker | `max(5, K) + max(10, K)`，K = 16 时 32 |
+| API | `DATABASE_POOL_SIZE + DATABASE_MAX_OVERFLOW`，默认 80 + 40 = 120 |
+| Scheduler | 15 |
+| controller | 15 |
+
+再给迁移和人工排查留 10 条左右。
+
+**按建议值，单机就已经超了**：2 个 Worker 容器 × 32 + 120 + 15 + 15 = 214，大于 200。
+单机档验收里连接数最多只用到 70，因为池平时填不满；但数据库一慢，每个池都会涨到上限，
+那时多出来的连接会被拒绝，报 `too many clients`，**偏偏发生在最忙的时候**。所以：
+
+```bash
+# 2 × 32 + 120 + 15 + 15 + 10 = 224，取整
+POSTGRES_MAX_CONNECTIONS=250 WORKER_CONCURRENCY=16 docker compose up -d --scale worker=2
+```
+
+改 `max_connections` 要重启 Postgres 才生效。B 档下每台 Worker 主机的池都连同一个
+Postgres，一起算进去。总数到了几百，就该在前面加一个连接池代理（如 PgBouncer），
+而不是一直调大 `max_connections`：这个方案没有测过。
+
+### 8.4 沙箱跟着通道变多
+
+每条通道上带工具的 Run 都可能拿着一个运行中的沙箱；被切片、等下一轮的长任务还各拿着一个
+冻结的。沙箱内存预算（`SANDBOX_MEMORY_BUDGET_MB`，默认主机内存的一半）放不下时，Run 会
+排队等名额，不会失败。所以**加通道之前先算沙箱内存**，见容量方案 §3 A 档的表。
+通道多了、沙箱名额没跟上，带工具的 Run 照样要等。
+
+### 8.5 重启和停止
+
+Worker 收到 SIGTERM 后：
+
+1. 不再领新的 Run；
+2. 正在跑的那一轮跑完，时间片就此结束，沙箱冻结保留，Run 回到 `queued`，别的 Worker
+   可以马上接着跑；
+3. 最多等 `WORKER_SHUTDOWN_GRACE_SECONDS`（默认 20 秒）。还有轮没跑完，进程就不写任何东西
+   直接退出，那些 Run 等租约过期（20 秒），由 Scheduler 中断再恢复，每次用掉一次恢复机会
+   （`MAX_RECOVERY_ATTEMPTS`，默认 3）。
+
+Compose 给 Worker 的 `stop_grace_period` 是 30 秒，**必须大于**
+`WORKER_SHUTDOWN_GRACE_SECONDS`。调大后者时一起调大前者，否则 Compose 会先把进程杀掉。
+
+实测（2026-10-21，K = 4，4 个长任务，`docker compose restart worker`）：
+
+| | 重启用时 | 被中断的 Run | 用掉的恢复次数 |
+|---|---:|---:|---:|
+| 改之前（Compose 10 秒就杀） | 10.6 s | 3 / 4 | 3 |
+| 改之后 | 2.4 s | 0 / 4 | 0 |
+
+一轮比宽限期长的时候（工具里执行 `sleep 60`），重启用了 20.7 秒，日志里有
+`workers still busy after the shutdown grace period`，那个 Run 被中断、恢复，最后完成。
+
+### 8.6 改完之后怎么验证
+
+上面的数字都来自确定性模型：不走网络，没有流式解析。真实模型每条通道要多少 CPU 还不知道，
+所以**换上真实模型以后，用自己的负载重测一遍**：
+
+```bash
+uv run --no-sync python scripts/concurrency_probe.py \
+  --rate 2 --seconds 150 --long-tasks 16 --rounds 40 --label my-host
+```
+
+同时用 `docker stats` 看 Worker 容器。单机档验收用的标准是：短消息排队 P95 在 10 秒以内，
+Worker CPU 按 2 秒采样的 P90 低于 70%。超了就加 N（还有核的话）或者加 Worker 主机（B 档），
+不要只加 K：一个进程只能用一个核。
+
+## 9. 这份手册没有覆盖什么
 
 - **没有在真实生产部署上演练过。** 上面的表和步骤都来自本地容器。
 - ~~没有做过「真的销毁旧 KEK 之后」的演练。~~ **已补（2026-08-23）**：
@@ -335,4 +436,6 @@ controller、Scheduler 和 Worker；进程只在启动时读证书。
   跑通」不是跑过。
 - **B 档没有在两台真实的机器上部署过。**本地用两个互不相通的 Docker 网络模拟，
   测不出真实的网络延迟和带宽。见 B 档的验收记录。
+- **第 8 节的建议值没有在真实模型下测过**，`POSTGRES_MAX_CONNECTIONS` 调大之后也没有
+  在连接真的打满的情况下测过。
 - **没有测量过规模**：十万条 Secret 的轮换要多久、大库的 `pg_restore` 要多久，都不知道。
