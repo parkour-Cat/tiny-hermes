@@ -72,6 +72,9 @@ x-base-env: &base-env
   CONSOLE_BASE_URL: ${CONSOLE_BASE_URL:-}
   SANDBOX_EGRESS_NETWORK: ${SANDBOX_EGRESS_NETWORK:-}
   SANDBOX_IDLE_TTL_SECONDS: ${SANDBOX_IDLE_TTL_SECONDS:-300}
+  # How often the controller removes containers and data volumes a crash left
+  # on its host with nothing in the database owning them.
+  SANDBOX_SWEEP_SECONDS: ${SANDBOX_SWEEP_SECONDS:-300}
   # Sandbox memory admission (§21.3): each sandbox's limit, and the sum of
   # limits the controller admits. An empty budget is half the host's memory.
   SANDBOX_MEMORY_MB: ${SANDBOX_MEMORY_MB:-1024}

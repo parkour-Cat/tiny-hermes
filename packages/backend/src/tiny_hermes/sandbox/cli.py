@@ -11,9 +11,11 @@ ban enforces.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import signal
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +31,7 @@ from tiny_hermes.sandbox.application.controller import (
     AuditEntry,
     SandboxController,
     SandboxRefused,
+    SweepResult,
 )
 from tiny_hermes.sandbox.domain.command import SandboxCommand
 from tiny_hermes.sandbox.domain.container_policy import (
@@ -115,6 +118,18 @@ async def _serve() -> None:
     budget = memory_budget_mb(settings)
     client: Any = docker.from_env(timeout=_DOCKER_CALL_TIMEOUT_SECONDS)  # noqa: TID251 - the one place, by design
 
+    def controller_on(session: AsyncSession) -> SandboxController:
+        return SandboxController(
+            engine=DockerEngine(client),
+            store=SqlSandboxStore(session),
+            approved_digests=settings.approved_image_digests,
+            leases=SqlLeaseAuthority(session),
+            audit=_AuditSink(session),
+            ceiling=ceiling,
+            egress=_egress(settings),
+            memory_budget_mb=budget,
+        )
+
     async def dispatch(action: str, payload: dict[str, Any]) -> dict[str, Any]:
         """One session per call.
 
@@ -123,16 +138,7 @@ async def _serve() -> None:
         would then wait on a lock the Controller forgot it held.
         """
         async with sessions() as session:
-            controller = SandboxController(
-                engine=DockerEngine(client),
-                store=SqlSandboxStore(session),
-                approved_digests=settings.approved_image_digests,
-                leases=SqlLeaseAuthority(session),
-                audit=_AuditSink(session),
-                ceiling=ceiling,
-                egress=_egress(settings),
-                memory_budget_mb=budget,
-            )
+            controller = controller_on(session)
             try:
                 answer = await _invoke(controller, action, payload)
             except SandboxRefused:
@@ -150,16 +156,7 @@ async def _serve() -> None:
         action: str, payload: dict[str, Any], channel: ServerStream
     ) -> dict[str, Any]:
         async with sessions() as session:
-            controller = SandboxController(
-                engine=DockerEngine(client),
-                store=SqlSandboxStore(session),
-                approved_digests=settings.approved_image_digests,
-                leases=SqlLeaseAuthority(session),
-                audit=_AuditSink(session),
-                ceiling=ceiling,
-                egress=_egress(settings),
-                memory_budget_mb=budget,
-            )
+            controller = controller_on(session)
             try:
                 answer = await _invoke_stream(controller, action, payload, channel, settings)
             except SandboxRefused:
@@ -188,13 +185,46 @@ async def _serve() -> None:
             "sandbox_memory_budget_mb": budget,
         },
     )
+    async def sweep_once() -> SweepResult:
+        async with sessions() as session:
+            result = await controller_on(session).sweep()
+            await session.commit()
+            return result
+
+    sweeping = asyncio.create_task(sweep_forever(sweep_once, every=settings.sandbox_sweep_seconds))
     stop = _stop_on_termination()
     try:
         await stop
     finally:
+        sweeping.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await sweeping
         await server.stop()
         client.close()
     logger.info("sandbox controller stopped")
+
+
+async def sweep_forever(
+    sweep_once: Callable[[], Awaitable[SweepResult]], *, every: float
+) -> None:
+    """Sweep now, then every `every` seconds, until cancelled.
+
+    Now first: a controller that just started is most often one that restarted
+    after the crash that left something behind. A failed pass is logged and
+    the next one tries again; nothing here may take the controller down.
+    """
+    while True:
+        try:
+            result = await sweep_once()
+        except Exception:
+            logger.warning("sandbox host sweep failed", exc_info=True)
+        else:
+            if result.containers or result.volumes:
+                logger.info(
+                    "sandbox host swept",
+                    extra={"containers": result.containers, "volumes": result.volumes},
+                )
+        await asyncio.sleep(every)
 
 
 async def _invoke(

@@ -176,6 +176,9 @@ class Settings(BaseSettings):
     #: How long a frozen instance stays warm for its own Run. §11.4 allows
     #: 0–30 minutes and lets a workspace lower it, never raise it.
     sandbox_idle_ttl_seconds: int = Field(default=300, ge=0, le=1_800)
+    #: How often the controller removes what a crash left on its host:
+    #: containers no row records, volumes no claim or lease owns.
+    sandbox_sweep_seconds: int = Field(default=300, ge=10, le=3_600)
     #: The cache tmpfs ceilings (design §9). Kernel-enforced; the profile the
     #: controller hands Docker is built from these at startup.
     sandbox_cache_mb: int = Field(default=512, ge=64, le=4_096)

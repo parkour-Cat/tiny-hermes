@@ -60,6 +60,14 @@ class FakeEngine:
     async def remove(self, container_id: str) -> None:
         self.calls.append(("remove", container_id))
 
+    async def containers_labelled(self, label: str, value: str | None = None) -> list[Any]:
+        self.calls.append(("containers_labelled", (label, value)))
+        return []
+
+    async def remove_volume_if_present(self, name: str) -> bool:
+        self.calls.append(("remove_volume_if_present", name))
+        return False
+
     async def pause(self, container_id: str) -> None:
         self.calls.append(("pause", container_id))
 
@@ -71,6 +79,13 @@ class FakeEngine:
 
     async def unpause(self, container_id: str) -> None:
         self.calls.append(("unpause", container_id))
+
+    async def unpause_if_present(self, container_id: str) -> bool:
+        self.calls.append(("unpause", container_id))
+        return True
+
+    async def remove_if_present(self, container_id: str) -> None:
+        self.calls.append(("remove", container_id))
 
     async def import_tree(
         self, container_id: str, target: str, tar_stream: AsyncIterator[bytes]
@@ -98,6 +113,7 @@ class FakeStore:
         #: Address -> (run, sandbox). The proxy reads this to answer "who is
         #: this" for a caller that presents nothing.
         self.addresses: dict[str, tuple[UUID, UUID]] = {}
+        self.admission_locks = 0
 
     async def reserve(
         self, *, run_id: UUID, workspace_id: UUID, instance: SandboxInstance
@@ -118,7 +134,7 @@ class FakeStore:
 
     # Admission: these tests run without a budget, so it never counts.
     async def lock_admission(self) -> None:
-        return None
+        self.admission_locks += 1
 
     async def committed_memory_mb(self) -> int:
         return 0
@@ -271,8 +287,16 @@ async def test_acquire_creates_the_labelled_volume_before_the_container(
 ) -> None:
     await _acquired(controller)
 
-    assert engine.names()[:2] == ["create_volume", "create"]
-    name, labels = engine.calls[0][1]
+    # What this Run left on the host goes first, so the volume is a new one.
+    assert engine.names()[:4] == [
+        "containers_labelled",
+        "remove_volume_if_present",
+        "create_volume",
+        "create",
+    ]
+    assert engine.calls[0][1] == ("tiny-hermes.run", str(RUN))
+    assert engine.calls[1][1] == f"tiny-hermes-data-{RUN}"
+    name, labels = engine.calls[2][1]
     assert name == f"tiny-hermes-data-{RUN}"
     assert labels["tiny-hermes.run"] == str(RUN)
     assert labels["tiny-hermes.workspace"] == str(WORKSPACE)
@@ -502,3 +526,22 @@ async def test_a_sandbox_with_no_network_is_registered_as_nobody(
     await _acquired(controller)
 
     assert store.addresses == {}
+
+
+async def test_an_acquire_without_a_budget_still_takes_the_admission_lock(
+    engine: FakeEngine, leases: ScriptedLeases
+) -> None:
+    """The host sweep holds this lock to know no acquire is between starting a
+    container and committing its row. An acquire that skipped it would have
+    its container swept as an orphan."""
+    store = FakeStore()
+    controller = SandboxController(
+        engine=engine,  # type: ignore[arg-type] - a recording double
+        store=store,
+        approved_digests=(DIGEST,),
+        leases=leases,
+    )
+
+    await _acquired(controller)
+
+    assert store.admission_locks == 1

@@ -422,6 +422,22 @@ uv run --no-sync python scripts/concurrency_probe.py \
 Worker CPU 按 2 秒采样的 P90 低于 70%。超了就加 N（还有核的话）或者加 Worker 主机（B 档），
 不要只加 K：一个进程只能用一个核。
 
+### 8.7 沙箱主机上残留的容器和卷
+
+controller 启动时清扫一遍，之后每 `SANDBOX_SWEEP_SECONDS`（默认 300 秒）清扫一遍：
+
+- 带 `tiny-hermes.run` 标签、但数据库里没有一条未销毁的实例记录指向它的容器，删掉。
+  这些通常是 controller 在 `docker run` 之后、记录提交之前崩溃留下的；
+- 带同样标签的数据卷，它的 Run 既没有占用记录也没有租约，删掉。还被挂载的卷留着，记一条
+  `sandbox volume left in place`。
+
+删掉的东西写进审计（`sandbox.sweep`），日志里有 `sandbox host swept containers=N volumes=M`。
+平时 N、M 应该是 0；经常不是 0，说明 controller 在频繁崩溃或者提交失败，先查那个。
+
+清扫在准入锁下进行，所以清扫期间新沙箱的创建会排队，一般在一秒以内。
+
+另外，同一个 Run 下一次建新实例时，会先删掉它自己留下的容器和卷，新实例总是从空卷开始恢复。
+
 ## 9. Redis 停了会怎样
 
 Redis 只用来**提前通知**，平台对不对不靠它。它传两样东西：

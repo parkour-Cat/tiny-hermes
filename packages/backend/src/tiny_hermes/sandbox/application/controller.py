@@ -11,6 +11,7 @@ expired. Letting it act while a lease is live would let it destroy the container
 of a Run that is at that moment executing in it.
 """
 
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -39,8 +40,14 @@ from tiny_hermes.sandbox.domain.models import (
     SandboxInstance,
     SandboxReservation,
 )
-from tiny_hermes.sandbox.infrastructure.docker_engine import DockerEngine
+from tiny_hermes.sandbox.infrastructure.docker_engine import (
+    ContainerInfo,
+    DockerEngine,
+    DockerUnavailable,
+)
 from tiny_hermes.sandbox.ports.store import SandboxStore
+
+logger = logging.getLogger(__name__)
 
 
 class RefusalReason(StrEnum):
@@ -98,6 +105,14 @@ class AuditEntry:
     run_id: UUID
     sandbox_id: UUID
     detail: str
+
+
+@dataclass(frozen=True)
+class SweepResult:
+    """What one host sweep removed."""
+
+    containers: int
+    volumes: int
 
 
 class SandboxAudit(Protocol):
@@ -196,6 +211,11 @@ class SandboxController:
             raise SandboxRefused(RefusalReason.IMAGE_NOT_APPROVED) from refused
 
         await self._admit(chosen.memory_mb)
+        # Workspace design §7: a fresh instance restores into an empty volume.
+        # Whatever this Run left on the host goes first — the volume of an
+        # instance discarded or evicted, a container a crash never recorded —
+        # so neither old files nor a stranger sharing the mount survive.
+        await self._clear_leftovers(run_id)
         # Explicitly, before the container, and with the full ownership chain
         # in labels: the Scheduler that later reclaims an orphan enumerates by
         # label (design §13), and it can only see what was written.
@@ -340,6 +360,46 @@ class SandboxController:
 
     # -- Scheduler action --------------------------------------------------
 
+    async def sweep(self) -> SweepResult:
+        """Remove from this host what a crash left and nothing records (§13).
+
+        A container is kept only while a live instance row names it. Held
+        under the admission lock, which every acquire takes before it starts a
+        container and keeps until the row commits: so a container without a
+        row here is one whose acquire died, never one still on its way.
+
+        A volume is kept while its Run holds a claim or a lease. Without
+        either, nothing mounts it again: a Run that comes back restores into
+        a new one.
+        """
+        await self.store.lock_admission()
+        containers = 0
+        for found in await self.engine.containers_labelled(_RUN_LABEL):
+            if await self._recorded(found):
+                continue
+            await self.engine.remove_if_present(found.id)
+            containers += 1
+            await self._audit_sweep(found.labels, "container nothing recorded removed")
+        volumes = 0
+        for volume in await self.engine.volumes_labelled(_RUN_LABEL):
+            run_id = _label_uuid(volume.labels, _RUN_LABEL)
+            if run_id is None or volume.name != _volume_name(run_id):
+                continue
+            if await self.store.live_for_run(run_id) is not None:
+                continue
+            if await self.leases.any_live(run_id):
+                continue
+            try:
+                removed = await self.engine.remove_volume_if_present(volume.name)
+            except DockerUnavailable:
+                # Still mounted, by a container this pass could not remove.
+                logger.warning("sandbox volume left in place", extra={"volume": volume.name})
+                continue
+            if removed:
+                volumes += 1
+                await self._audit_sweep(volume.labels, "data volume nothing owns removed")
+        return SweepResult(containers=containers, volumes=volumes)
+
     async def cleanup(self, *, run_id: UUID, sandbox_id: UUID) -> None:
         """Reclaim a sandbox whose Run no longer holds a lease.
 
@@ -376,7 +436,11 @@ class SandboxController:
         instance = await self.store.read_instance(existing.instance_id)
         if instance is None:
             return None
-        await self.engine.unpause(instance.container_id)
+        if not await self.engine.unpause_if_present(instance.container_id):
+            # The row outlived its container: an eviction rolled back after
+            # the container went, or somebody removed it by hand. Discarded
+            # like an expired keep, and the Run gets a new instance.
+            return None
         await self.store.set_instance_status(instance.id, InstanceStatus.RUNNING)
         # The freeze that ended the last slice took the address away, and the
         # Worker does not thaw a reused instance: this is its thaw.
@@ -391,10 +455,12 @@ class SandboxController:
         commits, so the container created after this returns is in the count
         before any other acquire takes its own.
         """
+        # Taken even without a budget: the host sweep relies on every acquire
+        # holding it from before `docker run` until its row commits.
+        await self.store.lock_admission()
         budget = self.memory_budget_mb
         if budget is None:
             return
-        await self.store.lock_admission()
         shortfall = await self.store.committed_memory_mb() + needed_mb - budget
         if shortfall <= 0:
             return
@@ -426,7 +492,8 @@ class SandboxController:
         """A frozen instance goes the way an expired keep does, early.
 
         Its Run's next slice starts a new instance from the committed
-        workspace, as after the idle TTL. The volume stays, as in `_discard`.
+        workspace, as after the idle TTL. The volume stays, as in `_discard`,
+        until that acquire clears it or the host sweep finds it unowned.
         """
         await self.engine.remove_if_present(instance.container_id)
         await self.store.set_instance_status(instance.id, InstanceStatus.DESTROYED)
@@ -443,9 +510,35 @@ class SandboxController:
     async def _discard(self, reservation: SandboxReservation) -> None:
         instance = await self.store.read_instance(reservation.instance_id)
         if instance is not None:
-            await self.engine.remove(instance.container_id)
+            await self.engine.remove_if_present(instance.container_id)
             await self.store.set_instance_status(instance.id, InstanceStatus.DESTROYED)
         await self.store.release(reservation.id)
+
+    async def _clear_leftovers(self, run_id: UUID) -> None:
+        for found in await self.engine.containers_labelled(_RUN_LABEL, str(run_id)):
+            await self.engine.remove_if_present(found.id)
+            await self._audit_sweep(found.labels, "container its Run left unrecorded removed")
+        await self.engine.remove_volume_if_present(_volume_name(run_id))
+
+    async def _recorded(self, found: ContainerInfo) -> bool:
+        instance_id = _label_uuid(found.labels, _INSTANCE_LABEL)
+        if instance_id is None:
+            return False
+        instance = await self.store.read_instance(instance_id)
+        return (
+            instance is not None
+            and instance.status is not InstanceStatus.DESTROYED
+            and instance.container_id == found.id
+        )
+
+    async def _audit_sweep(self, labels: dict[str, str], detail: str) -> None:
+        run_id = _label_uuid(labels, _RUN_LABEL)
+        sandbox_id = _label_uuid(labels, _INSTANCE_LABEL)
+        if run_id is None or sandbox_id is None:
+            return
+        await self.audit.record(
+            AuditEntry(action="sandbox.sweep", run_id=run_id, sandbox_id=sandbox_id, detail=detail)
+        )
 
     async def _register_address(
         self, container_id: str, run_id: UUID, sandbox_id: UUID
@@ -528,6 +621,17 @@ class SandboxController:
 
     def _digest(self) -> str:
         return self.approved_digests[0] if self.approved_digests else ""
+
+
+_RUN_LABEL = "tiny-hermes.run"
+_INSTANCE_LABEL = "tiny-hermes.instance"
+
+
+def _label_uuid(labels: dict[str, str], key: str) -> UUID | None:
+    try:
+        return UUID(labels[key])
+    except (KeyError, ValueError):
+        return None
 
 
 def _volume_name(run_id: UUID) -> str:

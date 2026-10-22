@@ -9,7 +9,7 @@ rather than being copied — a second copy is a second place for them to drift.
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
@@ -65,6 +65,9 @@ class StandIn:
     #: Stands in for every far end that reflects what it was sent — a debug
     #: endpoint, a misconfigured gateway, or one that means to.
     echo_header: str | None = None
+    #: Awaited as each request arrives, before it is answered: what the
+    #: platform had already written down by the time the far end heard it.
+    on_request: Callable[[], Awaitable[None]] | None = None
 
     @property
     def methods(self) -> list[str]:
@@ -77,6 +80,8 @@ class StandIn:
             for key, value in scope["headers"]
         }
         self.requests.append((str(scope["method"]), str(scope["path"]), headers))
+        if self.on_request is not None:
+            await self.on_request()
         while True:
             message = await receive()
             if not message.get("more_body", False):

@@ -14,8 +14,9 @@ may be created is `domain/container_policy.py`, and deciding who may ask is
 import asyncio
 import hashlib
 import tarfile
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterable, Iterator
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any, cast
 
 from tiny_hermes.sandbox.domain.command import (
@@ -28,6 +29,41 @@ from tiny_hermes.sandbox.domain.command import (
 from tiny_hermes.sandbox.domain.container_policy import ContainerConfig
 
 _SCAN_CHUNK = 1024 * 1024
+
+#: Between the TERM `timeout` sends at the deadline and the KILL that follows
+#: for whatever ignored it.
+_KILL_AFTER_SECONDS = 2
+#: How long past the deadline the controller stops reading on its own, for an
+#: exec that `timeout` somehow did not end. Its thread is then lost until the
+#: container goes, which is what every timeout cost before `timeout` was used.
+_BACKSTOP_SECONDS = _KILL_AFTER_SECONDS + 5
+
+
+def _bounded(command: SandboxCommand) -> list[str]:
+    """The command under coreutils `timeout`, inside the container.
+
+    The controller cannot kill an exec: the daemon has no call for it, and its
+    pid is in a namespace the controller does not see. `timeout` makes itself
+    a process-group leader and signals the whole group at the deadline, so a
+    `sleep &` the command started goes with it. A child that left the group
+    (`setsid`, a daemonizing server) does not, and still lives until the
+    container is destroyed.
+
+    So every approved image must ship `timeout`; the platform's own does, as
+    part of coreutils.
+    """
+    return [
+        "timeout",
+        f"--kill-after={_KILL_AFTER_SECONDS}",
+        str(command.timeout_seconds),
+        *command.argv,
+    ]
+
+
+def _ran_out(exit_code: int, elapsed: float, command: SandboxCommand) -> bool:
+    """124 is `timeout`'s own answer; 137 is its KILL, unless the command was
+    killed some other way (the OOM killer) before its deadline."""
+    return exit_code == 124 or (exit_code == 137 and elapsed >= command.timeout_seconds)
 
 
 class DockerUnavailable(Exception):
@@ -54,6 +90,12 @@ class VolumeInfo:
     labels: dict[str, str]
 
 
+@dataclass(frozen=True)
+class ContainerInfo:
+    id: str
+    labels: dict[str, str]
+
+
 @dataclass
 class DockerEngine:
     client: Any
@@ -77,7 +119,7 @@ class DockerEngine:
         handle = await self._call(
             self.client.api.exec_create,
             container_id,
-            cmd=command.argv,
+            cmd=_bounded(command),
             workdir=command.cwd,
             stdout=True,
             stderr=True,
@@ -86,33 +128,51 @@ class DockerEngine:
             # which turns exact output into approximately-right output.
             tty=False,
         )
-        try:
-            if command.stdin is None:
-                raw: bytes = await asyncio.wait_for(
-                    self._call(self.client.api.exec_start, handle["Id"], demux=False),
-                    timeout=command.timeout_seconds,
-                )
-            else:
-                raw = await asyncio.wait_for(
-                    self._call(self._exec_with_stdin, handle["Id"], command.stdin),
-                    timeout=command.timeout_seconds,
-                )
-        except TimeoutError:
-            # The exec is still running inside the container. It will be
-            # collected when the container is destroyed, and the Run is told
-            # what happened rather than left waiting.
-            return CommandResult(exit_code=124, output="", truncated=False, timed_out=True)
+        # Kept up to the limit as it arrives and the rest only counted, so a
+        # command that never stops printing costs the controller the limit,
+        # not everything it printed before its deadline.
+        kept = bytearray()
+        observed = 0
 
-        truncated = len(raw) > command.output_limit
-        body = raw[: command.output_limit]
+        def collect(chunks: Iterable[bytes]) -> None:
+            nonlocal observed
+            for chunk in chunks:
+                observed += len(chunk)
+                room = command.output_limit - len(kept)
+                if room > 0:
+                    kept.extend(chunk[:room])
+
+        stdin = command.stdin
+        if stdin is None:
+
+            def work() -> None:
+                collect(self.client.api.exec_start(handle["Id"], stream=True, demux=False))
+        else:
+
+            def work() -> None:
+                collect(self._exec_with_stdin(handle["Id"], stdin))
+
+        started = monotonic()
+        try:
+            await asyncio.wait_for(
+                self._call(work), timeout=command.timeout_seconds + _BACKSTOP_SECONDS
+            )
+        except TimeoutError:
+            exit_code, timed_out = 124, True
+        else:
+            info = await self._call(self.client.api.exec_inspect, handle["Id"])
+            exit_code = int(info.get("ExitCode") or 0)
+            timed_out = _ran_out(exit_code, monotonic() - started, command)
+
+        body = bytes(kept)
+        truncated = observed > command.output_limit
         if truncated:
             body += b"\n[output truncated by the platform]"
-        info = await self._call(self.client.api.exec_inspect, handle["Id"])
         return CommandResult(
-            exit_code=int(info.get("ExitCode") or 0),
+            exit_code=exit_code,
             output=body.decode("utf-8", errors="replace"),
             truncated=truncated,
-            timed_out=False,
+            timed_out=timed_out,
         )
 
     # -- volumes -------------------------------------------------------------
@@ -144,6 +204,35 @@ class DockerEngine:
     async def remove_volume(self, name: str) -> None:
         volume = await self._call(self.client.volumes.get, name)
         await self._call(volume.remove, force=True)
+
+    async def remove_volume_if_present(self, name: str) -> bool:
+        """`remove_volume`, where a volume that is already gone is fine.
+
+        True when this call removed it. A volume still mounted by a container
+        is refused by the daemon and raises, like any other refusal.
+        """
+        from docker.errors import NotFound  # noqa: PLC0415 - narrow the import
+
+        try:
+            await self.remove_volume(name)
+        except DockerUnavailable as failure:
+            if isinstance(failure.__cause__, NotFound):
+                return False
+            raise
+        return True
+
+    async def containers_labelled(
+        self, label: str, value: str | None = None
+    ) -> list[ContainerInfo]:
+        """Every container carrying the label, running or not."""
+        selector = label if value is None else f"{label}={value}"
+        found: list[dict[str, Any]] = await self._call(
+            self.client.api.containers, all=True, filters={"label": selector}
+        )
+        return [
+            ContainerInfo(id=str(entry["Id"]), labels=dict(entry.get("Labels") or {}))
+            for entry in found
+        ]
 
     async def volumes_labelled(self, label: str) -> list[VolumeInfo]:
         """Every volume carrying the label — by label, never by parsed name."""
@@ -247,7 +336,7 @@ class DockerEngine:
         handle = await self._call(
             self.client.api.exec_create,
             container_id,
-            cmd=command.argv,
+            cmd=_bounded(command),
             workdir=command.cwd,
             stdout=True,
             stderr=True,
@@ -274,18 +363,17 @@ class DockerEngine:
                     ).result()
                     delivered += len(portion)
 
-        timed_out = False
+        started = monotonic()
         try:
-            await asyncio.wait_for(self._call(drain), timeout=command.timeout_seconds)
+            await asyncio.wait_for(
+                self._call(drain), timeout=command.timeout_seconds + _BACKSTOP_SECONDS
+            )
         except TimeoutError:
-            # The exec is still running inside the container and is collected
-            # when the container is destroyed; the Run is told what happened.
-            timed_out = True
-
-        exit_code = 124
-        if not timed_out:
+            exit_code, timed_out = 124, True
+        else:
             info = await self._call(self.client.api.exec_inspect, handle["Id"])
             exit_code = int(info.get("ExitCode") or 0)
+            timed_out = _ran_out(exit_code, monotonic() - started, command)
         return StreamedResult(
             exit_code=exit_code,
             timed_out=timed_out,
@@ -316,6 +404,18 @@ class DockerEngine:
     async def unpause(self, container_id: str) -> None:
         await self._call(self.client.api.unpause, container_id)
 
+    async def unpause_if_present(self, container_id: str) -> bool:
+        """`unpause`, answering False for a container that no longer exists."""
+        from docker.errors import NotFound  # noqa: PLC0415 - narrow the import
+
+        try:
+            await self.unpause(container_id)
+        except DockerUnavailable as failure:
+            if isinstance(failure.__cause__, NotFound):
+                return False
+            raise
+        return True
+
     async def remove(self, container_id: str) -> None:
         await self._call(self.client.api.remove_container, container_id, force=True)
 
@@ -334,8 +434,8 @@ class DockerEngine:
                 return
             raise
 
-    def _exec_with_stdin(self, exec_id: str, stdin: bytes) -> bytes:
-        """Feed stdin whole, close it, then collect the demuxed output.
+    def _exec_with_stdin(self, exec_id: str, stdin: bytes) -> Iterator[bytes]:
+        """Feed stdin whole, close it, then yield the demuxed output.
 
         Runs in the engine's worker thread. Written for the file helper, which
         reads all of stdin before it produces output — a command that streams
@@ -346,7 +446,6 @@ class DockerEngine:
 
         untyped: Any = docker_socket
         sock = self.client.api.exec_start(exec_id, socket=True, demux=False)
-        received = bytearray()
         with sock:
             inner: Any = getattr(sock, "_sock", sock)
             inner.sendall(stdin)
@@ -356,8 +455,7 @@ class DockerEngine:
             for frame in cast(
                 list[tuple[int, bytes]], untyped.frames_iter(sock, tty=False)
             ):
-                received.extend(frame[1])
-        return bytes(received)
+                yield frame[1]
 
     async def _call(self, work: Any, *args: Any, **kwargs: Any) -> Any:
         from docker.errors import DockerException  # noqa: PLC0415 - narrow the import
