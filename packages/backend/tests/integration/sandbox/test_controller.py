@@ -314,6 +314,99 @@ async def test_output_beyond_the_limit_is_truncated_and_says_so(
     assert len(answer.output.encode()) <= 2_048 + 200
 
 
+#: Lists every process in the container by its command line. The runtime
+#: image has no `ps`, and adding one for a test would hand it to every Agent.
+_PROCESSES = (
+    "for p in /proc/[0-9]*; do tr '\\0' ' ' < $p/cmdline 2>/dev/null; echo; done"
+)
+
+
+async def _still_running(controller: SandboxController, sandbox_id: UUID, marker: str) -> bool:
+    listing = await controller.execute(
+        run_id=RUN,
+        lease_id=LEASE,
+        sandbox_id=sandbox_id,
+        command=command(["bash", "-c", _PROCESSES]),
+    )
+    return any(marker in line and "/proc" not in line for line in listing.output.splitlines())
+
+
+async def test_a_command_that_outruns_its_timeout_is_stopped_with_what_it_started(
+    controller: SandboxController,
+) -> None:
+    """The model is told the command "was stopped". A `npm run dev` left
+    running would keep its CPU and pids, be frozen with the sandbox at the
+    slice end and wake up with it, and keep writing into the workspace."""
+    box = await acquired(controller)
+    answer = await controller.execute(
+        run_id=RUN,
+        lease_id=LEASE,
+        sandbox_id=box.sandbox_id,
+        command=command(["bash", "-c", "sleep 1001 & sleep 1000"], timeout_seconds=2),
+    )
+    assert answer.timed_out is True
+
+    await asyncio.sleep(1)
+    assert not await _still_running(controller, box.sandbox_id, "sleep 100")
+
+
+async def test_a_streamed_command_that_outruns_its_timeout_is_stopped_too(
+    controller: SandboxController,
+) -> None:
+    box = await acquired(controller)
+    container_id = await _container_of(controller, box.sandbox_id)
+
+    class Sink:
+        artifact_limit = 4096
+
+        async def deliver(self, chunk: bytes) -> None:
+            del chunk
+
+    result = await controller.engine.execute_streamed(
+        container_id,
+        command(["bash", "-c", "sleep 1003 & sleep 1002"], timeout_seconds=2),
+        Sink(),
+    )
+    assert result.timed_out is True
+
+    await asyncio.sleep(1)
+    assert not await _still_running(controller, box.sandbox_id, "sleep 100")
+
+
+async def test_a_timed_out_command_keeps_what_it_printed(
+    controller: SandboxController,
+) -> None:
+    """What a command printed before it hung is usually why it hung."""
+    box = await acquired(controller)
+    answer = await controller.execute(
+        run_id=RUN,
+        lease_id=LEASE,
+        sandbox_id=box.sandbox_id,
+        command=command(["bash", "-c", "echo got-this-far; sleep 1000"], timeout_seconds=2),
+    )
+
+    assert answer.timed_out is True
+    assert "got-this-far" in answer.output
+
+
+async def test_output_past_the_limit_is_cut_while_it_is_read(
+    controller: SandboxController,
+) -> None:
+    """A command that never stops printing must not grow the controller's
+    memory until the timeout: it is cut at the limit and the rest drained."""
+    box = await acquired(controller)
+    answer = await controller.execute(
+        run_id=RUN,
+        lease_id=LEASE,
+        sandbox_id=box.sandbox_id,
+        command=command(["yes"], timeout_seconds=2, output_limit=2_048),
+    )
+
+    assert answer.timed_out is True
+    assert answer.truncated is True
+    assert 0 < len(answer.output.encode()) <= 2_048 + 200
+
+
 # --------------------------------------------------------------------------
 # Lifecycle.
 # --------------------------------------------------------------------------
