@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from tiny_hermes.api import cli
+from tiny_hermes.runs.infrastructure.event_push import ANNOUNCE
 from tiny_hermes.sandbox.transport.tls import Role
 from tiny_hermes.shared.config import Settings
 from tiny_hermes.shared.logging import FieldsFormatter
@@ -127,6 +128,10 @@ def _worker_settings(concurrency: int) -> Settings:
     return Settings(_env_file=None, **values)  # pyright: ignore[reportCallIssue]
 
 
+#: Whether each session factory `_worker()` built announces committed events.
+announced: list[bool] = []
+
+
 async def _serve_workers(
     monkeypatch: pytest.MonkeyPatch, concurrency: int
 ) -> tuple[list[Any], list[_Notifier], list[dict[str, Any]]]:
@@ -140,6 +145,7 @@ async def _serve_workers(
     runtimes: list[Any] = []
     notifiers: list[_Notifier] = []
     pools: list[dict[str, Any]] = []
+    announced.clear()
 
     class FakeRuntime:
         def __init__(self, **kwargs: Any) -> None:
@@ -162,6 +168,7 @@ async def _serve_workers(
         return notifier
 
     def sessions_for(_: Settings, **pool: Any) -> Any:
+        announced.append(ANNOUNCE in pool.pop("info", {}))
         pools.append(pool)
         return async_sessionmaker(create_async_engine("postgresql+asyncpg://x:y@127.0.0.1:1/z"))
 
@@ -230,6 +237,27 @@ async def test_the_pool_grows_with_the_workers_sharing_it(
     _, _, pools = await _serve_workers(monkeypatch, 16)
 
     assert pools == [{"pool_size": 16, "max_overflow": 16}]
+
+
+async def test_a_worker_announces_the_runs_it_writes_events_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Capacity plan item 5: without it every watched Run waits for the
+    API's long fallback read instead of hearing about its events."""
+    await _serve_workers(monkeypatch, 2)
+
+    assert announced == [True]
+
+
+def test_the_scheduler_and_worker_factory_announces_only_with_redis() -> None:
+    """The Scheduler writes events too: recovery, expiry, cancellation."""
+    with_redis = cli._sessions(_worker_settings(1))  # pyright: ignore[reportPrivateUsage]
+    without = cli._sessions(  # pyright: ignore[reportPrivateUsage]
+        _worker_settings(1).model_copy(update={"redis_url": ""})
+    )
+
+    assert ANNOUNCE in with_redis.kw["info"]
+    assert ANNOUNCE not in without.kw.get("info", {})
 
 
 # -- stopping -------------------------------------------------------------
