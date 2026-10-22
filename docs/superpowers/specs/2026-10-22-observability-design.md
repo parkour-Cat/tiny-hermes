@@ -1,6 +1,6 @@
 # 指标与链路追踪
 
-日期 2026-10-22。状态：**已评审（§8），未实现。**
+日期 2026-10-22。状态：**已实现**（分支 `feat/observability`）。实现与初稿不同的地方见 §9。
 依据：产品设计 §21.5（「OpenTelemetry trace、Prometheus 指标」），
 [容量方案](../plans/2026-09-29-enterprise-capacity.md)，
 [单机档验收](../verification/2026-09-30-tier-a-acceptance.md)。
@@ -54,7 +54,7 @@
 | `runs_by_status` | gauge | `status` | 各状态的 Run 数，从数据库读 |
 | `queue_oldest_age_seconds` | gauge | — | 可领取的 head Run 里等得最久的那个已经等了多久 |
 | `claim_wait_seconds` | histogram | — | 从可领取到被领取的时长，Worker 领到时记 |
-| `worker_lanes` | gauge | `state`（`busy`/`idle`） | 每个 Worker 进程 K 条通道的占用 |
+| `worker_lanes` | gauge | `state`（`total`/`busy`） | 每个 Worker 进程 K 条通道：`total` 是在跑的通道数，`busy` 是正在执行时间片的 |
 
 `runs_by_status` 和 `queue_oldest_age_seconds` 要查数据库，见 §5.2：谁来查，以及为什么
 不放进 scheduler 的串行循环。
@@ -63,17 +63,16 @@
 
 | 指标 | 类型 | 标签 | 说明 |
 |---|---|---|---|
-| `slice_seconds` | histogram | `outcome`（让出、完成、失败、等待…） | 一个时间片 |
-| `model_call_seconds` | histogram | `model_alias`、`outcome` | 一次模型调用 |
-| `model_tokens_total` | counter | `model_alias`、`direction`（in/out） | 只计提供方报告的用量；`usage_quality=unavailable` 的不计 |
+| `model_call_seconds` | histogram | `provider`（deterministic/openai_compatible）、`outcome`（停止原因或 error） | 一次模型调用 |
+| `model_tokens_total` | counter | `provider`、`direction`（in/out） | 只计提供方报告了的用量 |
 | `tool_call_seconds` | histogram | `kind`（file/shell/http/mcp/platform）、`outcome` | 按种类，不按工具名 |
-| `sandbox_acquire_seconds` | histogram | `path`（cold/thaw/warm）、`outcome` | 含准入排队 |
+| `sandbox_acquire_seconds` | histogram | `outcome`（cold/warm/refused/unreachable/failed） | 含准入排队 |
 | `workspace_commit_seconds` | histogram | `outcome` | 每轮提交工作区；[每轮开销记录](../verification/2026-09-29-round-overhead.md)说它是单机的主要开销 |
-| `runs_finished_total` | counter | `status`、`reason` | `reason` 只取产品已定义的有限集合 |
-| `recoveries_total` | counter | `outcome`（approved/failed） | 中断恢复；v2.17 之后多一个 `told`（告诉了模型结果未知） |
+| `runs_finished_total` | counter | `status` | 事务提交时才计数，回滚的不算 |
+| `recoveries_total` | counter | `outcome`（approved/failed） | 中断恢复，同样提交时才计数 |
 
-`model_alias` 是管理员配置的别名，数量有限，可以做标签。工具名是 Agent 开发者随便起的，
-数量没有上限，所以只按种类。
+按提供方类型而不是端点分：端点是工作空间自己建的，数量没有上限。工具名是 Agent 开发者随便起的，
+数量也没有上限，所以工具只按种类分。
 
 ### 3.3 后台：scheduler 有没有在干活
 
@@ -97,8 +96,8 @@ scheduler 的 `run_once` 是串行的 14 项扫描（`runs/application/scheduler
 | controller | `sandboxes` | gauge | `state`（running/frozen） |
 | controller | `sandbox_memory_reserved_bytes`、`sandbox_memory_budget_bytes` | gauge | — |
 | controller | `sandbox_admission_rejected_total` | counter | — |
-| controller | `docker_op_seconds` | histogram | `op`（create/exec/freeze/thaw/destroy） |
-| egress-proxy | `egress_connections_total` | counter | `decision`（allow/deny）、`reason` |
+| controller | `controller_action_seconds` | histogram | `action`、`outcome`（ok/refused） |
+| egress-proxy | `egress_connections_total` | counter | `caller`（调用方类型）、`decision`（allow/deny）、`reason` |
 
 出口不按目标主机打标签：主机由 Agent 决定，数量没有上限。要查某个被拒的连接，看日志。
 
@@ -137,8 +136,11 @@ egress-proxy 同时接在 `default` 和 `sandbox-egress` 两个网络上（`comp
 `egress-proxy.networks`），沙箱能连到它。它的指标端口如果监听 `0.0.0.0`，**任何沙箱都能读到
 全平台的出口放行和拒绝计数**，包括别的工作空间的。
 
-做法：egress-proxy 启动时，只在 `default` 网络那一侧的地址上监听指标端口。
-验收时要有一条测试，**在真实沙箱里**连这个端口，确认连不上。光读配置不算数。
+做法（实现时改过，见 §9）：指标端口可以要求 `Authorization: Bearer <METRICS_TOKEN>`；
+**egress-proxy 没有 token 就不提供指标**。初稿想的是只在 `default` 网络那一侧的地址上监听，
+但容器里拿不到「哪个地址属于哪个 Compose 网络」的可靠信息：按主机名解析、按网卡枚举都要
+猜。token 不用猜，沙箱拿不到它。
+验收时要**在真实沙箱里**连这个端口，确认拿不到指标。光读配置不算数。
 
 controller 不接 `sandbox-egress`，没有这个问题。但 B 档里 controller 在沙箱主机的内网
 地址上对外（运维手册 §7），指标端口同样只开在 Prometheus 能到的那个地址上，并写进 §7 的
@@ -228,7 +230,7 @@ Worker、经历好几次中断恢复。trace 上下文要跨过数据库：
 
 1. **指标的骨架**：`shared/metrics.py`（注册表、端口、按进程启动），五个进程各开端口；
    §3.1 和 §3.3。测试：真 Worker 用确定性模型跑完一个 Run，抓 `/metrics`，断言
-   `slice_seconds` 和 `claim_wait_seconds` 有样本；`api` 的 8000 端口上 `/metrics` 是 404。
+   `claim_wait_seconds` 有样本、通道忙碌数在时间片里加一；`api` 的 8000 端口上 `/metrics` 是 404。
 2. **其余指标**：§3.2、§3.4、§3.5。egress-proxy 的监听地址加真实沙箱测试（§4.2）。
 3. **Compose profile 和仪表盘**（§5.4、§5.5），运维手册加一节。
 4. **trace**：迁移加 `runs.trace_context`；§5.3 的 1–5；§4.3 的不注入测试。
@@ -254,3 +256,23 @@ Worker、经历好几次中断恢复。trace 上下文要跨过数据库：
    哪个 Run 被采在建 Run 时决定，没被采到的 Run 只能看日志和指标。
 2. **scheduler 的「一项失败，整轮跳过」**（§3.3）：要修，单独一个 PR，先于指标。
 3. **追踪后端**：Compose profile 用 Jaeger。记录一侧只用 OpenTelemetry 标准，换后端不改代码。
+
+## 9. 实现与初稿的不同
+
+| 初稿 | 实现 | 为什么 |
+|---|---|---|
+| egress-proxy 只在 `default` 网络一侧监听指标端口 | 指标端口要 bearer token，egress-proxy 没有 token 不提供指标 | 容器里分不清哪个地址属于哪个网络（§4.2） |
+| `worker_lanes{state=busy/idle}` | `state=total/busy` | 空闲数 = 总数 − 忙碌数，存两个原始量更不容易出错 |
+| `model_alias` 标签 | `provider` 标签 | 端点由工作空间创建，没有上限（§2） |
+| `slice_seconds` | 没有做 | 时间片的时长由 `WORKER_MAX_SLICE_SECONDS` 决定，看不出慢在哪；慢在哪由模型、工具、沙箱、提交四项回答 |
+| `runs_finished_total{status, reason}` | 只有 `status` | `failure_reason` 的取值没有封闭的集合 |
+| `docker_op_seconds{op}` | `controller_action_seconds{action, outcome}` | 在 controller 的协议层计时，包含 Docker 和数据库，就是 Worker 实际等的时间 |
+| `scheduler_last_cycle_timestamp` | `scheduler_scan_last_success_timestamp{scan}` | PR #124 之后一项失败不再跳过整轮，「整轮跑完」不再说明问题 |
+
+另外两条：
+
+- **OTLP 导出不经过 egress-proxy。**导出目标是部署自己网络里的服务（Compose 里是 Jaeger），
+  和 PostgreSQL、Redis 一样。OpenTelemetry 的导出器自己开连接，不经过 `SafeOutboundClient`。
+- **流式的 controller 动作（导入、导出工作区）没有 span。**只有普通的请求-应答动作加入了
+  调用方的 trace。
+
