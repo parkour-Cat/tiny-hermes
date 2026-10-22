@@ -554,7 +554,8 @@ async def test_a_worker_asked_to_stop_hands_its_run_back_at_the_next_round(
     run = submit(client, scope, agent, "keep going")
     stop = asyncio.Event()
     model = AsksUntilStopped(stop)
-    sandbox = StandInSandbox()
+    # `Any`, as in `drive`: the stand-in has only the calls these tests make.
+    sandbox: Any = StandInSandbox()
     worker = WorkerRuntime(
         session_factory=async_sessionmaker(engine, expire_on_commit=False),
         model=model,
