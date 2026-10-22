@@ -20,10 +20,12 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from opentelemetry import trace
 from tiny_hermes.sandbox.transport.client import ControllerClient
 from tiny_hermes.sandbox.transport.server import ControllerServer, ProtocolError
 
 from ..support import metric
+from ..tracing_support import named, recorded
 from .conftest import MAX_SOCKET_PATH, Pki, wire
 
 pytestmark = pytest.mark.skipif(
@@ -226,3 +228,18 @@ def test_the_socket_path_fits_in_the_kernels_own_field(socket_dir: Path) -> None
     path = socket_dir / "c.sock"
 
     assert len(str(path).encode()) < MAX_SOCKET_PATH, str(path)
+
+
+async def test_a_controller_action_joins_its_caller_s_trace(
+    wired: tuple[SpyController, ControllerClient],
+) -> None:
+    """Design §5.3: the context rides in the control line, beside the action."""
+    spans = recorded()
+    _, client = wired
+
+    with trace.get_tracer("test").start_as_current_span("caller") as caller:
+        await client.call("acquire", {"run_id": str(uuid4()), "profile": "default"})
+
+    [served] = named(spans, "controller.acquire")
+    assert served.context is not None
+    assert served.context.trace_id == caller.get_span_context().trace_id
