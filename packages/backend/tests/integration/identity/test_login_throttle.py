@@ -140,8 +140,9 @@ async def test_the_account_name_is_counted_by_case_and_spacing_it_normalises_to(
 async def test_no_account_name_is_stored_in_the_clear(
     api_client: TestClient, engine: AsyncEngine
 ) -> None:
-    """People type passwords into the account field."""
-    _fail(api_client, 1, subject="hunter2-typed-in-the-wrong-box")
+    """People type passwords into the account field. It must look like an
+    address to be counted at all; anything else is refused as malformed."""
+    _fail(api_client, 1, subject="hunter2-in-the-wrong-box@example.com")
 
     async with engine.connect() as connection:
         stored = await connection.scalar(
