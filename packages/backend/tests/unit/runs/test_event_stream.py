@@ -118,8 +118,8 @@ async def _subscribe(hub: EventStreamHub, into: list[int]) -> None:
         into.append(int(chunk.decode()))
 
 
-async def _until(condition: Any, timeout: float = 2.0) -> None:
-    deadline = asyncio.get_running_loop().time() + timeout
+async def _until(condition: Any, within: float = 2.0) -> None:
+    deadline = asyncio.get_running_loop().time() + within
     while not condition():
         assert asyncio.get_running_loop().time() < deadline, "timed out"
         await asyncio.sleep(0.005)

@@ -146,7 +146,7 @@ async def test_an_announced_run_reaches_a_listener(reachable_redis: str) -> None
         listener.cancel()
         await push.close()
 
-    assert heard == [run_id]
+    assert run_id in heard  # a local stack may share this Redis
 
 
 async def test_an_unreachable_channel_is_reported_and_never_raises() -> None:
@@ -172,13 +172,13 @@ async def _live_frames(
 ) -> None:
     async with browser.stream("GET", url) as response:
         assert response.status_code == 200
-        async for event in httpx.EventSource(response).aiter_sse():
+        async for event in httpx.EventSource(response):
             into.append(event.event)
             ready.set()
 
 
-async def _wait_for(condition: Callable[[], bool], timeout: float) -> bool:
-    deadline = asyncio.get_running_loop().time() + timeout
+async def _wait_for(condition: Callable[[], bool], within: float) -> bool:
+    deadline = asyncio.get_running_loop().time() + within
     while not condition():
         if asyncio.get_running_loop().time() >= deadline:
             return False
@@ -202,7 +202,7 @@ async def test_an_announced_event_reaches_a_subscriber_at_once(
         await asyncio.sleep(1.0)  # the room is holding, and has heard Redis say hello
 
         await _append(engine, watched, push.announce)
-        assert await _wait_for(lambda: "goal_verdict" in seen, timeout=1.0)
+        assert await _wait_for(lambda: "goal_verdict" in seen, within=1.0)
     finally:
         reader.cancel()
         await push.close()
@@ -225,8 +225,8 @@ async def test_an_unannounced_event_waits_for_the_fallback_read(
         await asyncio.sleep(1.0)
 
         await _append(engine, watched)  # a writer whose announcement was lost
-        assert not await _wait_for(lambda: "goal_verdict" in seen, timeout=1.0)
-        assert await _wait_for(lambda: "goal_verdict" in seen, timeout=10.0)
+        assert not await _wait_for(lambda: "goal_verdict" in seen, within=1.0)
+        assert await _wait_for(lambda: "goal_verdict" in seen, within=10.0)
     finally:
         reader.cancel()
 
@@ -246,6 +246,6 @@ async def test_without_redis_a_subscriber_waits_no_longer_than_before(
         await asyncio.sleep(1.0)
 
         await _append(engine, watched)
-        assert await _wait_for(lambda: "goal_verdict" in seen, timeout=1.5)
+        assert await _wait_for(lambda: "goal_verdict" in seen, within=1.5)
     finally:
         reader.cancel()
