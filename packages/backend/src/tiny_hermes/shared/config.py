@@ -379,7 +379,8 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"ENVIRONMENT={self.environment} with Compose's shipped defaults for "
                 + ", ".join(name.upper() for name in shipped)
-                + "; set real values (scripts/generate_local_secrets.py mints the first three)"
+                + "; set real values (scripts/generate_local_secrets.py mints the cookie"
+                " secret, the bootstrap token and the KEK)"
             )
         return self
 
