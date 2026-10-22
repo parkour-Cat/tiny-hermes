@@ -59,6 +59,14 @@ class FakeEngine:
     async def remove(self, container_id: str) -> None:
         self.calls.append(("remove", container_id))
 
+    async def containers_labelled(self, label: str, value: str | None = None) -> list[Any]:
+        self.calls.append(("containers_labelled", (label, value)))
+        return []
+
+    async def remove_volume_if_present(self, name: str) -> bool:
+        self.calls.append(("remove_volume_if_present", name))
+        return False
+
     async def pause(self, container_id: str) -> None:
         self.calls.append(("pause", container_id))
 
@@ -271,8 +279,16 @@ async def test_acquire_creates_the_labelled_volume_before_the_container(
 ) -> None:
     await _acquired(controller)
 
-    assert engine.names()[:2] == ["create_volume", "create"]
-    name, labels = engine.calls[0][1]
+    # What this Run left on the host goes first, so the volume is a new one.
+    assert engine.names()[:4] == [
+        "containers_labelled",
+        "remove_volume_if_present",
+        "create_volume",
+        "create",
+    ]
+    assert engine.calls[0][1] == ("tiny-hermes.run", str(RUN))
+    assert engine.calls[1][1] == f"tiny-hermes-data-{RUN}"
+    name, labels = engine.calls[2][1]
     assert name == f"tiny-hermes-data-{RUN}"
     assert labels["tiny-hermes.run"] == str(RUN)
     assert labels["tiny-hermes.workspace"] == str(WORKSPACE)
