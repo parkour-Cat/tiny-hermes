@@ -97,6 +97,7 @@ class FakeStore:
         #: Address -> (run, sandbox). The proxy reads this to answer "who is
         #: this" for a caller that presents nothing.
         self.addresses: dict[str, tuple[UUID, UUID]] = {}
+        self.admission_locks = 0
 
     async def reserve(
         self, *, run_id: UUID, workspace_id: UUID, instance: SandboxInstance
@@ -117,7 +118,7 @@ class FakeStore:
 
     # Admission: these tests run without a budget, so it never counts.
     async def lock_admission(self) -> None:
-        return None
+        self.admission_locks += 1
 
     async def committed_memory_mb(self) -> int:
         return 0
@@ -466,3 +467,22 @@ async def test_a_sandbox_with_no_network_is_registered_as_nobody(
     await _acquired(controller)
 
     assert store.addresses == {}
+
+
+async def test_an_acquire_without_a_budget_still_takes_the_admission_lock(
+    engine: FakeEngine, leases: ScriptedLeases
+) -> None:
+    """The host sweep holds this lock to know no acquire is between starting a
+    container and committing its row. An acquire that skipped it would have
+    its container swept as an orphan."""
+    store = FakeStore()
+    controller = SandboxController(
+        engine=engine,  # type: ignore[arg-type] - a recording double
+        store=store,
+        approved_digests=(DIGEST,),
+        leases=leases,
+    )
+
+    await _acquired(controller)
+
+    assert store.admission_locks == 1
