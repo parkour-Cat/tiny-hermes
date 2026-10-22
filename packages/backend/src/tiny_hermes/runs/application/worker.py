@@ -121,7 +121,7 @@ from tiny_hermes.runs.ports.store import (
     StoredSummary,
 )
 from tiny_hermes.sandbox.application.controller import RefusalReason as SandboxRefusal
-from tiny_hermes.sandbox.application.controller import SandboxRefused
+from tiny_hermes.sandbox.application.controller import SandboxRefused, SandboxUnreachable
 from tiny_hermes.sandbox.domain.command import SandboxCommand
 from tiny_hermes.sandbox.domain.container_policy import DEFAULT_PROFILE
 from tiny_hermes.sandbox.domain.models import CacheState
@@ -833,6 +833,41 @@ class WorkerRuntime:
             logger.exception("sandbox refused", extra={"run_id": str(claimed.run.id)})
             await self._fail(
                 claimed, handle, context, f"sandbox_{refused.reason.value}", spent, executed_ms
+            )
+            return None
+        except SandboxUnreachable as unreachable:
+            # Failing the Run made a network blip permanent for whoever sent
+            # it (tier B acceptance, finding 1). Which way it waits depends on
+            # whether the acquire may have reserved a sandbox nobody heard of.
+            logger.warning(
+                "controller unreachable at acquire",
+                extra={
+                    "run_id": str(claimed.run.id),
+                    "sent": unreachable.sent,
+                    "error": str(unreachable),
+                },
+            )
+            if unreachable.sent:
+                # Requeued, the next acquire would meet that reservation as
+                # `already_reserved` until the Run's budget ran out: only an
+                # interrupted Run's reservation is isolated and reclaimed, and
+                # recovery waits until it is gone.
+                decision = SliceDecision(RunSignal.INTERRUPTED)
+            else:
+                # Nothing can have been reserved. Bounded by the Run's own
+                # budget: each attempt spends the call that asked for the tool.
+                decision = SliceDecision(
+                    RunSignal.SLICE_ENDED,
+                    retry_after_seconds=CONTROLLER_UNREACHABLE_RETRY_SECONDS,
+                )
+            await self._record(
+                claimed,
+                handle,
+                context.state_version,
+                decision,
+                spent,
+                executed_ms,
+                prices=context.prices,
             )
             return None
         except Exception:
@@ -2806,6 +2841,11 @@ class WorkerRuntime:
 #: (§21.3). Churn is the waiting Runs divided by this; a freed slot may sit idle
 #: up to this long.
 SANDBOX_ROOM_RETRY_SECONDS = 10
+
+#: How long a Run whose acquire was never sent waits. Longer than for room: an
+#: outage lasts longer than a full budget, and every attempt is a model call
+#: charged to the Run.
+CONTROLLER_UNREACHABLE_RETRY_SECONDS = 30
 
 #: Refusals that end the slice and requeue the Run instead of failing it.
 _NOT_READY = frozenset(

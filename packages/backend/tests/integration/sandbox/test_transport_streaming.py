@@ -175,6 +175,28 @@ async def test_a_declared_total_above_the_server_limit_dies_at_start(
     assert not spy.received, "no byte may land after a refused START"
 
 
+async def test_a_refusal_mid_upload_always_arrives_as_the_refusal(
+    wired: tuple[SpyStreams, ControllerClient],
+) -> None:
+    """Over TCP, a server that closes with the client's frames still unread
+    sends a reset, and the reset can destroy the answer before the client
+    reads it: a decided "no" then arrives as an unknown failure. The test
+    above failed that way about one run in three over TLS; one refusal is
+    not enough to catch it, twenty are."""
+    spy, client = wired
+    spy.receive_limit = 1024
+
+    for _ in range(20):
+        with pytest.raises(ControllerClient.Refused) as refused:
+            await client.send_stream(
+                "workspace_import",
+                {"run_id": "r"},
+                _chunks(BODY),
+                declared_total=len(BODY),
+            )
+        assert refused.value.reason == "stream_failed"
+
+
 async def test_an_aborted_stream_does_not_take_the_server_down(
     wired: tuple[SpyStreams, ControllerClient],
 ) -> None:

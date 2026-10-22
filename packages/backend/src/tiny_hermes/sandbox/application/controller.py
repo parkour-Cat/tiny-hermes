@@ -66,6 +66,19 @@ class SandboxRefused(Exception):
         self.reason = reason
 
 
+class SandboxUnreachable(Exception):
+    """No answer came back from the Controller, so nothing was decided.
+
+    The opposite of `SandboxRefused`. `sent` says whether the request may
+    have reached the Controller: when it may, the call may have taken effect
+    and nobody heard about it.
+    """
+
+    def __init__(self, detail: str, *, sent: bool) -> None:
+        super().__init__(detail)
+        self.sent = sent
+
+
 class LeaseAuthority(Protocol):
     """Answers whether a Run currently holds a given lease.
 

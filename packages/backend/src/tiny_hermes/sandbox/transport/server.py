@@ -202,6 +202,9 @@ class ControllerServer:
     #: A local socket is still a socket, and an unbounded read is still an
     #: unbounded read. A tool request carries a command line, not a payload.
     MAX_FRAME_BYTES = 64 * 1024
+    #: How long a stream's connection stays open for the client to stop
+    #: sending after its answer; a client that never stops is cut off here.
+    LINGER_SECONDS = 5.0
 
     def __init__(
         self,
@@ -310,6 +313,7 @@ class ControllerServer:
                     )
                     # After a framed exchange — finished or aborted midway —
                     # the byte stream cannot be trusted to frame another call.
+                    await self._discard_unread(reader)
                     return
                 await self._say(writer, await self._answer(line, allowed))
         except (ConnectionResetError, BrokenPipeError, ssl.SSLError):
@@ -317,6 +321,23 @@ class ControllerServer:
             return
         finally:
             writer.close()
+
+    async def _discard_unread(self, reader: asyncio.StreamReader) -> None:
+        """Let a refused upload notice the answer before the connection closes.
+
+        A refusal mid-upload leaves the client's frames unread. Over TCP,
+        closing with unread input sends a reset, and the reset can destroy the
+        answer in the client's buffer before it is read, so a decided "no"
+        reached the Worker as an unknown failure. The client stops writing
+        once it sees the answer and closes; until then, or for at most
+        `LINGER_SECONDS`, its bytes are read and thrown away.
+        """
+        try:
+            async with asyncio.timeout(self.LINGER_SECONDS):
+                while await reader.read(64 * 1024):
+                    pass
+        except (TimeoutError, ConnectionResetError, BrokenPipeError, ssl.SSLError):
+            return
 
     def _parse_streaming(self, line: bytes) -> tuple[str, dict[str, Any]] | None:
         try:

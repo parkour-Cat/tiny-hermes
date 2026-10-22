@@ -54,6 +54,14 @@ class ControllerClient:
         a Run that meets it has an unknown outcome rather than a decided one.
         """
 
+    class NotConnected(Unreachable):
+        """No connection was made, so no request was sent.
+
+        Raised only by `connect()`. A refused TLS handshake is here when the
+        client refused it; a server refusing the client's certificate is not,
+        because TLS 1.3 tells the client only after the request is written.
+        """
+
     class Refused(Exception):
         def __init__(self, reason: str) -> None:
             super().__init__(reason)
@@ -236,7 +244,7 @@ class ControllerClient:
         except (OSError, TimeoutError) as unreachable:
             # A refused handshake is an `ssl.SSLError`, which is an OSError:
             # the platform could not ask, so the outcome is unknown, never "no".
-            raise ControllerClient.Unreachable(str(unreachable)) from unreachable
+            raise ControllerClient.NotConnected(str(unreachable)) from unreachable
         keep_alive(writer)
         return reader, writer
 

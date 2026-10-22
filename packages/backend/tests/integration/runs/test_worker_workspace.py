@@ -24,6 +24,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from tiny_hermes.runs.application.scheduler import SchedulerRuntime, SchedulerSettings
 from tiny_hermes.runs.application.worker import (
     WorkerRuntime,
     WorkerSettings,
@@ -50,7 +51,11 @@ from tiny_hermes.runs.ports.store import (
     ClaimRunCommand,
     RecordSliceCommand,
 )
-from tiny_hermes.sandbox.application.controller import RefusalReason, SandboxRefused
+from tiny_hermes.sandbox.application.controller import (
+    RefusalReason,
+    SandboxRefused,
+    SandboxUnreachable,
+)
 from tiny_hermes.sandbox.domain.command import (
     CommandResult,
     SandboxCommand,
@@ -868,6 +873,103 @@ async def test_a_run_with_no_sandbox_room_waits_in_the_queue_rather_than_failing
     assert await _roles(engine, run) == ["user"]
     wait = await _seconds_until_claimable(engine, run)
     assert 5 < wait <= 10, "§21.3: the Run waits ten seconds before it is claimed again"
+
+
+@dataclass
+class UnreachableSandbox(GatewaySandbox):
+    """A Controller the Worker could not get an answer from.
+
+    On 2026-10-21 a Worker on another host met a Controller that had stopped
+    listening, and both Runs it claimed failed for good.
+    """
+
+    sent: bool = False
+
+    async def acquire(self, **_: Any) -> Any:
+        self.calls.append("acquire")
+        raise SandboxUnreachable("no answer", sent=self.sent)
+
+
+class BrokenSandbox(GatewaySandbox):
+    """A Controller that answered with something the Worker cannot use."""
+
+    async def acquire(self, **_: Any) -> Any:
+        self.calls.append("acquire")
+        raise RuntimeError("the controller answered with nonsense")
+
+
+async def test_a_run_that_cannot_reach_the_controller_waits_rather_than_failing(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    objects: MinioObjectStore,
+    tooled_agent: Callable[[list[str]], str],
+) -> None:
+    run, _ = _submit(client, scope, tooled_agent(["shell.exec"]))
+    model = Recording(UnreachableSandbox(), _tool())
+
+    await _drive(engine, model, UnreachableSandbox(), objects)
+
+    row = await _run_row(engine, run)
+    assert row.status == "queued"
+    assert "run_failed" not in await _events_of(engine, run)
+    # As with no room: the call that asked was made and is charged, and its
+    # tool call is not kept for the next slice to find unanswered.
+    assert await _consumed_model_calls(engine, run) == 1
+    assert await _roles(engine, run) == ["user"]
+    wait = await _seconds_until_claimable(engine, run)
+    assert 25 < wait <= 30, "every retry costs a model call, so it waits longer than for room"
+
+
+async def test_an_acquire_that_may_have_reached_the_controller_interrupts(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    objects: MinioObjectStore,
+    tooled_agent: Callable[[list[str]], str],
+) -> None:
+    """It may have made a reservation nobody heard about. Requeued, the Run's
+    next acquire would meet that reservation as `already_reserved` again and
+    again, since only an interrupted Run's reservation is isolated and
+    reclaimed by the Scheduler."""
+    run, _ = _submit(client, scope, tooled_agent(["shell.exec"]))
+    sandbox = UnreachableSandbox(sent=True)
+
+    await _drive(engine, Recording(sandbox, _tool()), sandbox, objects)
+
+    assert (await _run_row(engine, run)).status == "interrupted"
+    assert "run_failed" not in await _events_of(engine, run)
+    assert await _roles(engine, run) == ["user"]
+
+    # With nothing reserved there is nothing to reclaim, and the Scheduler
+    # puts it back in the queue on its next pass.
+    await SchedulerRuntime(
+        session_factory=async_sessionmaker(engine, expire_on_commit=False),
+        notifier=NullWakeUpNotifier(),
+        sandbox=sandbox,
+        settings=SchedulerSettings(
+            max_recovery_attempts=3, event_retention_hours=24, batch_size=50
+        ),
+    ).run_once()
+    assert (await _run_row(engine, run)).status == "queued"
+
+
+async def test_a_controller_answer_the_worker_cannot_use_still_fails_the_run(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    objects: MinioObjectStore,
+    tooled_agent: Callable[[list[str]], str],
+) -> None:
+    """Only "could not ask" waits. Anything else would retry forever on a fault
+    no amount of waiting fixes."""
+    run, _ = _submit(client, scope, tooled_agent(["shell.exec"]))
+
+    await _drive(engine, Recording(BrokenSandbox(), _tool()), BrokenSandbox(), objects)
+
+    snapshot = client.get(f"/api/v1/runs/{run}", headers=scope).json()
+    assert snapshot["status"] == "failed"
+    assert snapshot["failure_reason"] == "sandbox_start_failed"
 
 
 async def _consumed_model_calls(engine: AsyncEngine, run_id: str) -> int:

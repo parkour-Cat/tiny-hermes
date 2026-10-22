@@ -275,7 +275,8 @@ docker compose -f compose.worker-host.yaml up -d --scale worker=2
 **停掉 Worker 主机时，`down` 也要同样的变量。**不设的话 `docker compose -f
 compose.worker-host.yaml down` 报错退出，**容器照样在跑**，还会继续领 Run。验收时就这样
 撞到过：controller 已经不在那个地址上了，这个 Worker 领到的带工具的 Run 全判了
-`sandbox_start_failed`。停之前先确认：
+`sandbox_start_failed`（当时的行为；现在这些 Run 会每 30 秒重试，直到 Run 的预算用完）。
+停之前先确认：
 
 ```bash
 docker ps --filter label=com.docker.compose.project=tiny-hermes-worker
@@ -301,8 +302,13 @@ controller、Scheduler 和 Worker；进程只在启动时读证书。
 **过期之后**，握手失败，Worker 调 controller 一律得到「联系不上」。后果按 Run 走到哪一步
 而不同（M1 沙箱设计 §11）：
 
-- 还没拿到沙箱的 Run：判失败，原因 `sandbox_start_failed`，**不会重试**；
+- 还没拿到沙箱的 Run：进入 `interrupted`，Scheduler 恢复它，再撞上，再恢复，
+  **超过 `MAX_RECOVERY_ATTEMPTS`（默认 3）次就判失败**，前后只有几秒；
 - 已经有沙箱、在时间片边界冻结失败的 Run：进入 `interrupted`，等证书换好由 Scheduler 恢复。
+
+为什么前一种不是「稍后重试」：Worker 的证书被拒，TLS 1.3 要等请求写出去之后才告诉它，
+它分不出这和「controller 做完就挂了」。这和 controller 停机、网络断开不一样，那两种在
+连接阶段就失败，Run 会每 30 秒重试。
 
 所以证书过期是会让用户的 Run 失败的故障，不是只会变慢。**到期警告出现后就续签**，不要等。
 
