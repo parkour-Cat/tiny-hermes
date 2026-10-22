@@ -90,6 +90,12 @@ class VolumeInfo:
     labels: dict[str, str]
 
 
+@dataclass(frozen=True)
+class ContainerInfo:
+    id: str
+    labels: dict[str, str]
+
+
 @dataclass
 class DockerEngine:
     client: Any
@@ -198,6 +204,35 @@ class DockerEngine:
     async def remove_volume(self, name: str) -> None:
         volume = await self._call(self.client.volumes.get, name)
         await self._call(volume.remove, force=True)
+
+    async def remove_volume_if_present(self, name: str) -> bool:
+        """`remove_volume`, where a volume that is already gone is fine.
+
+        True when this call removed it. A volume still mounted by a container
+        is refused by the daemon and raises, like any other refusal.
+        """
+        from docker.errors import NotFound  # noqa: PLC0415 - narrow the import
+
+        try:
+            await self.remove_volume(name)
+        except DockerUnavailable as failure:
+            if isinstance(failure.__cause__, NotFound):
+                return False
+            raise
+        return True
+
+    async def containers_labelled(
+        self, label: str, value: str | None = None
+    ) -> list[ContainerInfo]:
+        """Every container carrying the label, running or not."""
+        selector = label if value is None else f"{label}={value}"
+        found: list[dict[str, Any]] = await self._call(
+            self.client.api.containers, all=True, filters={"label": selector}
+        )
+        return [
+            ContainerInfo(id=str(entry["Id"]), labels=dict(entry.get("Labels") or {}))
+            for entry in found
+        ]
 
     async def volumes_labelled(self, label: str) -> list[VolumeInfo]:
         """Every volume carrying the label — by label, never by parsed name."""
