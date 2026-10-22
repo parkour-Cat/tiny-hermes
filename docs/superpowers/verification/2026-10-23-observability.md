@@ -36,6 +36,11 @@ scheduler 有没有在干活，都看不到。
 - 全量集成跑完之后又改了一处（trace 提取改成按函数名调用，见下面「发现」第 3 条），之后
   重跑了全部单元测试和 `test_tracing`、`test_transport`，没有重跑全量集成。
 - compose-e2e 以 PR 的 CI 为准。
+- **PR 的第一次 CI，backend-unit 红了 3 条**（`test_cli.py` 里启动 api 和 scheduler 的入口）：
+  入口现在要先读配置才能起指标和 trace，而 CI 的单元测试没有 `.env`，也没有 `DATABASE_URL`。
+  本地是绿的，只因为仓库根目录的 `.env` 补上了配置。在本地把 `.env` 挪开就复现了。修法是把
+  指标和 trace 放进 `_observe` 一个钩子，测试按原来替换 `configure_logging` 的办法把它也替换掉
+  （`9eb4717` 测试，之后一个提交实现）。挪开 `.env` 重跑全部单元测试：2680 passed。
 
 新测试覆盖的：
 
