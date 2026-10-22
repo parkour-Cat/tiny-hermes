@@ -33,3 +33,12 @@ def test_compose_waits_longer_than_the_worker_grace_period() -> None:
     grace = int(_default(str(document["x-app-env"]["WORKER_SHUTDOWN_GRACE_SECONDS"])))
 
     assert _seconds(_default(str(worker["stop_grace_period"]))) > grace
+
+
+def test_postgres_connections_can_be_raised_without_editing_the_file() -> None:
+    """Ops manual §8: the pools' sum passes 200 with two Worker containers at
+    K=16, so the limit is something an operator sets, like K itself."""
+    document: Any = yaml.safe_load((COMPOSE / "compose.yaml").read_text(encoding="utf-8"))
+    command = document["services"]["postgres"]["command"]
+
+    assert "max_connections=${POSTGRES_MAX_CONNECTIONS:-200}" in command
