@@ -1,0 +1,58 @@
+# Observability design §5.5. Rules only: where an alert goes is the
+# deployment's Alertmanager to decide. Every threshold is a first value, to be
+# set from a pilot and written into product design §24, like capacity plan §6.
+groups:
+  - name: tiny-hermes
+    rules:
+      - alert: QueueWaitingTooLong
+        expr: max(tiny_hermes_queue_oldest_age_seconds) > 60
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: A claimable Run has waited over a minute for five minutes
+          description: Capacity is short. Check worker lanes and sandbox admission.
+
+      - alert: WorkerLanesSaturated
+        expr: >-
+          sum(tiny_hermes_worker_lanes{state="busy"})
+          / sum(tiny_hermes_worker_lanes{state="total"}) > 0.9
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Over 90% of worker lanes have been busy for ten minutes
+
+      - alert: SchedulerScanStalled
+        # 5x the default one-second scan interval, with room for slow scans.
+        expr: time() - max by (scan) (tiny_hermes_scheduler_scan_last_success_timestamp) > 60
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Scheduler scan {{ $labels.scan }} has not succeeded for over a minute"
+          description: >-
+            One scan failing every cycle, or the scheduler stopped. Recovery,
+            approval expiry and cleanup live in these scans.
+
+      - alert: SandboxAdmissionRefusing
+        expr: increase(tiny_hermes_sandbox_admission_rejected_total[1m]) > 0
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: The sandbox memory budget has refused acquires for ten minutes
+
+      - alert: EgressDenialsSpiking
+        expr: >-
+          sum(rate(tiny_hermes_egress_connections_total{decision="deny"}[5m]))
+          > 5 * sum(rate(tiny_hermes_egress_connections_total{decision="deny"}[1h] offset 5m))
+          and sum(rate(tiny_hermes_egress_connections_total{decision="deny"}[5m])) > 0.1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Egress refusals are five times the last hour's rate
+          description: An Agent misconfigured, or something probing. The proxy log names hosts.
+
+      - alert: LoginFailuresSpiking
+        expr: sum(increase(tiny_hermes_login_attempts_total{outcome="bad_credentials"}[1m])) > 30
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: Over 30 failed logins a minute

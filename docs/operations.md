@@ -486,6 +486,8 @@ Run 详情页时，Redis 停机会让数据库压力明显上升，不要长时�
   `DATASTORE_BIND_ADDRESS` 设成公网地址。
 - 出站代理和 controller 一样只拿基础环境：没有 KEK、对象存储密钥和模型密钥。它是沙箱唯一
   连得到的进程。
+- 起了 `observability` profile 的话：设 `GRAFANA_ADMIN_PASSWORD`（默认 `admin`），设
+  `METRICS_TOKEN`（不设时出站代理不提供指标）。见第 12 节。
 
 **还没解决的：同一台主机上的沙箱之间网络是通的。**它们都在 `sandbox-egress` 这个网桥上，
 `internal` 只去掉了出网，没有去掉容器之间的互访。直接关掉网桥的容器间通信会把代理也切断，
@@ -511,3 +513,56 @@ Run 详情页时，Redis 停机会让数据库压力明显上升，不要长时�
 - **第 8 节的建议值没有在真实模型下测过**，`POSTGRES_MAX_CONNECTIONS` 调大之后也没有
   在连接真的打满的情况下测过。
 - **没有测量过规模**：十万条 Secret 的轮换要多久、大库的 `pg_restore` 要多久，都不知道。
+
+## 12. 监控：指标与告警
+
+设计见[指标与链路追踪](superpowers/specs/2026-10-22-observability-design.md)。
+
+### 12.1 起监控栈
+
+```bash
+cd deploy/compose
+# .env 里先设 METRICS_TOKEN（.env.example 有生成命令）
+docker compose --env-file ../../.env --profile observability up -d --wait
+```
+
+| 服务 | 地址 | 说明 |
+|---|---|---|
+| Grafana | http://127.0.0.1:3002 | 用户 `admin`，密码 `GRAFANA_ADMIN_PASSWORD`；预置仪表盘在 tiny-hermes 文件夹 |
+| Prometheus | http://127.0.0.1:9090 | Status → Targets 看抓取是否都是 up |
+| Jaeger | http://127.0.0.1:16686 | 链路追踪，见 12.4 |
+
+不加 `--profile observability` 时这些服务都不启动，平台本身照常运行。
+
+### 12.2 指标端口
+
+- api、worker、scheduler、controller、egress-proxy 各自在 **9464** 端口提供 `/metrics`。
+  Compose 不把它发布到宿主机；对外的 8000 端口**没有** `/metrics`。
+- 设了 `METRICS_TOKEN` 时，端口只回应 `Authorization: Bearer <token>`。Prometheus 从这个
+  变量读 token。
+- **出站代理没有 token 就不提供指标**，日志里有一条 `metrics not served: METRICS_TOKEN is
+  unset`。原因：沙箱连得到出站代理监听的每个端口，指标里有全平台的出站放行和拒绝计数。
+- 端口被占用时进程照常运行，只记一条 `metrics not served`，Prometheus 里这个目标显示 down。
+- `--scale worker=M` 之后不用改配置：Prometheus 按服务名解析出全部 M 个副本。
+- B 档（Worker 在别的机器上）：Compose 里的 Prometheus 只抓得到本机的服务。别的机器上的
+  Worker 要在企业自己的 Prometheus 里加目标，并在防火墙里只对它开放 9464。
+
+### 12.3 先看什么
+
+| 现象 | 看哪个面板 | 通常是 |
+|---|---|---|
+| 用户说回复慢 | 「最久的等待」「Worker 通道」 | 通道满了：加 Worker 或调 `WORKER_CONCURRENCY`（第 8 节） |
+| 排队不多但一轮很慢 | 「模型调用 P95」「工具调用 P95」「工作区提交 P95」 | 哪一段高就查哪一段 |
+| 带工具的 Run 卡在排队 | 「准入拒绝」「沙箱内存」 | 沙箱内存预算满了（第 8.4 节） |
+| 恢复、审批过期、清理不动了 | 「每项扫描距上次成功」 | 某一项扫描每轮都失败：日志里搜 `scheduler scan failed scan=<名字>` |
+| 出站拒绝突然变多 | 「出口放行与拒绝」 | 按 reason 看；具体主机在出站代理日志里 |
+
+告警规则在 `deploy/compose/observability/alerts.yml`，只有规则，没有通知渠道。接企业自己的
+Alertmanager。阈值都是初值，要在试点之后定。
+
+### 12.4 指标里没有什么
+
+- **没有工作空间、用户、Run 的 id，也没有工具名、模型端点名、出站目标主机。**这些标签的取值
+  没有上限，每多一个值就多一组时间序列。要查某一个 Run，看它的事件、日志和链路追踪。
+- 模型调用按提供方类型（`deterministic`、`openai_compatible`）分，不按端点分。
+

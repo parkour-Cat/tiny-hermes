@@ -28,6 +28,11 @@ x-base-env: &base-env
   # Workers per worker container (1–64). Each concurrent Run can hold a sandbox
   # on this one Docker host, so raising it is a capacity decision.
   WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
+  # The metrics port's bearer token (observability design §4.2). Empty serves
+  # every process's metrics without one, except the egress proxy's: a sandbox
+  # can reach every port the proxy listens on, so it serves none without a
+  # token. .env.example says how to generate one.
+  METRICS_TOKEN: ${METRICS_TOKEN:-}
   # How long a stopping Worker may take to finish the round under way and hand
   # its Runs back (5–120 s). Past it, they wait for their leases to lapse. The
   # worker's `stop_grace_period` below must be longer, or Compose kills first.
@@ -360,6 +365,69 @@ services:
       retries: 20
     ports: ["3001:3001"]
 
+  # -- observability (design §5.4): `docker compose --profile observability up`.
+  # None of it starts by default, and what it publishes is on loopback only:
+  # Grafana ships with admin/admin and Jaeger with no login. The metrics port
+  # itself (9464) is published by no service; Prometheus reaches it on the
+  # Compose network.
+  prometheus:
+    profiles: ["observability"]
+    restart: unless-stopped
+    image: prom/prometheus:v3.5.0
+    # Prometheus reads a bearer token from a file, never from the
+    # environment, so the token is written to one at start.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        printf %s "$$METRICS_TOKEN" > /tmp/metrics-token &&
+        exec /bin/prometheus --config.file=/etc/prometheus/prometheus.yml
+        --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=15d
+    environment:
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    ports: ["127.0.0.1:9090:9090"]
+
+  grafana:
+    profiles: ["observability"]
+    restart: unless-stopped
+    image: grafana/grafana:12.0.2
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus]
+    ports: ["127.0.0.1:3002:3000"]
+
+  jaeger:
+    profiles: ["observability"]
+    restart: unless-stopped
+    image: jaegertracing/jaeger:2.8.0
+    # 4317/4318 receive OTLP from the platform on the Compose network; only
+    # the UI is published.
+    ports: ["127.0.0.1:16686:16686"]
+
+  postgres-exporter:
+    profiles: ["observability"]
+    restart: unless-stopped
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.17.1
+    environment:
+      DATA_SOURCE_NAME: postgresql://tiny_hermes:${POSTGRES_PASSWORD:-local-only}@postgres:5432/tiny_hermes?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redis-exporter:
+    profiles: ["observability"]
+    restart: unless-stopped
+    image: oliver006/redis_exporter:v1.74.0
+    environment:
+      REDIS_ADDR: redis://redis:6379
+
 networks:
   # Nothing on this network can route anywhere: `internal` is Docker's way of
   # saying a bridge has no gateway. A sandbox attached to it cannot reach the
@@ -371,6 +439,7 @@ networks:
     internal: true
 
 volumes:
+  prometheus-data:
   postgres-data:
   # Not `minio-data`: SeaweedFS cannot read MinIO's on-disk format. That volume
   # is deliberately no longer declared, so `docker compose down -v` does not
