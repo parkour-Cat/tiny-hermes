@@ -1,6 +1,6 @@
 # 指标与链路追踪
 
-日期 2026-10-22。状态：**待评审，未实现。**
+日期 2026-10-22。状态：**已评审（§8），未实现。**
 依据：产品设计 §21.5（「OpenTelemetry trace、Prometheus 指标」），
 [容量方案](../plans/2026-09-29-enterprise-capacity.md)，
 [单机档验收](../verification/2026-09-30-tier-a-acceptance.md)。
@@ -164,7 +164,7 @@ OpenTelemetry 的 httpx 自动插桩会给每个出站请求加 `traceparent` �
 - 指标：`prometheus_client`。**默认开**，因为它只是一个不对外的端口。
 - trace：`opentelemetry-sdk` 和 `opentelemetry-exporter-otlp`。**默认关**：
   `OTEL_EXPORTER_OTLP_ENDPOINT` 不设就用 no-op，不连任何地方。
-- 采样：在建 Run 时决定，按 `OTEL_TRACES_SAMPLER_ARG` 的比例（默认 0.1），同一个 Run
+- 采样：在建 Run 时决定，按 `OTEL_TRACES_SAMPLER_ARG` 的比例（Compose 默认 1.0，生产建议 0.1，见 §8），同一个 Run
   的所有时间片跟随这个决定，不会出现只采到半个 Run 的情况。
 
 ### 5.2 数据库派生的 gauge 谁来查
@@ -249,10 +249,9 @@ Worker、经历好几次中断恢复。trace 上下文要跨过数据库：
 - trace 上下文不发给外部服务；
 - 指标不带租户和 Run 的 id。
 
-## 8. 要你决定的
+## 8. 已决定（2026-10-22）
 
-1. **默认采样率 10% 可以吗？**全采样对排查最方便，但 trace 的存储和开销随 Run 数线性涨。
-2. **scheduler 的「一项失败，整轮跳过」**（§3.3）要不要在这一遍顺带改？改动很小，但它是
-   行为变化，不是加指标，按规矩应该单独一个 PR。
-3. **Compose profile 里的追踪后端用 Jaeger 可以吗？**它最常见，面试官一听就懂。也可以换成
-   Grafana Tempo，和 Grafana 放在一起更顺。
+1. **trace 采样率**：本地和试点 100%；企业正式部署默认 10%，用 `OTEL_TRACES_SAMPLER_ARG` 调。
+   哪个 Run 被采在建 Run 时决定，没被采到的 Run 只能看日志和指标。
+2. **scheduler 的「一项失败，整轮跳过」**（§3.3）：要修，单独一个 PR，先于指标。
+3. **追踪后端**：Compose profile 用 Jaeger。记录一侧只用 OpenTelemetry 标准，换后端不改代码。
