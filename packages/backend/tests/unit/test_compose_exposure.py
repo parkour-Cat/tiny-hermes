@@ -56,3 +56,14 @@ def test_the_object_store_and_its_clients_take_the_same_keys() -> None:
     app = spec["x-app-env"]
     assert server["AWS_ACCESS_KEY_ID"] == app["S3_ACCESS_KEY"]
     assert server["AWS_SECRET_ACCESS_KEY"] == app["S3_SECRET_KEY"]
+
+
+def test_the_settings_refuse_exactly_the_fallbacks_this_file_ships() -> None:
+    """Settings keeps its own copy of these to refuse them outside
+    development. A default changed here and not there would start again."""
+    from tiny_hermes.shared.config import _COMPOSE_DEFAULTS  # pyright: ignore[reportPrivateUsage]
+
+    spec = document()
+    env = {**spec["x-base-env"], **spec["x-app-env"]}
+    for name, value in _COMPOSE_DEFAULTS.items():
+        assert env[name.upper()].endswith(f":-{value}}}"), name
