@@ -132,7 +132,10 @@ API、Worker、scheduler 已经是无状态的，Run 的真相在 Postgres 里�
      每个都用掉一次恢复机会。已按设计改，Compose 等 30 秒。
    - **连接池上限之和超过 `max_connections`。**按建议值单机就是 214 条对 200。新增
      `POSTGRES_MAX_CONNECTIONS`，手册里给了算法。
-5. **SSE 改成 Redis 推送**。现在每个有人看的 Run，每 0.5 秒查一次库，还没测过。
+5. ~~**SSE 改成 Redis 推送**~~ **已做**（[验收记录](../verification/2026-10-22-sse-redis-push.md)，运维手册 §9）。
+   事件提交后发通知，事件流收到才读，另外每 5 秒兜底；Redis 不可用时退回每 0.5 秒。
+   本地栈 50 个在看但没有新事件的 Run：数据库每秒多出的事务从 175 降到 29，提交到收到的
+   p50 从 320 ms 降到 10 ms。原来的记录：现在每个有人看的 Run，每 0.5 秒查一次库，还没测过。
 6. ~~**沙箱内存没有总量上限**~~ **已修**（规格 v2.14 §21.3，[验收记录](../verification/2026-09-30-sandbox-admission.md)）：按上限之和准入，默认预算为主机内存的一半，沙箱不得借用 swap。同一场景重跑：474 个 Run 全部完成，VM 最多用 43%，swap 没有增加。代价见第 8 项。原来的记录（[沙箱内存](../verification/2026-09-30-sandbox-memory.md)）：
    每个沙箱上限 1 GiB，另外按 Docker 默认还能用 1 GiB swap；controller 不限制个数，也不看主机
    还剩多少内存。32 条通道全部用上时，理论上需要 32 GiB，而 7.8 GiB 的 VM 按 70% 线只能给
