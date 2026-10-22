@@ -253,8 +253,8 @@ docker compose -f compose.yaml -f compose.sandbox-host.yaml up -d --scale worker
 controller 只在 `CONTROLLER_PRIVATE_ADDRESS:7443` 上对外。**防火墙只放行 Worker 主机
 到这个端口。**它握着 Docker socket，等于这台主机的 root。
 
-Postgres、Redis、对象存储也要让 Worker 主机连得上：给它们发布到内网地址，同样只放行
-Worker 主机。每路 Worker 并发约占 1.5 条 Postgres 连接，总路数超过 100 时加连接池代理。
+Postgres、Redis、对象存储也要让 Worker 主机连得上：默认只发布在 127.0.0.1，设
+`DATASTORE_BIND_ADDRESS=<内网地址>` 发布到内网地址，同样只放行 Worker 主机。每路 Worker 并发约占 1.5 条 Postgres 连接，总路数超过 100 时加连接池代理。
 
 ### 7.3 Worker 主机
 
@@ -447,7 +447,29 @@ Run 详情页时，Redis 停机会让数据库压力明显上升，不要长时�
 时，API 以为通知正常，就按 5 秒兜底读：**这时用户看到事件最多晚 5 秒**，不是半秒。
 看 Worker 日志里有没有 `run event publish failed`。
 
-## 10. 这份手册没有覆盖什么
+## 10. 上线前要换掉的默认值
+
+`compose.yaml` 在变量没设时用一组写在文件里的默认值，本地栈和 CI 靠它们不带 `.env` 就能起来。
+这些值所有人都看得到，所以只能在开发机上用。
+
+- **设 `ENVIRONMENT=production`**（任何不是 `development` 的值都行）。这样会话 cookie 才带
+  `Secure`；而且下面任何一项还是默认值时，进程拒绝启动，日志里列出是哪几项。
+- 要换的：`SESSION_COOKIE_SECRET`、`BOOTSTRAP_TOKEN`、`TINY_HERMES_KEK`
+  （`scripts/generate_local_secrets.py` 生成这三个），`S3_ACCESS_KEY`、`S3_SECRET_KEY`、
+  `POSTGRES_PASSWORD`。默认 KEK 是 32 个零字节，用它包的 Secret 等于明文。
+- `POSTGRES_PASSWORD` 只在数据卷**第一次初始化**时生效。已经有数据的库，先在库里
+  `ALTER ROLE tiny_hermes PASSWORD '...'`，再改变量。
+- Postgres、Redis、对象存储默认只发布在 127.0.0.1。Redis 没有密码，不要把
+  `DATASTORE_BIND_ADDRESS` 设成公网地址。
+- 出站代理和 controller 一样只拿基础环境：没有 KEK、对象存储密钥和模型密钥。它是沙箱唯一
+  连得到的进程。
+
+**还没解决的：同一台主机上的沙箱之间网络是通的。**它们都在 `sandbox-egress` 这个网桥上，
+`internal` 只去掉了出网，没有去掉容器之间的互访。直接关掉网桥的容器间通信会把代理也切断，
+所以要换成每个沙箱一个网络之类的做法，还没做。在那之前，一个 Run 能连到同主机上别的 Run
+在沙箱里起的端口。
+
+## 11. 这份手册没有覆盖什么
 
 - **没有在真实生产部署上演练过。** 上面的表和步骤都来自本地容器。
 - ~~没有做过「真的销毁旧 KEK 之后」的演练。~~ **已补（2026-08-23）**：

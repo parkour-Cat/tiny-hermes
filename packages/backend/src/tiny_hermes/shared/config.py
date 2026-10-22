@@ -10,6 +10,17 @@ from tiny_hermes.sandbox.transport.tls import TlsFiles
 
 DEFAULT_CONTROLLER_URL = "unix:///run/tiny-hermes/controller.sock"
 
+#: `deploy/compose/compose.yaml`'s `:-` fallbacks; `test_compose_exposure`
+#: fails when the two disagree. The database password is matched inside the
+#: URL rather than listed here.
+_COMPOSE_DEFAULTS = {
+    "session_cookie_secret": "local-cookie-secret-with-32-characters",
+    "bootstrap_token": "local-bootstrap-token-with-32-characters",
+    "tiny_hermes_kek": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "s3_access_key": "tiny-hermes-local",
+    "s3_secret_key": "tiny-hermes-local-password",
+}
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -344,6 +355,32 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"sandbox_memory_budget_mb={budget} admits no sandbox of "
                 f"sandbox_memory_mb={self.sandbox_memory_mb}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def reject_the_compose_defaults_outside_development(self) -> "Settings":
+        """`compose.yaml` falls back to these when a variable is unset.
+
+        They let the local stack and CI start with no `.env`, and they are
+        printed in a public file: outside development each one is a secret
+        everybody has, the zero KEK unwrapping every stored Secret.
+        """
+        if self.environment == "development":
+            return self
+        shipped = [
+            name
+            for name, value in _COMPOSE_DEFAULTS.items()
+            if getattr(self, name) == value
+        ]
+        if ":local-only@" in self.database_url:
+            shipped.append("database_url")
+        if shipped:
+            raise ValueError(
+                f"ENVIRONMENT={self.environment} with Compose's shipped defaults for "
+                + ", ".join(name.upper() for name in shipped)
+                + "; set real values (scripts/generate_local_secrets.py mints the cookie"
+                " secret, the bootstrap token and the KEK)"
             )
         return self
 

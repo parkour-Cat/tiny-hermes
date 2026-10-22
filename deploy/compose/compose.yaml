@@ -6,7 +6,11 @@ name: tiny-hermes
 # holding Docker must not also hold object-storage credentials or model keys —
 # design §14.6 makes both directions of that separation an assertion.
 x-base-env: &base-env
-  DATABASE_URL: postgresql+asyncpg://tiny_hermes:local-only@postgres:5432/tiny_hermes
+  # `development` keeps the shipped defaults below usable on a laptop. Any
+  # other value marks session cookies Secure and refuses to start on those
+  # defaults, so a real deployment sets it and finds out what it forgot.
+  ENVIRONMENT: ${ENVIRONMENT:-development}
+  DATABASE_URL: postgresql+asyncpg://tiny_hermes:${POSTGRES_PASSWORD:-local-only}@postgres:5432/tiny_hermes
   REDIS_URL: redis://redis:6379/0
   S3_ENDPOINT: http://seaweedfs:9000
   S3_BUCKET: tiny-hermes
@@ -111,7 +115,7 @@ services:
     environment:
       POSTGRES_DB: tiny_hermes
       POSTGRES_USER: tiny_hermes
-      POSTGRES_PASSWORD: local-only
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-only}
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
@@ -120,7 +124,10 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    ports: ["5432:5432"]
+    # Loopback by default: Redis has no password, and the defaults above are
+    # in this file for anyone to read. Tier B sets DATASTORE_BIND_ADDRESS to
+    # the private address its Worker hosts reach (ops manual §7.2).
+    ports: ["${DATASTORE_BIND_ADDRESS:-127.0.0.1}:5432:5432"]
 
   redis:
     restart: unless-stopped
@@ -131,7 +138,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    ports: ["6379:6379"]
+    ports: ["${DATASTORE_BIND_ADDRESS:-127.0.0.1}:6379:6379"]
 
   # S3-compatible object store. MinIO until 2026-09-11, when its images left
   # Docker Hub; a deployment that ran MinIO copies its objects over with
@@ -142,8 +149,8 @@ services:
     image: chrislusf/seaweedfs:4.47
     command: ["mini", "-dir=/data", "-s3.port=9000"]
     environment:
-      AWS_ACCESS_KEY_ID: tiny-hermes-local
-      AWS_SECRET_ACCESS_KEY: tiny-hermes-local-password
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-tiny-hermes-local}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-tiny-hermes-local-password}
     volumes:
       - seaweedfs-data:/data
     healthcheck:
@@ -151,7 +158,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    ports: ["9000:9000"]
+    ports: ["${DATASTORE_BIND_ADDRESS:-127.0.0.1}:9000:9000"]
 
   migrate:
     build:
@@ -298,7 +305,10 @@ services:
       context: ../..
       dockerfile: apps/api/Dockerfile
     command: ["/app/.venv/bin/tiny-hermes-egress"]
-    environment: *app-env
+    # The base, like the controller. It is the one process a sandbox can send
+    # a packet to, and its request parser is our own code: whatever this
+    # environment holds is what a flaw in that parser hands to a Run.
+    environment: *base-env
     # On both: the default network to reach the internet and the database, and
     # the sandbox network to be reached *from* a container. A sandbox is on the
     # second only, and that network is `internal` — so the proxy is the one
@@ -349,9 +359,11 @@ services:
 
 networks:
   # Nothing on this network can route anywhere: `internal` is Docker's way of
-  # saying a bridge has no gateway. A sandbox attached to it can reach the
-  # proxy and nothing else — not the internet, not PostgreSQL, not the object store, not
-  # another Run's container.
+  # saying a bridge has no gateway. A sandbox attached to it cannot reach the
+  # internet, PostgreSQL or the object store — only the proxy, and every
+  # other sandbox on this host: containers on one bridge reach each other, and
+  # `internal` does not change that. Turning off inter-container traffic on
+  # the bridge would cut the proxy off too.
   sandbox-egress:
     internal: true
 

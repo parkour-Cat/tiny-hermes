@@ -378,6 +378,9 @@ class SandboxController:
             return None
         await self.engine.unpause(instance.container_id)
         await self.store.set_instance_status(instance.id, InstanceStatus.RUNNING)
+        # The freeze that ended the last slice took the address away, and the
+        # Worker does not thaw a reused instance: this is its thaw.
+        await self._register_address(instance.container_id, existing.run_id, instance.id)
         return AcquireResult(sandbox_id=instance.id, cache_state=CacheState.REUSED)
 
     async def _admit(self, needed_mb: int) -> None:

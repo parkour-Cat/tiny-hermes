@@ -232,6 +232,8 @@ jobs:
           docker compose -f deploy/compose/compose.yaml exec -T controller sh -c 'test -z "$S3_ACCESS_KEY" && test -z "$S3_SECRET_KEY"'
           docker compose -f deploy/compose/compose.yaml exec -T controller sh -c 'test -z "$TINY_HERMES_MODEL_KEY_EXAMPLE"'
           docker compose -f deploy/compose/compose.yaml exec -T worker sh -c 'test -n "$S3_ACCESS_KEY"'
+          # The proxy is what a sandbox can reach, so it holds as little as the controller.
+          docker compose -f deploy/compose/compose.yaml exec -T egress-proxy sh -c 'test -z "$S3_ACCESS_KEY" && test -z "$S3_SECRET_KEY" && test -z "$TINY_HERMES_KEK"'
       - run: pnpm exec playwright test --config tests/e2e/playwright.config.ts
       # The drill restarts processes in the middle of a Run, so a Run has to be
       # long enough to be interrupted. The stack is recreated with a slower

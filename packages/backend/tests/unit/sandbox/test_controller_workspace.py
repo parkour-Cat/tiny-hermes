@@ -8,7 +8,7 @@ checkpoint files a background process is still changing.
 
 import uuid
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -20,6 +20,7 @@ from tiny_hermes.sandbox.application.controller import (
 )
 from tiny_hermes.sandbox.domain.command import SandboxCommand
 from tiny_hermes.sandbox.domain.models import (
+    CacheState,
     InstanceStatus,
     ReservationStatus,
     SandboxInstance,
@@ -447,6 +448,41 @@ async def test_a_sandbox_holds_its_identity_only_while_it_may_use_it(
 
     await controller.destroy(run_id=RUN, lease_id=LEASE, sandbox_id=sandbox_id)
     assert store.addresses == {}
+
+
+async def test_a_kept_sandbox_taken_back_by_its_next_slice_gets_its_identity_back(
+    engine: FakeEngine, leases: ScriptedLeases
+) -> None:
+    """A slice ends with freeze then keep, and the next slice's acquire
+    unpauses the same container. Freeze took the address row away, so the
+    acquire that hands the container back has to put it back: otherwise the
+    proxy answers every request of the second slice with "unknown caller"."""
+    engine.address = "172.30.0.5"
+    store = FakeStore()
+    controller = SandboxController(
+        engine=engine,  # type: ignore[arg-type] - a recording double
+        store=store,
+        approved_digests=(DIGEST,),
+        leases=leases,
+    )
+    sandbox_id = await _acquired(controller)
+    await controller.freeze(run_id=RUN, lease_id=LEASE, sandbox_id=sandbox_id)
+    await controller.keep(
+        run_id=RUN, sandbox_id=sandbox_id, until=datetime.now(UTC) + timedelta(minutes=5)
+    )
+    assert store.addresses == {}
+
+    again = await controller.acquire(
+        run_id=RUN,
+        lease_id=uuid.uuid4(),
+        workspace_id=WORKSPACE,
+        session_id=SESSION,
+        profile="default",
+    )
+
+    assert again.sandbox_id == sandbox_id
+    assert again.cache_state is CacheState.REUSED
+    assert store.addresses == {"172.30.0.5": (RUN, sandbox_id)}
 
 
 async def test_a_sandbox_with_no_network_is_registered_as_nobody(
