@@ -163,8 +163,8 @@ async def test_the_queue_is_read_from_the_database(
     assert _value("tiny_hermes_queue_oldest_age_seconds") >= 90
 
 
-async def test_an_empty_queue_reports_no_wait(engine: AsyncEngine) -> None:
-    """Every table is truncated before each test, so nothing is queued."""
+async def test_an_empty_queue_reports_no_wait(empty_database: None, engine: AsyncEngine) -> None:
+    """Nothing queued: the database starts empty."""
     await _scheduler(engine).observe_queue()
 
     assert _value("tiny_hermes_runs_by_status", status="queued") == 0
