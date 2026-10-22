@@ -7,6 +7,7 @@ prove against a real daemon. A container per test would make these slow enough
 that the ordering rules stopped getting written.
 """
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -518,3 +519,64 @@ async def test_a_destroy_that_cannot_be_confirmed_interrupts(
 
     snapshot = client.get(f"/api/v1/runs/{run}", headers=scope).json()
     assert snapshot["status"] == "interrupted"
+
+
+# -- shutdown --------------------------------------------------------------
+
+
+class AsksUntilStopped:
+    """Asks for a command every round, and asks the Worker to stop during the
+    second one, the way SIGTERM lands while a round is under way."""
+
+    def __init__(self, stop: asyncio.Event) -> None:
+        self._stop = stop
+        self.calls = 0
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        del request
+        self.calls += 1
+        if self.calls == 2:
+            self._stop.set()
+        return _tool()
+
+
+async def test_a_worker_asked_to_stop_hands_its_run_back_at_the_next_round(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_with_tools: Any
+) -> None:
+    """M1 run execution design §6.5: a rolling restart returns Runs to `queued`.
+
+    Measured 2026-10-21 before this held: `docker compose restart worker` with
+    four long tasks in one process interrupted three of them, each spending
+    one of its three recovery attempts, because the slice ran on to its full
+    length and Compose killed the process at ten seconds.
+    """
+    agent = agent_with_tools(["shell.exec"])
+    run = submit(client, scope, agent, "keep going")
+    stop = asyncio.Event()
+    model = AsksUntilStopped(stop)
+    sandbox = StandInSandbox()
+    worker = WorkerRuntime(
+        session_factory=async_sessionmaker(engine, expire_on_commit=False),
+        model=model,
+        notifier=NullWakeUpNotifier(),
+        sandbox=sandbox,
+        settings=WorkerSettings(
+            worker_id="worker-stopping",
+            lease_seconds=30,
+            # Far longer than the test: only the stop can end this slice.
+            max_slice_seconds=300,
+            idle_poll_seconds=1,
+        ),
+    )
+
+    await asyncio.wait_for(worker.run_forever(stop), timeout=10)
+
+    assert model.calls == 2, "the round under way finishes; no further round starts"
+    snapshot = client.get(f"/api/v1/runs/{run}", headers=scope).json()
+    assert snapshot["status"] == "queued"
+    history = await events(engine, run)
+    assert "run_slice_ended" in history
+    assert "run_interrupted" not in history
+    # Handed back like any slice boundary: frozen and kept for the next Worker.
+    assert "keep" in sandbox.calls
+    assert "destroy" not in sandbox.calls

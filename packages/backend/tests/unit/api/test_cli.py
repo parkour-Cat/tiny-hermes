@@ -230,3 +230,61 @@ async def test_the_pool_grows_with_the_workers_sharing_it(
     _, _, pools = await _serve_workers(monkeypatch, 16)
 
     assert pools == [{"pool_size": 16, "max_overflow": 16}]
+
+
+# -- stopping -------------------------------------------------------------
+
+
+async def test_workers_that_finish_within_the_grace_period_are_waited_for() -> None:
+    stop = asyncio.Event()
+    finished: list[str] = []
+
+    async def hands_back(stopping: asyncio.Event) -> None:
+        await stopping.wait()
+        await asyncio.sleep(0.05)  # the round under way
+        finished.append("handed back")
+
+    stop.set()
+    await cli._run_until_stopped([hands_back, hands_back], stop, grace_seconds=5)  # pyright: ignore[reportPrivateUsage]
+
+    assert finished == ["handed back", "handed back"]
+
+
+async def test_a_worker_still_busy_when_the_grace_period_ends_is_left_behind() -> None:
+    """Design §6.5: past the grace period it exits without writing, and the
+    lease lapses for the Scheduler. Compose's own stop timeout must be longer,
+    or the process is killed before it gets to choose."""
+    stop = asyncio.Event()
+    cancelled: list[bool] = []
+
+    async def wedged(stopping: asyncio.Event) -> None:
+        del stopping
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    stop.set()
+    started = asyncio.get_running_loop().time()
+    await cli._run_until_stopped([wedged], stop, grace_seconds=0.1)  # pyright: ignore[reportPrivateUsage]
+
+    assert asyncio.get_running_loop().time() - started < 2
+    assert cancelled == [True]
+
+
+async def test_the_worker_process_uses_its_configured_grace_period(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`worker_shutdown_grace_seconds` existed from M1 and nothing read it."""
+    used: list[float] = []
+    real = cli._run_until_stopped  # pyright: ignore[reportPrivateUsage]
+
+    async def recording(runs: Any, stop: asyncio.Event, *, grace_seconds: float) -> None:
+        used.append(grace_seconds)
+        await real(runs, stop, grace_seconds=grace_seconds)
+
+    monkeypatch.setattr(cli, "_run_until_stopped", recording)
+    await _serve_workers(monkeypatch, 2)
+
+    assert used == [20]
