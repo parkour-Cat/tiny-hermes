@@ -27,8 +27,10 @@ from tiny_hermes.runs.ports.model import ModelRequest
 from ..egress_support import ProxyHandle
 from .http_tool_support import StandIn, ask, worker
 from .test_http_write_requests import ORDER, calls, ordering_agent
-from .test_scheduler import _expire_lease  # pyright: ignore[reportPrivateUsage]
-from .test_scheduler import _scheduler  # pyright: ignore[reportPrivateUsage]
+from .test_scheduler import (
+    _expire_lease,  # pyright: ignore[reportPrivateUsage]
+    _scheduler,  # pyright: ignore[reportPrivateUsage]
+)
 from .test_worker_tools import Recording
 
 
@@ -105,6 +107,15 @@ async def test_the_run_goes_back_to_the_queue_and_the_model_is_told(
     await _killed_during_the_first_request(engine, workspace, proxy, stand_in, first)
 
     assert await _recovered(engine, ordering) == "queued"
+    async with engine.connect() as connection:
+        named = await connection.scalar(
+            text(
+                "SELECT payload->>'interrupted_call_id' FROM run_events "
+                "WHERE run_id = :id AND event_type = 'run_recovery_approved'"
+            ),
+            {"id": UUID(ordering)},
+        )
+    assert named == "c1"
 
     second = Recording()
     await worker(engine, workspace, proxy, second).run_once()
@@ -212,3 +223,38 @@ async def test_a_round_that_was_recorded_leaves_nothing_behind(
     assert row[0] is None
     assert row[1] == "none"
     assert stand_in.methods == ["POST"]
+
+
+async def test_nothing_is_told_when_the_workspace_moved_past_the_checkpoint(
+    ordering: str,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    api: tuple[StandIn, str],
+    proxy: ProxyHandle,
+) -> None:
+    """The round's own changes may then have been committed, and the account
+    would say they were not saved. §12 fails such a Run, and it fails untold."""
+    stand_in, _ = api
+    workspace = scope["X-Workspace-Id"]
+    first = Recording(calls(("c1", "createOrder", {"body": ORDER})))
+    await _killed_during_the_first_request(engine, workspace, proxy, stand_in, first)
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "UPDATE runs SET checkpoint_workspace_revision_id = gen_random_uuid() "
+                "WHERE id = :id"
+            ),
+            {"id": UUID(ordering)},
+        )
+
+    assert await _recovered(engine, ordering) == "failed"
+
+    async with engine.connect() as connection:
+        told = await connection.scalar(
+            text(
+                "SELECT count(*) FROM session_messages "
+                "WHERE source_run_id = :id AND role = 'tool'"
+            ),
+            {"id": UUID(ordering)},
+        )
+    assert told == 0
