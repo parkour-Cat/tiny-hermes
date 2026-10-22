@@ -566,3 +566,27 @@ Alertmanager。阈值都是初值，要在试点之后定。
   没有上限，每多一个值就多一组时间序列。要查某一个 Run，看它的事件、日志和链路追踪。
 - 模型调用按提供方类型（`deterministic`、`openai_compatible`）分，不按端点分。
 
+## 13. 登录限流
+
+规则在产品设计 §23 第 16 条（v2.19）。
+
+- **按账号**（API 里）：同一账号 15 分钟内本地密码登录失败 5 次，之后的登录返回 429
+  `login_throttled`，带 `Retry-After`，**密码对了也不放行**，直到最早那次失败移出 15 分钟窗口。
+  不存在的账号同样计数。登录成功清零。OIDC 登录不受影响。
+- **按来源地址**（控制台的 nginx 里）：同一地址对登录接口每分钟 10 次，可以突发 10 次，超过的
+  直接由 nginx 返回 429，不到 API。**直接访问 API 的 8000 端口不经过这一层**，所以生产环境不要
+  把 8000 暴露给浏览器以外的网络，或者在你自己的网关上做同样的限制。
+- 指标：`tiny_hermes_login_attempts_total{outcome="throttled"}`；告警规则 `LoginFailuresSpiking`。
+  审计：`identity.login_throttled`。
+
+**有人被锁在外面了，等不了 15 分钟：**现在没有管理员解锁的界面。失败记录按账号名规范化后
+（去掉首尾空白、转小写）的 SHA-256 存储，在数据库里删掉就解锁：
+
+```bash
+docker compose exec postgres psql -U tiny_hermes -d tiny_hermes -c \
+  "DELETE FROM login_failures WHERE subject_key = encode(sha256(convert_to(lower(trim('someone@example.com')), 'UTF8')), 'hex')"
+```
+
+知道账号名的人可以故意输错，让这个账号的密码登录 15 分钟内用不了。这是按账号限流的代价。
+如果某个账号反复被这样针对，查审计里的 `identity.login_throttled`，在网关上按来源地址封掉。
+
