@@ -436,7 +436,11 @@ class SandboxController:
         instance = await self.store.read_instance(existing.instance_id)
         if instance is None:
             return None
-        await self.engine.unpause(instance.container_id)
+        if not await self.engine.unpause_if_present(instance.container_id):
+            # The row outlived its container: an eviction rolled back after
+            # the container went, or somebody removed it by hand. Discarded
+            # like an expired keep, and the Run gets a new instance.
+            return None
         await self.store.set_instance_status(instance.id, InstanceStatus.RUNNING)
         return AcquireResult(sandbox_id=instance.id, cache_state=CacheState.REUSED)
 
@@ -503,7 +507,7 @@ class SandboxController:
     async def _discard(self, reservation: SandboxReservation) -> None:
         instance = await self.store.read_instance(reservation.instance_id)
         if instance is not None:
-            await self.engine.remove(instance.container_id)
+            await self.engine.remove_if_present(instance.container_id)
             await self.store.set_instance_status(instance.id, InstanceStatus.DESTROYED)
         await self.store.release(reservation.id)
 

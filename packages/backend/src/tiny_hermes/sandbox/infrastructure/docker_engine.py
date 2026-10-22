@@ -404,6 +404,18 @@ class DockerEngine:
     async def unpause(self, container_id: str) -> None:
         await self._call(self.client.api.unpause, container_id)
 
+    async def unpause_if_present(self, container_id: str) -> bool:
+        """`unpause`, answering False for a container that no longer exists."""
+        from docker.errors import NotFound  # noqa: PLC0415 - narrow the import
+
+        try:
+            await self.unpause(container_id)
+        except DockerUnavailable as failure:
+            if isinstance(failure.__cause__, NotFound):
+                return False
+            raise
+        return True
+
     async def remove(self, container_id: str) -> None:
         await self._call(self.client.api.remove_container, container_id, force=True)
 
