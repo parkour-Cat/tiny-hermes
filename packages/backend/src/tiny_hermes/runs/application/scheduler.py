@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -113,32 +114,60 @@ class SchedulerRuntime:
         self._replies = replies
 
     async def run_once(self) -> None:
+        """Every scan once, each on its own.
+
+        A scan that throws is logged under its name and the rest still run:
+        one bad row must not stop recovery, approval expiry and cleanup on
+        every cycle after it. The failures are raised together at the end, so
+        a caller still sees them.
+
+        The order is kept for latency, not safety. Recovery skips a Run whose
+        sandbox reservation is still live, so a cleanup scan that failed
+        delays that Run's recovery rather than racing it.
+        """
         now = datetime.now(UTC)
-        await self._reclaim_expired_leases(now)
-        # Worker-side freeze/destroy failures interrupt the Run after its lease
-        # is released, so they do not appear in the expired-lease scan. Hand
-        # their still-live reservation to the same cleanup path explicitly.
-        await self._isolate_interrupted_sandboxes()
-        # A Run whose Worker died may still own a live container. Destroy that
-        # container before putting the Run back in the queue; otherwise a new
-        # Worker can race the cleanup and meet the abandoned reservation.
-        await self._reclaim_sandboxes(now)
-        await self._recover_interrupted()
-        await self._repair_session_heads()
-        await self._settle_due_waits(now)
-        await self._settle_child_waits()
-        await self._cascade_cancel_children()
-        await self._expire_approvals(now)
-        await self._cancel_aged_compat_timeouts(now)
-        await self._collect_expired_records(now)
-        await self._collect_upload_garbage(now)
-        await self._expire_artifacts(now)
-        await self._dispatch_channel_replies()
+        scans: tuple[tuple[str, Callable[[], Awaitable[None]]], ...] = (
+            ("reclaim_expired_leases", lambda: self._reclaim_expired_leases(now)),
+            # Worker-side freeze/destroy failures interrupt the Run after its
+            # lease is released, so they do not appear in the expired-lease
+            # scan. Hand their still-live reservation to the same cleanup path
+            # explicitly.
+            ("isolate_interrupted_sandboxes", self._isolate_interrupted_sandboxes),
+            # A Run whose Worker died may still own a live container. Destroy
+            # that container before putting the Run back in the queue;
+            # otherwise a new Worker can race the cleanup and meet the
+            # abandoned reservation.
+            ("reclaim_sandboxes", lambda: self._reclaim_sandboxes(now)),
+            ("recover_interrupted", self._recover_interrupted),
+            ("repair_session_heads", self._repair_session_heads),
+            ("settle_due_waits", lambda: self._settle_due_waits(now)),
+            ("settle_child_waits", self._settle_child_waits),
+            ("cascade_cancel_children", self._cascade_cancel_children),
+            ("expire_approvals", lambda: self._expire_approvals(now)),
+            ("cancel_aged_compat_timeouts", lambda: self._cancel_aged_compat_timeouts(now)),
+            ("collect_expired_records", lambda: self._collect_expired_records(now)),
+            ("collect_upload_garbage", lambda: self._collect_upload_garbage(now)),
+            ("expire_artifacts", lambda: self._expire_artifacts(now)),
+            ("dispatch_channel_replies", self._dispatch_channel_replies),
+        )
+        failures: list[Exception] = []
+        for name, scan in scans:
+            try:
+                await scan()
+            except Exception as error:
+                logger.exception("scheduler scan failed", extra={"scan": name})
+                error.add_note(f"scheduler scan: {name}")
+                failures.append(error)
+        if failures:
+            raise ExceptionGroup("scheduler scans failed", failures)
 
     async def run_forever(self, stop: asyncio.Event, interval_seconds: int) -> None:
         while not stop.is_set():
             try:
                 await self.run_once()
+            except ExceptionGroup:
+                # Each failed scan was logged under its name as it happened.
+                pass
             except Exception:
                 logger.exception("scheduler cycle failed")
             try:
