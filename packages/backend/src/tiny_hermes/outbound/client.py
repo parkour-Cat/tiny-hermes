@@ -243,12 +243,13 @@ class SafeOutboundClient:
         *,
         json: Any = None,
         data: dict[str, str] | None = None,
+        content: bytes | None = None,
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
-        if json is not None and data is not None:
+        if sum(given is not None for given in (json, data, content)) > 1:
             # Two ways to say the same thing is a caller bug, not a request
             # this client gets to guess about.
-            raise ValueError("request takes json or data, not both")
+            raise ValueError("request takes one of json, data or content")
         sending: dict[str, str] = dict(headers) if headers else {}
         if data is not None:
             # RFC 6749 §4.1.3: a token endpoint takes a form body, not JSON —
@@ -270,8 +271,8 @@ class SafeOutboundClient:
             # it.
             content = httpx.Request("POST", url, json=json).content
             sending.setdefault("Content-Type", "application/json")
-        else:
-            content = None
+        # Otherwise `content` is sent as given: an HTTP tool's body is encoded
+        # where the request is composed, and the composer sets its type.
         for _ in range(self._max_redirects + 1):
             response = await self._send(method, url, content, sending)
             if response.status_code not in REDIRECT_STATUSES:
