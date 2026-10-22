@@ -331,6 +331,14 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
         String(16), default=CheckpointEffectStatus.NONE.value
     )
     checkpoint_workspace_revision_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    #: §17.2, v2.17: the round as it stood when a call that may reach outside
+    #: was sent, until the round is recorded. See `runs.domain.interruption`.
+    inflight_round: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    #: `{"fingerprint", "idempotency_key"}` for each HTTP write recovery told
+    #: the model about, until an exact repeat takes the key.
+    interrupted_writes: Mapped[list[dict[str, str]] | None] = mapped_column(
+        JSON, nullable=True
+    )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     #: When this Run last *entered* `queued` (§21.3, v2.13), which is the order

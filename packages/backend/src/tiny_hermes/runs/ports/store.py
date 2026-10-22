@@ -9,6 +9,7 @@ from tiny_hermes.agents.domain.models import AgentSpec, EndpointModelPolicy, Mod
 from tiny_hermes.memory.ports.library import RememberedFact
 from tiny_hermes.model_catalog.domain.pricing import Cost, TokenPrices
 from tiny_hermes.runs.domain.context_budget import ContextWindow
+from tiny_hermes.runs.domain.interruption import InFlightRound
 from tiny_hermes.runs.domain.models import (
     BoundSkill,
     BudgetSummary,
@@ -646,9 +647,11 @@ class RunStore(Protocol):
 
     async def record_slice(self, command: RecordSliceCommand) -> RunSnapshot: ...
 
-    async def reserve_tool_call(
-        self, workspace_id: UUID, run_id: UUID, lease_id: UUID, *, reaches_outside: bool = False
-    ) -> bool: ...
+    async def reserve_tool_call(self, workspace_id: UUID, run_id: UUID, lease_id: UUID) -> bool: ...
+
+    async def reserve_outside_call(
+        self, workspace_id: UUID, run_id: UUID, lease_id: UUID, sending: InFlightRound
+    ) -> InFlightRound | None: ...
 
     async def repair_session_head(self, session_id: UUID, request_id: str) -> RepairResult: ...
 

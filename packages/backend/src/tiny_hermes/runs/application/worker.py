@@ -5,6 +5,7 @@ import shlex
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from time import monotonic
 from typing import Any, Protocol, cast
 from uuid import UUID
@@ -59,6 +60,7 @@ from tiny_hermes.runs.domain.goal import (
     GoalVerdict,
     judge,
 )
+from tiny_hermes.runs.domain.interruption import InFlightRound
 from tiny_hermes.runs.domain.models import (
     Block,
     BudgetSummary,
@@ -94,7 +96,7 @@ from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalGate
 from tiny_hermes.runs.ports.artifacts import ArtifactReads
 from tiny_hermes.runs.ports.children import ChildRuns, DelegationWait
-from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolSender
+from tiny_hermes.runs.ports.http_calls import Cleared, EgressClaim, HttpToolSender
 from tiny_hermes.runs.ports.mcp import BoundMcpTool, McpGateway
 from tiny_hermes.runs.ports.memories import MemoryCandidates
 from tiny_hermes.runs.ports.model import (
@@ -148,7 +150,7 @@ from tiny_hermes.tools.application.execute import (
     run_tool_call,
 )
 from tiny_hermes.tools.domain.files import DATA_ROOT, FILE_HELPER, changes_workspace
-from tiny_hermes.tools.domain.http_calls import HTTP_PREFIX
+from tiny_hermes.tools.domain.http_calls import HTTP_PREFIX, HttpRequestPlan
 from tiny_hermes.tools.domain.mcp import (
     MCP_PREFIX,
     estimated_tokens,
@@ -1232,22 +1234,47 @@ class WorkerRuntime:
         loaded = list(context.loaded_skills)
         tool_limit_reached = False
 
-        async def reserve(*, reaches_outside: bool = False) -> bool:
+        async def reserve() -> bool:
             nonlocal tool_limit_reached
             if tool_limit_reached:
                 return False
             async with self._sessions.begin() as session:
                 accepted = await SqlRunStore(session).reserve_tool_call(
-                    claimed.run.workspace_id,
-                    claimed.run.id,
-                    handle.lease_id,
-                    reaches_outside=reaches_outside,
+                    claimed.run.workspace_id, claimed.run.id, handle.lease_id
                 )
             tool_limit_reached = not accepted
             return accepted
 
-        async def reserve_outside() -> bool:
-            return await reserve(reaches_outside=True)
+        async def reserve_outside(
+            call: ToolCallBlock, fingerprint: str | None = None
+        ) -> InFlightRound | None:
+            """`reserve`, writing the round down as it stands (§17.2, v2.17)."""
+            nonlocal tool_limit_reached
+            if tool_limit_reached:
+                return None
+            sending = InFlightRound(
+                assistant=assistant,
+                finished=tuple(
+                    answer for answer in results if isinstance(answer, ToolResultBlock)
+                ),
+                call_id=call.call_id,
+                fingerprint=fingerprint,
+            )
+            async with self._sessions.begin() as session:
+                recorded = await SqlRunStore(session).reserve_outside_call(
+                    claimed.run.workspace_id, claimed.run.id, handle.lease_id, sending
+                )
+            tool_limit_reached = recorded is None
+            return recorded
+
+        async def charged(call: ToolCallBlock) -> bool:
+            return await reserve_outside(call) is not None
+
+        async def cleared(call: ToolCallBlock, plan: HttpRequestPlan) -> Cleared | None:
+            # Only a write is recognised again when repeated, and only a write
+            # carries a key: a read changes nothing to apply twice.
+            recorded = await reserve_outside(call, None if plan.read_only else plan.fingerprint)
+            return None if recorded is None else Cleared(recorded.idempotency_key)
 
         # A command in a sandbox with a network can send a request through the
         # proxy; one without can change only the workspace, which recovery
@@ -1291,8 +1318,10 @@ class WorkerRuntime:
                 continue
             external = call.name.startswith((f"{MCP_PREFIX}.", f"{HTTP_PREFIX}."))
             # External writes pass their approval gate before spending a call.
-            if not external and not await reserve(
-                reaches_outside=call.name == "shell.exec" and sandbox_reaches_outside
+            if not external and not await (
+                charged(call)
+                if call.name == "shell.exec" and sandbox_reaches_outside
+                else reserve()
             ):
                 results.append(
                     ToolResultBlock(
@@ -1358,7 +1387,7 @@ class WorkerRuntime:
                     mcp,
                     _claim_of(claimed),
                     self._approvals,
-                    before_call=reserve_outside,
+                    before_call=partial(charged, call),
                 )
                 if outcome.event is not None:
                     events.append(outcome.event)
@@ -1377,7 +1406,7 @@ class WorkerRuntime:
                     call,
                     _claim_of(claimed),
                     self._approvals,
-                    before_call=reserve_outside,
+                    before_call=partial(cleared, call),
                 )
                 if outcome.event is not None:
                     events.append(outcome.event)
