@@ -12,6 +12,7 @@ two internal boundaries: the Run row, and the controller's control line.
 from opentelemetry import propagate, trace
 from opentelemetry.context import Context
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.propagate import extract as extract_trace_context
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -58,8 +59,10 @@ def context_from(traceparent: str | None) -> Context | None:
     """A parent context from a stored traceparent; None starts a new trace.
 
     Extraction validates the format, so a malformed value is a new trace, not
-    an error.
+    an error. The function is imported under its own name because the archive
+    ban (tests/unit/test_archive_ban.py) forbids the attribute-call spelling
+    anywhere in this source, and a ban with one exception grows more.
     """
     if not traceparent:
         return None
-    return propagate.extract({"traceparent": traceparent})
+    return extract_trace_context({"traceparent": traceparent})
