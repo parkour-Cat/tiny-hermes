@@ -98,3 +98,20 @@ def test_the_controller_is_the_platforms_own_image_not_a_docker_cli() -> None:
     controller = services()["controller"]
     assert controller["command"] == ["/app/.venv/bin/tiny-hermes-controller"]
     assert controller["build"]["dockerfile"] == "apps/api/Dockerfile"
+
+
+def test_the_egress_proxy_holds_no_credential() -> None:
+    """The proxy is the one process a sandbox can send a packet to.
+
+    Its request parser is our own code, so a flaw in it is reachable by any
+    Run. Whatever the proxy's environment holds is what such a flaw hands
+    over: the KEK would unwrap every Secret in the database, the object-store
+    keys would read every workspace. It needs the database, its token and its
+    port rules, and nothing the controller is denied.
+    """
+    proxy_env = services()["egress-proxy"]["environment"]
+    assert "TINY_HERMES_KEK" not in proxy_env
+    assert "TINY_HERMES_PREVIOUS_KEK" not in proxy_env
+    assert "TINY_HERMES_MODEL_KEY_EXAMPLE" not in proxy_env
+    assert proxy_env["S3_ACCESS_KEY"] == ""
+    assert proxy_env["S3_SECRET_KEY"] == ""

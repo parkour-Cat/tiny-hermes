@@ -312,3 +312,28 @@ def test_an_empty_tls_file_variable_means_unset(
     monkeypatch.setenv(field.upper(), "")
 
     assert getattr(_settings(), field) is None
+
+
+#: What `deploy/compose/compose.yaml` falls back to when a variable is unset.
+#: Fine on a laptop; outside development each one is a published secret.
+COMPOSE_DEFAULTS = [
+    ("session_cookie_secret", "local-cookie-secret-with-32-characters"),
+    ("bootstrap_token", "local-bootstrap-token-with-32-characters"),
+    ("tiny_hermes_kek", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
+    ("s3_access_key", "tiny-hermes-local"),
+    ("s3_secret_key", "tiny-hermes-local-password"),
+    ("database_url", "postgresql+asyncpg://tiny_hermes:local-only@postgres:5432/tiny_hermes"),
+]
+
+
+@pytest.mark.parametrize(("name", "value"), COMPOSE_DEFAULTS)
+def test_outside_development_the_compose_defaults_are_refused(name: str, value: str) -> None:
+    with pytest.raises(ValidationError, match=name.upper()):
+        _settings(environment="production", **{name: value})
+
+
+@pytest.mark.parametrize(("name", "value"), COMPOSE_DEFAULTS)
+def test_in_development_the_compose_defaults_still_start(name: str, value: str) -> None:
+    """The local stack and CI run on them; refusing here would only move the
+    default into every developer's `.env`."""
+    assert getattr(_settings(**{name: value}), name) == value
