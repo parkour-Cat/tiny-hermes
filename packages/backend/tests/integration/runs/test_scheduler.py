@@ -449,3 +449,22 @@ async def test_a_failing_scan_does_not_starve_the_scans_after_it(
     assert await _counts(engine, "SELECT count(*) FROM idempotency_records") == 0
     [failure] = raised.value.exceptions
     assert "lease scan cannot read this row" in str(failure)
+
+
+async def test_login_failures_outside_the_throttle_window_are_deleted(
+    engine: AsyncEngine,
+) -> None:
+    """They decide nothing any more (§23.16) and would otherwise pile up."""
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "INSERT INTO login_failures (subject_key, failed_at) VALUES "
+                "('old', now() - interval '2 hours'), ('recent', now())"
+            )
+        )
+
+    await _scheduler(engine).run_once()
+
+    async with engine.connect() as connection:
+        kept = (await connection.execute(text("SELECT subject_key FROM login_failures"))).scalars()
+        assert list(kept) == ["recent"]
