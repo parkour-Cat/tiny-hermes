@@ -29,13 +29,13 @@ from ..conftest import VALID_SPEC
 from ..egress_support import ProxyHandle
 from .http_tool_support import StandIn, approve_host, ask, register_tool, worker
 from .test_http_tool_calls import _agent as http_agent  # pyright: ignore[reportPrivateUsage]
-from .test_worker_tools import (  # pyright: ignore[reportPrivateUsage]
+from .test_worker_tools import (
     Recording,
     StandInSandbox,
-    _tool,
     drive,
     submit,
 )
+from .test_worker_tools import _tool as shell_call  # pyright: ignore[reportPrivateUsage]
 
 
 async def _effect(engine: AsyncEngine, run_id: str) -> str:
@@ -95,7 +95,8 @@ async def test_a_command_with_the_network_marks_the_round_unsafe_while_it_runs(
     run = submit(client, scope, _shell_agent(client, scope, ["api.example.com"]), "go")
     sandbox = WatchingSandbox(engine=engine, run_id=run)
 
-    await drive(engine, Recording(_tool("curl -X POST https://api.example.com"), _done()), sandbox)
+    post = shell_call("curl -X POST https://api.example.com")
+    await drive(engine, Recording(post, _done()), sandbox)
 
     assert sandbox.seen == ["unknown"]
     # The round was recorded with its result: replaying from there no longer
@@ -111,7 +112,7 @@ async def test_a_command_with_no_network_leaves_the_round_safe(
     run = submit(client, scope, _shell_agent(client, scope, []), "go")
     sandbox = WatchingSandbox(engine=engine, run_id=run)
 
-    await drive(engine, Recording(_tool("ls"), _done()), sandbox)
+    await drive(engine, Recording(shell_call("ls"), _done()), sandbox)
 
     assert sandbox.seen == ["none"]
 
