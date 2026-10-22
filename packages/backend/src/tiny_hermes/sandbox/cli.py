@@ -49,6 +49,7 @@ from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.database import build_session_factory
 from tiny_hermes.shared.logging import configure_logging
 from tiny_hermes.shared.metrics import serve_configured_metrics
+from tiny_hermes.shared.tracing import configure_tracing
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,7 @@ def memory_budget_mb(settings: Settings, *, meminfo: Path = Path("/proc/meminfo"
 def main() -> None:
     configure_logging()
     serve_configured_metrics(get_settings())
+    configure_tracing(get_settings(), service="controller")
     asyncio.run(_serve())
 
 

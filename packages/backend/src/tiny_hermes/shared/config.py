@@ -78,6 +78,13 @@ class Settings(BaseSettings):
     metrics_token: str = ""
     #: How often the Scheduler reads the queue for `tiny_hermes_runs_by_status`.
     queue_observe_seconds: int = Field(default=15, ge=1, le=300)
+    #: Where spans go, as an OTLP/HTTP base URL (observability design §5.1).
+    #: Empty traces nothing and connects nowhere. Like Postgres, an address on
+    #: the deployment's own network: it does not pass the egress proxy.
+    otel_exporter_otlp_endpoint: str = ""
+    #: The share of Runs traced, decided when the Run is created and followed
+    #: by every slice of it. Compose sets 1.0; production would use about 0.1.
+    otel_traces_sampler_arg: float = Field(default=1.0, ge=0.0, le=1.0)
     max_recovery_attempts: int = Field(default=3, ge=0, le=10)
     event_retention_hours: int = Field(default=168, ge=1, le=8_760)
     sse_heartbeat_seconds: int = Field(default=15, ge=5, le=60)

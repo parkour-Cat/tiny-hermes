@@ -37,6 +37,7 @@ from tiny_hermes.runs.ports.model import (
 )
 from tiny_hermes.secrets.infrastructure.sql_store import SqlSecretStore
 from tiny_hermes.shared.metrics import MODEL_CALL_SECONDS, MODEL_TOKENS
+from tiny_hermes.shared.tracing import tracer
 
 ClientFactory = Callable[[], AbstractAsyncContextManager[SafeOutboundClient]]
 
@@ -79,13 +80,17 @@ class ModelRouter:
             else "openai_compatible"
         )
         started = time.monotonic()
-        try:
-            response = await self._route(request)
-        except BaseException:
-            MODEL_CALL_SECONDS.labels(provider=provider, outcome="error").observe(
-                time.monotonic() - started
-            )
-            raise
+        with tracer.start_as_current_span(
+            "model.call", attributes={"model.provider": provider}
+        ) as span:
+            try:
+                response = await self._route(request)
+            except BaseException:
+                MODEL_CALL_SECONDS.labels(provider=provider, outcome="error").observe(
+                    time.monotonic() - started
+                )
+                raise
+            span.set_attribute("model.stop_reason", response.stop_reason.value)
         MODEL_CALL_SECONDS.labels(provider=provider, outcome=response.stop_reason.value).observe(
             time.monotonic() - started
         )

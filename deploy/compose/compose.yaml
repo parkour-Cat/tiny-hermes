@@ -33,6 +33,11 @@ x-base-env: &base-env
   # can reach every port the proxy listens on, so it serves none without a
   # token. .env.example says how to generate one.
   METRICS_TOKEN: ${METRICS_TOKEN:-}
+  # Tracing (observability design §5.1). Empty traces nothing; with the
+  # observability profile, set http://jaeger:4318. The share of Runs traced
+  # is decided when each is created; 1.0 locally, about 0.1 in production.
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+  OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
   # How long a stopping Worker may take to finish the round under way and hand
   # its Runs back (5–120 s). Past it, they wait for their leases to lapse. The
   # worker's `stop_grace_period` below must be longer, or Compose kills first.

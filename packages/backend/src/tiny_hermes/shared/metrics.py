@@ -25,6 +25,8 @@ from prometheus_client import (
     make_wsgi_app,  # pyright: ignore[reportUnknownVariableType]
 )
 
+from tiny_hermes.shared.tracing import tracer
+
 if TYPE_CHECKING:
     from tiny_hermes.shared.config import Settings
 
@@ -161,14 +163,15 @@ LOGIN_ATTEMPTS = Counter(
 )
 
 
-async def timed[T](histogram: Histogram, work: Awaitable[T]) -> T:
-    """Await `work`, observing its time under outcome ok or failed."""
+async def timed[T](histogram: Histogram, span: str, work: Awaitable[T]) -> T:
+    """Await `work` inside a span, observing its time under outcome ok or failed."""
     started = time.monotonic()
-    try:
-        value = await work
-    except BaseException:
-        histogram.labels(outcome="failed").observe(time.monotonic() - started)
-        raise
+    with tracer.start_as_current_span(span):
+        try:
+            value = await work
+        except BaseException:
+            histogram.labels(outcome="failed").observe(time.monotonic() - started)
+            raise
     histogram.labels(outcome="ok").observe(time.monotonic() - started)
     return value
 

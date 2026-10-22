@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from time import monotonic
+from time import monotonic, time_ns
 from typing import Any, Protocol, cast
 from uuid import UUID
 
@@ -152,6 +152,7 @@ from tiny_hermes.shared.metrics import (
     WORKSPACE_COMMIT_SECONDS,
     timed,
 )
+from tiny_hermes.shared.tracing import context_from, tracer
 from tiny_hermes.tools.application.execute import (
     ArtifactUpload,
     StreamedCommandRunner,
@@ -402,7 +403,17 @@ class WorkerRuntime:
         if claimed is None:
             return None
         CLAIM_WAIT.observe(claimed.waited_seconds)
-        with WORKER_LANES.labels(state="busy").track_inprogress():
+        with (
+            WORKER_LANES.labels(state="busy").track_inprogress(),
+            tracer.start_as_current_span(
+                "run.slice",
+                context=context_from(claimed.trace_context),
+                attributes={
+                    "run.id": str(claimed.run.id),
+                    "workspace.id": str(claimed.run.workspace_id),
+                },
+            ),
+        ):
             await self._execute_slice(claimed)
             try:
                 await self._review_for_skills(claimed)
@@ -820,9 +831,12 @@ class WorkerRuntime:
             )
             return None
         asked = monotonic()
+        acquiring = tracer.start_span("sandbox.acquire")
 
         def acquire_ended(outcome: str) -> None:
             SANDBOX_ACQUIRE_SECONDS.labels(outcome=outcome).observe(monotonic() - asked)
+            acquiring.set_attribute("sandbox.outcome", outcome)
+            acquiring.end()
 
         try:
             acquired = await self._sandbox.acquire(
@@ -1471,8 +1485,9 @@ class WorkerRuntime:
             if not answer.failed and changes_workspace(call.name):
                 wrote = True
             results.append(answer)
-        answered = _tool_events(response.tool_calls, results, started, monotonic(), ended)
-        _observe_tool_calls(answered)
+        finished = monotonic()
+        answered = _tool_events(response.tool_calls, results, started, finished, ended)
+        _observe_tool_calls(answered, started, finished)
         events.extend(answered)
         return _RoundWork(
             (assistant, CanonicalMessage("tool", tuple(results))),
@@ -1638,6 +1653,7 @@ class WorkerRuntime:
         try:
             result = await timed(
                 WORKSPACE_COMMIT_SECONDS,
+                "workspace.commit",
                 service.checkpoint(
                     WorkspaceCheckpoint(
                     workspace_id=claimed.run.workspace_id,
@@ -3754,13 +3770,29 @@ def _argument_shape(arguments: Mapping[str, Any]) -> dict[str, str]:
     return shaped
 
 
-def _observe_tool_calls(answered: Sequence[ReservedEvent]) -> None:
-    """From the events, so the metric and the Run's own record agree on
-    which calls ran and how long each took."""
+def _observe_tool_calls(
+    answered: Sequence[ReservedEvent], started: Mapping[str, float], finished: float
+) -> None:
+    """From the events, so the metric, the span and the Run's own record agree
+    on which calls ran and how long each took.
+
+    The spans are written after the round, with the times each call had: the
+    dispatch loop above has a dozen ways out per call, and a span opened inside
+    it would need closing on every one.
+    """
+    wall_finished = time_ns()
     for event in answered:
-        TOOL_CALL_SECONDS.labels(
-            kind=_tool_kind(str(event.payload["tool"])), outcome=str(event.payload["outcome"])
-        ).observe(int(event.payload["duration_ms"]) / 1000)
+        kind = _tool_kind(str(event.payload["tool"]))
+        outcome = str(event.payload["outcome"])
+        duration_ms = int(event.payload["duration_ms"])
+        TOOL_CALL_SECONDS.labels(kind=kind, outcome=outcome).observe(duration_ms / 1000)
+        began = wall_finished - int((finished - started[str(event.payload["call_id"])]) * 1e9)
+        span = tracer.start_span(
+            f"tool.{kind}",
+            start_time=began,
+            attributes={"tool.name": str(event.payload["tool"]), "tool.outcome": outcome},
+        )
+        span.end(end_time=began + duration_ms * 1_000_000)
 
 
 def _tool_kind(name: str) -> str:

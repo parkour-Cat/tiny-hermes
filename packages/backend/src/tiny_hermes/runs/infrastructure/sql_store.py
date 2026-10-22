@@ -170,6 +170,7 @@ from tiny_hermes.runs.ports.store import (
     WidenBudgetCommand,
 )
 from tiny_hermes.shared.metrics import RECOVERIES, RUNS_FINISHED
+from tiny_hermes.shared.tracing import context_from, current_traceparent, tracer
 from tiny_hermes.skills.infrastructure.tables import (
     SkillRow,
     SkillVersionLoadRow,
@@ -350,6 +351,7 @@ class SqlRunStore:
         ceiling = await self._cost_ceiling(command.workspace_id)
         run = RunRow(
             id=run_id,
+            trace_context=current_traceparent(),
             workspace_id=command.workspace_id,
             session_id=session.id,
             agent_version_id=version_id,
@@ -2225,6 +2227,7 @@ class SqlRunStore:
             lease_version=lease_version,
             lease_expires_at=expires_at,
             waited_seconds=max(0.0, (now - claimable_since).total_seconds()),
+            trace_context=candidate.trace_context,
         )
 
     async def _select_claimable(self, command: ClaimRunCommand, now: datetime) -> RunRow | None:
@@ -2319,7 +2322,26 @@ class SqlRunStore:
     async def recover_interrupted(
         self, run_id: UUID, max_attempts: int, request_id: str
     ) -> RunState | None:
-        """Return an interrupted Run to the queue only when that is safe."""
+        """Return an interrupted Run to the queue only when that is safe.
+
+        In the Run's own trace when it has one (observability design §5.3);
+        a Run that was not sampled gets no stray trace of its own here.
+        """
+        traced = await self._session.scalar(
+            select(RunRow.trace_context).where(RunRow.id == run_id)
+        )
+        if traced is None:
+            return await self._recover_interrupted(run_id, max_attempts, request_id)
+        with tracer.start_as_current_span(
+            "run.recover", context=context_from(traced), attributes={"run.id": str(run_id)}
+        ) as span:
+            state = await self._recover_interrupted(run_id, max_attempts, request_id)
+            span.set_attribute("run.state", "unchanged" if state is None else state.value)
+            return state
+
+    async def _recover_interrupted(
+        self, run_id: UUID, max_attempts: int, request_id: str
+    ) -> RunState | None:
         run = await self._lock_run_any_workspace(run_id)
         if run is None or RunState(run.status) is not RunState.INTERRUPTED:
             return None
@@ -3023,6 +3045,7 @@ class SqlRunStore:
         run_id = uuid4()
         run = RunRow(
             id=run_id,
+            trace_context=current_traceparent(),
             workspace_id=command.workspace_id,
             session_id=session.id,
             agent_version_id=source.agent_version_id,
@@ -3229,6 +3252,7 @@ class SqlRunStore:
             child_id = uuid4()
             child = RunRow(
                 id=child_id,
+                trace_context=current_traceparent(),
                 workspace_id=parent.workspace_id,
                 session_id=child_session.id,
                 agent_version_id=child_version_id,

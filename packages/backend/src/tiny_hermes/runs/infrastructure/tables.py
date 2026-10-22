@@ -334,6 +334,8 @@ class RunRow(IdMixin, CreatedAtMixin, Base):
     #: §17.2, v2.17: the round as it stood when a call that may reach outside
     #: was sent, until the round is recorded. See `runs.domain.interruption`.
     inflight_round: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    #: W3C traceparent of the request that created the Run (observability design §5.3).
+    trace_context: Mapped[str | None] = mapped_column(String(64), nullable=True)
     #: `{"fingerprint", "idempotency_key"}` for each HTTP write recovery told
     #: the model about, until an exact repeat takes the key.
     interrupted_writes: Mapped[list[dict[str, str]] | None] = mapped_column(

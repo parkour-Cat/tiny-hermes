@@ -15,6 +15,7 @@ socket that cannot reach a network anyway.
 """
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -41,6 +42,7 @@ from tiny_hermes.sandbox.transport.frames import (
 )
 from tiny_hermes.sandbox.transport.tls import allowed_actions, role_of
 from tiny_hermes.shared.metrics import CONTROLLER_ACTION_SECONDS
+from tiny_hermes.shared.tracing import context_from, tracer
 
 Dispatch = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 StreamDispatch = Callable[
@@ -394,8 +396,19 @@ class ControllerServer:
         if allowed is not None and action not in allowed:
             return {"error": ProtocolError.ROLE_NOT_PERMITTED.value}
         started = time.monotonic()
+        traceparent = fields.get("traceparent")
+        # Only inside a caller's trace: an untraced caller's Run was not
+        # sampled, and a root trace per action would be noise of its own.
+        traced = (
+            tracer.start_as_current_span(
+                f"controller.{action}", context=context_from(traceparent)
+            )
+            if isinstance(traceparent, str)
+            else contextlib.nullcontext()
+        )
         try:
-            answer = {"result": await self._dispatch(action, cast(dict[str, Any], payload))}
+            with traced:
+                answer = {"result": await self._dispatch(action, cast(dict[str, Any], payload))}
         except Exception as refused:  # noqa: BLE001 - every refusal is a reply
             CONTROLLER_ACTION_SECONDS.labels(action=action, outcome="refused").observe(
                 time.monotonic() - started

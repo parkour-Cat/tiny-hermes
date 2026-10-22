@@ -520,6 +520,8 @@ class ClaimedRun:
     lease_expires_at: datetime
     #: From becoming claimable to this claim (observability design §3.1).
     waited_seconds: float = 0.0
+    #: The Run's trace, for this slice to continue (observability design §5.3).
+    trace_context: str | None = None
 
 
 @dataclass(frozen=True)
