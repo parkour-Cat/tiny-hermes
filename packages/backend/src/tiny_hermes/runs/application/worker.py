@@ -342,6 +342,10 @@ class WorkerRuntime:
         self._model = model
         self._notifier = notifier
         self._settings = settings
+        #: Set by `run_forever`'s caller on SIGTERM. Checked where a round
+        #: decides whether the slice goes on, so a stopping Worker ends the
+        #: slice there as an expired one would (M1 run execution design §6.5).
+        self._stopping: asyncio.Event | None = None
         # Optional for the same reason the sandbox is: a deployment with no
         # skill catalog needs none. An Agent that bound a skill and finds this
         # absent is told so in the tool result rather than reading nothing and
@@ -397,6 +401,7 @@ class WorkerRuntime:
         return claimed.run.id
 
     async def run_forever(self, stop: asyncio.Event) -> None:
+        self._stopping = stop
         while not stop.is_set():
             try:
                 advanced = await self.run_once()
@@ -405,6 +410,9 @@ class WorkerRuntime:
                 advanced = None
             if advanced is None and not stop.is_set():
                 await self._notifier.wait(self._settings.idle_poll_seconds)
+
+    def _stop_requested(self) -> bool:
+        return self._stopping is not None and self._stopping.is_set()
 
     async def _claim(self) -> ClaimedRun | None:
         async with self._sessions.begin() as session:
@@ -597,7 +605,9 @@ class WorkerRuntime:
                 budget_allows = (
                     _budget_after(after, response, executed_ms) and not work.tool_limit_reached
                 )
-                slice_expired = (monotonic() - started) >= self._settings.max_slice_seconds
+                slice_expired = (
+                    monotonic() - started
+                ) >= self._settings.max_slice_seconds or self._stop_requested()
                 rounds_exhausted = _rounds_exhausted(context)
                 hold_slice = after.compat_deadline_at is not None and not compat_expired
                 # §12.1: `_has_waiting_run` opens its own transaction, worth

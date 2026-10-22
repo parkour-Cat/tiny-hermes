@@ -24,6 +24,10 @@ x-base-env: &base-env
   # Workers per worker container (1–64). Each concurrent Run can hold a sandbox
   # on this one Docker host, so raising it is a capacity decision.
   WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
+  # How long a stopping Worker may take to finish the round under way and hand
+  # its Runs back (5–120 s). Past it, they wait for their leases to lapse. The
+  # worker's `stop_grace_period` below must be longer, or Compose kills first.
+  WORKER_SHUTDOWN_GRACE_SECONDS: ${WORKER_SHUTDOWN_GRACE_SECONDS:-20}
   # How long a Worker keeps a Run before it goes back to the queue (10–300 s).
   # Shorter slices bound how long a newly queued Run waits behind long tasks
   # (§21.3); each slice boundary freezes and later thaws a sandbox.
@@ -237,6 +241,9 @@ services:
       dockerfile: apps/api/Dockerfile
     command: ["/app/.venv/bin/tiny-hermes-worker"]
     environment: *app-env
+    # Compose's default is 10 s, shorter than the Worker's own grace period:
+    # killed at 10 s, a restart interrupted three of four long tasks.
+    stop_grace_period: 30s
     volumes:
       - controller-socket:/run/tiny-hermes
     depends_on:
@@ -250,8 +257,8 @@ services:
       # never calls the controller, and a Worker held back by an unhealthy one
       # would leave every Run queued — which is what happened the first time
       # this said `service_healthy`. A tool-bound Run that meets an absent
-      # controller fails as `sandbox_start_failed`, per §11.5, which is one Run
-      # rather than all of them.
+      # controller waits and retries (M1 sandbox design §11), which holds up
+      # that Run rather than all of them.
       controller:
         condition: service_started
     # Liveness, not progress: this reports that the process is still there. A

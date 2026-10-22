@@ -6,7 +6,7 @@ import signal
 import socket
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
@@ -125,11 +125,49 @@ async def _worker() -> None:
     stop = _stop_on_termination()
     logger.info("worker started", extra={"worker_ids": worker_ids})
     try:
-        await asyncio.gather(*(runtime.run_forever(stop) for runtime in runtimes))
+        await _run_until_stopped(
+            [runtime.run_forever for runtime in runtimes],
+            stop,
+            grace_seconds=settings.worker_shutdown_grace_seconds,
+        )
     finally:
         for notifier in notifiers:
             await notifier.close()
     logger.info("worker stopped", extra={"worker_ids": worker_ids})
+
+
+async def _run_until_stopped(
+    runs: Sequence[Callable[[asyncio.Event], Awaitable[None]]],
+    stop: asyncio.Event,
+    *,
+    grace_seconds: float,
+) -> None:
+    """Every Worker until `stop`, then at most `grace_seconds` more.
+
+    A Worker that is still inside a round when the grace period ends is
+    cancelled: it writes nothing, its lease lapses, and the Scheduler treats
+    the Run as it treats a killed Worker's (M1 run execution design §6.5).
+    """
+    running = asyncio.gather(*(run(stop) for run in runs))
+    stopping = asyncio.ensure_future(stop.wait())
+    try:
+        await asyncio.wait({running, stopping}, return_when=asyncio.FIRST_COMPLETED)
+        if running.done():
+            await running
+            return
+        done, _ = await asyncio.wait({running}, timeout=grace_seconds)
+        if done:
+            await running
+            return
+        logger.warning(
+            "workers still busy after the shutdown grace period, leaving their leases to lapse",
+            extra={"grace_seconds": grace_seconds},
+        )
+        running.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running
+    finally:
+        stopping.cancel()
 
 
 def _worker_pool(concurrency: int) -> dict[str, int]:
