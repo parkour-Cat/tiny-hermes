@@ -53,6 +53,14 @@ class HttpToolAnswer:
         )
 
 
+@dataclass(frozen=True)
+class Cleared:
+    """A call charged to the Run and written down, free to go out."""
+
+    #: Sent as `Idempotency-Key`, for a write.
+    idempotency_key: str | None = None
+
+
 class HttpToolSender(Protocol):
     async def send(
         self,

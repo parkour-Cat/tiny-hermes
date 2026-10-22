@@ -17,7 +17,7 @@ will retry it or invent what it returned.
 """
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -39,7 +39,7 @@ from tiny_hermes.runs.ports.children import (
     DelegationRequest,
     DelegationWait,
 )
-from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolSender
+from tiny_hermes.runs.ports.http_calls import Cleared, EgressClaim, HttpToolSender
 from tiny_hermes.runs.ports.mcp import BoundMcpTool, McpGateway
 from tiny_hermes.runs.ports.memories import MemoryCandidates
 from tiny_hermes.runs.ports.proposals import SkillProposals
@@ -581,7 +581,7 @@ async def answer_http_call(
     claim: EgressClaim,
     gate: ApprovalGate | None = None,
     *,
-    before_call: Callable[[], Awaitable[bool]] | None = None,
+    before_call: Callable[[HttpRequestPlan], Awaitable[Cleared | None]] | None = None,
 ) -> HttpCallOutcome:
     """Call somebody else's API, wait for a person, or say why not.
 
@@ -625,8 +625,13 @@ async def answer_http_call(
 
     if sender is None:
         return HttpCallOutcome(text_refusal(call.call_id, "no outbound face is configured here"))
-    if before_call is not None and not await before_call():
+    cleared = Cleared() if before_call is None else await before_call(plan)
+    if cleared is None:
         return HttpCallOutcome(text_refusal(call.call_id, "tool_budget_exceeded"))
+    if cleared.idempotency_key is not None:
+        plan = replace(
+            plan, headers={**plan.headers, "Idempotency-Key": cleared.idempotency_key}
+        )
     answer = await sender.send(plan, entry.credential_ref, claim)
     if answer.refusal is not None:
         return HttpCallOutcome(

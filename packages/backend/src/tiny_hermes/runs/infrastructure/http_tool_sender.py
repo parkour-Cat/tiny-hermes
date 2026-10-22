@@ -82,7 +82,9 @@ class OutboundHttpToolSender:
         # another's would be measuring the wrong Agent.
         async with self._client_factory(claim) as client:
             try:
-                response = await client.request(plan.method, plan.url, headers=headers)
+                response = await client.request(
+                    plan.method, plan.url, content=plan.body, headers=headers
+                )
             except OutboundRefused as refused:
                 # The boundary said no, not the far end. Named with the scope's
                 # own reason so a person reading the transcript can tell "this

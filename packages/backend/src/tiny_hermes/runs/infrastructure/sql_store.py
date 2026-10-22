@@ -78,6 +78,7 @@ from tiny_hermes.runs.domain.context_budget import (
     ContextWindow,
     has_compactable_history,
 )
+from tiny_hermes.runs.domain.interruption import InFlightRound, told_after_interruption
 from tiny_hermes.runs.domain.models import (
     TERMINAL_STATES,
     USAGE_WINDOW,
@@ -1831,19 +1832,56 @@ class SqlRunStore:
         )
         return RenewedLease(lease_id=command.lease_id, version=renewed, expires_at=expires_at)
 
-    async def reserve_tool_call(
-        self, workspace_id: UUID, run_id: UUID, lease_id: UUID, *, reaches_outside: bool = False
-    ) -> bool:
+    async def reserve_tool_call(self, workspace_id: UUID, run_id: UUID, lease_id: UUID) -> bool:
         """Reserve an attempt before dispatch; children and retries share this row.
 
         The reservation survives uncertain tool outcomes. Refunding after a
         timeout would allow an operation that may have run to evade the limit.
-
-        A call that ``reaches_outside`` marks the checkpoint's effect unknown
-        in the same transaction, before anything is sent: until the round is
-        recorded, which writes the checkpoint again, crash recovery must not
-        replay a round whose effect the far end may already have.
         """
+        return await self._charge_tool_call(workspace_id, run_id, lease_id) is not None
+
+    async def reserve_outside_call(
+        self, workspace_id: UUID, run_id: UUID, lease_id: UUID, sending: InFlightRound
+    ) -> InFlightRound | None:
+        """`reserve_tool_call` for a call that may reach outside the sandbox.
+
+        Returns the round as written down, carrying the key an HTTP write goes
+        out with; `None` when the call may not be made.
+
+        In the transaction that charges the call, before anything is sent: the
+        checkpoint's effect becomes unknown, so the round cannot be replayed,
+        and the round is kept, so recovery can tell the model what was going
+        out instead (§17.2, v2.17). Recording the round clears both.
+
+        An exact repeat of a write recovery told the model about takes that
+        write's key, once. Any other write gets a new one, even an identical
+        write in the same round: two equal orders may be two orders.
+        """
+        run = await self._charge_tool_call(workspace_id, run_id, lease_id)
+        if run is None:
+            return None
+        run.checkpoint_effect_status = CheckpointEffectStatus.UNKNOWN.value
+        key: str | None = None
+        if sending.fingerprint is not None:
+            waiting = list(run.interrupted_writes or [])
+            match = next(
+                (entry for entry in waiting if entry["fingerprint"] == sending.fingerprint),
+                None,
+            )
+            if match is not None:
+                waiting.remove(match)
+                run.interrupted_writes = waiting or None
+                key = match["idempotency_key"]
+            else:
+                key = str(uuid4())
+        recorded = replace(sending, idempotency_key=key)
+        run.inflight_round = recorded.document()
+        return recorded
+
+    async def _charge_tool_call(
+        self, workspace_id: UUID, run_id: UUID, lease_id: UUID
+    ) -> RunRow | None:
+        """The locked Run when a call was charged to it, else `None`."""
         run = await self._lock_run(workspace_id, run_id)
         if run is None:
             raise UnknownRun
@@ -1865,9 +1903,7 @@ class SqlRunStore:
             .returning(RunBudgetScopeRow.root_run_id)
             .execution_options(synchronize_session=False)
         )
-        if reserved is not None and reaches_outside:
-            run.checkpoint_effect_status = CheckpointEffectStatus.UNKNOWN.value
-        return reserved is not None
+        return run if reserved is not None else None
 
     async def record_slice(self, command: RecordSliceCommand) -> RunSnapshot:
         """Persist one slice's checkpoint, accounting, state change, and lease."""
@@ -1894,6 +1930,8 @@ class SqlRunStore:
         run.checkpoint = command.checkpoint
         run.checkpoint_replay_safe = command.checkpoint_replay_safe
         run.checkpoint_effect_status = command.checkpoint_effect_status.value
+        # Its calls and their answers are in `appended`: nothing is in flight.
+        run.inflight_round = None
         run.updated_at = now
         if command.workspace_cleanup_target is not None:
             # Design §6.3: the destination and the sandbox to confirm, written
@@ -1904,21 +1942,7 @@ class SqlRunStore:
         # produced but not recorded would leave the transcript short, and the
         # next round would then build a different conversation than the one that
         # actually happened.
-        for message in command.appended:
-            self._session.add(
-                SessionMessageRow(
-                    id=uuid4(),
-                    session_id=session.id,
-                    workspace_id=command.workspace_id,
-                    sequence=session.next_message_sequence,
-                    role=message.role,
-                    content=message.document(),
-                    source_run_id=run.id,
-                    redacted=False,
-                    created_at=now,
-                )
-            )
-            session.next_message_sequence += 1
+        self._append_messages(run, session, command.appended, now)
         await self._consume_budget(
             run.budget_root_run_id,
             command.executed_ms,
@@ -2131,6 +2155,11 @@ class SqlRunStore:
         _apply_decision(candidate, decision, now)
         candidate.state_version += 1
         candidate.updated_at = now
+        # A queued Run has no round in flight. Recovery consumes the one an
+        # interrupted slice left; anything else here was left by a slice that
+        # ended some other way, and must not be told to the model later as if
+        # this slice had sent it.
+        candidate.inflight_round = None
 
         lease_id = uuid4()
         expires_at = now + timedelta(seconds=command.lease_seconds)
@@ -2286,7 +2315,6 @@ class SqlRunStore:
         if session is None or budget is None:
             return None
 
-        effect = CheckpointEffectStatus(run.checkpoint_effect_status)
         # Design §12: a Run whose checkpoint names one revision while the
         # Session's pointer names another cannot be replayed automatically —
         # restoring would hand the model a workspace its transcript never saw.
@@ -2294,6 +2322,11 @@ class SqlRunStore:
             run.checkpoint_workspace_revision_id is None
             or run.checkpoint_workspace_revision_id == session.workspace_revision_id
         )
+        # Not told when they disagree: the interrupted round's workspace
+        # changes may then have been committed, and the account below would
+        # say they were not.
+        told = self._tell_interrupted_round(run, session) if revision_agrees else None
+        effect = CheckpointEffectStatus(run.checkpoint_effect_status)
         safe = (
             run.checkpoint_replay_safe
             and revision_agrees
@@ -2312,9 +2345,62 @@ class SqlRunStore:
             wait_kind=None,
             wait_deadline_at=None,
             request_id=request_id,
-            payload={"replay_safe": run.checkpoint_replay_safe},
+            payload={
+                "replay_safe": run.checkpoint_replay_safe,
+                **({"interrupted_call_id": told} if told is not None else {}),
+            },
         )
         return RunState(run.status)
+
+    def _tell_interrupted_round(self, run: RunRow, session: SessionRow) -> str | None:
+        """Put the round a lost Worker was in into the transcript (§17.2, v2.17).
+
+        Returns the id of the call that was going out, or `None` when no round
+        was written down. Without one, an unknown effect stays unknown and the
+        Run fails as it always did: a provider reporting an unknown effect of
+        its own names no call the model could be told about.
+
+        Written whether or not the Run then goes back to the queue, which can
+        still fail on budget or attempts: the round happened either way, and a
+        retry derived from a failed Run reads the same transcript.
+        """
+        if run.inflight_round is None:
+            return None
+        sending = InFlightRound.from_document(run.inflight_round)
+        self._append_messages(run, session, told_after_interruption(sending), datetime.now(UTC))
+        if sending.idempotency_key is not None and sending.fingerprint is not None:
+            run.interrupted_writes = [
+                *(run.interrupted_writes or []),
+                {"fingerprint": sending.fingerprint, "idempotency_key": sending.idempotency_key},
+            ]
+        run.inflight_round = None
+        # The transcript now says what is known about the call, which is what
+        # recording a round would have done.
+        run.checkpoint_effect_status = CheckpointEffectStatus.NONE.value
+        return sending.call_id
+
+    def _append_messages(
+        self,
+        run: RunRow,
+        session: SessionRow,
+        messages: Sequence[CanonicalMessage],
+        now: datetime,
+    ) -> None:
+        for message in messages:
+            self._session.add(
+                SessionMessageRow(
+                    id=uuid4(),
+                    session_id=session.id,
+                    workspace_id=run.workspace_id,
+                    sequence=session.next_message_sequence,
+                    role=message.role,
+                    content=message.document(),
+                    source_run_id=run.id,
+                    redacted=False,
+                    created_at=now,
+                )
+            )
+            session.next_message_sequence += 1
 
     async def interrupted_runs(self, limit: int) -> Sequence[UUID]:
         rows = await self._session.scalars(

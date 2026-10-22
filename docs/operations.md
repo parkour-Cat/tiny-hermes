@@ -395,6 +395,13 @@ Worker 收到 SIGTERM 后：
    直接退出，那些 Run 等租约过期（20 秒），由 Scheduler 中断再恢复，每次用掉一次恢复机会
    （`MAX_RECOVERY_ATTEMPTS`，默认 3）。
 
+被中断的那一轮里如果有一个调用正发往沙箱外面（`http.*`、`mcp.*`、配了网络的 `shell.exec`），
+恢复时不会让模型重想一遍，而是把那一轮写进会话记录，那个调用的结果写成「中断，结果未知」，
+由模型自己去查（设计 §17.2，v2.17）。对方有没有收到，平台不知道，对话里能看到模型怎么处理的。
+这种 Run 的恢复事件（`run_recovery_approved`；预算或恢复次数用完时是 `run_recovery_failed`）
+带 `interrupted_call_id`。工作区版本对不上（这一轮的
+改动可能已经提交）的 Run 不写这段记录，照旧失败。
+
 Compose 给 Worker 的 `stop_grace_period` 是 30 秒，**必须大于**
 `WORKER_SHUTDOWN_GRACE_SECONDS`。调大后者时一起调大前者，否则 Compose 会先把进程杀掉。
 

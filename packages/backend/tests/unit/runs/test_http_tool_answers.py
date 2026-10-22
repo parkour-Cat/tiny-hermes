@@ -32,7 +32,7 @@ from tiny_hermes.runs.application.tool_answers import answer_http_call
 from tiny_hermes.runs.domain.approval import ApprovalType, NormalizedCall
 from tiny_hermes.runs.domain.models import CallerType, RunEventType, ToolCallBlock
 from tiny_hermes.runs.ports.approvals import ApprovalCheck, ApprovalVerdict
-from tiny_hermes.runs.ports.http_calls import EgressClaim, HttpToolAnswer
+from tiny_hermes.runs.ports.http_calls import Cleared, EgressClaim, HttpToolAnswer
 from tiny_hermes.runs.ports.store import BudgetSummary, ExecutionContext
 from tiny_hermes.tools.domain.http_calls import BoundOperation, HttpRequestPlan
 from tiny_hermes.tools.domain.openapi import Operation, OperationParameter
@@ -57,10 +57,10 @@ async def test_only_an_approved_dispatch_spends_a_tool_call(
 ) -> None:
     count = 0
 
-    async def reserve() -> bool:
+    async def reserve(plan: HttpRequestPlan) -> Cleared | None:
         nonlocal count
         count += 1
-        return allowed
+        return Cleared() if allowed else None
 
     sender = Sender()
     await answer_http_call(

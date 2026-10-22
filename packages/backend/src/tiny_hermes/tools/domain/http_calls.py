@@ -17,6 +17,7 @@ it says so — but it is the only correct behaviour while the capability it
 depends on does not exist.
 """
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -73,6 +74,18 @@ class HttpRequestPlan:
     #: platform has ever held one.
     headers: dict[str, str]
     read_only: bool
+
+    @property
+    def fingerprint(self) -> str:
+        """What the far end would receive, as one value.
+
+        An interrupted write repeated exactly is the same request, and is sent
+        with the same `Idempotency-Key` (§17.2, v2.17). The headers are left
+        out: the only ones composed here follow from the body.
+        """
+        digest = hashlib.sha256(f"{self.method}\n{self.url}\n".encode())
+        digest.update(self.body or b"")
+        return digest.hexdigest()
 
 
 class HttpCallRefused(Exception):

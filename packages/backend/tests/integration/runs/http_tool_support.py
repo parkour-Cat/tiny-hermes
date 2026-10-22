@@ -61,6 +61,8 @@ class StandIn:
     requests: list[tuple[str, str, dict[str, str]]] = field(
         default_factory=list[tuple[str, str, dict[str, str]]]
     )
+    #: Each request's body, in the order `requests` holds them.
+    bodies: list[bytes] = field(default_factory=list[bytes])
     #: When set, the answer body carries back the request header of this name.
     #: Stands in for every far end that reflects what it was sent — a debug
     #: endpoint, a misconfigured gateway, or one that means to.
@@ -80,12 +82,15 @@ class StandIn:
             for key, value in scope["headers"]
         }
         self.requests.append((str(scope["method"]), str(scope["path"]), headers))
-        if self.on_request is not None:
-            await self.on_request()
+        received = b""
         while True:
             message = await receive()
+            received += message.get("body", b"")
             if not message.get("more_body", False):
                 break
+        self.bodies.append(received)
+        if self.on_request is not None:
+            await self.on_request()
         answer = dict(ANSWER)
         if self.echo_header is not None:
             answer = {**answer, "you_sent": headers.get(self.echo_header.lower(), "")}
