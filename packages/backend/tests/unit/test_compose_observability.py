@@ -75,12 +75,12 @@ def _registered() -> set[str]:
     for family in REGISTRY.collect():
         names.add(family.name)
         names.update(sample.name for sample in family.samples)
-    # A histogram with no observation yet has no `_bucket` sample to collect.
+    # A labelled family with no child yet has no samples to collect at all.
+    suffixes = {"histogram": ("_bucket", "_count", "_sum"), "counter": ("_total",)}
     names.update(
         f"{family.name}{suffix}"
         for family in REGISTRY.collect()
-        if family.type == "histogram"
-        for suffix in ("_bucket", "_count", "_sum")
+        for suffix in suffixes.get(family.type, ())
     )
     return names
 
