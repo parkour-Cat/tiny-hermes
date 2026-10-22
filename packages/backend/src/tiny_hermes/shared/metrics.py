@@ -207,11 +207,17 @@ def serve_configured_metrics(settings: "Settings", *, needs_token: bool = False)
     if needs_token and not settings.metrics_token:
         logger.warning("metrics not served: METRICS_TOKEN is unset and this process requires it")
         return
-    serve_metrics(
-        host=settings.metrics_host,
-        port=settings.metrics_port,
-        token=settings.metrics_token or None,
-    )
+    try:
+        serve_metrics(
+            host=settings.metrics_host,
+            port=settings.metrics_port,
+            token=settings.metrics_token or None,
+        )
+    except OSError:
+        # A Worker that cannot publish metrics still runs Runs; one that
+        # exited over it would run none. The scrape target shows as down.
+        logger.exception("metrics not served", extra={"port": settings.metrics_port})
+        return
     logger.info("metrics served", extra={"port": settings.metrics_port})
 
 
