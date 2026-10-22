@@ -23,6 +23,7 @@ import pytest
 from tiny_hermes.sandbox.transport.client import ControllerClient
 from tiny_hermes.sandbox.transport.server import ControllerServer, ProtocolError
 
+from ..support import metric
 from .conftest import MAX_SOCKET_PATH, Pki, wire
 
 pytestmark = pytest.mark.skipif(
@@ -76,11 +77,17 @@ async def test_a_request_reaches_the_controller_and_the_answer_comes_back(
 ) -> None:
     spy, client = wired
     run_id = uuid4()
+    timed = metric("tiny_hermes_controller_action_seconds_count", action="acquire", outcome="ok")
 
     answer = await client.call("acquire", {"run_id": str(run_id), "profile": "default"})
 
     assert spy.calls == [("acquire", {"run_id": str(run_id), "profile": "default"})]
     assert answer == spy.answer
+    # Observability design §3.4: what a Worker waits on, Docker and rows together.
+    assert (
+        metric("tiny_hermes_controller_action_seconds_count", action="acquire", outcome="ok")
+        == timed + 1
+    )
 
 
 async def test_a_refusal_arrives_as_a_refusal_and_not_as_a_dropped_connection(
@@ -93,11 +100,18 @@ async def test_a_refusal_arrives_as_a_refusal_and_not_as_a_dropped_connection(
     """
     spy, client = wired
     spy.refusal = "lease_invalid"
+    timed = metric(
+        "tiny_hermes_controller_action_seconds_count", action="execute", outcome="refused"
+    )
 
     with pytest.raises(ControllerClient.Refused) as refused:
         await client.call("execute", {"sandbox_id": str(uuid4())})
 
     assert refused.value.reason == "lease_invalid"
+    assert (
+        metric("tiny_hermes_controller_action_seconds_count", action="execute", outcome="refused")
+        == timed + 1
+    )
 
 
 async def test_the_server_survives_a_malformed_frame(

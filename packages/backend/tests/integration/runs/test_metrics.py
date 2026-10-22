@@ -8,20 +8,33 @@ import asyncio
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
-from urllib.request import urlopen
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
 from prometheus_client import REGISTRY
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from tiny_hermes.runs.application.model_router import ModelRouter
 from tiny_hermes.runs.application.scheduler import SchedulerRuntime, SchedulerSettings
 from tiny_hermes.runs.application.worker import WorkerRuntime, WorkerSettings
+from tiny_hermes.runs.domain.models import RunSignal
+from tiny_hermes.runs.infrastructure.deterministic_model import DeterministicModelProvider
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
+from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.model import ModelRequest, ModelResponse, StopReason
+from tiny_hermes.runs.ports.store import ApplySignalCommand
 from tiny_hermes.shared.metrics import serve_metrics
 
-from .test_scheduler import _scheduler  # pyright: ignore[reportPrivateUsage]
+from ..support import metric
+from .test_scheduler import (
+    FULL,
+    _abandon_claim,  # pyright: ignore[reportPrivateUsage]
+    _expire_lease,  # pyright: ignore[reportPrivateUsage]
+    _scheduler,  # pyright: ignore[reportPrivateUsage]
+)
 
 
 def _value(name: str, **labels: str) -> float:
@@ -171,19 +184,120 @@ async def test_an_empty_queue_reports_no_wait(empty_database: None, engine: Asyn
     assert _value("tiny_hermes_queue_oldest_age_seconds") == 0
 
 
-def test_the_metrics_port_serves_the_registry() -> None:
-    server, thread = serve_metrics(host="127.0.0.1", port=0)
+def _scrape(token: str | None, *, sent: str | None = None) -> tuple[int, str]:
+    server, thread = serve_metrics(host="127.0.0.1", port=0, token=token)
     try:
         port = server.server_address[1]
-        with urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5) as response:  # noqa: S310
-            body = response.read().decode()
+        request = Request(f"http://127.0.0.1:{port}/metrics")  # noqa: S310
+        if sent is not None:
+            request.add_header("Authorization", f"Bearer {sent}")
+        try:
+            with urlopen(request, timeout=5) as response:  # noqa: S310
+                return response.status, response.read().decode()
+        except HTTPError as refused:
+            return refused.code, ""
     finally:
         server.shutdown()
         thread.join(timeout=5)
+
+
+def test_the_metrics_port_serves_the_registry() -> None:
+    status, body = _scrape(None)
+
+    assert status == 200
     assert "tiny_hermes_claim_wait_seconds" in body
     assert "tiny_hermes_scheduler_scan_seconds" in body
+
+
+def test_with_a_token_the_metrics_port_answers_only_its_bearer() -> None:
+    """Design §4.2: a sandbox can reach every port of the egress proxy."""
+    assert _scrape("metrics-token", sent=None)[0] == 401
+    assert _scrape("metrics-token", sent="wrong")[0] == 401
+    assert _scrape("metrics-token", sent="metrics-token")[0] == 200
 
 
 def test_the_public_api_port_has_no_metrics(client: TestClient) -> None:
     """§4.1: the API is what the gateway exposes; metrics stay off it."""
     assert client.get("/metrics").status_code == 404
+
+
+async def test_a_model_call_is_timed_by_provider_and_the_finished_run_counted(
+    queued: dict[str, Any], engine: AsyncEngine
+) -> None:
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    calls = metric("tiny_hermes_model_call_seconds_count", provider="deterministic")
+    completed = metric("tiny_hermes_runs_finished_total", status="completed")
+
+    await WorkerRuntime(
+        session_factory=sessions,
+        model=ModelRouter(
+            deterministic=DeterministicModelProvider(delay_ms=0),
+            session_factory=sessions,
+            client_factory=_no_network,
+        ),
+        notifier=NullWakeUpNotifier(),
+        settings=WorkerSettings(
+            worker_id="metrics-router",
+            lease_seconds=30,
+            max_slice_seconds=30,
+            idle_poll_seconds=1,
+        ),
+    ).run_once()
+
+    assert metric("tiny_hermes_model_call_seconds_count", provider="deterministic") == calls + 1
+    assert metric("tiny_hermes_runs_finished_total", status="completed") == completed + 1
+
+
+def _no_network() -> Any:
+    raise AssertionError("a deterministic policy needs no client")
+
+
+async def test_a_rolled_back_transition_is_not_counted(
+    queued: dict[str, Any], scope: dict[str, str], engine: AsyncEngine
+) -> None:
+    """Counted on commit: a transaction that rolls back finished nothing."""
+    cancelled = metric("tiny_hermes_runs_finished_total", status="cancelled")
+    async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        store = SqlRunStore(session)
+        await store.apply_signal(
+            ApplySignalCommand(
+                workspace_id=UUID(scope["X-Workspace-Id"]),
+                run_id=UUID(str(queued["id"])),
+                signal=RunSignal.CANCEL_REQUESTED,
+                pause_reason=None,
+                request_id="metrics-rollback",
+                capabilities=FULL,
+            )
+        )
+        await session.rollback()
+
+    assert metric("tiny_hermes_runs_finished_total", status="cancelled") == cancelled
+
+
+async def test_a_recovery_is_counted_by_outcome(
+    queued: dict[str, Any], engine: AsyncEngine
+) -> None:
+    approved = metric("tiny_hermes_recoveries_total", outcome="approved")
+    claimed = await _abandon_claim(engine)
+    await _expire_lease(engine, claimed.run.id)
+
+    await _scheduler(engine).run_once()
+
+    assert metric("tiny_hermes_recoveries_total", outcome="approved") == approved + 1
+
+
+def test_a_request_is_timed_by_its_route_not_its_path(
+    client: TestClient, scope: dict[str, str], queued: dict[str, Any]
+) -> None:
+    """A Run id in the label would be a new series per Run (design §2)."""
+    route = "/api/v1/runs/{run_id}"
+    before = metric("tiny_hermes_http_request_seconds_count", route=route, status_class="2xx")
+
+    assert client.get(f"/api/v1/runs/{queued['id']}", headers=scope).status_code == 200
+
+    assert (
+        metric("tiny_hermes_http_request_seconds_count", route=route, status_class="2xx")
+        == before + 1
+    )
+    by_path = f"/api/v1/runs/{queued['id']}"
+    assert metric("tiny_hermes_http_request_seconds_count", route=by_path) == 0

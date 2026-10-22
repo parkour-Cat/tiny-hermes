@@ -29,7 +29,9 @@ from tiny_hermes.sandbox.domain.container_policy import DEFAULT_PROFILE
 from tiny_hermes.sandbox.domain.models import CacheState, ReservationStatus
 from tiny_hermes.sandbox.infrastructure.docker_engine import DockerEngine
 from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
+from tiny_hermes.sandbox.observation import publish_sandbox_gauges
 
+from ..support import metric
 from .conftest import LABEL, RecordingAudit, StubLeases
 
 WORKSPACE = uuid4()
@@ -157,11 +159,13 @@ async def test_a_sandbox_past_the_budget_is_refused_and_leaves_nothing_behind(
     await platform.acquire(uuid4())
     before = platform.labelled()
     third = uuid4()
+    rejected = metric("tiny_hermes_sandbox_admission_rejected_total")
 
     with pytest.raises(SandboxRefused) as refusal:
         await platform.acquire(third)
 
     assert refusal.value.reason is RefusalReason.MEMORY_BUDGET_EXHAUSTED
+    assert metric("tiny_hermes_sandbox_admission_rejected_total") == rejected + 1
     assert platform.labelled() == before
     assert await platform.claim_of(third) is None
 
@@ -274,3 +278,22 @@ async def test_a_running_runs_sandbox_frozen_for_a_checkpoint_is_not_evicted(
 
     assert refusal.value.reason is RefusalReason.MEMORY_BUDGET_EXHAUSTED
     assert platform.state(await platform.container_of(made.sandbox_id)) == "paused"
+
+
+async def test_the_sandboxes_and_their_memory_are_published(
+    platform: Platform, engine: AsyncEngine
+) -> None:
+    """Observability design §3.4: what the budget is spent on, from the rows."""
+    first = await platform.acquire(uuid4())
+    second_run = uuid4()
+    second = await platform.acquire(second_run)
+    await platform.checkpoint(second_run, second.sandbox_id)
+    assert first.sandbox_id != second.sandbox_id
+
+    async with async_sessionmaker(engine)() as session:
+        await publish_sandbox_gauges(SqlSandboxStore(session), budget_mb=512)
+
+    assert metric("tiny_hermes_sandboxes", state="running") == 1
+    assert metric("tiny_hermes_sandboxes", state="frozen") == 1
+    assert metric("tiny_hermes_sandbox_memory_reserved_bytes") == 512 * MiB
+    assert metric("tiny_hermes_sandbox_memory_budget_bytes") == 512 * MiB

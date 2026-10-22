@@ -6,6 +6,8 @@ from tiny_hermes.api.app import create_app
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
 from tiny_hermes.shared.config import Settings
 
+from ..support import metric
+
 
 @pytest.mark.asyncio
 async def test_bootstrap_login_me_and_logout(engine: AsyncEngine, database_url: str) -> None:
@@ -64,17 +66,23 @@ async def test_bootstrap_login_me_and_logout(engine: AsyncEngine, database_url: 
         assert closed.headers["content-type"].startswith("application/problem+json")
         assert closed.headers["X-Request-Id"] == closed.json()["request_id"]
 
+        failed = metric("tiny_hermes_login_attempts_total", outcome="bad_credentials")
+        succeeded = metric("tiny_hermes_login_attempts_total", outcome="ok")
         denied_login = api_client.post(
             "/api/v1/auth/sessions",
             json={"subject": "admin@example.com", "password": "wrong-password"},
         )
         assert denied_login.status_code == 401
+        assert (
+            metric("tiny_hermes_login_attempts_total", outcome="bad_credentials") == failed + 1
+        )
 
         login = api_client.post(
             "/api/v1/auth/sessions",
             json={"subject": "admin@example.com", "password": "long-pass-123"},
         )
         assert login.status_code == 201
+        assert metric("tiny_hermes_login_attempts_total", outcome="ok") == succeeded + 1
         assert login.cookies.get("tiny_hermes_session")
         csrf = login.cookies["tiny_hermes_csrf"]
 
