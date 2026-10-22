@@ -21,6 +21,7 @@ import os
 import socket
 import ssl
 import stat
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from enum import StrEnum
@@ -39,6 +40,7 @@ from tiny_hermes.sandbox.transport.frames import (
     encode_frame,
 )
 from tiny_hermes.sandbox.transport.tls import allowed_actions, role_of
+from tiny_hermes.shared.metrics import CONTROLLER_ACTION_SECONDS
 
 Dispatch = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 StreamDispatch = Callable[
@@ -391,13 +393,21 @@ class ControllerServer:
             return {"error": ProtocolError.UNKNOWN_ACTION.value}
         if allowed is not None and action not in allowed:
             return {"error": ProtocolError.ROLE_NOT_PERMITTED.value}
+        started = time.monotonic()
         try:
-            return {"result": await self._dispatch(action, cast(dict[str, Any], payload))}
+            answer = {"result": await self._dispatch(action, cast(dict[str, Any], payload))}
         except Exception as refused:  # noqa: BLE001 - every refusal is a reply
+            CONTROLLER_ACTION_SECONDS.labels(action=action, outcome="refused").observe(
+                time.monotonic() - started
+            )
             # A refusal and a dropped connection are different facts, and a
             # Worker that cannot tell them apart would retry a rejection.
             reason = getattr(refused, "reason", None)
             return {"error": str(getattr(reason, "value", reason) or type(refused).__name__)}
+        CONTROLLER_ACTION_SECONDS.labels(action=action, outcome="ok").observe(
+            time.monotonic() - started
+        )
+        return answer
 
     async def _say(self, writer: asyncio.StreamWriter, body: dict[str, Any]) -> None:
         writer.write(json.dumps(body).encode() + b"\n")

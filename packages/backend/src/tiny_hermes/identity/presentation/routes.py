@@ -19,6 +19,7 @@ from tiny_hermes.identity.presentation.dependencies import (
     unauthenticated,
 )
 from tiny_hermes.shared.errors import AppError
+from tiny_hermes.shared.metrics import LOGIN_ATTEMPTS
 
 
 class BootstrapRequest(BaseModel):
@@ -101,12 +102,14 @@ def identity_router(resources: ApplicationResources) -> APIRouter:
                 str(payload.subject), payload.password, request.state.request_id
             )
         except InvalidCredentials as error:
+            LOGIN_ATTEMPTS.labels(outcome="bad_credentials").inc()
             raise AppError(
                 code="invalid_credentials",
                 title="Invalid credentials",
                 status=401,
                 detail="The local account or password is invalid.",
             ) from error
+        LOGIN_ATTEMPTS.labels(outcome="ok").inc()
         secure = resources.settings.environment != "development"
         response.set_cookie(
             SESSION_COOKIE,

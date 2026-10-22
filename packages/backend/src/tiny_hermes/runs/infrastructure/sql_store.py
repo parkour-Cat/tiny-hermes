@@ -1,5 +1,5 @@
 import hashlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -22,11 +22,12 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy import cast as sql_cast
+from sqlalchemy import event as sa_event
 from sqlalchemy.dialects.postgresql import JSONB, JSONPATH
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import InstrumentedAttribute, aliased
+from sqlalchemy.orm import InstrumentedAttribute, Session, aliased
 
 from tiny_hermes.agents.domain.delegation import (
     MAX_DELEGATION_DEPTH,
@@ -168,6 +169,7 @@ from tiny_hermes.runs.ports.store import (
     StoredSummary,
     WidenBudgetCommand,
 )
+from tiny_hermes.shared.metrics import RECOVERIES, RUNS_FINISHED
 from tiny_hermes.skills.infrastructure.tables import (
     SkillRow,
     SkillVersionLoadRow,
@@ -893,6 +895,8 @@ class SqlRunStore:
         )
 
         _apply_decision(run, decision, now)
+        if decision.is_terminal:
+            _count_on_commit(self._session, RUNS_FINISHED.labels(status=decision.state.value).inc)
         # Cleared alongside `wait_kind` rather than left behind: a Run that is
         # no longer waiting on children must not read as one that is waiting
         # for `all` of nothing.
@@ -2351,6 +2355,9 @@ class SqlRunStore:
         if safe:
             run.recovery_attempts += 1
         signal = RunSignal.RECOVERY_APPROVED if safe else RunSignal.RECOVERY_FAILED
+        _count_on_commit(
+            self._session, RECOVERIES.labels(outcome="approved" if safe else "failed").inc
+        )
         await self._decide_and_write(
             run,
             session,
@@ -4338,6 +4345,29 @@ def _unfinished(status: InstrumentedAttribute[str]) -> ColumnElement[bool]:
             literal_execute=True,
         )
     )
+
+
+_ON_COMMIT = "tiny_hermes.metrics_on_commit"
+
+
+def _count_on_commit(session: AsyncSession, count: Callable[[], None]) -> None:
+    """Count when the transaction commits, never before: a transition that
+    rolls back did not happen, and a counter cannot be taken back."""
+    pending: list[Callable[[], None]] = session.sync_session.info.setdefault(_ON_COMMIT, [])
+    pending.append(count)
+
+
+def _counted(session: Session) -> None:
+    for count in session.info.pop(_ON_COMMIT, []):
+        count()
+
+
+def _not_counted(session: Session) -> None:
+    session.info.pop(_ON_COMMIT, None)
+
+
+sa_event.listen(Session, "after_commit", _counted)
+sa_event.listen(Session, "after_rollback", _not_counted)
 
 
 def _claimable(now: datetime) -> tuple[ColumnElement[bool], ...]:

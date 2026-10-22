@@ -54,6 +54,7 @@ from tiny_hermes.egress.ports.directory import ScopeDirectory
 from tiny_hermes.outbound.domain.address_policy import Address, Network, verdict
 from tiny_hermes.outbound.domain.scope import OutboundScope
 from tiny_hermes.outbound.resolver import lookup
+from tiny_hermes.shared.metrics import EGRESS_CONNECTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,9 @@ class EgressProxy:
         if claim is None:
             # Before the target is looked at, so an unauthenticated caller
             # cannot use this proxy as a DNS oracle.
+            EGRESS_CONNECTIONS.labels(
+                caller="unknown", decision="deny", reason=ProxyRefusal.UNKNOWN_CALLER.value
+            ).inc()
             await _answer(writer, 407, ProxyRefusal.UNKNOWN_CALLER.value, "unknown caller")
             return
 
@@ -189,6 +193,9 @@ class EgressProxy:
             await self._refuse(writer, request, claim, answer)
             return
 
+        EGRESS_CONNECTIONS.labels(
+            caller=claim.kind.value, decision="allow", reason="allowed"
+        ).inc()
         logger.info(
             "egress allowed: caller=%s host=%s port=%s run=%s",
             claim.kind.value,
@@ -231,6 +238,9 @@ class EgressProxy:
         claim: CallerClaim,
         verdict: ProxyVerdict,
     ) -> None:
+        EGRESS_CONNECTIONS.labels(
+            caller=claim.kind.value, decision="deny", reason=verdict.reason_text
+        ).inc()
         logger.info(
             "egress refused: caller=%s host=%s reason=%s run=%s",
             claim.kind.value,

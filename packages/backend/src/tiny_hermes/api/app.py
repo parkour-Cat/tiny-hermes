@@ -14,6 +14,7 @@ from tiny_hermes.api.health import (
     health_router,
 )
 from tiny_hermes.api.request_context import RequestIdMiddleware
+from tiny_hermes.api.request_metrics import RequestMetricsMiddleware
 from tiny_hermes.api.resources import ApplicationResources
 from tiny_hermes.artifacts.presentation.routes import artifact_router
 from tiny_hermes.audit.presentation.routes import audit_router
@@ -104,6 +105,7 @@ def create_app(
 
     app = FastAPI(title="tiny-hermes API", version="0.0.0", lifespan=lifespan)
     app.add_middleware(RequestIdMiddleware)
+    app.add_middleware(RequestMetricsMiddleware)
     app.add_exception_handler(AppError, app_error_handler)
     # An `AuditedDenial` reaches here only because its route let it through
     # rather than converting it, which is what gives the request dependency

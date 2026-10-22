@@ -144,7 +144,14 @@ from tiny_hermes.session_workspace.infrastructure.sandbox_port import (
     WorkspaceGateway,
 )
 from tiny_hermes.session_workspace.ports.objects import ObjectStore
-from tiny_hermes.shared.metrics import CLAIM_WAIT, WORKER_LANES
+from tiny_hermes.shared.metrics import (
+    CLAIM_WAIT,
+    SANDBOX_ACQUIRE_SECONDS,
+    TOOL_CALL_SECONDS,
+    WORKER_LANES,
+    WORKSPACE_COMMIT_SECONDS,
+    timed,
+)
 from tiny_hermes.tools.application.execute import (
     ArtifactUpload,
     StreamedCommandRunner,
@@ -812,6 +819,11 @@ class WorkerRuntime:
                 claimed, handle, context, "sandbox_not_configured", spent, executed_ms
             )
             return None
+        asked = monotonic()
+
+        def acquire_ended(outcome: str) -> None:
+            SANDBOX_ACQUIRE_SECONDS.labels(outcome=outcome).observe(monotonic() - asked)
+
         try:
             acquired = await self._sandbox.acquire(
                 run_id=claimed.run.id,
@@ -821,6 +833,7 @@ class WorkerRuntime:
                 profile=DEFAULT_PROFILE.name,
             )
         except SandboxRefused as refused:
+            acquire_ended("refused")
             if refused.reason in _NOT_READY:
                 # A previous slice's container is still being reclaimed, or the
                 # sandbox memory budget has no room (§21.3). That is the
@@ -856,6 +869,7 @@ class WorkerRuntime:
             )
             return None
         except SandboxUnreachable as unreachable:
+            acquire_ended("unreachable")
             # Failing the Run made a network blip permanent for whoever sent
             # it (tier B acceptance, finding 1). Which way it waits depends on
             # whether the acquire may have reserved a sandbox nobody heard of.
@@ -891,12 +905,14 @@ class WorkerRuntime:
             )
             return None
         except Exception:
+            acquire_ended("failed")
             logger.exception("sandbox acquire failed", extra={"run_id": str(claimed.run.id)})
             await self._fail(
                 claimed, handle, context, "sandbox_start_failed", spent, executed_ms
             )
             return None
 
+        acquire_ended("cold" if acquired.cache_state is CacheState.RESET else "warm")
         if acquired.cache_state is CacheState.RESET:
             # §11.3, and both halves of it: the event a person reads, and the
             # protected hint the model reads on the next call. That call comes
@@ -1455,9 +1471,9 @@ class WorkerRuntime:
             if not answer.failed and changes_workspace(call.name):
                 wrote = True
             results.append(answer)
-        events.extend(
-            _tool_events(response.tool_calls, results, started, monotonic(), ended)
-        )
+        answered = _tool_events(response.tool_calls, results, started, monotonic(), ended)
+        _observe_tool_calls(answered)
+        events.extend(answered)
         return _RoundWork(
             (assistant, CanonicalMessage("tool", tuple(results))),
             wrote,
@@ -1620,15 +1636,18 @@ class WorkerRuntime:
             return None
 
         try:
-            result = await service.checkpoint(
-                WorkspaceCheckpoint(
+            result = await timed(
+                WORKSPACE_COMMIT_SECONDS,
+                service.checkpoint(
+                    WorkspaceCheckpoint(
                     workspace_id=claimed.run.workspace_id,
                     session_id=claimed.run.session_id,
                     run_id=claimed.run.id,
-                    base_revision_id=box.revision,
-                    quota=runtime.quota,
-                    slice_command=slice_command,
-                )
+                        base_revision_id=box.revision,
+                        quota=runtime.quota,
+                        slice_command=slice_command,
+                    )
+                ),
             )
         except (LeaseLost, StateVersionConflict):
             handle.lost = True
@@ -3733,6 +3752,27 @@ def _argument_shape(arguments: Mapping[str, Any]) -> dict[str, str]:
         else:
             shaped[key] = "null" if value is None else type(value).__name__
     return shaped
+
+
+def _observe_tool_calls(answered: Sequence[ReservedEvent]) -> None:
+    """From the events, so the metric and the Run's own record agree on
+    which calls ran and how long each took."""
+    for event in answered:
+        TOOL_CALL_SECONDS.labels(
+            kind=_tool_kind(str(event.payload["tool"])), outcome=str(event.payload["outcome"])
+        ).observe(int(event.payload["duration_ms"]) / 1000)
+
+
+def _tool_kind(name: str) -> str:
+    if name.startswith(f"{HTTP_PREFIX}."):
+        return "http"
+    if name.startswith(f"{MCP_PREFIX}."):
+        return "mcp"
+    if name.startswith("file."):
+        return "file"
+    if name == "shell.exec":
+        return "shell"
+    return "platform"
 
 
 def _tool_events(

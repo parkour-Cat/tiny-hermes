@@ -190,6 +190,19 @@ class SqlSandboxStore:
         )
         return int(total or 0)
 
+    async def live_instances_by_status(self) -> dict[str, int]:
+        """Instances a live claim may still hold, by their own status."""
+        rows = await self._session.execute(
+            select(SandboxInstanceRow.status, func.count())
+            .join(
+                SandboxReservationRow,
+                SandboxReservationRow.sandbox_instance_id == SandboxInstanceRow.id,
+            )
+            .where(SandboxReservationRow.status.in_([e.value for e in LIVE_RESERVATIONS]))
+            .group_by(SandboxInstanceRow.status)
+        )
+        return {str(status): int(count) for status, count in rows.all()}
+
     async def evictable_keeps(self) -> list[SandboxReservation]:
         """Frozen instances under a kept claim, the earliest deadline first.
 
