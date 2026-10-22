@@ -13,10 +13,14 @@ builds the right dict; only the daemon can say what it built.
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from ipaddress import ip_address
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from tiny_hermes.egress.infrastructure.sql_directory import SqlScopeDirectory
 from tiny_hermes.sandbox.application.controller import (
     AcquireResult,
     RefusalReason,
@@ -24,10 +28,13 @@ from tiny_hermes.sandbox.application.controller import (
     SandboxRefused,
 )
 from tiny_hermes.sandbox.domain.command import SandboxCommand
+from tiny_hermes.sandbox.domain.container_policy import EgressNetwork
 from tiny_hermes.sandbox.domain.models import CacheState, InstanceStatus
-from tiny_hermes.sandbox.infrastructure.docker_engine import ContainerNotRunning
+from tiny_hermes.sandbox.infrastructure.docker_engine import ContainerNotRunning, DockerEngine
+from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
 
-from .conftest import RecordingAudit, StubLeases
+from ..conftest import VALID_SPEC
+from .conftest import LABEL, RecordingAudit, StubLeases
 
 RUN = uuid4()
 LEASE = uuid4()
@@ -338,6 +345,88 @@ async def test_thawing_this_runs_own_instance_reports_reuse(
 
     assert second.sandbox_id == first.sandbox_id
     assert second.cache_state is CacheState.REUSED
+
+
+async def test_a_reused_instance_is_somebody_to_the_proxy_again(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    docker_client: Any,
+    image_digest: str,
+    leases: StubLeases,
+) -> None:
+    """The proxy knows a sandbox only by its address row. A slice ends with
+    freeze, which deletes the row, and the next slice's acquire hands the
+    same container back: the proxy must know it again, at the address Docker
+    actually gave the container."""
+    run_id = UUID(_a_run(client, scope))
+    network = docker_client.networks.create(
+        f"tiny-hermes-test-egress-{uuid4().hex[:8]}", driver="bridge", internal=True
+    )
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions() as session:
+            controller = SandboxController(
+                engine=DockerEngine(docker_client, extra_labels={LABEL: "1"}),
+                store=SqlSandboxStore(session),
+                approved_digests=(image_digest,),
+                leases=leases,
+                egress=EgressNetwork(name=network.name, proxy_url="http://egress-proxy:3128"),
+            )
+            first = await acquired(controller, run_id=run_id)
+            await controller.freeze(run_id=run_id, lease_id=LEASE, sandbox_id=first.sandbox_id)
+            await controller.keep(
+                run_id=run_id,
+                sandbox_id=first.sandbox_id,
+                until=datetime.now(UTC) + timedelta(minutes=5),
+            )
+            await session.commit()
+
+            second = await acquired(controller, run_id=run_id, lease=uuid4())
+            await session.commit()
+            assert second.cache_state is CacheState.REUSED
+            container = docker_client.containers.get(
+                await _container_of(controller, second.sandbox_id)
+            )
+
+        given = container.attrs["NetworkSettings"]["Networks"][network.name]["IPAddress"]
+        directory = SqlScopeDirectory(sessions)
+        claim = await directory.sandbox_claim(ip_address(given))
+        assert claim is not None
+        assert claim.run_id == run_id
+    finally:
+        for leftover in docker_client.containers.list(all=True, filters={"label": f"{LABEL}=1"}):
+            leftover.remove(force=True)
+        network.remove()
+
+
+def _a_run(client: TestClient, scope: dict[str, str]) -> str:
+    """A Run for the address row to belong to; its Agent asks for nothing."""
+    agent_id = client.post(
+        "/api/v1/agents", headers=scope, json={"name": "Runner", "alias": "runner"}
+    ).json()["id"]
+    draft = client.put(
+        f"/api/v1/agents/{agent_id}/draft",
+        headers=scope,
+        json={"expected_revision": 1, "spec": VALID_SPEC},
+    )
+    assert draft.status_code == 200, draft.text
+    published = client.post(
+        f"/api/v1/agents/{agent_id}/publish",
+        headers=scope,
+        json={"expected_revision": draft.json()["revision"]},
+    )
+    assert published.status_code == 201, published.text
+    session_id = client.post("/api/v1/sessions", headers=scope, json={"agent_id": agent_id}).json()[
+        "id"
+    ]
+    created = client.post(
+        "/api/v1/runs",
+        headers={**scope, "Idempotency-Key": "reused-instance"},
+        json={"session_id": session_id, "input": "hello"},
+    )
+    assert created.status_code == 201, created.text
+    return str(created.json()["id"])
 
 
 async def test_a_kept_instance_past_its_deadline_is_not_reused(

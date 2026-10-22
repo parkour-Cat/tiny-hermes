@@ -46,7 +46,7 @@ def test_the_environment_reaches_every_process() -> None:
 def test_the_postgres_password_is_one_variable_for_server_and_clients() -> None:
     spec = document()
     password = spec["services"]["postgres"]["environment"]["POSTGRES_PASSWORD"]
-    assert password == "${POSTGRES_PASSWORD:-local-only}"
+    assert password == "${POSTGRES_PASSWORD:-local-only}"  # noqa: S105 - the shipped default
     assert ":${POSTGRES_PASSWORD:-local-only}@" in spec["x-base-env"]["DATABASE_URL"]
 
 
