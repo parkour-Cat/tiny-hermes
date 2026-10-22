@@ -18,6 +18,7 @@ class MemoryAuthStore:
         self._users: dict[UUID, AuthenticatedUser] = {}
         self._sessions: dict[str, StoredSession] = {}
         self.audit_actions: list[str] = []
+        self.login_failures: list[tuple[str, datetime]] = []
 
     @property
     def session_token_digests(self) -> set[str]:
@@ -31,6 +32,21 @@ class MemoryAuthStore:
     async def bootstrap_lock(self) -> AsyncGenerator[None]:
         async with self._lock:
             yield
+
+    async def lock_login(self, subject_key: str) -> None:
+        del subject_key
+
+    async def login_failures_since(
+        self, subject_key: str, since: datetime
+    ) -> tuple[int, datetime | None]:
+        times = [at for key, at in self.login_failures if key == subject_key and at > since]
+        return len(times), min(times, default=None)
+
+    async def record_login_failure(self, subject_key: str, at: datetime) -> None:
+        self.login_failures.append((subject_key, at))
+
+    async def clear_login_failures(self, subject_key: str) -> None:
+        self.login_failures = [entry for entry in self.login_failures if entry[0] != subject_key]
 
     async def has_platform_admin(self) -> bool:
         return any(user.is_platform_admin for user in self._users.values())

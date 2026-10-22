@@ -74,6 +74,7 @@ async def app_error_handler(request: Request, error: Exception) -> JSONResponse:
         raise error
     return JSONResponse(
         status_code=error.status,
+        headers=error.headers,
         media_type="application/problem+json",
         content={
             "type": f"https://tiny-hermes.dev/errors/{error.code.replace('_', '-')}",

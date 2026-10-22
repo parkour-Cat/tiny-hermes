@@ -21,6 +21,24 @@ class InvalidCredentials(Exception):
     pass
 
 
+class LoginThrottled(Exception):
+    def __init__(self, retry_after_seconds: int) -> None:
+        super().__init__(f"retry after {retry_after_seconds}s")
+        self.retry_after_seconds = retry_after_seconds
+
+
+#: §23.16 (v2.19): this many failures on one account inside the window, and
+#: password login on it is refused until the oldest leaves the window.
+LOGIN_FAILURE_LIMIT = 5
+LOGIN_FAILURE_WINDOW = timedelta(minutes=15)
+
+
+def login_subject_key(subject: str) -> str:
+    """What failures are counted by: never the name itself, which is sometimes
+    a password typed into the wrong box."""
+    return hashlib.sha256(subject.strip().lower().encode()).hexdigest()
+
+
 class AuthService:
     def __init__(self, store: AuthStore, bootstrap_token: str, session_ttl_seconds: int) -> None:
         self._store = store
@@ -63,6 +81,26 @@ class AuthService:
     async def login(
         self, subject: str, password: str, request_id: str
     ) -> tuple[str, str, AuthenticatedUser]:
+        """§23.16: throttled per account, existing or not, before the password
+        is looked at. A refusal that still let the right password through
+        would tell a guesser when they had it; one that skipped accounts that
+        do not exist would tell them which do."""
+        key = login_subject_key(subject)
+        now = datetime.now(UTC)
+        await self._store.lock_login(key)
+        failures, oldest = await self._store.login_failures_since(
+            key, now - LOGIN_FAILURE_WINDOW
+        )
+        if failures >= LOGIN_FAILURE_LIMIT and oldest is not None:
+            await self._store.append_audit(
+                actor_id=None,
+                action="identity.login_throttled",
+                result="denied",
+                request_id=request_id,
+                context={},
+            )
+            waited = oldest + LOGIN_FAILURE_WINDOW - now
+            raise LoginThrottled(max(1, int(waited.total_seconds()) + 1))
         identity = await self._store.find_local_identity(subject.strip().lower())
         # `identity.password_hash is None` is its own check, not folded into
         # the `or` below by accident of short-circuiting: OIDC login design's
@@ -76,6 +114,7 @@ class AuthService:
             or identity.password_hash is None
             or not self._passwords.verify(password, identity.password_hash)
         ):
+            await self._store.record_login_failure(key, now)
             await self._store.append_audit(
                 actor_id=None,
                 action="identity.login_failed",
@@ -84,6 +123,7 @@ class AuthService:
                 context={},
             )
             raise InvalidCredentials
+        await self._store.clear_login_failures(key)
         session_token, csrf_token = await self._issue_session(
             identity.user, request_id, "identity.login_succeeded"
         )

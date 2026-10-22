@@ -50,3 +50,19 @@ class AuthStore(Protocol):
         request_id: str,
         context: dict[str, str],
     ) -> None: ...
+
+    async def lock_login(self, subject_key: str) -> None:
+        """Serialise attempts on one account for this transaction, so two
+        parallel guesses cannot both be counted as the fifth."""
+        ...
+
+    async def login_failures_since(
+        self, subject_key: str, since: datetime
+    ) -> tuple[int, datetime | None]:
+        """How many failures since `since`, and the oldest of them."""
+        ...
+
+    async def record_login_failure(self, subject_key: str, at: datetime) -> None: ...
+
+    async def clear_login_failures(self, subject_key: str) -> None: ...
+

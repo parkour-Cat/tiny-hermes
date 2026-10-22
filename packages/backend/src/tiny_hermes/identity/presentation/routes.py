@@ -10,6 +10,7 @@ from tiny_hermes.identity.application.auth_service import (
     BootstrapClosed,
     InvalidBootstrapToken,
     InvalidCredentials,
+    LoginThrottled,
 )
 from tiny_hermes.identity.domain.models import AuthenticatedUser, NewLocalUser
 from tiny_hermes.identity.presentation.dependencies import (
@@ -101,6 +102,20 @@ def identity_router(resources: ApplicationResources) -> APIRouter:
             session_token, csrf_token, user = await service.login(
                 str(payload.subject), payload.password, request.state.request_id
             )
+        except LoginThrottled as throttled:
+            LOGIN_ATTEMPTS.labels(outcome="throttled").inc()
+            seconds = throttled.retry_after_seconds
+            raise AppError(
+                code="login_throttled",
+                title="Too many failed sign-ins",
+                status=429,
+                detail=(
+                    "Too many failed sign-ins for this account. "
+                    f"Try again in {max(1, round(seconds / 60))} minute(s)."
+                ),
+                context={"retry_after_seconds": seconds},
+                headers={"Retry-After": str(seconds)},
+            ) from throttled
         except InvalidCredentials as error:
             LOGIN_ATTEMPTS.labels(outcome="bad_credentials").inc()
             raise AppError(
