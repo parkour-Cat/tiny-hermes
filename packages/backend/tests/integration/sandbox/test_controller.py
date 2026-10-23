@@ -328,6 +328,24 @@ _PROCESSES = (
 )
 
 
+async def _stops(
+    controller: SandboxController, sandbox_id: UUID, marker: str, within: float = 10.0
+) -> bool:
+    """Whether the processes are gone within `within` seconds.
+
+    Asked until they are, not once after a fixed second: stopping a process
+    group on a busy Docker host took longer than that once (2026-10-23), and
+    the test failed with nothing wrong. Still bounded, so a command that is
+    never stopped fails here.
+    """
+    deadline = asyncio.get_running_loop().time() + within
+    while await _still_running(controller, sandbox_id, marker):
+        if asyncio.get_running_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(0.25)
+    return True
+
+
 async def _still_running(controller: SandboxController, sandbox_id: UUID, marker: str) -> bool:
     listing = await controller.execute(
         run_id=RUN,
@@ -353,8 +371,7 @@ async def test_a_command_that_outruns_its_timeout_is_stopped_with_what_it_starte
     )
     assert answer.timed_out is True
 
-    await asyncio.sleep(1)
-    assert not await _still_running(controller, box.sandbox_id, "sleep 100")
+    assert await _stops(controller, box.sandbox_id, "sleep 100")
 
 
 async def test_a_streamed_command_that_outruns_its_timeout_is_stopped_too(
@@ -376,8 +393,7 @@ async def test_a_streamed_command_that_outruns_its_timeout_is_stopped_too(
     )
     assert result.timed_out is True
 
-    await asyncio.sleep(1)
-    assert not await _still_running(controller, box.sandbox_id, "sleep 100")
+    assert await _stops(controller, box.sandbox_id, "sleep 100")
 
 
 async def test_a_timed_out_command_keeps_what_it_printed(
