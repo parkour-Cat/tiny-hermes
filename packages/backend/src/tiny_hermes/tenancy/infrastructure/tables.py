@@ -26,6 +26,11 @@ class WorkspaceRow(IdMixin, CreatedAtMixin, Base):
             name="ck_workspaces_approval_validity",
         ),
         CheckConstraint(
+            "(max_running_runs_per_caller IS NULL OR max_running_runs_per_caller > 0) "
+            "AND (max_running_runs IS NULL OR max_running_runs > 0)",
+            name="ck_workspaces_running_limits_positive",
+        ),
+        CheckConstraint(
             "(max_run_cost IS NULL) = (cost_currency IS NULL)",
             name="ck_workspaces_cost_ceiling_paired",
         ),
@@ -59,6 +64,11 @@ class WorkspaceRow(IdMixin, CreatedAtMixin, Base):
     #: rather than an Agent author's, so the two reasons point the same way.
     max_run_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
     cost_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    #: §1.21.3 (v2.21): how many Runs one user or end user may have executing
+    #: at once here; null takes the platform's `RUN_LIMIT_PER_CALLER`.
+    max_running_runs_per_caller: Mapped[int | None] = mapped_column(nullable=True)
+    #: The whole workspace's; null is no limit. Over either, a Run waits.
+    max_running_runs: Mapped[int | None] = mapped_column(nullable=True)
     #: §14.1's three choices, defaulting to the middle one.
     #:
     #: Not `off`, because a feature that is off by default is one nobody has

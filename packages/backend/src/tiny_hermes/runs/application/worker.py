@@ -221,6 +221,8 @@ class WorkerSettings:
     #: How long a frozen instance is kept warm for this Run's next slice.
     sandbox_idle_ttl_seconds: int = 300
     workspace_id: UUID | None = None
+    run_limit_per_caller: int = 3
+    run_interactive_promotion_seconds: int = 120
 
 
 @dataclass
@@ -451,6 +453,8 @@ class WorkerRuntime:
                     lease_seconds=self._settings.lease_seconds,
                     request_id=f"worker-{self._settings.worker_id}",
                     capabilities=PLATFORM,
+                    per_caller_default=self._settings.run_limit_per_caller,
+                    promote_after_seconds=self._settings.run_interactive_promotion_seconds,
                 )
             )
 

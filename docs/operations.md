@@ -620,3 +620,24 @@ docker compose exec postgres psql -U tiny_hermes -d tiny_hermes -c \
 数据库兜底。Worker、Scheduler、controller、出站代理、登录、平台管理的事务不受限，隔离仍然
 只靠代码。
 
+## 15. 领取顺序与并发上限
+
+规则在产品设计 §1.21 第 2、3 条（v2.21），设计：[领取顺序与并发上限](superpowers/specs/2026-10-23-claim-limits-design.md)。
+
+- **交互的先领。**同步 Chat Completions，以及终端用户从 Web Chat、飞书等渠道发起的 Run，排在
+  控制台和异步 API 的 Run 前面；委派出去的子 Run 不算交互。后台 Run 排队超过
+  `RUN_INTERACTIVE_PROMOTION_SECONDS`（默认 120）后按交互排，不会被一直挤在后面。
+- **每人同时执行的上限**：`RUN_LIMIT_PER_CALLER`（默认 3），工作空间可以单独设
+  `workspaces.max_running_runs_per_caller`。只管用户和终端用户，服务账号（API Key）不受它约束。
+- **工作空间同时执行的上限**：`workspaces.max_running_runs`，默认不限。
+- 只算正在执行时间片的 Run；等审批、等外部事件、暂停、排队的不算。超出上限的 Run 排队等待，
+  不报错，状态仍是「排队中」。
+- 现在只能用 SQL 改工作空间的上限，设置界面在后续版本里做：
+
+```sql
+UPDATE workspaces SET max_running_runs = 20, max_running_runs_per_caller = 5 WHERE id = '...';
+```
+
+- 注意：排队数和「最久的等待」指标会把因为上限而等待的 Run 也算进去。某人一次提交很多任务时，
+  这两个数会变大，这是上限在起作用，不一定是容量不够。
+

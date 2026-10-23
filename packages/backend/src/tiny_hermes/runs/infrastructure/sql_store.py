@@ -10,7 +10,9 @@ from sqlalchemy import (
     BindParameter,
     ColumnElement,
     Text,
+    and_,
     bindparam,
+    case,
     column,
     delete,
     exists,
@@ -2140,7 +2142,7 @@ class SqlRunStore:
         or execute the lease.
         """
         now = datetime.now(UTC)
-        candidate = await self._select_claimable(command, now)
+        candidate = await self._claimable_within_limits(command, now)
         if candidate is None:
             return None
 
@@ -2230,21 +2232,153 @@ class SqlRunStore:
             trace_context=candidate.trace_context,
         )
 
-    async def _select_claimable(self, command: ClaimRunCommand, now: datetime) -> RunRow | None:
-        """Queued, Session Head, unblocked, and not already leased."""
+    async def _claimable_within_limits(
+        self, command: ClaimRunCommand, now: datetime
+    ) -> RunRow | None:
+        """The next Run to take, without taking a person or a workspace past
+        their running limit (§1.21.3, v2.21).
+
+        The query already leaves out whoever is at their limit, but two
+        claimers can both count two and both take a third. So the count is
+        taken again under a lock per workspace and per person, which the next
+        claimer for the same one waits on and then counts after this one has
+        committed. A candidate that fails the recount puts its person or
+        workspace aside, and the next is chosen without them.
+        """
+        callers: set[tuple[str, UUID]] = set()
+        workspaces: set[UUID] = set()
+        for _ in range(_CLAIM_ATTEMPTS):
+            found = await self._select_claimable(command, now, callers, workspaces)
+            if found is None:
+                return None
+            candidate, caller_type, caller_id, workspace_limit, caller_limit = found
+            if workspace_limit is not None:
+                await self._lock_running(f"workspace:{candidate.workspace_id}")
+                if await self._running(candidate.workspace_id) >= workspace_limit:
+                    workspaces.add(candidate.workspace_id)
+                    continue
+            if caller_type != CallerType.SERVICE_ACCOUNT.value:
+                limit = caller_limit or command.per_caller_default
+                await self._lock_running(
+                    f"caller:{candidate.workspace_id}:{caller_type}:{caller_id}"
+                )
+                if await self._running(candidate.workspace_id, caller_type, caller_id) >= limit:
+                    callers.add((caller_type, caller_id))
+                    continue
+            return candidate
+        return None
+
+    async def _lock_running(self, key: str) -> None:
+        """Workspace before person, always, so two claimers never wait on each
+        other's second lock."""
+        await self._session.execute(
+            select(func.pg_advisory_xact_lock(func.hashtextextended(f"running:{key}", 0)))
+        )
+
+    async def _running(
+        self, workspace_id: UUID, caller_type: str | None = None, caller_id: UUID | None = None
+    ) -> int:
+        statement = select(func.count()).select_from(RunRow).where(
+            RunRow.workspace_id == workspace_id, RunRow.status == RunState.RUNNING.value
+        )
+        if caller_type is not None:
+            statement = statement.join(SessionRow, SessionRow.id == RunRow.session_id).where(
+                SessionRow.caller_type == caller_type, SessionRow.caller_id == caller_id
+            )
+        return int(await self._session.scalar(statement) or 0)
+
+    async def _select_claimable(
+        self,
+        command: ClaimRunCommand,
+        now: datetime,
+        callers_full: set[tuple[str, UUID]],
+        workspaces_full: set[UUID],
+    ) -> tuple[RunRow, str, UUID, int | None, int | None] | None:
+        """Queued, Session Head, unblocked, not leased, and nobody's limit full.
+
+        Interactive first (§1.21.2): a Run from a chat channel, the Web Chat or
+        a synchronous completion, unless it is a delegated child, which nobody
+        is at a screen waiting for. A background Run that has waited past
+        `promote_after_seconds` counts as interactive, so chat cannot starve
+        it. Within each, the order they came in.
+        """
+        others = aliased(RunRow)
+        their_sessions = aliased(SessionRow)
+        caller_running = (
+            select(func.count())
+            .select_from(others)
+            .join(their_sessions, their_sessions.id == others.session_id)
+            .where(
+                others.status == RunState.RUNNING.value,
+                others.workspace_id == RunRow.workspace_id,
+                their_sessions.caller_type == SessionRow.caller_type,
+                their_sessions.caller_id == SessionRow.caller_id,
+            )
+            .scalar_subquery()
+        )
+        workspace_others = aliased(RunRow)
+        workspace_running = (
+            select(func.count())
+            .select_from(workspace_others)
+            .where(
+                workspace_others.status == RunState.RUNNING.value,
+                workspace_others.workspace_id == RunRow.workspace_id,
+            )
+            .scalar_subquery()
+        )
+        interactive = and_(
+            RunRow.parent_run_id.is_(None),
+            or_(
+                RunRow.delivery_mode == DeliveryMode.CHAT_COMPLETIONS.value,
+                SessionRow.caller_type == CallerType.END_USER.value,
+            ),
+        )
+        promoted = _claimable_since() <= now - timedelta(seconds=command.promote_after_seconds)
         statement = (
-            select(RunRow)
+            select(
+                RunRow,
+                SessionRow.caller_type,
+                SessionRow.caller_id,
+                WorkspaceRow.max_running_runs,
+                WorkspaceRow.max_running_runs_per_caller,
+            )
             .join(SessionRow, SessionRow.id == RunRow.session_id)
-            .where(*_claimable(now))
-            .order_by(RunRow.queued_at, RunRow.id)
+            .join(WorkspaceRow, WorkspaceRow.id == RunRow.workspace_id)
+            .where(
+                *_claimable(now),
+                or_(
+                    SessionRow.caller_type == CallerType.SERVICE_ACCOUNT.value,
+                    caller_running
+                    < func.coalesce(
+                        WorkspaceRow.max_running_runs_per_caller, command.per_caller_default
+                    ),
+                ),
+                or_(
+                    WorkspaceRow.max_running_runs.is_(None),
+                    workspace_running < WorkspaceRow.max_running_runs,
+                ),
+            )
+            .order_by(
+                case((or_(interactive, promoted), 0), else_=1), RunRow.queued_at, RunRow.id
+            )
             .limit(1)
             .with_for_update(of=RunRow, skip_locked=True)
         )
+        if workspaces_full:
+            statement = statement.where(RunRow.workspace_id.not_in(workspaces_full))
+        for caller_type, caller_id in callers_full:
+            statement = statement.where(
+                or_(SessionRow.caller_type != caller_type, SessionRow.caller_id != caller_id)
+            )
         if command.workspace_id is not None:
             statement = statement.where(RunRow.workspace_id == command.workspace_id)
         if command.session_id is not None:
             statement = statement.where(RunRow.session_id == command.session_id)
-        return await self._session.scalar(statement)
+        row = (await self._session.execute(statement)).first()
+        if row is None:
+            return None
+        run, caller_type, caller_id, workspace_limit, caller_limit = row
+        return run, str(caller_type), caller_id, workspace_limit, caller_limit
 
     async def queue_snapshot(self, now: datetime) -> QueueSnapshot:
         """Unfinished Runs by status, and the longest wait among claimable ones.
@@ -4370,6 +4504,10 @@ def _unfinished(status: InstrumentedAttribute[str]) -> ColumnElement[bool]:
         )
     )
 
+
+#: How many candidates a claim may set aside for a full limit before giving up
+#: this round; the Worker asks again on its next poll.
+_CLAIM_ATTEMPTS = 5
 
 _ON_COMMIT = "tiny_hermes.metrics_on_commit"
 

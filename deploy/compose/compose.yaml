@@ -28,6 +28,11 @@ x-base-env: &base-env
   # Workers per worker container (1–64). Each concurrent Run can hold a sandbox
   # on this one Docker host, so raising it is a capacity decision.
   WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
+  # Product design §1.21.2-3 (v2.21): Runs one user or end user may have
+  # executing at once where their workspace sets no limit, and how long a
+  # background Run waits before it is claimed as if interactive.
+  RUN_LIMIT_PER_CALLER: ${RUN_LIMIT_PER_CALLER:-3}
+  RUN_INTERACTIVE_PROMOTION_SECONDS: ${RUN_INTERACTIVE_PROMOTION_SECONDS:-120}
   # The metrics port's bearer token (observability design §4.2). Empty serves
   # every process's metrics without one, except the egress proxy's: a sandbox
   # can reach every port the proxy listens on, so it serves none without a

@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     #: as it was; raising it multiplies concurrent sandboxes on the one Docker
     #: host too, which is the operator's call, not a default's.
     worker_concurrency: int = Field(default=1, ge=1, le=64)
+    #: §1.21.3 (v2.21): Runs one user or end user may have executing at once
+    #: in a workspace that sets no limit of its own. Over it, a Run waits.
+    run_limit_per_caller: int = Field(default=3, ge=1, le=1000)
+    #: §1.21.2: how long a background Run waits before it is claimed as if
+    #: interactive, so chat cannot starve it.
+    run_interactive_promotion_seconds: int = Field(default=120, ge=1, le=86_400)
     worker_shutdown_grace_seconds: int = Field(default=20, ge=5, le=120)
     scheduler_interval_seconds: int = Field(default=1, ge=1, le=60)
     #: The metrics port (observability design §4.1). Its own port, never the
