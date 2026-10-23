@@ -20,6 +20,7 @@ from tiny_hermes.agents.domain.models import (
     execution_above_ceiling,
     initial_agent_spec,
     rounds_above_ceiling,
+    sandbox_memory_above_ceiling,
     tool_calls_above_ceiling,
 )
 from tiny_hermes.agents.ports.http_tools import (
@@ -453,6 +454,16 @@ class ExecutionCeilingExceeded(AgentCatalogError):
         self.allowed = allowed
 
 
+class SandboxMemoryCeilingExceeded(AgentCatalogError):
+    """The draft declares a larger sandbox than the platform allows (§21.3,
+    v2.22). Carries both numbers, as `RoundCeilingExceeded` does."""
+
+    def __init__(self, asked: int, allowed: int) -> None:
+        super().__init__(f"{asked} MB of sandbox memory asked, {allowed} allowed")
+        self.asked = asked
+        self.allowed = allowed
+
+
 class WorkspaceCeilingReader(Protocol):
     """A workspace's own ceilings, where it has set them (§1.21.1, v2.21)."""
 
@@ -864,6 +875,9 @@ class AgentCatalog:
         seconds_asked = execution_above_ceiling(spec, ceilings)
         if seconds_asked is not None:
             raise ExecutionCeilingExceeded(seconds_asked, ceilings.max_execution_seconds)
+        memory_asked = sandbox_memory_above_ceiling(spec, ceilings)
+        if memory_asked is not None:
+            raise SandboxMemoryCeilingExceeded(memory_asked, ceilings.sandbox_memory_mb)
 
     async def _check_endpoint(self, spec: AgentSpec) -> None:
         """Refuse a version that names an endpoint it cannot actually use."""

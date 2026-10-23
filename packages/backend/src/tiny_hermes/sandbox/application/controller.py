@@ -14,7 +14,7 @@ of a Run that is at that moment executing in it.
 import logging
 import random
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
@@ -28,6 +28,7 @@ from tiny_hermes.sandbox.domain.command import (
 )
 from tiny_hermes.sandbox.domain.container_policy import (
     DEFAULT_PROFILE,
+    MIN_SANDBOX_MEMORY_MB,
     ContainerPolicyError,
     ResourceProfile,
     SandboxNetworking,
@@ -67,6 +68,10 @@ class RefusalReason(StrEnum):
     #: §21.3: the new instance's limit does not fit, even after evicting the
     #: frozen instances that could go. The Run waits; it has not failed.
     MEMORY_BUDGET_EXHAUSTED = "memory_budget_exhausted"
+    #: §21.3, v2.22: an Agent's declared size is below the floor, above the
+    #: ceiling, or larger than the whole budget. None of those ever fits, so
+    #: the Run fails rather than queueing to be refused again.
+    MEMORY_OUT_OF_RANGE = "memory_out_of_range"
     NETWORK_POOL_EXHAUSTED = "network_pool_exhausted"
     WORKING_DIRECTORY_NOT_ALLOWED = "working_directory_not_allowed"
 
@@ -157,6 +162,7 @@ class SandboxController:
         ceiling: ResourceProfile = DEFAULT_PROFILE,
         networking: SandboxNetworking | None = None,
         memory_budget_mb: int | None = None,
+        memory_ceiling_mb: int | None = None,
     ) -> None:
         self.engine = engine
         self.store = store
@@ -167,6 +173,12 @@ class SandboxController:
         #: The sum of instance memory limits this controller admits (§21.3).
         #: None admits without counting, which only tests and tools want.
         self.memory_budget_mb = memory_budget_mb
+        #: The largest sandbox an Agent may declare (§21.3, v2.22). `ceiling`
+        #: is the default profile, so its memory is the size of an Agent that
+        #: declares none; None here means that is also the largest.
+        self.memory_ceiling_mb = (
+            ceiling.memory_mb if memory_ceiling_mb is None else memory_ceiling_mb
+        )
         # Absent on a deployment with no boundary, and then a sandbox has no
         # network at all — never an unguarded one.
         self.networking = networking
@@ -181,6 +193,7 @@ class SandboxController:
         workspace_id: UUID,
         profile: str,
         session_id: UUID | None = None,
+        memory_mb: int | None = None,
     ) -> AcquireResult:
         await self._require_lease(run_id, lease_id)
         # Locked: eviction skips a claim its own Run holds, so the container
@@ -199,6 +212,16 @@ class SandboxController:
         instance_id = uuid.uuid4()
         try:
             chosen = profile_named(profile, ceiling=self.ceiling)
+        except ContainerPolicyError as refused:
+            raise SandboxRefused(RefusalReason.IMAGE_NOT_APPROVED) from refused
+        if memory_mb is not None:
+            # Checked before anything is created, so a refused size leaves
+            # nothing behind. Publishing already checked the ceiling; this is
+            # what stands for a version published before it came down.
+            if not MIN_SANDBOX_MEMORY_MB <= memory_mb <= self.memory_ceiling_mb:
+                raise SandboxRefused(RefusalReason.MEMORY_OUT_OF_RANGE)
+            chosen = replace(chosen, memory_mb=memory_mb)
+        try:
             config = container_config(
                 digest=self._digest(),
                 profile=chosen,
@@ -207,7 +230,7 @@ class SandboxController:
                 workspace_id=workspace_id,
                 session_id=session_id,
                 approved_digests=self.approved_digests,
-                ceiling=self.ceiling,
+                ceiling=replace(self.ceiling, memory_mb=self.memory_ceiling_mb),
                 egress=None
                 if self.networking is None
                 else self.networking.attachment(instance_id),
@@ -475,6 +498,10 @@ class SandboxController:
         budget = self.memory_budget_mb
         if budget is None:
             return
+        if needed_mb > budget:
+            # Never fits, however much is evicted: refusing it as exhausted
+            # would requeue the Run to be refused every ten seconds, forever.
+            raise SandboxRefused(RefusalReason.MEMORY_OUT_OF_RANGE)
         shortfall = await self.store.committed_memory_mb() + needed_mb - budget
         if shortfall <= 0:
             return

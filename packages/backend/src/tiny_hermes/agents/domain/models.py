@@ -14,6 +14,7 @@ from tiny_hermes.runs.domain.context_budget import (
     SegmentBudget,
     SegmentName,
 )
+from tiny_hermes.sandbox.domain.container_policy import MIN_SANDBOX_MEMORY_MB
 
 
 class AgentLimits(BaseModel):
@@ -526,6 +527,26 @@ ModelPolicy = Annotated[
 MAX_NETWORK_ENTRIES = 32
 
 
+class AgentSandbox(BaseModel):
+    """How heavy this Agent's sandbox is (§21.3, v2.22).
+
+    The real-model long-task probe (2026-10-23) found sandboxes writing bash
+    scripts using a few MiB each while every one reserved the instance's
+    1 GiB, so a host admitted three at once. How much a sandbox needs is the
+    Agent's to say: lowering the instance default for everyone would kill the
+    Agents that install dependencies or compile.
+
+    No upper literal, for the reason `AgentLimits.max_model_calls` has none:
+    the ceiling (`PlatformCeilings.sandbox_memory_mb`) is checked where a
+    value is written, so lowering it never stops a version already published.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    #: None takes the instance default, `SANDBOX_MEMORY_MB`.
+    memory_mb: int | None = Field(default=None, ge=MIN_SANDBOX_MEMORY_MB)
+
+
 class AgentNetwork(BaseModel):
     """The targets this Agent asked for, checked against its workspace at publish.
 
@@ -662,6 +683,9 @@ class AgentSpec(BaseModel):
     #: §15.4's post-run review. Absent means never reviewed, and then carrying
     #: no key — the tenth widening to leave every earlier content hash alone.
     skill_review: "SkillReview | None" = None
+    #: §21.3, v2.22. Absent, or present with no size, means the instance
+    #: default; either way it carries no key — the eleventh widening.
+    sandbox: AgentSandbox | None = None
 
     @field_validator("mcp_tools")
     @classmethod
@@ -793,6 +817,8 @@ class PlatformCeilings:
     max_model_calls: int = 20
     max_tool_calls: int = 200
     max_execution_seconds: int = 900
+    #: §21.3, v2.22: the largest sandbox an Agent may declare.
+    sandbox_memory_mb: int = 4_096
 
 
 def rounds_above_ceiling(spec: AgentSpec, ceilings: PlatformCeilings) -> int | None:
@@ -811,6 +837,12 @@ def tool_calls_above_ceiling(spec: AgentSpec, ceilings: PlatformCeilings) -> int
     """The asked-for tool-call count when it is above the ceiling, else `None`."""
     asked = spec.limits.max_tool_calls
     return asked if asked > ceilings.max_tool_calls else None
+
+
+def sandbox_memory_above_ceiling(spec: AgentSpec, ceilings: PlatformCeilings) -> int | None:
+    """The declared sandbox memory when above the ceiling, else `None`."""
+    asked = None if spec.sandbox is None else spec.sandbox.memory_mb
+    return asked if asked is not None and asked > ceilings.sandbox_memory_mb else None
 
 
 def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
@@ -853,6 +885,11 @@ def normalize_agent_spec(spec: AgentSpec) -> tuple[dict[str, object], str]:
         # and is serialized into every spec, so putting it there would have
         # rewritten every hash. This key is absent unless an author wrote one.
         normalized.pop("delegation", None)
+    sandbox = normalized.get("sandbox")
+    if sandbox is None or sandbox.get("memory_mb") is None:
+        # The eleventh widening. `{}` and no key say the same thing, so they
+        # must not publish as two versions with two hashes.
+        normalized.pop("sandbox", None)
     if normalized.get("skill_review") is None:
         # The tenth widening, same promise.
         normalized.pop("skill_review", None)

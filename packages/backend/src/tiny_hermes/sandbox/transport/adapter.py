@@ -80,18 +80,21 @@ class SandboxClient:
         workspace_id: UUID,
         profile: str,
         session_id: UUID | None = None,
+        memory_mb: int | None = None,
     ) -> AcquiredSandbox:
+        payload: dict[str, Any] = {
+            "run_id": run_id,
+            "lease_id": lease_id,
+            "workspace_id": workspace_id,
+            "session_id": session_id,
+            "profile": profile,
+        }
+        if memory_mb is not None:
+            # Only when declared (§21.3, v2.22), so an Agent that declares
+            # nothing sends exactly what it sent before.
+            payload["memory_mb"] = memory_mb
         try:
-            answer = await self._call(
-                "acquire",
-                {
-                    "run_id": run_id,
-                    "lease_id": lease_id,
-                    "workspace_id": workspace_id,
-                    "session_id": session_id,
-                    "profile": profile,
-                },
-            )
+            answer = await self._call("acquire", payload)
         except ControllerClient.Unreachable as unreachable:
             # Only acquire is put into the platform's type, because only the
             # Worker's acquire acts on it.
