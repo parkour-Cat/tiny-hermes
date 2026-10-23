@@ -320,6 +320,8 @@ def _worker_runtime(
             max_slice_seconds=settings.worker_max_slice_seconds,
             idle_poll_seconds=settings.worker_idle_poll_seconds,
             sandbox_idle_ttl_seconds=settings.sandbox_idle_ttl_seconds,
+            run_limit_per_caller=settings.run_limit_per_caller,
+            run_interactive_promotion_seconds=settings.run_interactive_promotion_seconds,
         ),
     )
 

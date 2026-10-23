@@ -500,6 +500,12 @@ class ClaimRunCommand:
     lease_seconds: int
     request_id: str
     capabilities: RunCapabilities
+    #: §1.21.3 (v2.21): a person's running limit where their workspace sets
+    #: none (`RUN_LIMIT_PER_CALLER`).
+    per_caller_default: int = 3
+    #: §1.21.2: a background Run queued this long is claimed as if interactive,
+    #: so a steady stream of chat cannot starve it.
+    promote_after_seconds: int = 120
     session_id: UUID | None = None
 
 
