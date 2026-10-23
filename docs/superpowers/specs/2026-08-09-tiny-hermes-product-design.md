@@ -1,7 +1,7 @@
-# tiny-hermes 产品与系统设计 v2.21
+# tiny-hermes 产品与系统设计 v2.22
 
 > 日期：2026-10-23  
-> 版本：v2.21  
+> 版本：v2.22  
 > 状态：v2.9.3 已确认；M1 与 M2 已交付，可作为 M3 实施依据（§7.4.2 截至 v2.9.3 的内容与 §12.1 已实现）。**v2.10 对 §7.4.2 的改动实施中，尚未全部实现**，见 §1.10  
 > 目标版本：首个企业预览版  
 > 许可证方向：Apache-2.0
@@ -22,6 +22,14 @@
 ### 1.1 v2.4 修订重点
 
 v2.4 补全重试链共享预算、RunEvent 并发序号、幂等并发创建、工作空间选择、累计执行时间与墙钟期限，并把 Runs API 的“已创建但排队受阻”与 Chat Completions 的 409 `session_blocked` 明确区分。M1 的跨 Run 共享只读层缩小为平台预构建的运行时 Docker 镜像层，不在运行时根据 Agent 依赖构建快照；同时增加 cache 重置信号、沙箱所有权校验、待提交对象登记和 M1 不交付审批系统的安全边界。v2.4 替代 v2.3 中对应定义。
+
+### 1.22 v2.22 修订重点
+
+**沙箱内存按 Agent 配置**（§21.3）。[真实模型长任务压测](../verification/2026-10-23-real-task-probe.md)
+里，写 bash 脚本的沙箱实际只用几 MiB，却各按实例默认的 1 GiB 预约，一台主机同时只能开 3 个；
+实例默认值调到 256 MB 后，20 个任务从 85 秒降到 25 秒。但轻重因 Agent 而异，调低实例默认值会让
+重的 Agent 被内存上限杀掉，所以这个数改由 Agent 声明。设计见
+[沙箱内存按 Agent 配置](2026-10-23-agent-sandbox-memory-design.md)。
 
 ### 1.21 v2.21 修订重点（已实现）
 
@@ -1779,6 +1787,13 @@ sandbox-controller 的每个操作都必须携带适用的 `run_id` 和 `sandbox
 
 **沙箱内存准入。** 每个 SandboxInstance 有内存上限，实例默认 1 GiB，平台管理员可以调整。这个上限
 同时约束容器内的进程和它的 tmpfs（`/tmp` 与 `/workspace/cache`），实例不得借用 swap。
+
+v2.22 起 Agent 可以声明自己的沙箱内存上限（AgentSpec 的 `sandbox.memory_mb`，最小 256 MB），
+不声明就用实例默认值。可声明的最大值是平台天花板（初值 4 GiB，平台管理员可以调整），保存草稿
+和发布时检查，超过返回 `sandbox_memory_ceiling_exceeded`。准入预约、容器的内存上限都用 Agent
+声明的值；解冻同一 Run 的保温实例沿用它创建时的值。sandbox-controller 收到超出 [256 MB, 天花板]
+的值，或比整个沙箱内存预算还大的值时拒绝，原因为 `memory_out_of_range`，Run 失败，而不是按
+`memory_budget_exhausted` 无限排队。
 sandbox-controller 为新实例放行前，把所有仍可能占用内存的实例（运行中、已冻结、隔离中）
 的内存上限相加，加上新实例的上限，不得超过**沙箱内存预算**。预算实例默认为主机总内存的
 50%，平台管理员可以调整。放行检查、新实例的创建与登记在同一把 PostgreSQL advisory lock 下
