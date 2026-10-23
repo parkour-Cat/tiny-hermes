@@ -46,6 +46,14 @@ class NetworkedEngine(FakeEngine):
     async def connect(self, network: str, container: str, aliases: list[str]) -> None:
         self.calls.append(("connect", (network, container, tuple(aliases))))
 
+    async def networks_labelled(self, label: str, value: str | None = None) -> list[Any]:
+        self.calls.append(("networks_labelled", (label, value)))
+        return []
+
+    async def remove_network_if_present(self, name: str) -> bool:
+        self.calls.append(("remove_network", name))
+        return True
+
 
 def _controller(engine: NetworkedEngine) -> SandboxController:
     return SandboxController(
