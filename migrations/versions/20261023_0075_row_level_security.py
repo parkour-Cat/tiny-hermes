@@ -61,9 +61,12 @@ TENANT_TABLES = (
 #: other tenant and stays visible inside every workspace.
 PLATFORM_ROWS_TOO = ("audit_events", "outbound_scopes", "secrets", "skill_proposals", "skills")
 
+#: `NULLIF` before the cast, not left to the `OR`: Postgres does not promise to
+#: evaluate an `OR` left to right, and it folds `''::uuid` as a constant, which
+#: is an error, even where the first branch is already true.
 _SCOPED = (
     "coalesce(current_setting('app.workspace_id', true), '') = '' "
-    "OR workspace_id = current_setting('app.workspace_id', true)::uuid"
+    "OR workspace_id = nullif(current_setting('app.workspace_id', true), '')::uuid"
 )
 
 
