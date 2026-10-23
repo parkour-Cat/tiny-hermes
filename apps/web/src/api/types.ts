@@ -95,6 +95,11 @@ export type AgentSpecDocument = {
    */
   network?: { allow: string[] };
   /**
+   * §21.3, v2.22: how much memory this Agent's sandbox is admitted and
+   * limited at. Absent means the platform default.
+   */
+  sandbox?: { memory_mb?: number | null };
+  /**
    * Bound skills, by version id and never by name.
    *
    * Publishing a new version of a skill therefore changes nothing about an

@@ -283,6 +283,8 @@ export const enUS: Record<MessageKey, string> = {
   maxModelCalls: "Model calls per run",
   maxToolCalls: "Tool calls per run",
   maxDerivedRetries: "Derived retries per run",
+  sandboxMemoryMb: "Sandbox memory (MB)",
+  sandboxMemoryMbHelp: "Empty uses the platform default. 256 is enough for light work such as bash scripts; installing dependencies or compiling needs more. Too much takes sandboxes other runs could have had; too little gets processes killed when memory runs out.",
   toolsSection: "Tools",
   toolsPhaseGap: "Tools arrive in phase three; a draft's tool list is empty for now.",
   saveDraft: "Save draft",

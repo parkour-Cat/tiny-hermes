@@ -66,6 +66,8 @@ type DraftValues = {
   /** §15.4. Optional in the type: a draft kept before this existed has neither. */
   skill_review_enabled?: boolean;
   skill_review_min_tool_calls?: number;
+  /** §21.3, v2.22. Empty (null) means the platform default. */
+  sandbox_memory_mb?: number | null;
   sync_timeout_seconds: number;
   /** Bound skill *version* ids. Never names — see `agentSkillsHint`. */
   skills: string[];
@@ -162,6 +164,7 @@ function valuesOf(draft: AgentDraftResponse): DraftValues {
     end_user_access_enabled: draft.spec.end_user_access?.enabled ?? false,
     skill_review_enabled: draft.spec.skill_review?.enabled ?? false,
     skill_review_min_tool_calls: draft.spec.skill_review?.min_tool_calls ?? 10,
+    sandbox_memory_mb: draft.spec.sandbox?.memory_mb ?? null,
     sync_timeout_seconds: delivery.sync_timeout_seconds,
     skills: (draft.spec.skills ?? []).map((binding) => binding.skill_version_id),
     network: [...(draft.spec.network?.allow ?? [])],
@@ -233,6 +236,11 @@ function formSpecOf(values: DraftValues): AgentSpecDocument {
       write_policy: values.mcp_write_policy ?? null,
     }));
   }
+  if (values.sandbox_memory_mb != null) {
+    // Written only when declared, for the same reason as `skill_review`: an
+    // Agent that never set a size publishes the document it published before.
+    spec.sandbox = { memory_mb: values.sandbox_memory_mb };
+  }
   if (values.skill_review_enabled === true) {
     // Written only when on, so an Agent that never asked publishes the
     // document — and the content hash — it published before.
@@ -281,6 +289,7 @@ const FORM_KEYS = new Set([
   "end_user_access",
   "skill_review",
   "network",
+  "sandbox",
   "skills",
   "http_tools",
   "mcp_tools",
@@ -932,6 +941,16 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
                 <InputNumber min={limit.min} max={limit.max} className="full-width" />
               </Form.Item>
             ))}
+            {/* Optional, unlike the valves above, and with no `max`: the ceiling
+                is the platform's, which this page cannot see, and the server
+                refuses an over-ceiling draft with both numbers. */}
+            <Form.Item
+              name="sandbox_memory_mb"
+              label={t("sandboxMemoryMb")}
+              extra={t("sandboxMemoryMbHelp")}
+            >
+              <InputNumber min={256} step={256} className="full-width" />
+            </Form.Item>
           </div>
           </FormSection>
           {/* 能力：全是可选的，所以可以折叠——折叠条上说的是绑了什么，不是「能力」

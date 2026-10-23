@@ -253,6 +253,8 @@ export const zhCN = {
   maxModelCalls: "模型调用次数上限",
   maxToolCalls: "工具调用次数上限",
   maxDerivedRetries: "派生重试次数上限",
+  sandboxMemoryMb: "沙箱内存（MB）",
+  sandboxMemoryMbHelp: "留空用平台默认值。写 bash 脚本这类轻量任务 256 足够；装依赖、编译要更多。写多了占用同时能开的沙箱数，写少了进程会因内存不足被杀掉。",
   toolsSection: "工具",
   toolsPhaseGap: "工具在阶段三接入，当前草稿固定为空。",
   saveDraft: "保存草稿",
