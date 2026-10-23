@@ -12,6 +12,7 @@ of a Run that is at that moment executing in it.
 """
 
 import logging
+import random
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -28,8 +29,8 @@ from tiny_hermes.sandbox.domain.command import (
 from tiny_hermes.sandbox.domain.container_policy import (
     DEFAULT_PROFILE,
     ContainerPolicyError,
-    EgressNetwork,
     ResourceProfile,
+    SandboxNetworking,
     container_config,
     profile_named,
 )
@@ -44,6 +45,7 @@ from tiny_hermes.sandbox.infrastructure.docker_engine import (
     ContainerInfo,
     DockerEngine,
     DockerUnavailable,
+    SubnetTaken,
 )
 from tiny_hermes.sandbox.ports.store import SandboxStore
 from tiny_hermes.shared.metrics import SANDBOX_ADMISSION_REJECTED
@@ -65,6 +67,7 @@ class RefusalReason(StrEnum):
     #: §21.3: the new instance's limit does not fit, even after evicting the
     #: frozen instances that could go. The Run waits; it has not failed.
     MEMORY_BUDGET_EXHAUSTED = "memory_budget_exhausted"
+    NETWORK_POOL_EXHAUSTED = "network_pool_exhausted"
     WORKING_DIRECTORY_NOT_ALLOWED = "working_directory_not_allowed"
 
 
@@ -152,7 +155,7 @@ class SandboxController:
         leases: LeaseAuthority | None = None,
         audit: SandboxAudit | None = None,
         ceiling: ResourceProfile = DEFAULT_PROFILE,
-        egress: EgressNetwork | None = None,
+        networking: SandboxNetworking | None = None,
         memory_budget_mb: int | None = None,
     ) -> None:
         self.engine = engine
@@ -166,7 +169,7 @@ class SandboxController:
         self.memory_budget_mb = memory_budget_mb
         # Absent on a deployment with no boundary, and then a sandbox has no
         # network at all — never an unguarded one.
-        self.egress = egress
+        self.networking = networking
 
     # -- Worker actions ----------------------------------------------------
 
@@ -205,7 +208,9 @@ class SandboxController:
                 session_id=session_id,
                 approved_digests=self.approved_digests,
                 ceiling=self.ceiling,
-                egress=self.egress,
+                egress=None
+                if self.networking is None
+                else self.networking.attachment(instance_id),
             )
         except ContainerPolicyError as refused:
             # Before Docker is asked, so a refused image leaves nothing behind.
@@ -221,6 +226,8 @@ class SandboxController:
         # in labels: the Scheduler that later reclaims an orphan enumerates by
         # label (design §13), and it can only see what was written.
         await self.engine.create_volume(_volume_name(run_id), config.volume_labels)
+        if self.networking is not None:
+            await self._open_network(self.networking, instance_id, config.volume_labels)
         container_id = await self.engine.create(config)
         await self.store.reserve(
             run_id=run_id,
@@ -381,6 +388,12 @@ class SandboxController:
             await self.engine.remove_if_present(found.id)
             containers += 1
             await self._audit_sweep(found.labels, "container nothing recorded removed")
+        if self.networking is not None:
+            for network in await self.engine.networks_labelled(_RUN_LABEL):
+                if await self._network_recorded(network.labels):
+                    continue
+                if await self.engine.remove_network_if_present(network.name):
+                    await self._audit_sweep(network.labels, "network nothing recorded removed")
         volumes = 0
         for volume in await self.engine.volumes_labelled(_RUN_LABEL):
             run_id = _label_uuid(volume.labels, _RUN_LABEL)
@@ -498,6 +511,7 @@ class SandboxController:
         until that acquire clears it or the host sweep finds it unowned.
         """
         await self.engine.remove_if_present(instance.container_id)
+        await self._close_network(instance.id)
         await self.store.set_instance_status(instance.id, InstanceStatus.DESTROYED)
         await self.store.release(reservation.id)
         await self.audit.record(
@@ -513,6 +527,7 @@ class SandboxController:
         instance = await self.store.read_instance(reservation.instance_id)
         if instance is not None:
             await self.engine.remove_if_present(instance.container_id)
+            await self._close_network(instance.id)
             await self.store.set_instance_status(instance.id, InstanceStatus.DESTROYED)
         await self.store.release(reservation.id)
 
@@ -520,7 +535,42 @@ class SandboxController:
         for found in await self.engine.containers_labelled(_RUN_LABEL, str(run_id)):
             await self.engine.remove_if_present(found.id)
             await self._audit_sweep(found.labels, "container its Run left unrecorded removed")
+        if self.networking is not None:
+            for network in await self.engine.networks_labelled(_RUN_LABEL, str(run_id)):
+                await self.engine.remove_network_if_present(network.name)
         await self.engine.remove_volume_if_present(_volume_name(run_id))
+
+    async def _open_network(
+        self, networking: SandboxNetworking, instance_id: UUID, labels: dict[str, str]
+    ) -> None:
+        """This sandbox's bridge, on a /28 from the pool, with the proxy on it.
+
+        Random rather than counted: Docker already knows which subnets are in
+        use and says so when one overlaps, and a table of our own would be a
+        second record of the same fact, free to disagree with the first.
+        """
+        name = networking.network_name(instance_id)
+        subnets = list(networking.pool.subnets(new_prefix=_SANDBOX_PREFIX))
+        for subnet in random.sample(subnets, min(_SUBNET_ATTEMPTS, len(subnets))):
+            try:
+                await self.engine.create_network(name, str(subnet), labels)
+            except SubnetTaken:
+                continue
+            await self.engine.connect(name, networking.proxy_container, [networking.proxy_alias])
+            return
+        raise SandboxRefused(RefusalReason.NETWORK_POOL_EXHAUSTED)
+
+    async def _close_network(self, instance_id: UUID) -> None:
+        """After the container: Docker will not remove a network in use."""
+        if self.networking is not None:
+            await self.engine.remove_network_if_present(self.networking.network_name(instance_id))
+
+    async def _network_recorded(self, labels: dict[str, str]) -> bool:
+        instance_id = _label_uuid(labels, _INSTANCE_LABEL)
+        if instance_id is None:
+            return False
+        instance = await self.store.read_instance(instance_id)
+        return instance is not None and instance.status is not InstanceStatus.DESTROYED
 
     async def _recorded(self, found: ContainerInfo) -> bool:
         instance_id = _label_uuid(found.labels, _INSTANCE_LABEL)
@@ -566,6 +616,7 @@ class SandboxController:
         await self.store.clear_egress_address(sandbox_id)
         if instance is not None:
             await self.engine.remove(instance.container_id)
+            await self._close_network(sandbox_id)
             await self.store.set_instance_status(sandbox_id, InstanceStatus.DESTROYED)
         await self.store.release(reservation.id)
         # Container first, then volume: the volume cannot be in use once the
@@ -625,6 +676,10 @@ class SandboxController:
         return self.approved_digests[0] if self.approved_digests else ""
 
 
+#: Two addresses are used, the sandbox's and the proxy's; a /28 leaves room
+#: and a /16 pool holds 4096 of them.
+_SANDBOX_PREFIX = 28
+_SUBNET_ATTEMPTS = 8
 _RUN_LABEL = "tiny-hermes.run"
 _INSTANCE_LABEL = "tiny-hermes.instance"
 

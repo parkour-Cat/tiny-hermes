@@ -179,6 +179,9 @@ jobs:
       EGRESS_PROXY_TOKEN: ci-egress-token-not-a-secret
       EGRESS_ALLOWED_PORTS: "80,443,8000"
       OUTBOUND_ALLOWED_CIDRS: 172.16.0.0/12
+      # Networked sandboxes, one network each (§1.21.4, v2.21). Unset before,
+      # so every sandbox here ran with no network and this path never ran.
+      SANDBOX_NETWORK_POOL: 10.249.0.0/16
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

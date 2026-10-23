@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import docker
 import pytest
@@ -267,3 +267,26 @@ async def controller(
             audit=audit,
         )
         await session.commit()
+
+
+#: A listener in perl, which the runtime image carries because its Debian base
+#: needs it: enough to stand in for the proxy without adding a tool to the image.
+LISTEN = (
+    "use IO::Socket::INET; my $s = IO::Socket::INET->new(LocalPort => {port}, "
+    "Listen => 5, ReuseAddr => 1) or die $!; "
+    "while (my $c = $s->accept) {{ print $c \"hello\\n\"; close $c }}"
+)
+
+
+@pytest.fixture
+def proxy(docker_client: Any, image_digest: str) -> Iterator[Any]:
+    """Stands in for the egress proxy: listens on 3128, on the default bridge."""
+    container = docker_client.containers.run(
+        image_digest,
+        entrypoint=["perl", "-e", LISTEN.format(port=3128)],
+        name=f"tiny-hermes-test-proxy-{uuid4().hex[:8]}",
+        labels={LABEL: "1"},
+        detach=True,
+    )
+    yield container
+    container.remove(force=True)

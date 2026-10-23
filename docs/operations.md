@@ -489,10 +489,18 @@ Run 详情页时，Redis 停机会让数据库压力明显上升，不要长时�
 - 起了 `observability` profile 的话：设 `GRAFANA_ADMIN_PASSWORD`（默认 `admin`），设
   `METRICS_TOKEN`（不设时出站代理不提供指标）。见第 12 节。
 
-**还没解决的：同一台主机上的沙箱之间网络是通的。**它们都在 `sandbox-egress` 这个网桥上，
-`internal` 只去掉了出网，没有去掉容器之间的互访。直接关掉网桥的容器间通信会把代理也切断，
-所以要换成每个沙箱一个网络之类的做法，还没做。在那之前，一个 Run 能连到同主机上别的 Run
-在沙箱里起的端口。
+**沙箱之间的网络隔离（v2.21 起）：**每个沙箱一个 `internal` 网桥，上面只有它和出站代理
+（设计：[每个沙箱一个网络](superpowers/specs/2026-10-23-sandbox-networks-design.md)）。之前
+所有沙箱共用一个 `sandbox-egress` 网桥，一个 Run 能连到同主机上别的 Run 在沙箱里起的端口。
+
+- 要联网的部署设 `SANDBOX_NETWORK_POOL`（比如 `10.240.0.0/16`），不能和主机的网络、Docker
+  默认的 172.17–31.x、192.168.x 重叠。每个沙箱从里面取一个 /28，`/16` 能分 4096 个。
+- `SANDBOX_EGRESS_PROXY_CONTAINER` 是出站代理的容器名，Compose 默认 `tiny-hermes-egress-proxy-1`；
+  改了 Compose 项目名就要跟着改。
+- 还设着旧的 `SANDBOX_EGRESS_NETWORK`、没设新变量的部署，controller 启动时记一条警告，沙箱
+  不联网。这是有意的：不悄悄退回共享网桥。
+- 删不掉的沙箱网桥由 controller 的主机巡检按标签收走。手工清理：
+  `docker network ls --filter label=tiny-hermes.run`。
 
 ## 11. 这份手册没有覆盖什么
 

@@ -13,7 +13,7 @@ builds the right dict; only the daemon can say what it built.
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from ipaddress import ip_address
+from ipaddress import IPv4Network, ip_address
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -28,7 +28,7 @@ from tiny_hermes.sandbox.application.controller import (
     SandboxRefused,
 )
 from tiny_hermes.sandbox.domain.command import SandboxCommand
-from tiny_hermes.sandbox.domain.container_policy import EgressNetwork
+from tiny_hermes.sandbox.domain.container_policy import SandboxNetworking
 from tiny_hermes.sandbox.domain.models import CacheState, InstanceStatus
 from tiny_hermes.sandbox.infrastructure.docker_engine import ContainerNotRunning, DockerEngine
 from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
@@ -447,14 +447,17 @@ async def test_a_reused_instance_is_somebody_to_the_proxy_again(
     docker_client: Any,
     image_digest: str,
     leases: StubLeases,
+    proxy: Any,
 ) -> None:
     """The proxy knows a sandbox only by its address row. A slice ends with
     freeze, which deletes the row, and the next slice's acquire hands the
     same container back: the proxy must know it again, at the address Docker
     actually gave the container."""
     run_id = UUID(_a_run(client, scope))
-    network = docker_client.networks.create(
-        f"tiny-hermes-test-egress-{uuid4().hex[:8]}", driver="bridge", internal=True
+    networking = SandboxNetworking(
+        proxy_url="http://egress-proxy:3128",
+        proxy_container=proxy.name,
+        pool=IPv4Network("10.249.0.0/16"),
     )
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     try:
@@ -464,7 +467,7 @@ async def test_a_reused_instance_is_somebody_to_the_proxy_again(
                 store=SqlSandboxStore(session),
                 approved_digests=(image_digest,),
                 leases=leases,
-                egress=EgressNetwork(name=network.name, proxy_url="http://egress-proxy:3128"),
+                networking=networking,
             )
             first = await acquired(controller, run_id=run_id)
             await controller.freeze(run_id=run_id, lease_id=LEASE, sandbox_id=first.sandbox_id)
@@ -482,15 +485,21 @@ async def test_a_reused_instance_is_somebody_to_the_proxy_again(
                 await _container_of(controller, second.sandbox_id)
             )
 
-        given = container.attrs["NetworkSettings"]["Networks"][network.name]["IPAddress"]
+        network_name = networking.network_name(second.sandbox_id)
+        given = container.attrs["NetworkSettings"]["Networks"][network_name]["IPAddress"]
         directory = SqlScopeDirectory(sessions)
         claim = await directory.sandbox_claim(ip_address(given))
         assert claim is not None
         assert claim.run_id == run_id
     finally:
         for leftover in docker_client.containers.list(all=True, filters={"label": f"{LABEL}=1"}):
-            leftover.remove(force=True)
-        network.remove()
+            if leftover.id != proxy.id:
+                leftover.remove(force=True)
+        for leftover in docker_client.networks.list(filters={"label": f"{LABEL}=1"}):
+            leftover.reload()
+            for attached in leftover.attrs.get("Containers", {}):
+                leftover.disconnect(attached, force=True)
+            leftover.remove()
 
 
 def _a_run(client: TestClient, scope: dict[str, str]) -> str:

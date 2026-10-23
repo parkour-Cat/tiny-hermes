@@ -90,6 +90,16 @@ class VolumeInfo:
     labels: dict[str, str]
 
 
+class SubnetTaken(Exception):
+    """Docker refused a subnet because it overlaps a network already there."""
+
+
+@dataclass(frozen=True)
+class NetworkInfo:
+    name: str
+    labels: dict[str, str]
+
+
 @dataclass(frozen=True)
 class ContainerInfo:
     id: str
@@ -231,6 +241,78 @@ class DockerEngine:
         )
         return [
             ContainerInfo(id=str(entry["Id"]), labels=dict(entry.get("Labels") or {}))
+            for entry in found
+        ]
+
+    # -- sandbox networks (product design §1.21.4) ----------------------------
+
+    async def create_network(self, name: str, subnet: str, labels: dict[str, str]) -> None:
+        """An `internal` bridge on `subnet`: no gateway out, one sandbox on it.
+
+        `SubnetTaken` when the subnet overlaps a network already on the host,
+        for the caller to try another; anything else is `DockerUnavailable`.
+        """
+        from docker.errors import APIError  # noqa: PLC0415 - narrow the import
+        from docker.types import IPAMConfig, IPAMPool  # noqa: PLC0415
+
+        ipam = IPAMConfig(pool_configs=[IPAMPool(subnet=subnet)])
+        all_labels = {**labels, **(self.extra_labels or {})}
+        try:
+            await asyncio.to_thread(
+                self.client.networks.create,
+                name,
+                driver="bridge",
+                internal=True,
+                ipam=ipam,
+                labels=all_labels,
+            )
+        except APIError as failure:
+            if "overlap" in str(failure).lower():
+                raise SubnetTaken(subnet) from failure
+            raise DockerUnavailable(str(failure)) from failure
+
+    async def connect(self, network: str, container: str, aliases: list[str]) -> None:
+        await self._call(
+            self.client.api.connect_container_to_network, container, network, aliases=aliases
+        )
+
+    async def remove_network_if_present(self, name: str) -> bool:
+        """Every endpoint off it first, the proxy's included: Docker will not
+        remove a network something is still attached to."""
+        from docker.errors import NotFound  # noqa: PLC0415 - narrow the import
+
+        try:
+            details: dict[str, Any] = await self._call(self.client.api.inspect_network, name)
+        except DockerUnavailable as failure:
+            if isinstance(failure.__cause__, NotFound):
+                return False
+            raise
+        endpoints: dict[str, Any] = details.get("Containers") or {}
+        for endpoint in endpoints:
+            try:
+                await self._call(
+                    self.client.api.disconnect_container_from_network, endpoint, name, force=True
+                )
+            except DockerUnavailable as failure:
+                if not isinstance(failure.__cause__, NotFound):
+                    raise
+        try:
+            await self._call(self.client.api.remove_network, name)
+        except DockerUnavailable as failure:
+            if isinstance(failure.__cause__, NotFound):
+                return False
+            raise
+        return True
+
+    async def networks_labelled(
+        self, label: str, value: str | None = None
+    ) -> list[NetworkInfo]:
+        selector = label if value is None else f"{label}={value}"
+        found: list[dict[str, Any]] = await self._call(
+            self.client.api.networks, filters={"label": selector}
+        )
+        return [
+            NetworkInfo(name=str(entry["Name"]), labels=dict(entry.get("Labels") or {}))
             for entry in found
         ]
 

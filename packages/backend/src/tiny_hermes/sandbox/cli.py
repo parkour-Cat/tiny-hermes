@@ -18,6 +18,7 @@ import signal
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime
+from ipaddress import IPv4Network, ip_network
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -36,8 +37,8 @@ from tiny_hermes.sandbox.application.controller import (
 from tiny_hermes.sandbox.domain.command import SandboxCommand
 from tiny_hermes.sandbox.domain.container_policy import (
     DEFAULT_PROFILE,
-    EgressNetwork,
     ResourceProfile,
+    SandboxNetworking,
 )
 from tiny_hermes.sandbox.infrastructure.docker_engine import DockerEngine
 from tiny_hermes.sandbox.infrastructure.lease_authority import SqlLeaseAuthority
@@ -59,18 +60,36 @@ logger = logging.getLogger(__name__)
 _DOCKER_CALL_TIMEOUT_SECONDS = 930
 
 
-def _egress(settings: Settings) -> EgressNetwork | None:
-    """The network a sandbox may be attached to, when there is one.
+def _networking(settings: Settings) -> SandboxNetworking | None:
+    """One network per sandbox, when the boundary is configured (§1.21.4, v2.21).
 
-    Both halves are required. A network name without a proxy URL would attach
-    containers to a network with nothing on it, and a URL without a network
-    would set variables pointing at something unreachable — either way a Run
-    would fail confusingly rather than be offline plainly.
+    All three are needed: a pool to take addresses from, the proxy's container
+    to put on each network, and the URL the sandbox is told to use. Missing
+    any, a sandbox has no network at all rather than a half-made one.
     """
-    if not settings.sandbox_egress_network or not settings.egress_proxy_url:
+    if settings.sandbox_egress_network and not settings.sandbox_network_pool:
+        # The shared bridge this replaced let sandboxes reach each other.
+        # Going quietly back to it would undo the fix; going offline says so.
+        logger.warning(
+            "SANDBOX_EGRESS_NETWORK is no longer read; sandboxes have no network until "
+            "SANDBOX_NETWORK_POOL and SANDBOX_EGRESS_PROXY_CONTAINER are set (ops manual §10)"
+        )
+    if (
+        not settings.sandbox_network_pool
+        or not settings.sandbox_egress_proxy_container
+        or not settings.egress_proxy_url
+    ):
         return None
-    return EgressNetwork(
-        name=settings.sandbox_egress_network, proxy_url=settings.egress_proxy_url
+    pool = ip_network(settings.sandbox_network_pool)
+    if not isinstance(pool, IPv4Network) or pool.prefixlen > 28:
+        raise ValueError(
+            f"SANDBOX_NETWORK_POOL={settings.sandbox_network_pool} must be IPv4 and hold at "
+            "least one /28"
+        )
+    return SandboxNetworking(
+        proxy_url=settings.egress_proxy_url,
+        proxy_container=settings.sandbox_egress_proxy_container,
+        pool=pool,
     )
 
 
@@ -121,6 +140,9 @@ async def _serve() -> None:
     sessions = build_session_factory(settings)
     ceiling = resource_ceiling(settings)
     budget = memory_budget_mb(settings)
+    # Once, at start: a pool that cannot be used stops the process here, not
+    # every acquire later, and a retired setting is warned about once.
+    networking = _networking(settings)
     client: Any = docker.from_env(timeout=_DOCKER_CALL_TIMEOUT_SECONDS)  # noqa: TID251 - the one place, by design
 
     def controller_on(session: AsyncSession) -> SandboxController:
@@ -131,7 +153,7 @@ async def _serve() -> None:
             leases=SqlLeaseAuthority(session),
             audit=_AuditSink(session),
             ceiling=ceiling,
-            egress=_egress(settings),
+            networking=networking,
             memory_budget_mb=budget,
         )
 
