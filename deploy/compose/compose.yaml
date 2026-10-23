@@ -86,6 +86,10 @@ x-base-env: &base-env
   # default. The pool must not overlap the host's networks or Compose's own.
   SANDBOX_NETWORK_POOL: ${SANDBOX_NETWORK_POOL:-}
   SANDBOX_EGRESS_PROXY_CONTAINER: ${SANDBOX_EGRESS_PROXY_CONTAINER:-tiny-hermes-egress-proxy-1}
+  # Retired by v2.21, and passed through only so the controller can say so: a
+  # `.env` that still sets it and not the pool above would otherwise lose its
+  # sandboxes' network with nothing in the log to say why.
+  SANDBOX_EGRESS_NETWORK: ${SANDBOX_EGRESS_NETWORK:-}
   SANDBOX_IDLE_TTL_SECONDS: ${SANDBOX_IDLE_TTL_SECONDS:-300}
   # How often the controller removes containers and data volumes a crash left
   # on its host with nothing in the database owning them.
