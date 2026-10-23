@@ -161,7 +161,13 @@ class ApplicationResources:
             try:
                 yield service
             except AppError as error:
-                if error.code in {"invalid_bootstrap_token", "invalid_credentials"}:
+                # A failure counted and a throttle audited are the point of
+                # these refusals; rolling them back would undo the throttle.
+                if error.code in {
+                    "invalid_bootstrap_token",
+                    "invalid_credentials",
+                    "login_throttled",
+                }:
                     await session.commit()
                 else:
                     await session.rollback()

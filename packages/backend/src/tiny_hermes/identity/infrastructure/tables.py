@@ -5,9 +5,11 @@ from uuid import UUID
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Identity,
     Index,
     String,
     UniqueConstraint,
@@ -156,3 +158,17 @@ class OidcLoginStateRow(IdMixin, CreatedAtMixin, Base):
     redirect_uri: Mapped[str] = mapped_column(String(500))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class LoginFailureRow(Base):
+    """One failed password login (§23.16, v2.19), by hashed account name."""
+
+    __tablename__ = "login_failures"
+    __table_args__ = (
+        Index("ix_login_failures_subject_failed_at", "subject_key", "failed_at"),
+        Index("ix_login_failures_failed_at", "failed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    subject_key: Mapped[str] = mapped_column(String(64))
+    failed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

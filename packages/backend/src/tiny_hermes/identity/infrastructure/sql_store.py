@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
@@ -15,6 +15,7 @@ from tiny_hermes.identity.domain.models import (
 from tiny_hermes.identity.infrastructure.tables import (
     AuthIdentityRow,
     AuthSessionRow,
+    LoginFailureRow,
     UserRow,
 )
 
@@ -173,6 +174,33 @@ class SqlAuthStore:
         row.revoked_at = now
         return True
 
+    async def lock_login(self, subject_key: str) -> None:
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"login:{subject_key}"},
+        )
+
+    async def login_failures_since(
+        self, subject_key: str, since: datetime
+    ) -> tuple[int, datetime | None]:
+        counted = (
+            await self._session.execute(
+                select(func.count(), func.min(LoginFailureRow.failed_at)).where(
+                    LoginFailureRow.subject_key == subject_key,
+                    LoginFailureRow.failed_at > since,
+                )
+            )
+        ).one()
+        return int(counted[0]), counted[1]
+
+    async def record_login_failure(self, subject_key: str, at: datetime) -> None:
+        self._session.add(LoginFailureRow(subject_key=subject_key, failed_at=at))
+
+    async def clear_login_failures(self, subject_key: str) -> None:
+        await self._session.execute(
+            delete(LoginFailureRow).where(LoginFailureRow.subject_key == subject_key)
+        )
+
     async def append_audit(
         self,
         *,
@@ -205,3 +233,12 @@ class SqlAuthStore:
             user.status,
             user.is_platform_admin,
         )
+
+
+async def delete_stale_login_failures(session: AsyncSession, before: datetime) -> int:
+    """For the Scheduler's retention scan: failures that decide nothing any more."""
+    deleted = await session.execute(
+        delete(LoginFailureRow).where(LoginFailureRow.failed_at < before)
+    )
+    return int(getattr(deleted, "rowcount", 0) or 0)
+

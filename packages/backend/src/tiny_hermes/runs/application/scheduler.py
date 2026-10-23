@@ -11,6 +11,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tiny_hermes.artifacts.infrastructure.sql_store import SqlArtifactStore
+from tiny_hermes.identity.application.auth_service import LOGIN_FAILURE_WINDOW
+from tiny_hermes.identity.infrastructure.sql_store import delete_stale_login_failures
 from tiny_hermes.runs.domain.models import (
     TERMINAL_STATES,
     PauseReason,
@@ -499,10 +501,14 @@ class SchedulerRuntime:
             pruned = await store.prune_terminal_run_events(
                 cutoff, self._settings.batch_size
             )
-            if removed or pruned:
+            # Outside the throttle window they decide nothing (§23.16).
+            forgotten = await delete_stale_login_failures(
+                session, now - LOGIN_FAILURE_WINDOW
+            )
+            if removed or pruned or forgotten:
                 logger.info(
                     "collected expired records",
-                    extra={"records": removed, "events": pruned},
+                    extra={"records": removed, "events": pruned, "login_failures": forgotten},
                 )
 
     async def _collect_upload_garbage(self, now: datetime) -> None:
