@@ -113,7 +113,12 @@ async def test_a_child_run_is_background_even_in_an_end_users_session(
     child = queue()
     await _age(engine, older, 30)
     await _owned_by(engine, child, "end_user", uuid4())
-    await _shape(engine, "UPDATE runs SET parent_run_id = :p WHERE id = :id", p=older, id=child)
+    await _shape(
+        engine,
+        "UPDATE runs SET parent_run_id = :p, depth = 1, delegation_scope = '{}' WHERE id = :id",
+        p=older,
+        id=child,
+    )
 
     assert await _claim(engine) == older
 
