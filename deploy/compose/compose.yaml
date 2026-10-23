@@ -108,6 +108,10 @@ x-base-env: &base-env
   # Sandbox memory admission (§21.3): each sandbox's limit, and the sum of
   # limits the controller admits. An empty budget is half the host's memory.
   SANDBOX_MEMORY_MB: ${SANDBOX_MEMORY_MB:-1024}
+  # The largest sandbox an Agent may declare (§21.3, v2.22): the API refuses a
+  # draft above it, the controller an acquire above it. The value above is the
+  # size of an Agent that declares none.
+  SANDBOX_CEILING_MEMORY_MB: ${SANDBOX_CEILING_MEMORY_MB:-4096}
   SANDBOX_MEMORY_BUDGET_MB: ${SANDBOX_MEMORY_BUDGET_MB:-}
   # Present-but-empty for the controller: Settings requires the fields so a
   # credentialless API deployment fails at startup, and empty is exactly what
