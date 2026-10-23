@@ -15,7 +15,9 @@ that could read them would make every other control here decorative.
 """
 
 from dataclasses import dataclass, field, replace
+from ipaddress import IPv4Network
 from typing import Any, Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 #: The uid baked into the runtime image. Numeric rather than a name, so the
@@ -125,6 +127,36 @@ class EgressNetwork:
     #: network already makes everything else unreachable — but a runtime that
     #: finds them produces a useful error instead of a hung connect.
     proxy_url: str
+
+
+@dataclass(frozen=True)
+class SandboxNetworking:
+    """How a sandbox gets its own network (product design §1.21.4, v2.21).
+
+    One `internal` bridge per sandbox, with the proxy on it and nothing else,
+    so a sandbox cannot reach another one. Addresses come from `pool` rather
+    than Docker's defaults, which run out at about 31 networks a host.
+    """
+
+    proxy_url: str
+    #: The proxy's container, joined to each sandbox network as it is made.
+    proxy_container: str
+    pool: IPv4Network
+
+    def network_name(self, instance_id: UUID) -> str:
+        """From the instance id, so teardown needs no record to find it."""
+        return f"tiny-hermes-sandbox-{instance_id}"
+
+    @property
+    def proxy_alias(self) -> str:
+        """The name a sandbox's proxy variables use for the proxy."""
+        host = urlsplit(self.proxy_url).hostname
+        if not host:
+            raise ValueError(f"EGRESS_PROXY_URL has no host: {self.proxy_url!r}")
+        return host
+
+    def attachment(self, instance_id: UUID) -> EgressNetwork:
+        return EgressNetwork(name=self.network_name(instance_id), proxy_url=self.proxy_url)
 
 
 @dataclass(frozen=True)

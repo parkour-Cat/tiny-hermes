@@ -144,12 +144,15 @@ class Settings(BaseSettings):
     #: deployed it, and a guessed URL is a dead link in front of a user.
     #: §19.2 allows `必要的审批卡片或跳转管理页面`, and this is the second.
     console_base_url: str = ""
-    #: The Docker network a sandbox is attached to. Empty means a sandbox has
-    #: no network at all — §16.4's default — rather than one nobody guards.
-    #: The network itself must reach the proxy and nothing else; Compose
-    #: declares it `internal` so that is a property of the deployment rather
-    #: than of anybody's discipline.
+    #: Retired by v2.21: the one bridge every sandbox shared, on which they
+    #: could reach each other. Read only to warn a deployment still setting it.
     sandbox_egress_network: str = ""
+    #: Where each sandbox's own network takes its /28 from (§1.21.4, v2.21).
+    #: Empty, sandboxes have no network. `SANDBOX_EGRESS_NETWORK` above is no
+    #: longer read except to warn that it is set.
+    sandbox_network_pool: str = ""
+    #: The egress proxy's container, joined to every sandbox network.
+    sandbox_egress_proxy_container: str = ""
 
     #: The most model rounds an Agent author may ask for (product design §12.3,
     #: M2A design §4.7). 20 was a literal on `AgentLimits.max_model_calls`
