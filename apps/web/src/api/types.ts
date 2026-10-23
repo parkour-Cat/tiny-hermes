@@ -866,3 +866,20 @@ export type OfferableProviderResponse = {
   id: string;
   issuer: string;
 };
+
+/** Product design §1.21 (v2.21): a workspace's run limits. `null` is unset. */
+export type LimitValues = {
+  agent_max_execution_seconds: number | null;
+  agent_max_model_calls: number | null;
+  max_running_runs_per_caller: number | null;
+  max_running_runs: number | null;
+};
+
+export type WorkspaceLimitsResponse = {
+  values: LimitValues;
+  /** What an unset limit means. */
+  defaults: LimitValues;
+  /** How far an administrator may raise each. */
+  ceilings: LimitValues;
+};
+

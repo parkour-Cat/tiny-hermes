@@ -897,6 +897,18 @@ export const zhCN = {
   approvalApprovedNote: "有人批准了这次调用，运行回到了队列。",
   rewrapProcessed: "已处理 ",
   rewrapRemaining: "，剩余 ",
+  runLimits: "运行上限",
+  runLimitsIntro: "一个任务最长能跑多久、最多调用几次模型，以及同时能执行多少个任务。留空就用平台的默认值。",
+  limitExecutionSeconds: "单个任务最长执行时间（秒）",
+  limitModelCalls: "单个任务最多调用模型次数",
+  limitRunningPerCaller: "每人同时执行的任务数",
+  limitRunning: "整个工作空间同时执行的任务数",
+  limitDefault: "默认 {value}",
+  limitNoDefault: "默认不限",
+  limitCeiling: "最多 {value}",
+  limitSave: "保存",
+  limitSaved: "已保存",
+  limitReadOnly: "只有工作空间管理员可以修改。",
 } as const;
 
 export type MessageKey = keyof typeof zhCN;
