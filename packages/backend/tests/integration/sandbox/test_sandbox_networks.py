@@ -10,12 +10,13 @@ nothing is added to the image for these tests.
 """
 
 import asyncio
-from collections.abc import AsyncIterator, Iterator
-from ipaddress import ip_network
+from collections.abc import AsyncIterator, Callable
+from ipaddress import IPv4Network
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from tiny_hermes.sandbox.application.controller import AcquireResult, SandboxController
 from tiny_hermes.sandbox.domain.command import SandboxCommand
@@ -23,33 +24,34 @@ from tiny_hermes.sandbox.domain.container_policy import SandboxNetworking
 from tiny_hermes.sandbox.infrastructure.docker_engine import DockerEngine
 from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
 
-from .conftest import LABEL, RecordingAudit, StubLeases
+from .conftest import LABEL, LISTEN, RecordingAudit, StubLeases
 
 WORKSPACE = uuid4()
 LEASE = uuid4()
 PUBLIC = "93.184.216.34"
 #: Not one Docker hands out by default, and not the Compose project's.
-POOL = ip_network("10.249.0.0/16")
-
-_LISTEN = (
-    "use IO::Socket::INET; my $s = IO::Socket::INET->new(LocalPort => {port}, "
-    "Listen => 5, ReuseAddr => 1) or die $!; "
-    "while (my $c = $s->accept) {{ print $c \"hello\\n\"; close $c }}"
-)
-
+POOL = IPv4Network("10.249.0.0/16")
 
 @pytest.fixture
-def proxy(docker_client: Any, image_digest: str) -> Iterator[Any]:
-    """Stands in for the egress proxy: listens on 3128, on the default bridge."""
-    container = docker_client.containers.run(
-        image_digest,
-        entrypoint=["perl", "-e", _LISTEN.format(port=3128)],
-        name=f"tiny-hermes-test-proxy-{uuid4().hex[:8]}",
-        labels={LABEL: "1"},
-        detach=True,
-    )
-    yield container
-    container.remove(force=True)
+def runs(
+    client: TestClient, scope: dict[str, str], published_agent: str
+) -> Callable[[], UUID]:
+    """Each call a new Run of one Agent, in a Session of its own: the
+    controller writes down a sandbox's address, and that row belongs to a Run."""
+
+    def made() -> UUID:
+        session = client.post(
+            "/api/v1/sessions", headers=scope, json={"agent_id": published_agent}
+        ).json()["id"]
+        created = client.post(
+            "/api/v1/runs",
+            headers={**scope, "Idempotency-Key": str(uuid4())},
+            json={"session_id": session, "input": "hello"},
+        )
+        assert created.status_code == 201, created.text
+        return UUID(created.json()["id"])
+
+    return made
 
 
 @pytest.fixture
@@ -113,14 +115,14 @@ async def _reaches(container: Any, host: str, port: int) -> bool:
 
 
 def _listen_in(container: Any, port: int) -> None:
-    container.exec_run(["perl", "-e", _LISTEN.format(port=port)], detach=True)
+    container.exec_run(["perl", "-e", LISTEN.format(port=port)], detach=True)
 
 
 async def test_each_sandbox_gets_a_network_of_its_own_with_only_the_proxy_on_it(
-    networked: SandboxController, docker_client: Any, proxy: Any
+    networked: SandboxController, docker_client: Any, proxy: Any, runs: Callable[[], UUID]
 ) -> None:
-    _, first = await _run(networked, docker_client, uuid4())
-    _, second = await _run(networked, docker_client, uuid4())
+    _, first = await _run(networked, docker_client, runs())
+    _, second = await _run(networked, docker_client, runs())
 
     [first_network] = _networks_of(first)
     [second_network] = _networks_of(second)
@@ -133,13 +135,13 @@ async def test_each_sandbox_gets_a_network_of_its_own_with_only_the_proxy_on_it(
 
 
 async def test_a_sandbox_cannot_reach_a_port_another_sandbox_opened(
-    networked: SandboxController, docker_client: Any
+    networked: SandboxController, docker_client: Any, runs: Callable[[], UUID]
 ) -> None:
     """The point of this change. The control is the listener answering inside
     its own sandbox, so a closed answer from the other one means unreachable,
     not nothing listening."""
-    _, ours = await _run(networked, docker_client, uuid4())
-    _, theirs = await _run(networked, docker_client, uuid4())
+    _, ours = await _run(networked, docker_client, runs())
+    _, theirs = await _run(networked, docker_client, runs())
     _listen_in(theirs, 8080)
     await asyncio.sleep(1)
     [(_, settings)] = _networks_of(theirs).items()
@@ -150,25 +152,25 @@ async def test_a_sandbox_cannot_reach_a_port_another_sandbox_opened(
 
 
 async def test_a_sandbox_reaches_the_proxy_by_the_name_in_its_proxy_url(
-    networked: SandboxController, docker_client: Any
+    networked: SandboxController, docker_client: Any, runs: Callable[[], UUID]
 ) -> None:
-    _, sandbox = await _run(networked, docker_client, uuid4())
+    _, sandbox = await _run(networked, docker_client, runs())
 
     assert await _reaches(sandbox, "egress-proxy", 3128) is True
 
 
 async def test_a_sandbox_on_its_own_network_still_cannot_reach_the_internet(
-    networked: SandboxController, docker_client: Any
+    networked: SandboxController, docker_client: Any, runs: Callable[[], UUID]
 ) -> None:
-    _, sandbox = await _run(networked, docker_client, uuid4())
+    _, sandbox = await _run(networked, docker_client, runs())
 
     assert await _reaches(sandbox, PUBLIC, 80) is False
 
 
 async def test_destroying_a_sandbox_takes_its_network_away(
-    networked: SandboxController, docker_client: Any, proxy: Any
+    networked: SandboxController, docker_client: Any, proxy: Any, runs: Callable[[], UUID]
 ) -> None:
-    run_id = uuid4()
+    run_id = runs()
     made, sandbox = await _run(networked, docker_client, run_id)
     [name] = _networks_of(sandbox)
 
@@ -179,7 +181,7 @@ async def test_destroying_a_sandbox_takes_its_network_away(
 
 
 async def test_the_host_sweep_removes_a_network_nothing_records(
-    networked: SandboxController, docker_client: Any
+    networked: SandboxController, docker_client: Any, runs: Callable[[], UUID]
 ) -> None:
     """What an acquire that died between the network and the row leaves."""
     stray = docker_client.networks.create(
@@ -199,9 +201,9 @@ async def test_the_host_sweep_removes_a_network_nothing_records(
 
 
 async def test_a_command_in_a_networked_sandbox_still_runs(
-    networked: SandboxController, docker_client: Any
+    networked: SandboxController, docker_client: Any, runs: Callable[[], UUID]
 ) -> None:
-    run_id = uuid4()
+    run_id = runs()
     made = await _acquired(networked, run_id)
 
     result = await networked.execute(

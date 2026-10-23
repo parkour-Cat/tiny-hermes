@@ -5,7 +5,7 @@ picks a /28 from `SANDBOX_NETWORK_POOL` itself, at random, and takes another
 when Docker says that one overlaps a network already there.
 """
 
-from ipaddress import IPv4Network, ip_network
+from ipaddress import IPv4Network
 from typing import Any
 
 import pytest
@@ -28,7 +28,7 @@ from .test_controller_workspace import (
     ScriptedLeases,
 )
 
-POOL = ip_network("10.249.0.0/16")
+POOL = IPv4Network("10.249.0.0/16")
 
 
 class NetworkedEngine(FakeEngine):
