@@ -11,6 +11,7 @@ who may do what, the check is in the wrong place.
 
 import asyncio
 import json
+import logging
 import os
 import socket
 import sys
@@ -45,6 +46,7 @@ class SpyController:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.answer: dict[str, Any] = {"sandbox_id": str(uuid4()), "cache_state": "reset"}
         self.refusal: str | None = None
+        self.failure: Exception | None = None
         self.delay: float = 0.0
 
     async def dispatch(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -53,6 +55,8 @@ class SpyController:
             await asyncio.sleep(self.delay)
         if self.refusal is not None:
             raise _Refused(self.refusal)
+        if self.failure is not None:
+            raise self.failure
         return self.answer
 
 
@@ -243,3 +247,24 @@ async def test_a_controller_action_joins_its_caller_s_trace(
     [served] = named(spans, "controller.acquire")
     assert served.context is not None
     assert served.context.trace_id == caller.get_span_context().trace_id
+
+
+async def test_a_failure_that_is_not_a_refusal_is_logged_with_what_it_said(
+    wired: tuple[SpyController, ControllerClient], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The caller hears only the exception's class name. On 2026-10-23 a CI run
+    failed on `DockerUnavailable` from cleanup, and nothing anywhere said what
+    the daemon had answered."""
+    spy, client = wired
+    spy.failure = RuntimeError("409 Conflict: removal of container abc is already in progress")
+
+    with caplog.at_level(logging.WARNING), pytest.raises(ControllerClient.Refused) as refused:
+        await client.call("cleanup", {"sandbox_id": str(uuid4())})
+
+    assert refused.value.reason == "RuntimeError"
+    [record] = [r for r in caplog.records if "controller action failed" in r.getMessage()]
+    assert record.levelno >= logging.WARNING
+    assert "removal of container abc is already in progress" in record.getMessage() + str(
+        getattr(record, "detail", "")
+    )
+    assert getattr(record, "action", None) == "cleanup"

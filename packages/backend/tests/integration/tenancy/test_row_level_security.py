@@ -20,6 +20,9 @@ from tiny_hermes.api.app import create_app
 from tiny_hermes.shared.config import Settings
 from tiny_hermes.shared.database import Base, build_session_factory
 from tiny_hermes.shared.tenancy_scope import acting_in
+from tiny_hermes.tenancy.domain.models import Role, WorkspaceMember
+from tiny_hermes.tenancy.infrastructure.sql_store import SqlWorkspaceStore
+from tiny_hermes.tenancy.infrastructure.tables import MembershipRow
 
 APP_ROLE = "tiny_hermes_app"
 
@@ -197,3 +200,34 @@ async def test_a_connection_that_was_scoped_serves_an_unscoped_transaction_next(
     await sessions.kw["bind"].dispose()
 
     assert sorted(everyone) == ["Ours", "Theirs"]
+
+
+async def test_member_routes_name_their_workspace_in_the_path_and_are_scoped_too(
+    two_workspaces: tuple[dict[str, str], dict[str, str]],
+    client: TestClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/workspaces/{id}/members` takes the workspace from the path, and checks
+    it against the header through `require_workspace_id`, which is where the
+    request's workspace is entered. The administrator belongs to both, so a
+    query that forgot its workspace would list them twice."""
+    ours, _ = two_workspaces
+
+    async def forgetful(self: Any, workspace_id: UUID) -> list[Any]:
+        del workspace_id
+        rows = (await self._session.execute(select(MembershipRow.user_id))).all()
+        return [
+            WorkspaceMember(user_id, "someone", "someone@example.com", Role.WORKSPACE_ADMIN)
+            for (user_id,) in rows
+        ]
+
+    async with engine.connect() as connection:
+        everywhere = await connection.scalar(text("SELECT count(*) FROM memberships"))
+    assert everywhere == 2, "without the policy the forgetful query would list two"
+    monkeypatch.setattr(SqlWorkspaceStore, "list_members", forgetful)
+
+    listed = client.get(f"/api/v1/workspaces/{ours['X-Workspace-Id']}/members", headers=ours)
+
+    assert listed.status_code == 200
+    assert len(listed.json()) == 1

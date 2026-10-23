@@ -609,6 +609,6 @@ docker compose exec postgres psql -U tiny_hermes -d tiny_hermes -c \
 - 核对：每个进程连上之后 `SELECT current_user` 应该是 `tiny_hermes_app`。
 
 **它管什么、不管什么：**API 在请求确定工作空间之后开始的事务受限，代码漏了工作空间条件时由
-数据库兜底。Worker、Scheduler、controller、出站代理、登录、平台管理、以及用路径参数指定工作
-空间的成员管理接口，事务不受限，隔离仍然只靠代码。
+数据库兜底。Worker、Scheduler、controller、出站代理、登录、平台管理的事务不受限，隔离仍然
+只靠代码。
 

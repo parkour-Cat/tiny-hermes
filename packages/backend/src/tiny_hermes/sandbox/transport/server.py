@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import socket
 import ssl
@@ -43,6 +44,8 @@ from tiny_hermes.sandbox.transport.frames import (
 from tiny_hermes.sandbox.transport.tls import allowed_actions, role_of
 from tiny_hermes.shared.metrics import CONTROLLER_ACTION_SECONDS
 from tiny_hermes.shared.tracing import context_from, tracer
+
+logger = logging.getLogger(__name__)
 
 Dispatch = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 StreamDispatch = Callable[
@@ -376,8 +379,7 @@ class ControllerServer:
         except StreamAborted:
             return {"error": ProtocolError.STREAM_FAILED.value}
         except Exception as refused:  # noqa: BLE001 - every refusal is a reply
-            reason = getattr(refused, "reason", None)
-            return {"error": str(getattr(reason, "value", reason) or type(refused).__name__)}
+            return _refusal(action, refused)
 
     async def _answer(self, line: bytes, allowed: frozenset[str] | None) -> dict[str, Any]:
         try:
@@ -415,8 +417,7 @@ class ControllerServer:
             )
             # A refusal and a dropped connection are different facts, and a
             # Worker that cannot tell them apart would retry a rejection.
-            reason = getattr(refused, "reason", None)
-            return {"error": str(getattr(reason, "value", reason) or type(refused).__name__)}
+            return _refusal(action, refused)
         CONTROLLER_ACTION_SECONDS.labels(action=action, outcome="ok").observe(
             time.monotonic() - started
         )
@@ -425,3 +426,25 @@ class ControllerServer:
     async def _say(self, writer: asyncio.StreamWriter, body: dict[str, Any]) -> None:
         writer.write(json.dumps(body).encode() + b"\n")
         await writer.drain()
+
+
+def _refusal(action: str, refused: Exception) -> dict[str, Any]:
+    """The reply a caller gets: a named refusal's reason, or else the failure's
+    class name and nothing more of it, since its text is the daemon's and may
+    name hosts, paths or containers.
+
+    So the text is logged here, where it happened. A named refusal is the
+    platform deciding; anything else is the platform failing, and on
+    2026-10-23 a CI run failed on `DockerUnavailable` from cleanup with no
+    record anywhere of what the daemon had said.
+    """
+    reason = getattr(refused, "reason", None)
+    if reason is None:
+        logger.warning(
+            "controller action failed: %s",
+            refused,
+            extra={"action": action, "failure": type(refused).__name__},
+            exc_info=refused,
+        )
+    return {"error": str(getattr(reason, "value", reason) or type(refused).__name__)}
+
