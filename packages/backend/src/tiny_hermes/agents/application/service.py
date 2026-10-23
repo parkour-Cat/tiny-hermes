@@ -17,6 +17,7 @@ from tiny_hermes.agents.domain.models import (
     EndpointModelPolicy,
     PlatformCeilings,
     WritePolicy,
+    execution_above_ceiling,
     initial_agent_spec,
     rounds_above_ceiling,
     tool_calls_above_ceiling,
@@ -442,6 +443,24 @@ class ToolCallCeilingExceeded(AgentCatalogError):
         self.allowed = allowed
 
 
+class ExecutionCeilingExceeded(AgentCatalogError):
+    """The draft asks for more execution time than its workspace allows
+    (§1.21.1, v2.21). Carries both numbers, as `RoundCeilingExceeded` does."""
+
+    def __init__(self, asked: int, allowed: int) -> None:
+        super().__init__(f"{asked} execution seconds asked, {allowed} allowed")
+        self.asked = asked
+        self.allowed = allowed
+
+
+class WorkspaceCeilingReader(Protocol):
+    """A workspace's own ceilings, where it has set them (§1.21.1, v2.21)."""
+
+    async def __call__(self, workspace_id: UUID) -> tuple[int | None, int | None]:
+        """(max execution seconds, max model calls); None takes the platform's."""
+        ...
+
+
 class AgentCatalog:
     """Agent publication rules.
 
@@ -458,8 +477,12 @@ class AgentCatalog:
         scopes: WorkspaceScopeReader | None = None,
         http_tools: HttpToolBindingReader | None = None,
         mcp: McpBindingReader | None = None,
+        workspace_ceilings: WorkspaceCeilingReader | None = None,
     ) -> None:
         self._store = store
+        # Absent in the domain tests; then the platform's ceilings are the
+        # workspace's, as they were before v2.21.
+        self._workspace_ceilings = workspace_ceilings
         # Defaulted rather than required so the domain tests, which are about
         # publication rules and not about configuration, keep reading the way
         # they did. The default is the same 20 the field used to spell out.
@@ -750,7 +773,7 @@ class AgentCatalog:
         # Checked on save as well as on publish, unlike the endpoint rules: the
         # ceiling is a number the author typed, and telling them at the moment
         # they typed it costs nothing.
-        self._check_ceilings(spec)
+        await self._check_ceilings(workspace_id, spec)
         draft = await self._store.replace_draft(
             workspace_id, agent_id, actor.id, expected_revision, spec
         )
@@ -796,7 +819,7 @@ class AgentCatalog:
             self._check_compaction_threshold(draft.spec.context_budget or ContextBudget())
             # Again here, and not only on save: this draft was measured against
             # whatever the ceiling was the day it was written.
-            self._check_ceilings(draft.spec)
+            await self._check_ceilings(workspace_id, draft.spec)
         result = await self._store.publish_draft(
             workspace_id, agent_id, actor.id, expected_revision
         )
@@ -823,13 +846,24 @@ class AgentCatalog:
         )
         return version
 
-    def _check_ceilings(self, spec: AgentSpec) -> None:
-        asked = rounds_above_ceiling(spec, self._ceilings)
+    async def _check_ceilings(self, workspace_id: UUID, spec: AgentSpec) -> None:
+        ceilings = self._ceilings
+        if self._workspace_ceilings is not None:
+            seconds, calls = await self._workspace_ceilings(workspace_id)
+            ceilings = replace(
+                ceilings,
+                max_execution_seconds=seconds or ceilings.max_execution_seconds,
+                max_model_calls=calls or ceilings.max_model_calls,
+            )
+        asked = rounds_above_ceiling(spec, ceilings)
         if asked is not None:
-            raise RoundCeilingExceeded(asked, self._ceilings.max_model_calls)
-        calls = tool_calls_above_ceiling(spec, self._ceilings)
-        if calls is not None:
-            raise ToolCallCeilingExceeded(calls, self._ceilings.max_tool_calls)
+            raise RoundCeilingExceeded(asked, ceilings.max_model_calls)
+        tools = tool_calls_above_ceiling(spec, ceilings)
+        if tools is not None:
+            raise ToolCallCeilingExceeded(tools, ceilings.max_tool_calls)
+        seconds_asked = execution_above_ceiling(spec, ceilings)
+        if seconds_asked is not None:
+            raise ExecutionCeilingExceeded(seconds_asked, ceilings.max_execution_seconds)
 
     async def _check_endpoint(self, spec: AgentSpec) -> None:
         """Refuse a version that names an endpoint it cannot actually use."""

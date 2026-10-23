@@ -1,7 +1,7 @@
 from typing import Protocol
 from uuid import UUID
 
-from tiny_hermes.tenancy.domain.models import Role, Workspace, WorkspaceMember
+from tiny_hermes.tenancy.domain.models import Role, Workspace, WorkspaceLimits, WorkspaceMember
 
 
 class WorkspaceStore(Protocol):
@@ -36,3 +36,8 @@ class WorkspaceStore(Protocol):
         resource_id: UUID,
         request_id: str,
     ) -> None: ...
+
+    async def get_limits(self, workspace_id: UUID) -> WorkspaceLimits | None: ...
+
+    async def set_limits(self, workspace_id: UUID, limits: WorkspaceLimits) -> None: ...
+

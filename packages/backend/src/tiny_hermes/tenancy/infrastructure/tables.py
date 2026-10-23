@@ -31,6 +31,11 @@ class WorkspaceRow(IdMixin, CreatedAtMixin, Base):
             name="ck_workspaces_running_limits_positive",
         ),
         CheckConstraint(
+            "(agent_max_execution_seconds IS NULL OR agent_max_execution_seconds > 0) "
+            "AND (agent_max_model_calls IS NULL OR agent_max_model_calls > 0)",
+            name="ck_workspaces_agent_limits_positive",
+        ),
+        CheckConstraint(
             "(max_run_cost IS NULL) = (cost_currency IS NULL)",
             name="ck_workspaces_cost_ceiling_paired",
         ),
@@ -69,6 +74,10 @@ class WorkspaceRow(IdMixin, CreatedAtMixin, Base):
     max_running_runs_per_caller: Mapped[int | None] = mapped_column(nullable=True)
     #: The whole workspace's; null is no limit. Over either, a Run waits.
     max_running_runs: Mapped[int | None] = mapped_column(nullable=True)
+    #: §1.21.1 (v2.21): the most an Agent here may ask for; null takes the
+    #: platform's `AGENT_MAX_EXECUTION_SECONDS` and `AGENT_MAX_MODEL_CALLS`.
+    agent_max_execution_seconds: Mapped[int | None] = mapped_column(nullable=True)
+    agent_max_model_calls: Mapped[int | None] = mapped_column(nullable=True)
     #: §14.1's three choices, defaulting to the middle one.
     #:
     #: Not `off`, because a feature that is off by default is one nobody has

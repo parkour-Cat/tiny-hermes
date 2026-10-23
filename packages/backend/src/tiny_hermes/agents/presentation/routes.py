@@ -14,6 +14,7 @@ from tiny_hermes.agents.application.service import (
     ContextBudgetUnsatisfied,
     ContextWindowTooSmall,
     DraftRevisionConflict,
+    ExecutionCeilingExceeded,
     ForbiddenAgentAction,
     InvalidAgentAlias,
     InvalidAgentName,
@@ -708,6 +709,17 @@ def as_app_error(error: AgentCatalogError) -> AppError:
             detail=(
                 f"The agent asks for {error.asked} model calls and this "
                 f"platform allows {error.allowed}."
+            ),
+        )
+    if isinstance(error, ExecutionCeilingExceeded):
+        return AppError(
+            code="execution_ceiling_exceeded",
+            title="Too much execution time",
+            status=422,
+            # Both numbers, and where the ceiling is set (§1.21.1, v2.21).
+            detail=(
+                f"The agent asks for {error.asked} seconds of execution and this "
+                f"workspace allows {error.allowed}; a workspace administrator can raise it."
             ),
         )
     if isinstance(error, ToolCallCeilingExceeded):

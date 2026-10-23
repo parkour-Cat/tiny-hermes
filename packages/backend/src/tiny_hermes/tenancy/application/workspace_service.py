@@ -1,6 +1,13 @@
 from uuid import UUID
 
-from tiny_hermes.tenancy.domain.models import Actor, Role, Workspace, WorkspaceMember
+from tiny_hermes.tenancy.domain.models import (
+    Actor,
+    LimitPolicy,
+    Role,
+    Workspace,
+    WorkspaceLimits,
+    WorkspaceMember,
+)
 from tiny_hermes.tenancy.ports.store import WorkspaceStore
 
 WRITERS = {Role.WORKSPACE_ADMIN}
@@ -35,9 +42,56 @@ class InvalidMemberRole(Exception):
     pass
 
 
+class LimitOutOfRange(Exception):
+    def __init__(self, field: str, ceiling: int | None) -> None:
+        bound = "" if ceiling is None else f" and at most {ceiling}"
+        super().__init__(f"{field} must be at least 1{bound}")
+        self.field = field
+        self.ceiling = ceiling
+
+
+class UnknownWorkspace(Exception):
+    pass
+
+
 class WorkspaceService:
-    def __init__(self, store: WorkspaceStore) -> None:
+    def __init__(self, store: WorkspaceStore, limits: LimitPolicy | None = None) -> None:
         self._store = store
+        self._limits = limits or LimitPolicy(WorkspaceLimits(), WorkspaceLimits())
+
+    @property
+    def limit_policy(self) -> LimitPolicy:
+        return self._limits
+
+    async def get_limits(self, actor: Actor, workspace_id: UUID) -> WorkspaceLimits:
+        """Every member may read them: an Agent author has to know how far
+        they may go, and a person whose Run waits, why (§1.21, v2.21)."""
+        await self._require_member(actor, workspace_id)
+        limits = await self._store.get_limits(workspace_id)
+        if limits is None:
+            raise UnknownWorkspace
+        return limits
+
+    async def set_limits(
+        self, actor: Actor, workspace_id: UUID, limits: WorkspaceLimits, request_id: str
+    ) -> WorkspaceLimits:
+        platform = await self._require_admin(actor, workspace_id)
+        offending = self._limits.offending(limits)
+        if offending is not None:
+            raise LimitOutOfRange(*offending)
+        await self._store.set_limits(workspace_id, limits)
+        await self._store.append_audit(
+            workspace_id=workspace_id,
+            actor_id=actor.id,
+            action=(
+                "workspace.limits_changed_by_platform_admin"
+                if platform
+                else "workspace.limits_changed"
+            ),
+            resource_id=workspace_id,
+            request_id=request_id,
+        )
+        return limits
 
     async def create_workspace(self, actor: Actor, name: str, request_id: str) -> Workspace:
         if not actor.is_platform_admin:
