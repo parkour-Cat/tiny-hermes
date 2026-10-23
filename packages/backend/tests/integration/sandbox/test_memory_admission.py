@@ -62,9 +62,12 @@ class Platform:
         *,
         budget: int = 512,
         memory: int = 256,
+        memory_ceiling: int | None = None,
     ) -> T:
         async with self._sessions() as session:
-            controller = self._controller(session, budget=budget, memory=memory)
+            controller = self._controller(
+                session, budget=budget, memory=memory, memory_ceiling=memory_ceiling
+            )
             try:
                 answer = await work(controller)
             except SandboxRefused:
@@ -76,7 +79,9 @@ class Platform:
             await session.commit()
             return answer
 
-    def _controller(self, session: AsyncSession, *, budget: int, memory: int) -> SandboxController:
+    def _controller(
+        self, session: AsyncSession, *, budget: int, memory: int, memory_ceiling: int | None
+    ) -> SandboxController:
         return SandboxController(
             engine=DockerEngine(self._docker, extra_labels={LABEL: "1"}),
             store=SqlSandboxStore(session),
@@ -85,18 +90,35 @@ class Platform:
             audit=self.audit,
             ceiling=replace(DEFAULT_PROFILE, memory_mb=memory),
             memory_budget_mb=budget,
+            memory_ceiling_mb=memory_ceiling,
         )
 
-    async def acquire(self, run_id: UUID, **limits: int) -> AcquireResult:
-        """What a Worker does holding a live lease for the Run."""
+    async def acquire(
+        self, run_id: UUID, *, asked: int | None = None, **limits: Any
+    ) -> AcquireResult:
+        """What a Worker does holding a live lease for the Run.
+
+        `asked` is the Agent's `sandbox.memory_mb` (§21.3, v2.22); `None` is
+        an Agent that declared none, and gets the instance default.
+        """
         lease = self.leases.setdefault(run_id, uuid4())
         self._leases.renew(run_id=run_id)
         return await self.call(
             lambda c: c.acquire(
-                run_id=run_id, lease_id=lease, workspace_id=WORKSPACE, profile="default"
+                run_id=run_id,
+                lease_id=lease,
+                workspace_id=WORKSPACE,
+                profile="default",
+                memory_mb=asked,
             ),
             **limits,
         )
+
+    async def memory_of(self, sandbox_id: UUID) -> int:
+        async with self._sessions() as session:
+            found = await SqlSandboxStore(session).read_instance(sandbox_id)
+        assert found is not None
+        return found.memory_mb
 
     async def park(self, run_id: UUID, sandbox_id: UUID) -> None:
         """What a slice boundary does: freeze, keep warm, release the lease."""
@@ -297,3 +319,74 @@ async def test_the_sandboxes_and_their_memory_are_published(
     assert metric("tiny_hermes_sandboxes", state="frozen") == 1
     assert metric("tiny_hermes_sandbox_memory_reserved_bytes") == 512 * MiB
     assert metric("tiny_hermes_sandbox_memory_budget_bytes") == 512 * MiB
+
+
+# -- an Agent's own size (§21.3, v2.22) ----------------------------------------
+
+
+async def test_an_agents_declared_size_is_the_containers_limit_and_what_is_counted(
+    platform: Platform, docker_client: Any
+) -> None:
+    """The size has to reach both ends: the limit Docker enforces and the
+    number admission adds up. Reaching only one is either an Agent killed at
+    a size it did not ask for, or a host admitting by the wrong sum."""
+    made = await platform.acquire(uuid4(), asked=384, memory=512, memory_ceiling=1024)
+
+    container = docker_client.containers.get(await platform.container_of(made.sandbox_id))
+    assert container.attrs["HostConfig"]["Memory"] == 384 * MiB
+    assert await platform.memory_of(made.sandbox_id) == 384
+
+
+async def test_small_sandboxes_fit_where_default_ones_would_not(platform: Platform) -> None:
+    """The probe's finding as a test: a budget of 512 holds one default
+    sandbox of 512, but two of an Agent's declared 256."""
+    await platform.acquire(uuid4(), asked=256, budget=512, memory=512, memory_ceiling=1024)
+    await platform.acquire(uuid4(), asked=256, budget=512, memory=512, memory_ceiling=1024)
+
+    with pytest.raises(SandboxRefused) as refusal:
+        await platform.acquire(uuid4(), budget=512, memory=512, memory_ceiling=1024)
+
+    assert refusal.value.reason is RefusalReason.MEMORY_BUDGET_EXHAUSTED
+
+
+async def test_a_size_above_the_ceiling_is_refused_and_leaves_nothing_behind(
+    platform: Platform,
+) -> None:
+    """Publishing checks the ceiling; this is what still stands when a version
+    was published before the ceiling came down."""
+    run = uuid4()
+    with pytest.raises(SandboxRefused) as refusal:
+        await platform.acquire(run, asked=2048, budget=4096, memory=512, memory_ceiling=1024)
+
+    assert refusal.value.reason is RefusalReason.MEMORY_OUT_OF_RANGE
+    assert platform.labelled() == 0
+    assert await platform.claim_of(run) is None
+
+
+async def test_a_size_below_the_floor_is_refused(platform: Platform) -> None:
+    with pytest.raises(SandboxRefused) as refusal:
+        await platform.acquire(uuid4(), asked=128, memory=512, memory_ceiling=1024)
+
+    assert refusal.value.reason is RefusalReason.MEMORY_OUT_OF_RANGE
+
+
+async def test_a_size_larger_than_the_whole_budget_fails_rather_than_waits(
+    platform: Platform,
+) -> None:
+    """`memory_budget_exhausted` puts the Run back in the queue to try again
+    in ten seconds. A sandbox bigger than the whole budget never fits, so
+    that would be a Run queued forever, retrying every ten seconds."""
+    with pytest.raises(SandboxRefused) as refusal:
+        await platform.acquire(uuid4(), asked=1024, budget=768, memory=256, memory_ceiling=4096)
+
+    assert refusal.value.reason is RefusalReason.MEMORY_OUT_OF_RANGE
+    assert platform.labelled() == 0
+
+
+async def test_without_a_ceiling_only_the_default_may_be_asked_for(platform: Platform) -> None:
+    """A controller built before v2.22's setting is threaded through admits
+    the default and nothing larger, as it always did."""
+    with pytest.raises(SandboxRefused) as refusal:
+        await platform.acquire(uuid4(), asked=512, memory=256)
+
+    assert refusal.value.reason is RefusalReason.MEMORY_OUT_OF_RANGE
