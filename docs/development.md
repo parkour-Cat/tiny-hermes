@@ -773,7 +773,7 @@ address and a token:
 ```powershell
 $env:EGRESS_PROXY_URL = "http://egress-proxy:3128"
 $env:EGRESS_PROXY_TOKEN = (python -c "import secrets; print(secrets.token_urlsafe(32))")
-$env:SANDBOX_EGRESS_NETWORK = "tiny-hermes_sandbox-egress"
+$env:SANDBOX_NETWORK_POOL = "10.240.0.0/16"
 docker compose --env-file .env -f deploy/compose/compose.yaml up -d --build
 ```
 
@@ -812,11 +812,19 @@ step would be one that gets forgotten rather than a judgement that gets made.
 
 ### What a sandbox can reach
 
-With `SANDBOX_EGRESS_NETWORK` set, a sandbox is attached to a Docker network
-declared `internal` — a bridge with no gateway. The only thing on it besides
-sandboxes is the proxy, so a container has exactly one place to send a packet
-and that place decides. Without the setting a sandbox has **no network at
-all**, which is the default and what §16.4 asks for.
+With `SANDBOX_NETWORK_POOL` set, each sandbox gets a Docker network of its own,
+declared `internal` — a bridge with no gateway — on a /28 the controller takes
+from that pool. The only other thing on it is the proxy, which the controller
+joins to it (`SANDBOX_EGRESS_PROXY_CONTAINER`) under the name in
+`EGRESS_PROXY_URL`. So a container has exactly one place to send a packet, and
+that place decides; and another sandbox is not on its network to be reached.
+Without the setting a sandbox has **no network at all**, which is the default
+and what §16.4 asks for.
+
+Before v2.21 every sandbox shared one bridge, `sandbox-egress`, and `internal`
+removes the way out, not the way across: one Run could reach a port another
+had opened. `SANDBOX_EGRESS_NETWORK` named that bridge; it is now only read to
+warn that it is still set.
 
 The container also gets `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`, for the
 runtimes that read them. Nothing relies on that: a tool that ignored them would
