@@ -178,3 +178,22 @@ async def test_an_api_request_whose_query_forgot_its_workspace_still_sees_one(
     assert listed.status_code == 200
     assert [agent["name"] for agent in listed.json()] == ["Ours"]
 
+
+
+async def test_a_connection_that_was_scoped_serves_an_unscoped_transaction_next(
+    two_workspaces: tuple[dict[str, str], dict[str, str]], settings: Settings
+) -> None:
+    """The setting is transaction-local; after it ends the connection holds an
+    empty string, not nothing. The policy's cast once failed on exactly that,
+    and 120 tests went red: one connection, so the second transaction is sure
+    to reuse the first one's."""
+    ours, _ = two_workspaces
+    sessions = build_session_factory(settings, pool_size=1, max_overflow=0)
+    with acting_in(UUID(ours["X-Workspace-Id"])):
+        async with sessions() as session:
+            assert (await session.scalars(select(AgentRow.name))).all() == ["Ours"]
+    async with sessions() as session:
+        everyone = (await session.scalars(select(AgentRow.name))).all()
+    await sessions.kw["bind"].dispose()
+
+    assert sorted(everyone) == ["Ours", "Theirs"]
