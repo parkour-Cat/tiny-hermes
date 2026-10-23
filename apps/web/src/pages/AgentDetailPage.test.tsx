@@ -1411,3 +1411,97 @@ test("a developer cannot add shared memory from the Agent page", async () => {
   await screen.findByLabelText("人格");
   expect(screen.queryByRole("button", { name: t("writeShared") })).not.toBeInTheDocument();
 });
+
+test("a declared sandbox size reaches the draft (§21.3, v2.22)", async () => {
+  loadedAgent(3);
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  await screen.findByLabelText("人格");
+  await openSection(t("agentSectionCapability"));
+  await userEvent.type(screen.getByLabelText("沙箱内存（MB）"), "256");
+  await userEvent.tab();
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  const body = sent[0] as { spec: { sandbox?: unknown } };
+  expect(body.spec.sandbox).toEqual({ memory_mb: 256 });
+});
+
+test("a loaded sandbox size survives saving the draft", async () => {
+  // Same reason as the skill review test: the form rebuilds the spec from
+  // what it shows, so a size it failed to load would be deleted by a save.
+  loadedAgent(3);
+  const sent: unknown[] = [];
+  server.use(
+    http.get(`/api/v1/agents/${AGENT}/draft`, () =>
+      HttpResponse.json({ ...draftBody(3), spec: { ...SPEC, sandbox: { memory_mb: 512 } } }),
+    ),
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  const personality = await screen.findByLabelText("人格");
+  await userEvent.clear(personality);
+  await userEvent.type(personality, "Rewritten.");
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  const body = sent[0] as { spec: { sandbox?: unknown } };
+  expect(body.spec.sandbox).toEqual({ memory_mb: 512 });
+});
+
+test("an empty sandbox size carries no key, so an old Agent's hash does not move", async () => {
+  loadedAgent(3);
+  const sent: unknown[] = [];
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  await userEvent.click(await screen.findByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  const [only] = sent as [{ spec: Record<string, unknown> }];
+  expect(only.spec).not.toHaveProperty("sandbox");
+});
+
+test("clearing a loaded sandbox size takes the key away, back to the platform default", async () => {
+  // The form carries fields it does not show through from the loaded spec,
+  // so a size it shows has to be removed by name when emptied, or clearing
+  // the box would quietly keep the old value.
+  loadedAgent(3);
+  const sent: unknown[] = [];
+  server.use(
+    http.get(`/api/v1/agents/${AGENT}/draft`, () =>
+      HttpResponse.json({ ...draftBody(3), spec: { ...SPEC, sandbox: { memory_mb: 512 } } }),
+    ),
+    http.put(`/api/v1/agents/${AGENT}/draft`, async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json(draftBody(4));
+    }),
+  );
+
+  renderDetail();
+  await screen.findByLabelText("人格");
+  await openSection(t("agentSectionCapability"));
+  await userEvent.clear(screen.getByLabelText("沙箱内存（MB）"));
+  await userEvent.tab();
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  await waitFor(() => expect(sent).toHaveLength(1));
+  const [only] = sent as [{ spec: Record<string, unknown> }];
+  expect(only.spec).not.toHaveProperty("sandbox");
+});
