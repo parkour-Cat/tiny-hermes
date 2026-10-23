@@ -16,7 +16,7 @@ import pytest
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from tiny_hermes.runs.domain.models import RunEventType
-from tiny_hermes.runs.infrastructure.event_push import RedisRunEventPush, announcing
+from tiny_hermes.runs.infrastructure.event_push import CHANNEL, RedisRunEventPush, announcing
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.store import AppendEventsCommand, ReservedEvent
 from tiny_hermes.shared.config import Settings
@@ -177,6 +177,22 @@ async def _live_frames(
             ready.set()
 
 
+async def _subscribed(url: str, within: float) -> bool:
+    """Whether the API's room has subscribed to the push channel yet."""
+    client = Redis.from_url(url)  # pyright: ignore[reportUnknownMemberType]
+    try:
+        deadline = asyncio.get_running_loop().time() + within
+        while True:
+            counts: Any = await client.pubsub_numsub(CHANNEL)  # pyright: ignore[reportUnknownMemberType]
+            if counts and int(counts[0][1]) > 0:
+                return True
+            if asyncio.get_running_loop().time() >= deadline:
+                return False
+            await asyncio.sleep(0.02)
+    finally:
+        await client.aclose()
+
+
 async def _wait_for(condition: Callable[[], bool], within: float) -> bool:
     deadline = asyncio.get_running_loop().time() + within
     while not condition():
@@ -199,10 +215,21 @@ async def test_an_announced_event_reaches_a_subscriber_at_once(
     reader = asyncio.create_task(_live_frames(browser, events_url(watched["id"]), seen, ready))
     try:
         await asyncio.wait_for(ready.wait(), timeout=5)
-        await asyncio.sleep(1.0)  # the room is holding, and has heard Redis say hello
+        opened = asyncio.get_running_loop().time()
+        # Subscribed, asked of Redis, rather than assumed after a fixed second:
+        # on a loaded runner the second was sometimes not enough, the
+        # announcement went to nobody, and only the 5 s fallback would have
+        # delivered it (2026-10-22, on main). The count is the channel's, not
+        # this server's: on CI this Redis is the test job's alone, but on a
+        # machine also running the Compose stack its API is counted too, and
+        # the check proves less there.
+        assert await _subscribed(reachable_redis, within=1.5)
 
         await _append(engine, watched, push.announce)
-        assert await _wait_for(lambda: "goal_verdict" in seen, within=1.0)
+        # Inside the fallback's first read, which comes 5 s after the room
+        # opened: arriving by then means the push delivered it, not the poll.
+        window = 4.5 - (asyncio.get_running_loop().time() - opened)
+        assert await _wait_for(lambda: "goal_verdict" in seen, within=window)
     finally:
         reader.cancel()
         await push.close()
