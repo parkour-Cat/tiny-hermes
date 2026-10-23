@@ -265,6 +265,26 @@ class _Database:
     def now(self) -> float:
         return float(self._go(self._conn.fetchval("select extract(epoch from now())")))
 
+    def enter_through(self, sessions: Sequence[str], caller_type: str) -> None:
+        """Give each session a caller of its own, of `caller_type`.
+
+        The probe signs in once, as the administrator, so every Run it makes is
+        one person's console Run: background, and since v2.21 held to that
+        person's running limit (§1.21.3). Rewriting who each session belongs to
+        is how the probe stands in for many people coming in through a chat
+        channel (`end_user`, interactive) or many integrations (`service_account`,
+        background and held only by the workspace's limit). The API has no way
+        to create either in bulk, and the claim reads exactly these columns.
+        """
+        self._go(
+            self._conn.execute(
+                "update sessions set caller_type = $1, caller_id = gen_random_uuid() "
+                "where id = any($2::uuid[])",
+                caller_type,
+                list(sessions),
+            )
+        )
+
     def status_counts(self, workspace: str) -> dict[str, int]:
         rows = self._go(
             self._conn.fetch(
@@ -442,6 +462,7 @@ def probe(
     lead_seconds: float = 5.0,
     cache_mb: int = 0,
     short_tools: Sequence[str] = (),
+    channels: bool = False,
 ) -> dict[str, Any]:
     """Short Runs at `rate`, optionally after `long_tasks` long ones start.
 
@@ -452,6 +473,10 @@ def probe(
     The long tasks are submitted first and the short Runs `lead_seconds`
     later, so the short ones arrive while long tasks already hold Workers:
     their wait is the fairness a person sending a message would see.
+
+    `channels` makes each short Run an end user's through a chat channel and
+    each long task an integration's (see `_Database.enter_through`). Without
+    it every Run is the administrator's console Run, as before v2.21.
     """
     if rounds < 1:
         raise SystemExit("--rounds must be at least 1")
@@ -503,6 +528,9 @@ def probe(
                     short_ids.add(run_id)
 
         database = _Database(database_url())
+        if channels:
+            database.enter_through(sessions, "end_user")
+            database.enter_through(long_sessions, "service_account")
         try:
             with _Sampler(workspace, workers) as sampler:
                 for index, session in enumerate(long_sessions):
@@ -641,6 +669,11 @@ def main() -> int:
         default=[],
         help="a tool bound to the short Runs' Agent, which never calls it (repeatable)",
     )
+    parser.add_argument(
+        "--channels",
+        action="store_true",
+        help="short Runs as end users through a chat channel, long tasks as integrations",
+    )
     arguments = parser.parse_args()
     result = probe(
         arguments.rate,
@@ -652,6 +685,7 @@ def main() -> int:
         lead_seconds=arguments.lead_seconds,
         cache_mb=arguments.cache_mb,
         short_tools=arguments.short_tools,
+        channels=arguments.channels,
     )
     _report(result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
