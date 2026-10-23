@@ -234,6 +234,41 @@ class ProbeConsole(BenchmarkConsole):
         return agent
 
 
+    def publish_endpoint_agent(self, workspace: str, alias: str, endpoint_id: str) -> str:
+        """The short Runs' Agent on a real model endpoint instead of the stand-in.
+
+        Asked for one short sentence, so a probe of a hundred Runs costs a
+        hundred short completions: what is being measured is the platform's
+        share of the time and CPU around a real call, not the model's prose.
+        """
+        created = self._client.post(
+            "/api/v1/agents",
+            headers=self._headers(workspace),
+            json={"name": alias, "alias": alias},
+        )
+        created.raise_for_status()
+        agent = str(created.json()["id"])
+        self._client.put(
+            f"/api/v1/agents/{agent}/draft",
+            headers=self._headers(workspace),
+            json={
+                "expected_revision": 1,
+                "spec": {
+                    "schema_version": 1,
+                    "personality": "Answer in one short sentence.",
+                    "model_policy": {"provider": "openai_compatible", "endpoint_id": endpoint_id},
+                    "tools": [],
+                },
+            },
+        ).raise_for_status()
+        self._client.post(
+            f"/api/v1/agents/{agent}/publish",
+            headers=self._headers(workspace),
+            json={"expected_revision": 2},
+        ).raise_for_status()
+        return agent
+
+
 def split_runs(
     runs: Sequence[RunTimes], long_ids: set[str], short_ids: set[str]
 ) -> tuple[list[RunTimes], list[RunTimes]]:
@@ -463,6 +498,7 @@ def probe(
     cache_mb: int = 0,
     short_tools: Sequence[str] = (),
     channels: bool = False,
+    endpoint: str | None = None,
 ) -> dict[str, Any]:
     """Short Runs at `rate`, optionally after `long_tasks` long ones start.
 
@@ -491,8 +527,12 @@ def probe(
         console = ProbeConsole(client)
         console.sign_in()
         workspace = console.create_workspace(f"probe-{time.time_ns()}")
-        agent = console.publish_agent(
-            workspace, f"probe-{time.time_ns()}", SCENARIO, list(short_tools)
+        agent = (
+            console.publish_endpoint_agent(workspace, f"probe-{time.time_ns()}", endpoint)
+            if endpoint
+            else console.publish_agent(
+                workspace, f"probe-{time.time_ns()}", SCENARIO, list(short_tools)
+            )
         )
         _log(f"opening {len(offsets)} sessions (one per Run, outside the timed window)")
         sessions = [console.open_session(workspace, agent) for _ in offsets]
@@ -588,6 +628,7 @@ def probe(
             "rounds": rounds if long_tasks else 0,
             "cache_mb": cache_mb if long_tasks else 0,
             "short_tools": list(short_tools),
+            "short_model": endpoint or f"deterministic:{SCENARIO}",
         },
         "stack": {
             **host_shape(),
@@ -674,6 +715,11 @@ def main() -> int:
         action="store_true",
         help="short Runs as end users through a chat channel, long tasks as integrations",
     )
+    parser.add_argument(
+        "--endpoint",
+        default=None,
+        help="a model endpoint id: the short Runs use it instead of the deterministic stand-in",
+    )
     arguments = parser.parse_args()
     result = probe(
         arguments.rate,
@@ -686,6 +732,7 @@ def main() -> int:
         cache_mb=arguments.cache_mb,
         short_tools=arguments.short_tools,
         channels=arguments.channels,
+        endpoint=arguments.endpoint,
     )
     _report(result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
