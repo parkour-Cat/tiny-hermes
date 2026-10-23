@@ -140,6 +140,9 @@ async def _serve() -> None:
     sessions = build_session_factory(settings)
     ceiling = resource_ceiling(settings)
     budget = memory_budget_mb(settings)
+    # Once, at start: a pool that cannot be used stops the process here, not
+    # every acquire later, and a retired setting is warned about once.
+    networking = _networking(settings)
     client: Any = docker.from_env(timeout=_DOCKER_CALL_TIMEOUT_SECONDS)  # noqa: TID251 - the one place, by design
 
     def controller_on(session: AsyncSession) -> SandboxController:
@@ -150,7 +153,7 @@ async def _serve() -> None:
             leases=SqlLeaseAuthority(session),
             audit=_AuditSink(session),
             ceiling=ceiling,
-            networking=_networking(settings),
+            networking=networking,
             memory_budget_mb=budget,
         )
 
