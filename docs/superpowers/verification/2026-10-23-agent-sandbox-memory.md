@@ -16,7 +16,8 @@
 
 ## 测试过了
 
-- 后端单元测试：新增 Agent 侧 8 条、配置 2 条、传输层 4 条，全量见下。
+- 后端单元测试：新增 Agent 侧 8 条、配置 2 条、传输层 4 条；全量 2709 passed。
+- 后端集成测试全量：1296 passed、1 skipped（比 main 多 11 条，就是下面这些）。
 - 集成测试（真 Docker、真数据库）：
   - Agent 声明 384 时，容器的 `HostConfig.Memory` 确实是 384 MiB，`sandbox_instances.memory_mb` 也是 384；
   - 预算 512 时，默认 512 的沙箱只放得下 1 个，声明 256 的放得下 2 个；
