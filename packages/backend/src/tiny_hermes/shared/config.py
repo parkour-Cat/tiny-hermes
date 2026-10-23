@@ -27,6 +27,11 @@ class Settings(BaseSettings):
 
     environment: str = "development"
     database_url: str
+    #: The role every application connection acts as (§9.3, v2.20): one that
+    #: row-level security applies to. Created by migration 20261023_0075.
+    #: Empty keeps the login's own role, for a deployment that logs in as such
+    #: a role already.
+    database_role: str = Field(default="tiny_hermes_app", pattern=r"^[a-z_][a-z0-9_]*$|^$")
     redis_url: str
     s3_endpoint: str
     s3_bucket: str

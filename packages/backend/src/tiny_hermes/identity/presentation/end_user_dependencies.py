@@ -29,6 +29,7 @@ from starlette.datastructures import Headers
 from tiny_hermes.identity.application.end_user_service import EndUserIdentityService
 from tiny_hermes.identity.presentation.dependencies import SESSION_COOKIE
 from tiny_hermes.shared.errors import AppError
+from tiny_hermes.shared.tenancy_scope import enter_workspace
 
 #: Deliberately not `tiny_hermes_session` (`presentation/dependencies.py`).
 #: Design §3's own words: the two identity systems must never share a
@@ -81,6 +82,7 @@ async def resolve_end_user_caller(
     session = await service.authenticate(session_token, datetime.now(UTC))
     if session is None:
         raise end_user_unauthenticated()
+    enter_workspace(session.workspace_id)
     return EndUserCaller(
         session.end_user_id, session.workspace_id, session.agents, session.channel_issuer_id
     )
