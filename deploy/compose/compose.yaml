@@ -55,6 +55,12 @@ x-base-env: &base-env
   # task makes one model call per round, so this is its round ceiling.
   AGENT_MAX_MODEL_CALLS: ${AGENT_MAX_MODEL_CALLS:-20}
   AGENT_MAX_TOOL_CALLS: ${AGENT_MAX_TOOL_CALLS:-200}
+  # §1.21.1 (v2.21): the execution time an Agent may ask for where its
+  # workspace sets nothing, and how far a workspace administrator may raise
+  # that and the model calls above (设置 → 运行上限).
+  AGENT_MAX_EXECUTION_SECONDS: ${AGENT_MAX_EXECUTION_SECONDS:-900}
+  AGENT_CEILING_EXECUTION_SECONDS: ${AGENT_CEILING_EXECUTION_SECONDS:-7200}
+  AGENT_CEILING_MODEL_CALLS: ${AGENT_CEILING_MODEL_CALLS:-200}
   # Outbound safety. The default approves nothing, so only public addresses
   # are reachable; an enterprise private endpoint needs its range named here.
   OUTBOUND_ALLOWED_CIDRS: ${OUTBOUND_ALLOWED_CIDRS:-}
