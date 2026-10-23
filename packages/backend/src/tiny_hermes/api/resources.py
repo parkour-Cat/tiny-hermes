@@ -10,7 +10,6 @@ from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
-    create_async_engine,
 )
 
 from tiny_hermes.agents.application.service import AgentCatalog
@@ -80,6 +79,7 @@ from tiny_hermes.session_workspace.application.files import WorkspaceFiles
 from tiny_hermes.session_workspace.infrastructure.minio_store import MinioObjectStore
 from tiny_hermes.session_workspace.infrastructure.sql_files import SqlWorkspaceFiles
 from tiny_hermes.shared.config import Settings, get_settings
+from tiny_hermes.shared.database import application_engine
 from tiny_hermes.shared.errors import AppError, AuditedDenial
 from tiny_hermes.skills.application.service import SkillCatalog
 from tiny_hermes.skills.infrastructure.outbound_tarball import OutboundTarballSource
@@ -143,9 +143,8 @@ class ApplicationResources:
 
     def database_engine(self) -> AsyncEngine:
         if self._engine is None:
-            self._engine = create_async_engine(
-                self.settings.database_url,
-                pool_pre_ping=True,
+            self._engine = application_engine(
+                self.settings,
                 pool_size=self.settings.database_pool_size,
                 max_overflow=self.settings.database_max_overflow,
             )

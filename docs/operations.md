@@ -590,3 +590,25 @@ docker compose exec postgres psql -U tiny_hermes -d tiny_hermes -c \
 知道账号名的人可以故意输错，让这个账号的密码登录 15 分钟内用不了。这是按账号限流的代价。
 如果某个账号反复被这样针对，查审计里的 `identity.login_throttled`，在网关上按来源地址封掉。
 
+## 14. 数据库行级安全
+
+规则在产品设计 §9 第 3 条、§23 第 17 条（v2.20）。
+
+- 迁移 `20261023_0075` 创建角色 `tiny_hermes_app`（不能登录、不是超级用户、没有 BYPASSRLS、
+  不拥有任何表），给它增删改查权限，并在 31 张带 `workspace_id` 的表上开行级安全。以后的迁移
+  建的表自动授权，但**要自己写策略**；`test_row_level_security` 在缺策略时会失败。
+- 应用的每个连接打开后执行 `SET ROLE tiny_hermes_app`（`DATABASE_ROLE`，默认就是它）。
+  Compose 用的登录 `tiny_hermes` 是超级用户，行级安全对它不生效，所以必须降下来。迁移仍然用
+  `tiny_hermes` 跑。
+- **生产环境更好的做法**：给 `tiny_hermes_app` 一个密码和 `LOGIN`，应用直接用它登录，
+  `DATABASE_ROLE` 设为空。这样即使有 SQL 注入执行了 `RESET ROLE`，也回不到超级用户。
+  ```sql
+  ALTER ROLE tiny_hermes_app WITH LOGIN PASSWORD '...';
+  ```
+  然后 `DATABASE_URL` 换成这个角色，迁移任务单独保留所有者的连接串。
+- 核对：每个进程连上之后 `SELECT current_user` 应该是 `tiny_hermes_app`。
+
+**它管什么、不管什么：**API 在请求确定工作空间之后开始的事务受限，代码漏了工作空间条件时由
+数据库兜底。Worker、Scheduler、controller、出站代理、登录、平台管理、以及用路径参数指定工作
+空间的成员管理接口，事务不受限，隔离仍然只靠代码。
+

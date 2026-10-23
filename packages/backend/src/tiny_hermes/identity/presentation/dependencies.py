@@ -9,6 +9,7 @@ from tiny_hermes.identity.application.machine_service import (
 )
 from tiny_hermes.identity.domain.models import AuthenticatedUser
 from tiny_hermes.shared.errors import AppError
+from tiny_hermes.shared.tenancy_scope import enter_workspace
 from tiny_hermes.tenancy.domain.models import Actor
 
 SESSION_COOKIE = "tiny_hermes_session"
@@ -54,7 +55,7 @@ def require_workspace_id(raw_value: str | None) -> UUID:
             detail="X-Workspace-Id is required for workspace-scoped requests.",
         )
     try:
-        return UUID(raw_value)
+        workspace_id = UUID(raw_value)
     except ValueError as error:
         raise AppError(
             code="invalid_workspace_id",
@@ -62,6 +63,12 @@ def require_workspace_id(raw_value: str | None) -> UUID:
             status=400,
             detail="X-Workspace-Id must be a UUID.",
         ) from error
+    # Where a request names its workspace, so where its transactions start to
+    # carry it (§9.3, v2.20). Before membership is checked: the check then
+    # runs inside the workspace asked for, and a caller who is not a member
+    # finds no membership row there.
+    enter_workspace(workspace_id)
+    return workspace_id
 
 
 def unauthenticated() -> AppError:
@@ -166,6 +173,7 @@ async def resolve_api_key_caller(
         scopes=machine.scopes,
     )
     require_scope(actor, required_scope)
+    enter_workspace(machine.account.workspace_id)
     return WorkspaceCaller(actor, machine.account.workspace_id)
 
 
@@ -199,6 +207,7 @@ async def resolve_workspace_caller(
             scopes=machine.scopes,
         )
         require_scope(actor, required_scope)
+        enter_workspace(machine.account.workspace_id)
         return WorkspaceCaller(actor, machine.account.workspace_id)
 
     if write:
