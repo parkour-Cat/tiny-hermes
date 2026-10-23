@@ -61,7 +61,7 @@ async def _owned_by(engine: AsyncEngine, run_id: UUID, caller_type: str, caller_
     )
 
 
-async def _claim(engine: AsyncEngine, **overrides: Any) -> UUID | None:
+async def _claim(engine: AsyncEngine, *, promote_after_seconds: int = 120) -> UUID | None:
     async with async_sessionmaker(engine, expire_on_commit=False).begin() as session:
         claimed = await SqlRunStore(session).claim_head(
             ClaimRunCommand(
@@ -70,7 +70,8 @@ async def _claim(engine: AsyncEngine, **overrides: Any) -> UUID | None:
                 lease_seconds=60,
                 request_id=f"claim-{uuid4().hex[:6]}",
                 capabilities=FULL,
-                **{"per_caller_default": PER_CALLER, **overrides},
+                per_caller_default=PER_CALLER,
+                promote_after_seconds=promote_after_seconds,
             )
         )
     return None if claimed is None else claimed.run.id
