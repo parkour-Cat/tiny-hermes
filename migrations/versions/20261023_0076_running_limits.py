@@ -18,7 +18,9 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column("workspaces", sa.Column("max_running_runs_per_caller", sa.Integer(), nullable=True))
+    op.add_column(
+        "workspaces", sa.Column("max_running_runs_per_caller", sa.Integer(), nullable=True)
+    )
     op.add_column("workspaces", sa.Column("max_running_runs", sa.Integer(), nullable=True))
     op.create_check_constraint(
         "ck_workspaces_running_limits_positive",
