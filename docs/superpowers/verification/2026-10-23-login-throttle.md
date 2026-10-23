@@ -54,6 +54,20 @@
   - nginx 配置里登录接口有按地址的限流，并且仍然转发到 API。
 - `nginx -t`：用 web 镜像同版本的 `nginx:1.29.1-alpine` 检查配置，语法通过。
 
+### PR 的第一次 CI
+
+两次运行里，一次全绿；另一次红了两处，都和这个分支无关：
+
+- `test_event_push.py::test_an_announced_event_reaches_a_subscriber_at_once`：同一条测试在
+  main 的 17:10 那次运行（#125 合并之前）就红过一次，是已有的时序问题。
+- compose-e2e 的工作区配额演练：一个 Run 停在 `interrupted` 120 秒，scheduler 的沙箱清理
+  每次都被 controller 以 `DockerUnavailable` 拒绝，也就是 CI 机器上的 Docker 守护进程拒绝了
+  那次调用。这个分支没有改沙箱的代码。
+  - **顺带发现一个排查上的缺口**：controller 只把异常的类名传回给 scheduler，两边都没有记下
+    Docker 说的具体内容，所以日志里看不出 Docker 当时为什么拒绝。没有在这一遍修。
+
+推了这条记录，重新跑 CI，看最终提交上的结果。
+
 ## 走通了什么
 
 在本机的 Compose 栈上，重建到这个分支，核对过 api、worker、scheduler、controller 四个容器
