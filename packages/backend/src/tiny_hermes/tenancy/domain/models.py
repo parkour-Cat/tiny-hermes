@@ -53,3 +53,40 @@ class WorkspaceMember:
     display_name: str
     subject: str
     role: Role
+
+
+@dataclass(frozen=True)
+class WorkspaceLimits:
+    """What a workspace has set (§1.21.1 and .3, v2.21). None takes the default."""
+
+    agent_max_execution_seconds: int | None = None
+    agent_max_model_calls: int | None = None
+    max_running_runs_per_caller: int | None = None
+    max_running_runs: int | None = None
+
+
+#: Every field `WorkspaceLimits` has, in the order they are shown.
+LIMIT_FIELDS = (
+    "agent_max_execution_seconds",
+    "agent_max_model_calls",
+    "max_running_runs_per_caller",
+    "max_running_runs",
+)
+
+
+@dataclass(frozen=True)
+class LimitPolicy:
+    """The platform's side: what an unset limit means, and how far one may go."""
+
+    defaults: WorkspaceLimits
+    ceilings: WorkspaceLimits
+
+    def offending(self, limits: WorkspaceLimits) -> tuple[str, int] | None:
+        """The first value below one or above its ceiling, with that ceiling."""
+        for name in LIMIT_FIELDS:
+            value = getattr(limits, name)
+            ceiling = getattr(self.ceilings, name)
+            if value is not None and (value < 1 or (ceiling is not None and value > ceiling)):
+                return name, ceiling
+        return None
+

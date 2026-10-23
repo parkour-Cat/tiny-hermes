@@ -7,6 +7,7 @@ import { MembersPage } from "./MembersPage";
 import { ModelEndpointsPage } from "./ModelEndpointsPage";
 import { OutboundScopePage } from "./OutboundScopePage";
 import { SecretsPage } from "./SecretsPage";
+import { WorkspaceLimitsPage } from "./WorkspaceLimitsPage";
 
 /** 配一次就不太会再动的东西。六段，按角色决定画哪几段——见 GroupedPage。 */
 export function SettingsPage() {
@@ -19,6 +20,7 @@ export function SettingsPage() {
       groupKey="settings"
       render={(key) =>
         key === "members" ? <MembersPage /> :
+        key === "limits" ? <WorkspaceLimitsPage /> :
         key === "api-keys" ? <ApiKeysPage /> :
         key === "model-endpoints" ? <>{platform ? <Link to="../platform#model-endpoints">{t("managePlatform")}</Link> : null}<ModelEndpointsPage readOnly /></> :
         key === "secrets" ? <SecretsPage scopeOnly="workspace" /> :

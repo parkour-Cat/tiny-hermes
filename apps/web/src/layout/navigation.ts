@@ -118,6 +118,9 @@ export const NAV_GROUPS: NavGroup[] = [
       { key: "outbound", labelKey: "outboundScopes", introKey: "outboundScopesIntro", path: "outbound", roles: null },
       // 依据：/api/v1/service-accounts 对 viewer 403、developer 200
       { key: "api-keys", labelKey: "programAccess", introKey: "apiKeysIntro", path: "api-keys", roles: ["workspace_admin", "developer"] },
+      // 最后：不依赖上面任何一段，有了 Agent 和任务之后才会想去调。
+      // 依据：/api/v1/workspaces/{id}/limits 对所有成员 200，只有管理员能改（v2.21 §1.21）
+      { key: "limits", labelKey: "runLimits", introKey: "runLimitsIntro", path: "limits", roles: null },
 
     ],
   },

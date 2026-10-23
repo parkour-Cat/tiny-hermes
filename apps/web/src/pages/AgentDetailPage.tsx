@@ -371,12 +371,13 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
   const scope = { workspace: workspaceId ?? "" };
   const enabled = workspaceId !== null && agentId !== "";
   const limits: { name: keyof DraftValues; label: MessageKey; min: number; max: number }[] = [
-    { name: "max_execution_seconds", label: "maxExecutionSeconds", min: 1, max: 900 },
+    // Execution time, model calls and tool calls stop at the highest ceiling
+    // the backend allows, not at the ceiling in force: that is the workspace's
+    // (运行上限, v2.21) or the platform's, and the server refuses an
+    // over-ceiling draft with both numbers. A lower `max` here clamped 120 to
+    // 50 without saying so; 900 here once hid that a workspace could raise it.
+    { name: "max_execution_seconds", label: "maxExecutionSeconds", min: 1, max: 7_200 },
     { name: "max_elapsed_seconds", label: "maxElapsedSeconds", min: 60, max: 86_400 },
-    // Model and tool calls stop at the highest ceiling the backend's settings
-    // allow, not at the ceiling in force: that is an administrator's setting
-    // this page cannot see, and the server refuses an over-ceiling draft with
-    // both numbers. A lower `max` here clamped 120 to 50 without saying so.
     { name: "max_model_calls", label: "maxModelCalls", min: 1, max: 200 },
     { name: "max_tool_calls", label: "maxToolCalls", min: 0, max: 5000 },
     { name: "max_derived_retries", label: "maxDerivedRetries", min: 0, max: 3 },

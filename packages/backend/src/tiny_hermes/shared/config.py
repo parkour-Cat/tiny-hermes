@@ -167,6 +167,13 @@ class Settings(BaseSettings):
     #: is published — never when a published version is read back, so lowering
     #: this cannot break an Agent already published above it.
     agent_max_model_calls: int = Field(default=20, ge=1, le=200)
+    #: §1.21.1 (v2.21): the most execution time an Agent may ask for where its
+    #: workspace sets nothing. Was the literal `le=900` on `AgentLimits`, which
+    #: no workspace could raise. Checked when written, like the line above.
+    agent_max_execution_seconds: int = Field(default=900, ge=1, le=86_400)
+    #: How far a workspace administrator may raise the two above (§1.21.1).
+    agent_ceiling_model_calls: int = Field(default=200, ge=1, le=1_000)
+    agent_ceiling_execution_seconds: int = Field(default=7_200, ge=1, le=86_400)
 
     #: The most tool calls an Agent author may ask for (§12.3). Was the literal
     #: `le=50` on `AgentLimits.max_tool_calls`; fifty is a short task — an

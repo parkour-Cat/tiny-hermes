@@ -20,12 +20,20 @@ from tiny_hermes.tenancy.application.workspace_service import (
     InvalidMemberRole,
     InvalidWorkspaceName,
     LastWorkspaceAdmin,
+    LimitOutOfRange,
     MemberAlreadyPresent,
     UnknownMember,
     UnknownUser,
     WorkspaceService,
 )
-from tiny_hermes.tenancy.domain.models import Actor, Role, Workspace, WorkspaceMember
+from tiny_hermes.tenancy.domain.models import (
+    LIMIT_FIELDS,
+    Actor,
+    Role,
+    Workspace,
+    WorkspaceLimits,
+    WorkspaceMember,
+)
 
 
 class CreateWorkspaceRequest(BaseModel):
@@ -49,6 +57,28 @@ class WorkspaceResponse(BaseModel):
     @classmethod
     def from_domain(cls, workspace: Workspace) -> "WorkspaceResponse":
         return cls(id=workspace.id, name=workspace.name, status=workspace.status)
+
+
+class LimitsBody(BaseModel):
+    """The four limits. In a `PUT`, a field left out is left as it was and
+    `null` puts it back to the platform's default."""
+
+    agent_max_execution_seconds: int | None = None
+    agent_max_model_calls: int | None = None
+    max_running_runs_per_caller: int | None = None
+    max_running_runs: int | None = None
+
+    @classmethod
+    def from_domain(cls, limits: WorkspaceLimits) -> "LimitsBody":
+        return cls(**{name: getattr(limits, name) for name in LIMIT_FIELDS})
+
+
+class WorkspaceLimitsResponse(BaseModel):
+    """What the workspace set; what an unset one means; how far one may go."""
+
+    values: LimitsBody
+    defaults: LimitsBody
+    ceilings: LimitsBody
 
 
 class MyRoleResponse(BaseModel):
@@ -267,6 +297,61 @@ def workspace_router(resources: ApplicationResources) -> APIRouter:
         except LastWorkspaceAdmin as error:
             raise _last_admin() from error
 
+    @router.get("/{workspace_id}/limits", response_model=WorkspaceLimitsResponse)
+    async def get_limits(  # pyright: ignore[reportUnusedFunction]
+        workspace_id: UUID,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        workspaces: Annotated[WorkspaceService, Depends(workspace_dependency, scope="function")],
+        selected_workspace: Annotated[str | None, Header(alias="X-Workspace-Id")] = None,
+        session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+    ) -> WorkspaceLimitsResponse:
+        user = await authenticate_browser_user(auth, session_token)
+        _require_path_matches_header(workspace_id, selected_workspace)
+        try:
+            limits = await workspaces.get_limits(_actor(user), workspace_id)
+        except Forbidden as error:
+            raise forbidden() from error
+        return _limits_response(workspaces, limits)
+
+    @router.put("/{workspace_id}/limits", response_model=WorkspaceLimitsResponse)
+    async def set_limits(  # pyright: ignore[reportUnusedFunction]
+        workspace_id: UUID,
+        payload: LimitsBody,
+        request: Request,
+        auth: Annotated[AuthService, Depends(auth_dependency, scope="function")],
+        workspaces: Annotated[WorkspaceService, Depends(workspace_dependency, scope="function")],
+        selected_workspace: Annotated[str | None, Header(alias="X-Workspace-Id")] = None,
+        session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
+        csrf_token: Annotated[str | None, Header(alias="X-CSRF-Token")] = None,
+    ) -> WorkspaceLimitsResponse:
+        user = await verify_browser_write(auth, session_token, csrf_token)
+        _require_path_matches_header(workspace_id, selected_workspace)
+        actor = _actor(user)
+        try:
+            current = await workspaces.get_limits(actor, workspace_id)
+            changed = WorkspaceLimits(
+                **{
+                    name: getattr(payload, name)
+                    if name in payload.model_fields_set
+                    else getattr(current, name)
+                    for name in LIMIT_FIELDS
+                }
+            )
+            limits = await workspaces.set_limits(
+                actor, workspace_id, changed, request.state.request_id
+            )
+        except Forbidden as error:
+            raise forbidden() from error
+        except LimitOutOfRange as error:
+            raise AppError(
+                code="limit_out_of_range",
+                title="Limit out of range",
+                status=422,
+                detail=str(error),
+                context={"field": error.field, "ceiling": error.ceiling},
+            ) from error
+        return _limits_response(workspaces, limits)
+
     return router
 
 
@@ -301,3 +386,15 @@ def _last_admin() -> AppError:
         status=409,
         detail="A workspace must keep at least one workspace admin.",
     )
+
+
+def _limits_response(
+    workspaces: WorkspaceService, limits: WorkspaceLimits
+) -> WorkspaceLimitsResponse:
+    policy = workspaces.limit_policy
+    return WorkspaceLimitsResponse(
+        values=LimitsBody.from_domain(limits),
+        defaults=LimitsBody.from_domain(policy.defaults),
+        ceilings=LimitsBody.from_domain(policy.ceilings),
+    )
+

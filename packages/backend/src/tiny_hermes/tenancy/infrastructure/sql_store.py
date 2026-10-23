@@ -1,13 +1,19 @@
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
 from tiny_hermes.identity.infrastructure.tables import AuthIdentityRow, UserRow
 from tiny_hermes.tenancy.application.workspace_service import MemberAlreadyPresent
-from tiny_hermes.tenancy.domain.models import Role, Workspace, WorkspaceMember
+from tiny_hermes.tenancy.domain.models import (
+    LIMIT_FIELDS,
+    Role,
+    Workspace,
+    WorkspaceLimits,
+    WorkspaceMember,
+)
 from tiny_hermes.tenancy.infrastructure.tables import MembershipRow, WorkspaceRow
 
 MEMBERSHIP_CONSTRAINT = "memberships_workspace_id_user_id_key"
@@ -62,6 +68,19 @@ class SqlWorkspaceStore:
             )
         )
         return Role(value) if value else None
+
+    async def get_limits(self, workspace_id: UUID) -> WorkspaceLimits | None:
+        row = await self._session.get(WorkspaceRow, workspace_id)
+        if row is None:
+            return None
+        return WorkspaceLimits(**{name: getattr(row, name) for name in LIMIT_FIELDS})
+
+    async def set_limits(self, workspace_id: UUID, limits: WorkspaceLimits) -> None:
+        await self._session.execute(
+            update(WorkspaceRow)
+            .where(WorkspaceRow.id == workspace_id)
+            .values({name: getattr(limits, name) for name in LIMIT_FIELDS})
+        )
 
     async def list_members(self, workspace_id: UUID) -> list[WorkspaceMember]:
         rows = (

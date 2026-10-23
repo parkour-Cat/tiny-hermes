@@ -49,8 +49,12 @@ def test_agent_spec_rejects_unknown_fields_and_unsafe_limits() -> None:
     with pytest.raises(ValidationError):
         AgentSpec.model_validate({**valid_spec(), "unknown": True})
     values = valid_spec()
+    # Zero, not 901: above 900 is no longer the model's to refuse. The ceiling
+    # is a workspace's since v2.21, checked where a value is written
+    # (tenancy/test_workspace_limits.py), so a published version read back
+    # never fails on a ceiling lowered after it.
     values["limits"] = {
-        "max_execution_seconds": 901,
+        "max_execution_seconds": 0,
         "max_elapsed_seconds": 86400,
         "max_model_calls": 20,
         "max_tool_calls": 50,

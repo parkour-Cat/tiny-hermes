@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 
-from tiny_hermes.agents.application.service import AgentCatalog
+from tiny_hermes.agents.application.service import AgentCatalog, WorkspaceCeilingReader
 from tiny_hermes.agents.domain.models import PlatformCeilings
 from tiny_hermes.agents.infrastructure.http_tool_bindings import (
     CatalogHttpToolBindings,
@@ -85,6 +85,7 @@ from tiny_hermes.skills.application.service import SkillCatalog
 from tiny_hermes.skills.infrastructure.outbound_tarball import OutboundTarballSource
 from tiny_hermes.skills.infrastructure.sql_store import SqlSkillStore
 from tiny_hermes.tenancy.application.workspace_service import WorkspaceService
+from tiny_hermes.tenancy.domain.models import LimitPolicy, WorkspaceLimits
 from tiny_hermes.tenancy.infrastructure.sql_store import SqlWorkspaceStore
 
 
@@ -301,10 +302,29 @@ class ApplicationResources:
         if self._engine is not None:
             await self._engine.dispose()
 
+    @property
+    def limit_policy(self) -> LimitPolicy:
+        """What an unset workspace limit means, and how far one may go (§1.21)."""
+        settings = self.settings
+        return LimitPolicy(
+            defaults=WorkspaceLimits(
+                agent_max_execution_seconds=settings.agent_max_execution_seconds,
+                agent_max_model_calls=settings.agent_max_model_calls,
+                max_running_runs_per_caller=settings.run_limit_per_caller,
+                max_running_runs=None,
+            ),
+            ceilings=WorkspaceLimits(
+                agent_max_execution_seconds=settings.agent_ceiling_execution_seconds,
+                agent_max_model_calls=settings.agent_ceiling_model_calls,
+                max_running_runs_per_caller=1_000,
+                max_running_runs=10_000,
+            ),
+        )
+
     async def workspace_service(self) -> AsyncGenerator[WorkspaceService]:
         async with self.session_factory()() as session:
             try:
-                yield WorkspaceService(SqlWorkspaceStore(session))
+                yield WorkspaceService(SqlWorkspaceStore(session), self.limit_policy)
             except BaseException:
                 await session.rollback()
                 raise
@@ -404,6 +424,7 @@ class ApplicationResources:
                     PlatformCeilings(
                         max_model_calls=self.settings.agent_max_model_calls,
                         max_tool_calls=self.settings.agent_max_tool_calls,
+                        max_execution_seconds=self.settings.agent_max_execution_seconds,
                     ),
                     CatalogSkillBindings(SqlSkillStore(session)),
                     # What this workspace approved, so a published version can
@@ -411,6 +432,7 @@ class ApplicationResources:
                     OutboundScopes(SqlScopeStore(session)),
                     CatalogHttpToolBindings(SqlHttpToolStore(session)),
                     CatalogMcpBindings(SqlMcpStore(session)),
+                    _workspace_ceilings(SqlWorkspaceStore(session)),
                 )
             except AuditedDenial:
                 await session.commit()
@@ -650,3 +672,16 @@ class ApplicationResources:
                 raise
             else:
                 await session.commit()
+
+
+def _workspace_ceilings(store: SqlWorkspaceStore) -> WorkspaceCeilingReader:
+    """A workspace's own ceilings on what its Agents may ask for (§1.21.1)."""
+
+    async def read(workspace_id: UUID) -> tuple[int | None, int | None]:
+        limits = await store.get_limits(workspace_id)
+        if limits is None:
+            return None, None
+        return limits.agent_max_execution_seconds, limits.agent_max_model_calls
+
+    return read
+

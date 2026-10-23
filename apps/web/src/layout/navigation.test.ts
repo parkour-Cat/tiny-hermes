@@ -30,6 +30,7 @@ test("viewer 看不到他会被拒绝的段，而 developer 看得到渠道", ()
     "members",
     "model-endpoints",
     "outbound",
+    "limits",
   ]);
   const channels = NAV_GROUPS.find((g) => g.key === "channels")!;
   expect(visibleSections(channels, "developer", false)).toHaveLength(1);
@@ -64,6 +65,7 @@ test("设置里的段按依赖排序：先有 Key 才能接模型", () => {
     "model-endpoints",
     "outbound",
     "api-keys",
+    "limits",
   ]);
 });
 

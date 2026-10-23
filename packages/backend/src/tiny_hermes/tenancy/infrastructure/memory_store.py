@@ -1,10 +1,11 @@
 from uuid import UUID, uuid4
 
-from tiny_hermes.tenancy.domain.models import Role, Workspace, WorkspaceMember
+from tiny_hermes.tenancy.domain.models import Role, Workspace, WorkspaceLimits, WorkspaceMember
 
 
 class MemoryWorkspaceStore:
     def __init__(self) -> None:
+        self.limits: dict[UUID, WorkspaceLimits] = {}
         self._workspaces: dict[UUID, Workspace] = {}
         self._memberships: dict[tuple[UUID, UUID], Role] = {}
         self._people: dict[UUID, tuple[str, str]] = {}
@@ -35,6 +36,12 @@ class MemoryWorkspaceStore:
 
     async def get_membership(self, workspace_id: UUID, user_id: UUID) -> Role | None:
         return self._memberships.get((workspace_id, user_id))
+
+    async def get_limits(self, workspace_id: UUID) -> WorkspaceLimits | None:
+        return self.limits.get(workspace_id, WorkspaceLimits())
+
+    async def set_limits(self, workspace_id: UUID, limits: WorkspaceLimits) -> None:
+        self.limits[workspace_id] = limits
 
     async def list_members(self, workspace_id: UUID) -> list[WorkspaceMember]:
         return [

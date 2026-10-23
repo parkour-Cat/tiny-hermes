@@ -19,7 +19,10 @@ from tiny_hermes.runs.domain.context_budget import (
 class AgentLimits(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    max_execution_seconds: int = Field(default=900, ge=1, le=900)
+    # No upper literal, for the reason `max_model_calls` below has none: the
+    # ceiling is a workspace's (§1.21.1, v2.21), checked where a value is
+    # written. It was `le=900` here, which no workspace could raise.
+    max_execution_seconds: int = Field(default=900, ge=1)
     max_elapsed_seconds: int = Field(default=86_400, ge=60, le=86_400)
     # No upper literal. This model is also what a published AgentVersion's
     # stored document parses back into, and a Run loads that document every
@@ -789,12 +792,19 @@ class PlatformCeilings:
 
     max_model_calls: int = 20
     max_tool_calls: int = 200
+    max_execution_seconds: int = 900
 
 
 def rounds_above_ceiling(spec: AgentSpec, ceilings: PlatformCeilings) -> int | None:
     """The asked-for round count when it is above the ceiling, else `None`."""
     asked = spec.limits.max_model_calls
     return asked if asked > ceilings.max_model_calls else None
+
+
+def execution_above_ceiling(spec: AgentSpec, ceilings: PlatformCeilings) -> int | None:
+    """The asked-for execution seconds when above the ceiling, else `None`."""
+    asked = spec.limits.max_execution_seconds
+    return asked if asked > ceilings.max_execution_seconds else None
 
 
 def tool_calls_above_ceiling(spec: AgentSpec, ceilings: PlatformCeilings) -> int | None:

@@ -632,11 +632,22 @@ docker compose exec postgres psql -U tiny_hermes -d tiny_hermes -c \
 - **工作空间同时执行的上限**：`workspaces.max_running_runs`，默认不限。
 - 只算正在执行时间片的 Run；等审批、等外部事件、暂停、排队的不算。超出上限的 Run 排队等待，
   不报错，状态仍是「排队中」。
-- 现在只能用 SQL 改工作空间的上限，设置界面在后续版本里做：
+- 工作空间管理员在控制台「设置 → 运行上限」里改，或者调接口
+  `PUT /api/v1/workspaces/{id}/limits`。留空表示用平台默认值。
 
-```sql
-UPDATE workspaces SET max_running_runs = 20, max_running_runs_per_caller = 5 WHERE id = '...';
-```
+### 15.1 长任务的上限（v2.21 §1.21 第 1 条）
+
+同一个页面上还有两项：单个任务最长执行时间、最多调用模型次数。它们是这个工作空间里的 Agent
+**最多能申请到多少**：
+
+| 设置 | 不设时 | 最多 | 平台变量 |
+|---|---|---|---|
+| 单个任务最长执行时间 | 900 秒 | 7200 秒 | `AGENT_MAX_EXECUTION_SECONDS`、`AGENT_CEILING_EXECUTION_SECONDS` |
+| 单个任务最多调用模型次数 | 20 次 | 200 次 | `AGENT_MAX_MODEL_CALLS`、`AGENT_CEILING_MODEL_CALLS` |
+
+- 调高之后，Agent 作者在 Agent 编辑页里把自己的上限改大，保存、发布才生效。保存和发布时按
+  工作空间的上限检查，超了会说出两个数字。
+- 调低不影响已经发布的版本：它们照常运行，下次保存或发布时才按新上限检查。
 
 - 注意：排队数和「最久的等待」指标会把因为上限而等待的 Run 也算进去。某人一次提交很多任务时，
   这两个数会变大，这是上限在起作用，不一定是容量不够。
