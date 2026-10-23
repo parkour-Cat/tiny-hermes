@@ -131,7 +131,10 @@ test("uploading a directory sends a file list, never an archive", async () => {
   Object.defineProperty(reference, "webkitRelativePath", { value: "rollout/references/reference.md" });
   await userEvent.upload(picker, [main, reference]);
   expect(sent).toBeNull();
-  expect(screen.getByText("references/reference.md")).toBeVisible();
+  // Waited for, for the reason given in the next test: the list sits in a
+  // modal that fades in from opacity 0.
+  const listed = screen.getByText("references/reference.md");
+  await waitFor(() => expect(listed).toBeVisible());
   await userEvent.click(screen.getByRole("button", { name: "确认上传" }));
 
   await waitFor(() => expect(sent).not.toBeNull());
@@ -152,7 +155,11 @@ test("an invalid directory is explained before upload and cancelling submits not
   renderSkills();
   await userEvent.click(await screen.findByRole("button", { name: "上传技能目录" }));
   await userEvent.upload(screen.getByLabelText("选择文件"), new File(["note"], "note.md"));
-  expect(await screen.findByText("目录根部需要包含 SKILL.md。")).toBeVisible();
+  // Waited for, not just found: antd fades the alert in from opacity 0, and
+  // `toBeVisible` reads opacity. On a loaded CI runner the first look landed
+  // inside the animation (2026-10-23, run 39939009273).
+  const explained = await screen.findByText("目录根部需要包含 SKILL.md。");
+  await waitFor(() => expect(explained).toBeVisible());
   expect(screen.getByRole("button", { name: "确认上传" })).toBeDisabled();
   await userEvent.click(screen.getByRole("button", { name: "取消" }));
   expect(writes).toBe(0);
