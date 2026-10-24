@@ -39,7 +39,7 @@ flowchart TB
     s3[(SeaweedFS / S3<br/>工作区版本 · 产物)]
   end
 
-  subgraph sandboxhost[沙箱主机：B 档只允许一台]
+  subgraph sandboxhost[沙箱主机：C 档起可以有多台]
     controller[controller<br/>唯一能碰 Docker · 内存准入]
     sandbox[沙箱容器 ×n<br/>跑用户代码 · internal 网络]
   end
@@ -135,28 +135,33 @@ Worker，也不占沙箱。完整方案见 `docs/superpowers/plans/2026-09-29-en
 实测用的是确定性模型替身和 `printf` 工具，环境是 8 核 / 7.8 GiB 的 OrbStack VM，
 不是 §24.1 的参考机。真实模型每路要多少 CPU、真实工具的沙箱要多少内存，都没测过。
 
-`worker` 已经可以放在多台机器上（B 档，[验收](superpowers/verification/2026-10-21-tier-b-acceptance.md)）。
-剩下的单点是沙箱主机，往上扩改的是这一条线：
+`worker` 可以放在多台机器上（B 档，[验收](superpowers/verification/2026-10-21-tier-b-acceptance.md)），
+沙箱主机也可以有多台（C 档，[验收](superpowers/verification/2026-10-24-tier-c-acceptance.md)）：
 
 ```mermaid
 flowchart LR
-  subgraph now[现在 · B 档]
-    direction LR
-    w1[worker 主机 1] --> sb[沙箱主机 ×1<br/>它的内存 = 并发沙箱上限]
-    w2[worker 主机 2] --> sb
-    w3[worker 主机 3] --> sb
+  subgraph workers[Worker 主机 ×N]
+    w[worker<br/>SANDBOX_CONTROLLER_URL=pool]
   end
-  subgraph next[下一步 · C 档或 K8s]
-    direction LR
-    v1[worker 主机 1] --> hb[沙箱主机 B]
-    v2[worker 主机 2] --> ha[沙箱主机 A]
-    v3[worker 主机 3] --> hc[沙箱主机 C]
+  pg[(PostgreSQL<br/>sandbox_hosts · 每个沙箱记着它在哪台)]
+  subgraph a[沙箱主机 A]
+    ca[controller sbx-a] --> sa[沙箱 ×n]
   end
-  now ~~~ next
+  subgraph b[沙箱主机 B]
+    cb[controller sbx-b] --> sbb[沙箱 ×n]
+  end
+  w -- 读主机列表 · 剩余内存 --> pg
+  ca -- 登记 · 每 10 秒心跳 --> pg
+  cb -- 登记 · 每 10 秒心跳 --> pg
+  w -- 新沙箱：最空的那台 · mTLS --> ca
+  w -- 已有沙箱：只回原主机 · mTLS --> cb
 ```
 
-C 档自己写「新沙箱挑负载低的主机，冻结的沙箱路由回原主机」；K8s 把沙箱变成一次性 Pod，
-调度交给集群。工作区按版本存在对象存储里，所以冷恢复可以落在任何一台上。
+- 新沙箱放到剩余内存最多的主机；每台按自己的预算准入，满了换下一台。
+- 已有沙箱的 Run 只回原主机：冻结的沙箱只能在原地解冻，原主机连不上就等，不在别处另建。
+- 主机坏了要运维 `retire` 确认，它上面的 Run 才会到别的主机冷恢复（工作区按版本存在对象存储里，
+  冷恢复可以落在任何一台上）。
+- 每台主机的沙箱地址池互不重叠，出站代理按地址认 Run 才不会认错。
 
 ## 更细的地方
 
