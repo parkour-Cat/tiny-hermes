@@ -1,4 +1,5 @@
 import asyncio
+from collections import Counter
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -468,3 +469,56 @@ async def test_login_failures_outside_the_throttle_window_are_deleted(
     async with engine.connect() as connection:
         kept = (await connection.execute(text("SELECT subject_key FROM login_failures"))).scalars()
         assert list(kept) == ["recent"]
+
+
+async def test_housekeeping_runs_once_a_minute_while_the_rest_run_every_pass(
+    engine: AsyncEngine, empty_database: None
+) -> None:
+    """2026-10-24: an idle scheduler made 52 statements a second, a pass every
+    1.7 s. Deleting expired records, upload garbage and old artifacts, and
+    cancelling 24-hour compat timeouts, that often is waste; recovery, waits
+    and approvals are latency and stay on every pass."""
+    del empty_database
+    clock = [1_000.0]
+    runtime = SchedulerRuntime(
+        session_factory=async_sessionmaker(engine, expire_on_commit=False),
+        notifier=NullWakeUpNotifier(),
+        settings=SchedulerSettings(
+            max_recovery_attempts=3, event_retention_hours=168, housekeeping_seconds=60
+        ),
+        clock=lambda: clock[0],
+    )
+    ran: Counter[str] = Counter()
+
+    def counted(name: str, scan: Any) -> Any:
+        async def wrapped(*args: Any) -> None:
+            ran[name] += 1
+            await scan(*args)
+
+        return wrapped
+
+    for name in (
+        "_collect_expired_records",
+        "_collect_upload_garbage",
+        "_expire_artifacts",
+        "_cancel_aged_compat_timeouts",
+        "_recover_interrupted",
+        "_expire_approvals",
+    ):
+        setattr(runtime, name, counted(name, getattr(runtime, name)))
+
+    await runtime.run_once()
+    await runtime.run_once()
+
+    assert ran["_collect_expired_records"] == 1, "housekeeping runs on the first pass only"
+    assert ran["_collect_upload_garbage"] == 1
+    assert ran["_expire_artifacts"] == 1
+    assert ran["_cancel_aged_compat_timeouts"] == 1
+    assert ran["_recover_interrupted"] == 2, "latency scans run on every pass"
+    assert ran["_expire_approvals"] == 2
+
+    clock[0] += 61
+    await runtime.run_once()
+
+    assert ran["_collect_expired_records"] == 2
+    assert ran["_cancel_aged_compat_timeouts"] == 2

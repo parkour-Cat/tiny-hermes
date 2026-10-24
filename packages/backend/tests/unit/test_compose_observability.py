@@ -113,3 +113,32 @@ def test_prometheus_loads_the_alert_rules() -> None:
         if str(volume).endswith(":/etc/prometheus/alerts.yml:ro")
     ]
     assert mount.startswith("./observability/alerts.yml:")
+
+
+def _rules() -> dict[str, dict[str, Any]]:
+    document = yaml.safe_load((OBSERVABILITY / "alerts.yml").read_text(encoding="utf-8"))
+    return {
+        rule["alert"]: rule
+        for group in document["groups"]
+        for rule in group["rules"]
+        if "alert" in rule
+    }
+
+
+def test_housekeeping_scans_are_not_held_to_the_every_pass_deadline() -> None:
+    """2026-10-24: the housekeeping scans moved to once a minute. Under the
+    60-second staleness rule every scan answers to, each would go stale
+    between runs and page someone for a scheduler that is fine."""
+    from tiny_hermes.runs.application.scheduler import HOUSEKEEPING_SCANS
+
+    rules = _rules()
+    every_pass = rules["SchedulerScanStalled"]["expr"]
+    housekeeping = rules["SchedulerHousekeepingStalled"]["expr"]
+
+    for scan in HOUSEKEEPING_SCANS:
+        assert scan in every_pass, f"{scan} is still held to the every-pass deadline"
+        assert scan in housekeeping, f"{scan} has no staleness rule of its own"
+    assert 'scan!~"' in every_pass
+    assert 'scan=~"' in housekeeping
+    deadline = int(re.findall(r">\s*(\d+)", housekeeping)[-1])
+    assert deadline >= 3 * 60, "three missed minutes, not one late pass"

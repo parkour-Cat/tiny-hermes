@@ -111,6 +111,8 @@ class FakeStore:
     def __init__(self) -> None:
         self.reservations: dict[UUID, SandboxReservation] = {}
         self.instances: dict[UUID, SandboxInstance] = {}
+        #: How often the controller asked: one call should read its sandbox once.
+        self.instance_reads = 0
         #: Address -> (run, sandbox). The proxy reads this to answer "who is
         #: this" for a caller that presents nothing.
         self.addresses: dict[str, tuple[UUID, UUID]] = {}
@@ -185,6 +187,7 @@ class FakeStore:
         return []
 
     async def read_instance(self, instance_id: UUID) -> SandboxInstance | None:
+        self.instance_reads += 1
         return self.instances.get(instance_id)
 
     async def register_egress_address(
@@ -556,3 +559,23 @@ async def test_an_acquire_without_a_budget_still_takes_the_admission_lock(
     await _acquired(controller)
 
     assert store.admission_locks == 1
+
+
+async def test_a_call_on_a_sandbox_reads_its_instance_once(controller: SandboxController) -> None:
+    """2026-10-24: each controller call read the same instance two or three
+    times, once more for the tier C "is it on this host" check, about five
+    calls a round. One read answers every question the call has."""
+    store = controller.store
+    assert isinstance(store, FakeStore)
+    sandbox_id = await _acquired(controller)
+
+    for name, act in (
+        ("freeze", lambda: controller.freeze(run_id=RUN, lease_id=LEASE, sandbox_id=sandbox_id)),
+        ("scan", lambda: controller.workspace_scan(
+            run_id=RUN, lease_id=LEASE, sandbox_id=sandbox_id
+        )),
+        ("thaw", lambda: controller.thaw(run_id=RUN, lease_id=LEASE, sandbox_id=sandbox_id)),
+    ):
+        store.instance_reads = 0
+        await act()
+        assert store.instance_reads == 1, f"{name} read its instance {store.instance_reads} times"
