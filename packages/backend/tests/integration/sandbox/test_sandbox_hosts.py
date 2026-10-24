@@ -9,11 +9,20 @@ is still in use: addresses are unique only because pools are disjoint.
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
-from tiny_hermes.sandbox.domain.models import HostState, NetworkPoolOverlap, SandboxHost
-from tiny_hermes.sandbox.infrastructure.sql_hosts import SqlSandboxHosts
+from tiny_hermes.sandbox.domain.models import (
+    HostState,
+    InstanceStatus,
+    NetworkPoolOverlap,
+    SandboxHost,
+    SandboxInstance,
+)
+from tiny_hermes.sandbox.infrastructure.sql_hosts import SqlHostDirectory, SqlSandboxHosts
+from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
 
 pytestmark = pytest.mark.usefixtures("empty_database")
 
@@ -152,3 +161,108 @@ async def test_a_heartbeat_moves_seen_at_forward(engine: AsyncEngine) -> None:
 
     assert later is not None
     assert later.seen_at > first.seen_at
+
+
+# -- the directory placement and routing read (tier C §4.3, §4.4) --------------
+
+
+async def place(
+    engine: AsyncEngine, host: str, memory_mb: int, *, run_id: UUID | None = None
+) -> UUID:
+    """A live sandbox of `memory_mb` on `host`, as an acquire leaves it."""
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    made = SandboxInstance(
+        id=uuid4(),
+        container_id="c" * 64,
+        image_digest="sha256:" + "a" * 64,
+        resource_profile="default",
+        boot_id=uuid4().hex,
+        status=InstanceStatus.RUNNING,
+        memory_mb=memory_mb,
+        controller=host,
+    )
+    async with sessions() as session:
+        await SqlSandboxStore(session).reserve(
+            run_id=run_id or uuid4(), workspace_id=uuid4(), instance=made
+        )
+        await session.commit()
+    return made.id
+
+
+def directory(engine: AsyncEngine, stale_seconds: int = 30) -> SqlHostDirectory:
+    return SqlHostDirectory(async_sessionmaker(engine, expire_on_commit=False), stale_seconds)
+
+
+async def test_placement_puts_the_emptiest_host_first(engine: AsyncEngine) -> None:
+    """Spread, not packed (product design §1.23): one host failing then
+    touches the fewest Runs."""
+    for name in ("sbx-a", "sbx-b", "sbx-c"):
+        await register(engine, name, url=f"tls://{name}:7700", budget=4096)
+    await place(engine, "sbx-a", 1024)
+    await place(engine, "sbx-a", 1024)
+    await place(engine, "sbx-c", 1024)
+
+    assert await directory(engine).placement() == ["sbx-b", "sbx-c", "sbx-a"]
+
+
+async def test_remaining_room_is_the_budget_less_what_is_reserved(engine: AsyncEngine) -> None:
+    """A big host with more reserved can still have more room than a small
+    empty one."""
+    await register(engine, "big", url="tls://big:7700", budget=16384)
+    await register(engine, "small", url="tls://small:7700", budget=2048)
+    await place(engine, "big", 4096)
+
+    assert await directory(engine).placement() == ["big", "small"]
+
+
+@pytest.mark.parametrize("state", [HostState.DRAINING, HostState.RETIRED])
+async def test_placement_skips_a_host_taking_no_new_sandboxes(
+    engine: AsyncEngine, state: HostState
+) -> None:
+    await register(engine, "sbx-a", url="tls://sbx-a:7700")
+    await register(engine, "sbx-b", url="tls://sbx-b:7700")
+    await set_state(engine, "sbx-a", state)
+
+    assert await directory(engine).placement() == ["sbx-b"]
+
+
+async def test_placement_skips_a_host_not_heard_from(engine: AsyncEngine) -> None:
+    """Skipped, and nothing more: a host that is only cut off may still be
+    running its sandboxes (§4.8)."""
+    await register(engine, "sbx-a", url="tls://sbx-a:7700")
+    await register(engine, "sbx-b", url="tls://sbx-b:7700")
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "UPDATE sandbox_hosts SET seen_at = now() - interval '5 minutes' "
+                "WHERE name = 'sbx-a'"
+            )
+        )
+
+    assert await directory(engine).placement() == ["sbx-b"]
+
+
+async def test_placement_skips_a_host_nobody_can_dial(engine: AsyncEngine) -> None:
+    await register(engine, "default", url=None)
+    await register(engine, "sbx-b", url="tls://sbx-b:7700")
+
+    assert await directory(engine).placement() == ["sbx-b"]
+
+
+async def test_a_run_is_routed_to_the_host_of_its_live_claim(engine: AsyncEngine) -> None:
+    run = uuid4()
+    sandbox = await place(engine, "sbx-b", 256, run_id=run)
+    found = directory(engine)
+
+    assert await found.host_of_run(run) == "sbx-b"
+    assert await found.host_of_run(uuid4()) is None
+    assert await found.host_of_sandbox(sandbox) == "sbx-b"
+    assert await found.host_of_sandbox(uuid4()) is None
+
+
+async def test_a_hosts_address_is_what_it_registered(engine: AsyncEngine) -> None:
+    await register(engine, "sbx-a", url="tls://10.0.0.5:7700")
+    found = directory(engine)
+
+    assert await found.url_of("sbx-a") == "tls://10.0.0.5:7700"
+    assert await found.url_of("nobody") is None

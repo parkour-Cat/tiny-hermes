@@ -1,14 +1,25 @@
 """The sandbox host registry (tier C §4.1, §4.6)."""
 
-from datetime import UTC, datetime
+import random
+from datetime import UTC, datetime, timedelta
 from ipaddress import ip_network
+from uuid import UUID
 
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from tiny_hermes.sandbox.domain.models import HostState, NetworkPoolOverlap, SandboxHost
-from tiny_hermes.sandbox.infrastructure.tables import SandboxHostRow
+from tiny_hermes.sandbox.domain.models import (
+    LIVE_RESERVATIONS,
+    HostState,
+    NetworkPoolOverlap,
+    SandboxHost,
+)
+from tiny_hermes.sandbox.infrastructure.tables import (
+    SandboxHostRow,
+    SandboxInstanceRow,
+    SandboxReservationRow,
+)
 
 #: Taken by registration and nothing else: two hosts each reading the other
 #: absent and both writing overlapping pools is the race it closes.
@@ -98,3 +109,88 @@ class SqlSandboxHosts:
         await self._session.execute(
             update(SandboxHostRow).where(SandboxHostRow.name == name).values(state=state.value)
         )
+
+
+class SqlHostDirectory:
+    """What a pool reads to place and route (tier C §4.3, §4.4).
+
+    One short session per read: a Worker's slice holds no transaction across
+    a call to a host, and a stale answer here costs at most a refusal that
+    the host's own admission gives.
+    """
+
+    def __init__(
+        self, sessions: async_sessionmaker[AsyncSession], stale_seconds: int
+    ) -> None:
+        self._sessions = sessions
+        self._stale = timedelta(seconds=stale_seconds)
+
+    async def host_of_run(self, run_id: UUID) -> str | None:
+        """The host of this Run's live claim, if it has one."""
+        async with self._sessions() as session:
+            return await session.scalar(
+                select(SandboxInstanceRow.controller)
+                .join(
+                    SandboxReservationRow,
+                    SandboxReservationRow.sandbox_instance_id == SandboxInstanceRow.id,
+                )
+                .where(
+                    SandboxReservationRow.run_id == run_id,
+                    SandboxReservationRow.status.in_([e.value for e in LIVE_RESERVATIONS]),
+                )
+                .limit(1)
+            )
+
+    async def host_of_sandbox(self, sandbox_id: UUID) -> str | None:
+        async with self._sessions() as session:
+            return await session.scalar(
+                select(SandboxInstanceRow.controller).where(SandboxInstanceRow.id == sandbox_id)
+            )
+
+    async def url_of(self, name: str) -> str | None:
+        async with self._sessions() as session:
+            return await session.scalar(
+                select(SandboxHostRow.url).where(SandboxHostRow.name == name)
+            )
+
+    async def placement(self) -> list[str]:
+        """Hosts that may take a new sandbox, the most room first.
+
+        Room is the budget less the limits of what live claims hold there,
+        the same sum that host's admission makes. Equal room is shuffled, so
+        Workers reading at once do not all try the same host first. Only
+        `active` hosts heard from lately and with an address to dial.
+        """
+        reserved = (
+            select(
+                SandboxInstanceRow.controller.label("host"),
+                func.sum(SandboxInstanceRow.memory_mb).label("mb"),
+            )
+            .join(
+                SandboxReservationRow,
+                SandboxReservationRow.sandbox_instance_id == SandboxInstanceRow.id,
+            )
+            .where(SandboxReservationRow.status.in_([e.value for e in LIVE_RESERVATIONS]))
+            .group_by(SandboxInstanceRow.controller)
+            .subquery()
+        )
+        async with self._sessions() as session:
+            rows = await session.execute(
+                select(
+                    SandboxHostRow.name,
+                    SandboxHostRow.memory_budget_mb,
+                    func.coalesce(reserved.c.mb, 0),
+                )
+                .outerjoin(reserved, reserved.c.host == SandboxHostRow.name)
+                .where(
+                    SandboxHostRow.state == HostState.ACTIVE.value,
+                    SandboxHostRow.url.is_not(None),
+                    SandboxHostRow.seen_at >= datetime.now(UTC) - self._stale,
+                )
+            )
+        room = [
+            # A host that did not say its budget sorts last, not first.
+            (name, -1 if budget is None else int(budget) - int(used), random.random())  # noqa: S311
+            for name, budget, used in rows.all()
+        ]
+        return [name for name, _, _ in sorted(room, key=lambda r: (-r[1], r[2]))]

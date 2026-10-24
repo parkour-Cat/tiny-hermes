@@ -2953,8 +2953,14 @@ SANDBOX_ROOM_RETRY_SECONDS = 10
 CONTROLLER_UNREACHABLE_RETRY_SECONDS = 30
 
 #: Refusals that end the slice and requeue the Run instead of failing it.
+#: `reservation_elsewhere` is a claim that moved between the pool's lookup and
+#: its call (a host being retired, tier C §4.8): the next slice looks again.
 _NOT_READY = frozenset(
-    {SandboxRefusal.ALREADY_RESERVED, SandboxRefusal.MEMORY_BUDGET_EXHAUSTED}
+    {
+        SandboxRefusal.ALREADY_RESERVED,
+        SandboxRefusal.MEMORY_BUDGET_EXHAUSTED,
+        SandboxRefusal.RESERVATION_ELSEWHERE,
+    }
 )
 
 
