@@ -180,6 +180,28 @@ async def test_scheduler_cleanup_after_expiry_destroys_and_audits(
     assert audit.entries[0].run_id == RUN
 
 
+async def test_cleanup_of_a_container_something_else_removed_succeeds(
+    controller: SandboxController,
+    docker_client: Any,
+    leases: StubLeases,
+) -> None:
+    """2026-10-24 soak: a sandbox's container vanished (deleted outside the
+    platform), and every cleanup after it failed on Docker's 404, 246 times,
+    leaving the claim isolated and its Run interrupted for good. A container
+    that is not there is a container that is gone: what cleanup is for."""
+    box = await acquired(controller)
+    docker_client.containers.get(await _container_of(controller, box.sandbox_id)).remove(
+        force=True
+    )
+    leases.expire(run_id=RUN)
+
+    await controller.cleanup(run_id=RUN, sandbox_id=box.sandbox_id)
+
+    gone = await controller.store.read_instance(box.sandbox_id)
+    assert gone is not None and gone.status is InstanceStatus.DESTROYED
+    assert await controller.store.live_for_run(RUN) is None
+
+
 # --------------------------------------------------------------------------
 # What Docker actually built.
 # --------------------------------------------------------------------------

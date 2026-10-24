@@ -10,10 +10,12 @@ instance start on an empty data volume.
 Every call is its own transaction, as the controller's dispatch makes it.
 """
 
+import contextlib
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
+from docker.errors import NotFound
 from tiny_hermes.sandbox.domain.command import SandboxCommand
 from tiny_hermes.sandbox.domain.container_policy import DEFAULT_PROFILE, container_config
 from tiny_hermes.sandbox.domain.models import CacheState
@@ -173,3 +175,32 @@ async def test_a_kept_instance_whose_container_is_gone_is_replaced_not_thawed(
 
     assert second.sandbox_id != first.sandbox_id
     assert second.cache_state is CacheState.RESET
+
+
+async def test_a_controller_with_its_own_label_sweeps_only_containers_carrying_it(
+    platform: Platform, docker_client: Any, image_digest: str
+) -> None:
+    """2026-10-24: the integration suite's controllers share the developer's
+    Docker with a running Compose stack. Their sweep listed every platform
+    container on the daemon, found the stack's live sandbox unrecorded in
+    the test database, and removed it mid-run. A controller given a label of
+    its own sees only containers that carry it; a deployment gives none and
+    sweeps its whole host, as before."""
+    run_id = uuid4()
+    config = container_config(
+        digest=image_digest,
+        profile=DEFAULT_PROFILE,
+        run_id=run_id,
+        instance_id=uuid4(),
+        workspace_id=WORKSPACE,
+        approved_digests=(image_digest,),
+    )
+    someone_elses = await DockerEngine(docker_client).create(config)
+    try:
+        await platform.call(lambda c: c.sweep())
+
+        assert platform.state(someone_elses) == "running"
+    finally:
+        # Already gone when the sweep took it, which is the failure above.
+        with contextlib.suppress(NotFound):
+            docker_client.containers.get(someone_elses).remove(force=True)
