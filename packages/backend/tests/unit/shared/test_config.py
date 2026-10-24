@@ -386,3 +386,33 @@ def test_an_empty_advertised_address_is_none() -> None:
     """Compose passes `${SANDBOX_CONTROLLER_ADVERTISE_URL:-}`, "" when unset:
     a single host on a socket, which advertises nothing."""
     assert _settings(sandbox_controller_advertise_url="").sandbox_controller_advertise_url is None
+
+
+_TLS_FILES = {
+    "sandbox_controller_ca_file": "/etc/tiny-hermes/ca.pem",
+    "sandbox_controller_cert_file": "/etc/tiny-hermes/worker.pem",
+    "sandbox_controller_key_file": "/etc/tiny-hermes/worker.key",
+}
+
+
+def test_a_worker_may_be_pointed_at_a_pool_of_sandbox_hosts() -> None:
+    """Tier C §4.9: `pool` reads the hosts from the database instead of
+    naming one."""
+    settings = _settings(sandbox_controller_url="pool", **_TLS_FILES)
+
+    assert settings.sandbox_pool is True
+
+
+def test_a_pool_is_reached_only_over_tls() -> None:
+    """Every host in a pool is another machine, and only mutual TLS crosses a
+    network."""
+    with pytest.raises(ValidationError, match="pool"):
+        _settings(sandbox_controller_url="pool")
+
+
+def test_one_named_controller_is_not_a_pool() -> None:
+    assert _settings().sandbox_pool is False
+
+
+def test_placement_skips_a_host_silent_for_thirty_seconds_unless_told_otherwise() -> None:
+    assert _settings().sandbox_host_stale_seconds == 30

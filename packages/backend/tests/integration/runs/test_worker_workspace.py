@@ -880,6 +880,34 @@ async def test_a_run_with_no_sandbox_room_waits_in_the_queue_rather_than_failing
     assert 5 < wait <= 10, "§21.3: the Run waits ten seconds before it is claimed again"
 
 
+class ElsewhereSandbox(GatewaySandbox):
+    """A host answering that the Run's sandbox is recorded on another (tier C)."""
+
+    async def acquire(self, **_: Any) -> Any:
+        self.calls.append("acquire")
+        raise SandboxRefused(RefusalReason.RESERVATION_ELSEWHERE)
+
+
+async def test_a_run_whose_sandbox_is_on_another_host_waits_rather_than_failing(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    objects: MinioObjectStore,
+    tooled_agent: Callable[[list[str]], str],
+) -> None:
+    """The pool routes a Run to its claim's host, so this is a claim that
+    moved between the lookup and the call: a host being retired, say. The
+    next slice looks again; failing would end a Run nothing is wrong with."""
+    agent = tooled_agent(["shell.exec"])
+    run, _ = _submit(client, scope, agent)
+    sandbox = ElsewhereSandbox()
+
+    await _drive(engine, Recording(sandbox, _tool()), sandbox, objects)
+
+    assert (await _run_row(engine, run)).status == "queued"
+    assert "run_failed" not in await _events_of(engine, run)
+
+
 @dataclass
 class UnreachableSandbox(GatewaySandbox):
     """A Controller the Worker could not get an answer from.
