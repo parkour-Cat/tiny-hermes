@@ -63,10 +63,11 @@ class Platform:
         budget: int = 512,
         memory: int = 256,
         memory_ceiling: int | None = None,
+        host: str = "default",
     ) -> T:
         async with self._sessions() as session:
             controller = self._controller(
-                session, budget=budget, memory=memory, memory_ceiling=memory_ceiling
+                session, budget=budget, memory=memory, memory_ceiling=memory_ceiling, host=host
             )
             try:
                 answer = await work(controller)
@@ -80,7 +81,13 @@ class Platform:
             return answer
 
     def _controller(
-        self, session: AsyncSession, *, budget: int, memory: int, memory_ceiling: int | None
+        self,
+        session: AsyncSession,
+        *,
+        budget: int,
+        memory: int,
+        memory_ceiling: int | None,
+        host: str,
     ) -> SandboxController:
         return SandboxController(
             engine=DockerEngine(self._docker, extra_labels={LABEL: "1"}),
@@ -91,6 +98,7 @@ class Platform:
             ceiling=replace(DEFAULT_PROFILE, memory_mb=memory),
             memory_budget_mb=budget,
             memory_ceiling_mb=memory_ceiling,
+            name=host,
         )
 
     async def acquire(
@@ -114,23 +122,33 @@ class Platform:
             **limits,
         )
 
+    async def host_of(self, sandbox_id: UUID) -> str:
+        async with self._sessions() as session:
+            found = await SqlSandboxStore(session).read_instance(sandbox_id)
+        assert found is not None
+        return found.controller
+
     async def memory_of(self, sandbox_id: UUID) -> int:
         async with self._sessions() as session:
             found = await SqlSandboxStore(session).read_instance(sandbox_id)
         assert found is not None
         return found.memory_mb
 
-    async def park(self, run_id: UUID, sandbox_id: UUID) -> None:
+    async def park(self, run_id: UUID, sandbox_id: UUID, *, host: str = "default") -> None:
         """What a slice boundary does: freeze, keep warm, release the lease."""
-        await self.checkpoint(run_id, sandbox_id)
+        await self.checkpoint(run_id, sandbox_id, host=host)
         until = datetime.now(UTC) + timedelta(minutes=5)
-        await self.call(lambda c: c.keep(run_id=run_id, sandbox_id=sandbox_id, until=until))
+        await self.call(
+            lambda c: c.keep(run_id=run_id, sandbox_id=sandbox_id, until=until), host=host
+        )
         self._leases.expire(run_id=run_id)
 
-    async def checkpoint(self, run_id: UUID, sandbox_id: UUID) -> None:
+    async def checkpoint(self, run_id: UUID, sandbox_id: UUID, *, host: str = "default") -> None:
         """Every round's workspace commit freezes the container first."""
         lease = self.leases[run_id]
-        await self.call(lambda c: c.freeze(run_id=run_id, lease_id=lease, sandbox_id=sandbox_id))
+        await self.call(
+            lambda c: c.freeze(run_id=run_id, lease_id=lease, sandbox_id=sandbox_id), host=host
+        )
 
     async def container_of(self, sandbox_id: UUID) -> str:
         async with self._sessions() as session:
@@ -390,3 +408,97 @@ async def test_without_a_ceiling_only_the_default_may_be_asked_for(platform: Pla
         await platform.acquire(uuid4(), asked=512, memory=256)
 
     assert refusal.value.reason is RefusalReason.MEMORY_OUT_OF_RANGE
+
+
+# -- one budget per sandbox host (tier C, §21.3 v2.23) -------------------------
+#
+# Two controllers with two names on one daemon and one database: what a pool
+# of hosts shares (the database) without what it does not (each host's own
+# Docker). Each host's budget is its own memory, so each must count only its
+# own sandboxes, evict only its own, and touch nothing recorded elsewhere.
+
+
+async def test_a_sandbox_records_the_host_that_made_it(platform: Platform) -> None:
+    made = await platform.acquire(uuid4(), host="sbx-a")
+
+    assert await platform.host_of(made.sandbox_id) == "sbx-a"
+
+
+async def test_each_host_admits_against_its_own_sandboxes_only(platform: Platform) -> None:
+    """A budget of 512 holds two 256 sandboxes. Counted across the pool, the
+    third would be refused on a host that has nothing on it."""
+    await platform.acquire(uuid4(), host="sbx-a")
+    await platform.acquire(uuid4(), host="sbx-a")
+
+    with pytest.raises(SandboxRefused) as full:
+        await platform.acquire(uuid4(), host="sbx-a")
+    assert full.value.reason is RefusalReason.MEMORY_BUDGET_EXHAUSTED
+
+    await platform.acquire(uuid4(), host="sbx-b")
+
+
+async def test_a_host_short_of_memory_never_evicts_another_hosts_sandbox(
+    platform: Platform,
+) -> None:
+    """Evicting on B frees nothing on A: it would be a cold start for B's Run
+    and no room for A's."""
+    kept = uuid4()
+    on_b = await platform.acquire(kept, host="sbx-b")
+    await platform.park(kept, on_b.sandbox_id, host="sbx-b")
+    await platform.acquire(uuid4(), host="sbx-a")
+    await platform.acquire(uuid4(), host="sbx-a")
+
+    with pytest.raises(SandboxRefused) as full:
+        await platform.acquire(uuid4(), host="sbx-a")
+
+    assert full.value.reason is RefusalReason.MEMORY_BUDGET_EXHAUSTED
+    assert platform.state(await platform.container_of(on_b.sandbox_id)) == "paused"
+
+
+async def test_a_host_refuses_a_sandbox_recorded_on_another(platform: Platform) -> None:
+    """Routing sends every call to the sandbox's own host; this is what stands
+    if one arrives elsewhere anyway. It must do nothing, not act on a
+    container this host does not have."""
+    run = uuid4()
+    made = await platform.acquire(run, host="sbx-a")
+    lease = platform.leases[run]
+
+    with pytest.raises(SandboxRefused) as refusal:
+        await platform.call(
+            lambda c: c.freeze(run_id=run, lease_id=lease, sandbox_id=made.sandbox_id),
+            host="sbx-b",
+        )
+
+    assert refusal.value.reason is RefusalReason.RESERVATION_ELSEWHERE
+    assert platform.state(await platform.container_of(made.sandbox_id)) == "running"
+
+
+async def test_a_run_with_a_sandbox_on_one_host_gets_none_on_another(platform: Platform) -> None:
+    """A Run whose sandbox is frozen on A and whose acquire reaches B must not
+    be given a second sandbox there: two sandboxes writing one workspace is
+    what the isolated state exists to prevent."""
+    run = uuid4()
+    made = await platform.acquire(run, host="sbx-a")
+    await platform.park(run, made.sandbox_id, host="sbx-a")
+    before = platform.labelled()
+
+    with pytest.raises(SandboxRefused) as refusal:
+        await platform.acquire(run, host="sbx-b")
+
+    assert refusal.value.reason is RefusalReason.RESERVATION_ELSEWHERE
+    assert platform.labelled() == before
+    assert platform.state(await platform.container_of(made.sandbox_id)) == "paused"
+
+
+async def test_one_host_does_not_wait_on_anothers_admission(
+    platform: Platform, engine: AsyncEngine
+) -> None:
+    """Each host's acquires serialize on their own lock. Held by A in an open
+    transaction, it must not stop B from admitting."""
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as holding:
+        await SqlSandboxStore(holding).lock_admission("sbx-a")
+
+        await asyncio.wait_for(platform.acquire(uuid4(), host="sbx-b"), timeout=20)
+
+        await holding.rollback()
