@@ -241,6 +241,9 @@ def test_the_docker_arguments_are_exactly_these_and_no_others() -> None:
     `ipc_mode`, `binds` and their friends cannot arrive quietly.
     """
     assert set(config().as_docker_kwargs()) == {
+        # §1.25, v2.25: named every time, so `runc` is a choice the config made
+        # rather than whatever the daemon defaults to.
+        "runtime",
         "image",
         "command",
         "user",
@@ -312,3 +315,10 @@ def test_the_labels_say_which_run_owns_it() -> None:
 def test_the_command_keeps_the_container_alive_without_a_shell() -> None:
     """Nothing runs until a tool asks. The container exists to be executed in."""
     assert config().as_docker_kwargs()["command"] == ["sleep", "infinity"]
+
+
+def test_the_runtime_is_runc_unless_another_is_named() -> None:
+    """§1.25, v2.25: `runsc` (gVisor) on a host that has it puts a kernel of
+    its own between a sandbox and the host's."""
+    assert config().as_docker_kwargs()["runtime"] == "runc"
+    assert config(runtime="runsc").as_docker_kwargs()["runtime"] == "runsc"

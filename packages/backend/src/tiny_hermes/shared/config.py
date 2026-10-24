@@ -239,6 +239,10 @@ class Settings(BaseSettings):
     #: Each sandbox's memory limit. It bounds the container's processes and its
     #: tmpfs mounts together, and it is what admission counts (§21.3).
     sandbox_memory_mb: int = Field(default=1_024, ge=256, le=32_768)
+    #: The OCI runtime sandboxes run on (§1.25, v2.25): `runc`, Docker's own,
+    #: or `runsc` (gVisor) on a host where it is installed. The controller
+    #: refuses to start on one its Docker does not have.
+    sandbox_runtime: str = Field(default="runc", pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$")
     #: This sandbox host's name (tier C, v2.23). Every sandbox it makes is
     #: recorded under it, and it acts on no other's. A single host keeps
     #: `default`, the name every row written before there could be two has.

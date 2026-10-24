@@ -195,6 +195,9 @@ class ContainerConfig:
     volume_labels: dict[str, str]
     #: `HOME`, plus the proxy variables when this deployment has a boundary.
     environment: dict[str, str] = field(default_factory=lambda: {"HOME": "/workspace/data"})
+    #: The OCI runtime (§1.25, v2.25). Named on every container rather than
+    #: left to the daemon's default, so `runc` is this config's choice.
+    runtime: str = "runc"
 
     def as_docker_kwargs(self) -> dict[str, Any]:
         """The exact argument set, and no more.
@@ -204,6 +207,7 @@ class ContainerConfig:
         something: `privileged`, `devices`, `pid_mode`, `ipc_mode`, `binds`.
         """
         return {
+            "runtime": self.runtime,
             "image": self.image,
             "command": ["sleep", "infinity"],
             "user": self.user,
@@ -249,6 +253,7 @@ def container_config(
     approved_digests: tuple[str, ...],
     ceiling: ResourceProfile = DEFAULT_PROFILE,
     egress: EgressNetwork | None = None,
+    runtime: str = "runc",
 ) -> ContainerConfig:
     """Describe the one container this Run is allowed.
 
@@ -274,6 +279,7 @@ def container_config(
         volume_labels["tiny-hermes.session"] = str(session_id)
 
     return ContainerConfig(
+        runtime=runtime,
         image=digest,
         user=f"{SANDBOX_UID}:{SANDBOX_UID}",
         read_only=True,
