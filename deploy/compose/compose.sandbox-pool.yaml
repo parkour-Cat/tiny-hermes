@@ -1,0 +1,29 @@
+# Tier C: one of several sandbox hosts (design 2026-10-22-tier-c-sandbox-host-pool).
+#
+# On every sandbox host, over the tier B overlay:
+#
+#   docker compose -f compose.yaml -f compose.sandbox-host.yaml \
+#     -f compose.sandbox-pool.yaml up -d --scale worker=0
+#
+# SANDBOX_CONTROLLER_NAME names this host (lowercase letters, digits and
+# hyphens); SANDBOX_CONTROLLER_ADVERTISE_URL is the tls:// address the Workers
+# and the Scheduler dial it by, and the controller certificate must carry that
+# host name. SANDBOX_NETWORK_POOL must not overlap any other host's: the
+# controller refuses to start if it does, naming the other host.
+#
+# Workers and the Scheduler, wherever they run, are pointed at the pool rather
+# than at one controller: SANDBOX_CONTROLLER_URL=pool, with their tier B
+# certificates. They read the hosts from the database (`sandbox_hosts`).
+services:
+  controller:
+    environment:
+      SANDBOX_CONTROLLER_NAME: ${SANDBOX_CONTROLLER_NAME:?}
+      SANDBOX_CONTROLLER_ADVERTISE_URL: ${SANDBOX_CONTROLLER_ADVERTISE_URL:?}
+
+  worker:
+    environment:
+      SANDBOX_CONTROLLER_URL: pool
+
+  scheduler:
+    environment:
+      SANDBOX_CONTROLLER_URL: pool

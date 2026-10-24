@@ -529,6 +529,8 @@ Run 详情页时，Redis 停机会让数据库压力明显上升，不要长时�
   跑通」不是跑过。
 - **B 档没有在两台真实的机器上部署过。**本地用两个互不相通的 Docker 网络模拟，
   测不出真实的网络延迟和带宽。见 B 档的验收记录。
+- **C 档（§16）也没有在多台真实的机器上部署过。**验收时两台「沙箱主机」共用一个 Docker
+  和一个网络，验证的是放置、路由、按主机准入和下线流程，不是网络隔离和带宽。
 - **第 9 节的数字只在一台机器上量过**，最多 50 个同时在看的 Run；500 个、多个 API
   进程时没有测。所有 API 进程收同一个频道的全部通知，Run 多到一定程度要改成按 Run 分频道。
 - **第 8 节的建议值没有在真实模型下测过**，`POSTGRES_MAX_CONNECTIONS` 调大之后也没有
@@ -665,3 +667,68 @@ docker compose exec postgres psql -U tiny_hermes -d tiny_hermes -c \
 - 注意：排队数和「最久的等待」指标会把因为上限而等待的 Run 也算进去。某人一次提交很多任务时，
   这两个数会变大，这是上限在起作用，不一定是容量不够。
 
+
+## 16. 多台沙箱主机（C 档）
+
+[C 档设计](superpowers/specs/2026-10-22-tier-c-sandbox-host-pool-design.md)，验收记录见
+`docs/superpowers/verification/2026-10-24-tier-c-acceptance.md`。B 档只允许一台沙箱主机，C 档
+允许多台：每台一个 controller 和一个 egress-proxy，Worker 和 Scheduler 从数据库读主机列表。
+
+### 16.1 加一台沙箱主机
+
+每台沙箱主机在 B 档的基础上再叠一个文件：
+
+```bash
+SANDBOX_CONTROLLER_NAME=sbx-b \
+SANDBOX_CONTROLLER_ADVERTISE_URL=tls://10.0.0.6:7443 \
+SANDBOX_NETWORK_POOL=10.241.0.0/16 \
+docker compose -f compose.yaml -f compose.sandbox-host.yaml -f compose.sandbox-pool.yaml \
+  up -d --scale worker=0
+```
+
+- **名字**只能是小写字母、数字和连字符，全平台唯一。每个沙箱都记在它名下，改名等于换了一台主机。
+- **对外地址**必须是 `tls://`，controller 证书里要有这个主机名（`scripts/controller_certs.py
+  --host`，可以写多个）。
+- **地址池**和别的主机不能重叠。重叠时 controller 拒绝启动，日志里写出是哪一台、它的地址池是
+  什么。原因：出站代理只按来源地址认 Run，两台主机发出同一个地址，就会把一个 Run 的出站记到
+  另一个 Run 上。
+- controller 启动时自己登记，之后每 10 秒心跳一次。不用改 Worker 或 Scheduler 的配置。
+
+Worker 和 Scheduler 那一侧：`SANDBOX_CONTROLLER_URL=pool`，加上 B 档的证书。
+
+### 16.2 新沙箱放到哪台
+
+剩余内存最多的主机优先（预算减去这台上所有活着的沙箱的内存上限），同样多的随机打散。被拒
+「内存不够」或者根本连不上，就试下一台；请求已经发出去才断的，**不换主机**，因为那台可能已经
+建了沙箱。所有主机都满时，Run 照旧排队等待。
+
+已经有沙箱的 Run 只回到原来那台：冻结的沙箱只能在原主机解冻。原主机连不上时，这个 Run 每 30 秒
+重试一次，**不会**在别的主机上另建一个。
+
+跳过的主机：状态不是 `active` 的、超过 `SANDBOX_HOST_STALE_SECONDS`（默认 30）秒没有心跳的、
+没有对外地址的。
+
+### 16.3 维护、下线
+
+```bash
+uv run --no-sync python scripts/sandbox_hosts.py list
+uv run --no-sync python scripts/sandbox_hosts.py drain sbx-b      # 不再放新沙箱，打印还剩几个
+uv run --no-sync python scripts/sandbox_hosts.py activate sbx-b   # 维护完放回来
+uv run --no-sync python scripts/sandbox_hosts.py retire sbx-a --confirm-host-is-gone
+```
+
+- **维护**：`drain`，等它打印的数字（或 `list` 里的沙箱数）降到 0，再停机。冻结的沙箱会照常到期
+  被回收，不用手动处理。维护完 `activate`。
+- **主机彻底坏了、不会回来**：`retire`。它把这台上的所有沙箱标为已销毁并释放，这些 Run 下一次
+  会到别的主机上从对象存储冷恢复。**只有确认主机已经没了才能用**：如果只是网络断了、沙箱还在跑，
+  retire 会让一个 Run 有两个沙箱，同时写同一个工作区。平台不会因为心跳超时自动 retire，就是这个
+  原因。主机失联到有人 retire 之间，它上面的 Run 一直等待，直到用完预算暂停。
+- 被 retire 的主机如果又连回来，重启不会让它恢复 `active`；它本机残留的容器和卷会被它自己的
+  清扫删掉。要重新启用，用 `activate`。
+
+### 16.4 注意
+
+- **升级 controller 时先停旧的再起新的。** v2.23 的准入锁按主机分开，新旧两种锁互不排斥；同一台
+  主机上新旧 controller 同时在跑，两个申请可能同时数到同一块空闲内存。
+- 每台主机的内存预算单独计算（§8.4 的公式按每台主机套用）。
+- 冷恢复要从对象存储下载工作区，换主机后的第一个时间片会慢一些。
