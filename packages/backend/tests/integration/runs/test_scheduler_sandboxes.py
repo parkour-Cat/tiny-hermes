@@ -11,7 +11,7 @@ what stops the Run being handed a second sandbox while the first may still be
 alive.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -20,6 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from tiny_hermes.runs.application.sandbox_hosts import retire_host
 from tiny_hermes.runs.application.scheduler import SchedulerRuntime, SchedulerSettings
 from tiny_hermes.runs.application.worker import WorkerRuntime, WorkerSettings
 from tiny_hermes.runs.domain.models import RunCapabilities, ToolCallBlock
@@ -34,6 +35,7 @@ from tiny_hermes.sandbox.domain.models import (
     ReservationStatus,
     SandboxInstance,
 )
+from tiny_hermes.sandbox.infrastructure.sql_hosts import SqlSandboxHosts
 from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
 from tiny_hermes.sandbox.transport.adapter import AcquiredSandbox
 
@@ -509,3 +511,71 @@ async def test_worker_close_failure_is_cleaned_before_the_run_recovers(
     assert status == "queued"
     assert await reservation_status(sessions, run_id) == ReservationStatus.RELEASED.value
     assert order == ["sandbox_destroyed", "run_requeued"]
+
+
+async def test_retiring_a_dead_host_lets_its_interrupted_run_recover(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    published_agent: str,
+) -> None:
+    """Tier C §4.8. A Run whose sandbox was on a host that died waits, because
+    nobody can confirm the sandbox is gone: an unconfirmed sandbox released is
+    how a Run gets two. `retire` is the operator's confirmation, and the next
+    scan recovers the Run onto whichever host takes it."""
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    session_id = client.post(
+        "/api/v1/sessions", headers=scope, json={"agent_id": published_agent}
+    ).json()["id"]
+    run_id = UUID(
+        client.post(
+            "/api/v1/runs",
+            headers={**scope, "Idempotency-Key": uuid4().hex},
+            json={"session_id": session_id, "input": "hold a sandbox"},
+        ).json()["id"]
+    )
+    async with sessions.begin() as session:
+        claimed = await SqlRunStore(session).claim_head(
+            ClaimRunCommand(
+                workspace_id=None,
+                worker_id="worker-on-a-dead-host",
+                lease_seconds=30,
+                request_id="claim-dead-host",
+                capabilities=RunCapabilities(can_control=True, can_retry=True),
+            )
+        )
+    assert claimed is not None
+    on_dead_host = replace(instance(), controller="sbx-a")
+    async with sessions() as session:
+        await SqlSandboxHosts(session).register(
+            name="sbx-a", url="tls://sbx-a:7700", memory_budget_mb=4096, network_pool=None
+        )
+        await SqlSandboxStore(session).reserve(
+            run_id=run_id, workspace_id=claimed.run.workspace_id, instance=on_dead_host
+        )
+        await session.commit()
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                "UPDATE worker_leases SET expires_at = now() - interval '1 minute' "
+                "WHERE run_id = :id"
+            ),
+            {"id": run_id},
+        )
+    dead = StandInController(fails=True, order=[])
+    runtime = await scheduler(sessions, dead)
+    await runtime.run_once()
+    assert await reservation_status(sessions, run_id) == ReservationStatus.ISOLATED.value
+
+    async with sessions() as session:
+        released = await retire_host(session, "sbx-a")
+        await session.commit()
+    await runtime.run_once()
+
+    assert released == 1
+    async with engine.connect() as connection:
+        status = await connection.scalar(
+            text("SELECT status FROM runs WHERE id = :id"), {"id": run_id}
+        )
+    assert status == "queued"
+    assert await reservation_status(sessions, run_id) == ReservationStatus.RELEASED.value
