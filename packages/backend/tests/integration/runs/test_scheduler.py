@@ -522,3 +522,97 @@ async def test_housekeeping_runs_once_a_minute_while_the_rest_run_every_pass(
 
     assert ran["_collect_expired_records"] == 2
     assert ran["_cancel_aged_compat_timeouts"] == 2
+
+
+def _runtime(engine: AsyncEngine, **settings: Any) -> SchedulerRuntime:
+    return SchedulerRuntime(
+        session_factory=async_sessionmaker(engine, expire_on_commit=False),
+        notifier=NullWakeUpNotifier(),
+        settings=SchedulerSettings(max_recovery_attempts=3, event_retention_hours=168, **settings),
+    )
+
+
+def _wrap(runtime: SchedulerRuntime, name: str, before: Any) -> None:
+    scan = getattr(runtime, name)
+
+    async def wrapped(*args: Any) -> None:
+        await before(name)
+        await scan(*args)
+
+    setattr(runtime, name, wrapped)
+
+
+async def test_two_slow_scans_do_not_wait_for_each_other(
+    engine: AsyncEngine, empty_database: None
+) -> None:
+    """2026-10-24: the scans ran one after another, so any slow one held up
+    every scan behind it — reply delivery, approval expiry, due waits."""
+    del empty_database
+    runtime = _runtime(engine)
+
+    async def slow(_: str) -> None:
+        await asyncio.sleep(1.0)
+
+    _wrap(runtime, "_expire_approvals", slow)
+    _wrap(runtime, "_settle_child_waits", slow)
+    started = asyncio.get_running_loop().time()
+
+    await runtime.run_once()
+
+    elapsed = asyncio.get_running_loop().time() - started
+    assert elapsed < 1.8, f"{elapsed:.2f}s: the slow scans ran in turn"
+
+
+async def test_the_recovery_chain_keeps_its_order(
+    engine: AsyncEngine, empty_database: None
+) -> None:
+    """Sandboxes are cleaned before their Runs are recovered, so a new Worker
+    does not meet a reservation the cleanup has not reached yet."""
+    del empty_database
+    runtime = _runtime(engine)
+    order: list[str] = []
+
+    async def note(name: str) -> None:
+        order.append(name)
+        await asyncio.sleep(0.05)
+
+    chain = (
+        "_reclaim_expired_leases",
+        "_isolate_interrupted_sandboxes",
+        "_reclaim_sandboxes",
+        "_recover_interrupted",
+    )
+    for name in chain:
+        _wrap(runtime, name, note)
+
+    await runtime.run_once()
+
+    assert order == list(chain)
+
+
+async def test_a_scan_that_hangs_is_abandoned_and_reported_without_holding_the_rest(
+    engine: AsyncEngine, empty_database: None
+) -> None:
+    del empty_database
+    runtime = _runtime(engine, scan_timeout_seconds=0.5)
+    ran: list[str] = []
+
+    async def hang(_: str) -> None:
+        await asyncio.sleep(30)
+
+    async def note(name: str) -> None:
+        ran.append(name)
+
+    _wrap(runtime, "_dispatch_channel_replies", hang)
+    _wrap(runtime, "_expire_approvals", note)
+    _wrap(runtime, "_recover_interrupted", note)
+    started = asyncio.get_running_loop().time()
+
+    with pytest.raises(ExceptionGroup) as failed:
+        await runtime.run_once()
+
+    assert asyncio.get_running_loop().time() - started < 3.0
+    assert sorted(ran) == ["_expire_approvals", "_recover_interrupted"]
+    [timeout] = failed.value.exceptions
+    assert isinstance(timeout, TimeoutError)
+    assert "dispatch_channel_replies" in " ".join(getattr(timeout, "__notes__", []))
