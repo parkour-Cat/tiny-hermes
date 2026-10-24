@@ -36,6 +36,20 @@ const NAMED: Partial<Record<string, MessageKey>> = {
   request_failed: "requestFailed",
 };
 
+/**
+ * Refusals that carry their numbers in `context` (`asked`, `allowed`).
+ *
+ * Worded here, in the reader's language, with the numbers put in. Without
+ * them — an older API, or a proxy that dropped `context` — the server's own
+ * sentence is shown instead: true in English beats Chinese with holes in it.
+ */
+const CEILINGS: Partial<Record<string, MessageKey>> = {
+  sandbox_memory_ceiling_exceeded: "ceilingSandboxMemory",
+  execution_ceiling_exceeded: "ceilingExecution",
+  round_ceiling_exceeded: "ceilingModelCalls",
+  tool_call_ceiling_exceeded: "ceilingToolCalls",
+};
+
 /** Which form field a refusal belongs to, when it belongs to one. */
 const FIELDS: Partial<Record<string, string>> = {
   agent_alias_taken: "alias",
@@ -54,6 +68,11 @@ const FIELDS: Partial<Record<string, string>> = {
 export function problemMessage(error: unknown, t: (key: MessageKey) => string): string {
   if (!(error instanceof ApiError)) {
     return error instanceof Error ? error.message : t("requestFailed");
+  }
+  const ceiling = CEILINGS[error.code];
+  const { asked, allowed } = error.context;
+  if (ceiling !== undefined && typeof asked === "number" && typeof allowed === "number") {
+    return t(ceiling).replace("{asked}", String(asked)).replace("{allowed}", String(allowed));
   }
   const key = NAMED[error.code];
   // An empty `message` means the platform sent no `detail` — there is nothing

@@ -711,6 +711,9 @@ def as_app_error(error: AgentCatalogError) -> AppError:
                 f"The agent asks for {error.asked} model calls and this "
                 f"platform allows {error.allowed}."
             ),
+            # The numbers apart from the sentence, so the console can say this
+            # in the reader's language rather than show the English above.
+            context={"asked": error.asked, "allowed": error.allowed},
         )
     if isinstance(error, SandboxMemoryCeilingExceeded):
         return AppError(
@@ -722,6 +725,9 @@ def as_app_error(error: AgentCatalogError) -> AppError:
                 f"The agent asks for a {error.asked} MB sandbox and this platform "
                 f"allows {error.allowed} MB; a platform administrator can raise it."
             ),
+            # The numbers apart from the sentence, so the console can say this
+            # in the reader's language rather than show the English above.
+            context={"asked": error.asked, "allowed": error.allowed},
         )
     if isinstance(error, ExecutionCeilingExceeded):
         return AppError(
@@ -733,6 +739,9 @@ def as_app_error(error: AgentCatalogError) -> AppError:
                 f"The agent asks for {error.asked} seconds of execution and this "
                 f"workspace allows {error.allowed}; a workspace administrator can raise it."
             ),
+            # The numbers apart from the sentence, so the console can say this
+            # in the reader's language rather than show the English above.
+            context={"asked": error.asked, "allowed": error.allowed},
         )
     if isinstance(error, ToolCallCeilingExceeded):
         return AppError(
@@ -743,6 +752,9 @@ def as_app_error(error: AgentCatalogError) -> AppError:
                 f"The agent asks for {error.asked} tool calls and this "
                 f"platform allows {error.allowed}."
             ),
+            # The numbers apart from the sentence, so the console can say this
+            # in the reader's language rather than show the English above.
+            context={"asked": error.asked, "allowed": error.allowed},
         )
     if isinstance(error, InvalidAgentSpec):
         return AppError(

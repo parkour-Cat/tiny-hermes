@@ -266,6 +266,9 @@ h4,
 
 .page-alert {
   margin-bottom: 20px;
+  /* Room for the sticky .editor-actions bar, so a refusal scrolled into view
+     is not left underneath it. */
+  scroll-margin-top: 96px;
 }
 
 .grouped-page {

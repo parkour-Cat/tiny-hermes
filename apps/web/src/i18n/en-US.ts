@@ -923,5 +923,9 @@ export const enUS: Record<MessageKey, string> = {
   limitCeiling: "At most {value}",
   limitSave: "Save",
   limitSaved: "Saved",
+  ceilingSandboxMemory: "The sandbox memory is set to {asked} MB and this platform allows {allowed} MB. A platform administrator can raise it.",
+  ceilingExecution: "The execution time is set to {asked} seconds and this workspace allows {allowed}. A workspace administrator can raise it under Settings → Run limits.",
+  ceilingModelCalls: "Model calls are set to {asked} and at most {allowed} are allowed. A workspace administrator can raise it under Settings → Run limits, up to the platform's ceiling.",
+  ceilingToolCalls: "Tool calls are set to {asked} and this platform allows {allowed}. A platform administrator can raise it.",
   limitReadOnly: "Only a workspace administrator can change these.",
 };

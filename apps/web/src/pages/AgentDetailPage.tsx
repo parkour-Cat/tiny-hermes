@@ -13,7 +13,7 @@ import {
   Switch,
   Typography,
 } from "antd";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { ApiError, api, apiWithStatus } from "../api/client";
@@ -367,6 +367,20 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
   const [form] = Form.useForm<FormValues>();
   const [modal, contextHolder] = Modal.useModal();
   const [saveError, setSaveError] = useState<string | null>(null);
+  // A refusal is shown at the top of the page, and an author saves from
+  // wherever the field they changed is. Brought into view and focused, or it
+  // is a refusal nobody sees while the field still shows the refused value.
+  const saveErrorShown = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (saveError === null) return;
+    const shown = saveErrorShown.current?.querySelector<HTMLElement>("[role='alert']");
+    if (!shown) return;
+    shown.setAttribute("tabindex", "-1");
+    // Optional only for jsdom, which has no layout and no `scrollIntoView`;
+    // every browser the console supports has it.
+    shown.scrollIntoView?.({ block: "center", behavior: "smooth" });
+    shown.focus({ preventScroll: true });
+  }, [saveError]);
   const [publishNote, setPublishNote] = useState<string | null>(null);
   const [recovery] = useState(() => writer ? readAgentDraft(storageKey) : { draft: null, failed: false });
   const [localDraft, setLocalDraft] = useState<LocalAgentDraft | null>(recovery.draft);
@@ -766,6 +780,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
         <Alert className="page-alert" type="info" title={publishNote} showIcon />
       )}
       {saveError === null ? null : (
+        <div ref={saveErrorShown}>
         <Alert
           className="page-alert"
           type={conflicted ? "warning" : "error"}
@@ -788,6 +803,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
           }
           showIcon
         />
+        </div>
       )}
       <Card title={t("draftSection")} variant="borderless">
         <Form<FormValues>
