@@ -1,9 +1,11 @@
 """What the controller registers about itself when it starts (tier C step 3)."""
 
+import asyncio
+import contextlib
 from typing import Any
 
 import pytest
-from tiny_hermes.sandbox.cli import register_this_host
+from tiny_hermes.sandbox.cli import heartbeat_forever, register_this_host
 from tiny_hermes.sandbox.domain.models import NetworkPoolOverlap
 from tiny_hermes.shared.config import Settings
 
@@ -71,3 +73,26 @@ async def test_an_overlapping_pool_stops_the_controller_naming_the_other_host() 
         await register_this_host(
             hosts, _settings(sandbox_network_pool="10.240.0.0/16"), budget_mb=4002
         )
+
+
+async def test_a_failed_heartbeat_does_not_stop_the_next() -> None:
+    """A database the host briefly could not reach makes placement skip it
+    for a while; it must not end the heartbeat for good."""
+    beats: list[int] = []
+
+    async def beat() -> None:
+        beats.append(len(beats))
+        if len(beats) == 1:
+            raise RuntimeError("database unreachable")
+
+    task = asyncio.create_task(heartbeat_forever(beat, every=0.01))
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert len(beats) >= 3
+
+
+def test_the_heartbeat_is_every_ten_seconds_unless_told_otherwise() -> None:
+    assert _settings().sandbox_host_heartbeat_seconds == 10
