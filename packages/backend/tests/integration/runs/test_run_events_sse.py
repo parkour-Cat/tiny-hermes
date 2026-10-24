@@ -266,20 +266,31 @@ async def test_a_disconnected_subscriber_leaves_no_open_transaction(
     events_url: EventsUrl,
     submitted_run: dict[str, Any],
 ) -> None:
+    async def idle_in_transaction() -> set[int]:
+        async with engine.connect() as connection:
+            found = await connection.execute(
+                text(
+                    "SELECT pid FROM pg_stat_activity "
+                    "WHERE datname = current_database() "
+                    "AND state = 'idle in transaction'"
+                )
+            )
+            return {int(pid) for (pid,) in found}
+
+    # Only what this stream leaves counts. The whole database's count failed
+    # now and then under a full local run, with an earlier test's unreturned
+    # connection reported in its setup (2026-10-23, 2026-10-24).
+    before = await idle_in_transaction()
     async with browser.stream("GET", events_url(submitted_run["id"])) as response:
         assert response.status_code == 200
         async for _ in httpx.EventSource(response):
             break  # walk away with the run still queued and the stream open
 
-    await asyncio.sleep(1.0)
-    async with engine.connect() as connection:
-        idle = (
-            await connection.execute(
-                text(
-                    "SELECT count(*) FROM pg_stat_activity "
-                    "WHERE datname = current_database() "
-                    "AND state = 'idle in transaction'"
-                )
-            )
-        ).scalar_one()
-    assert idle == 0
+    # Asked until clear rather than once after a fixed second; a transaction
+    # the stream really left open never clears and still fails here.
+    deadline = asyncio.get_running_loop().time() + 5.0
+    left = await idle_in_transaction() - before
+    while left and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.1)
+        left = await idle_in_transaction() - before
+    assert left == set()
