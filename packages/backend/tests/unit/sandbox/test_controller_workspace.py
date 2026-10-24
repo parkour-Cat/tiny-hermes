@@ -323,7 +323,8 @@ async def test_destroy_removes_the_container_and_then_the_volume(
     sandbox_id = await _acquired(controller)
     await controller.destroy(run_id=RUN, lease_id=LEASE, sandbox_id=sandbox_id)
 
-    assert engine.names()[-2:] == ["remove", "remove_volume"]
+    # `_if_present` since 2026-10-24: one already gone is what was wanted.
+    assert engine.names()[-2:] == ["remove", "remove_volume_if_present"]
     assert engine.calls[-1][1] == f"tiny-hermes-data-{RUN}"
 
 
@@ -451,7 +452,7 @@ async def test_volume_remove_uses_scheduler_authority_rules(
     assert claim is not None
     await controller.store.isolate(claim.id, reason="cleanup drill")
     await controller.volume_remove(run_id=RUN, sandbox_id=sandbox_id)
-    assert engine.calls[-1] == ("remove_volume", f"tiny-hermes-data-{RUN}")
+    assert engine.calls[-1] == ("remove_volume_if_present", f"tiny-hermes-data-{RUN}")
 
 
 # -- the identity a sandbox holds, and for exactly how long ------------------
