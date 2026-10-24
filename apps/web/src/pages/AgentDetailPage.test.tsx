@@ -1505,3 +1505,40 @@ test("clearing a loaded sandbox size takes the key away, back to the platform de
   const [only] = sent as [{ spec: Record<string, unknown> }];
   expect(only.spec).not.toHaveProperty("sandbox");
 });
+
+test("a refused save is brought into view, where the author is looking", async () => {
+  // On 2026-10-24 a browser walk saved a sandbox size above the ceiling from
+  // the middle of the page: the refusal appeared at the top, out of sight, and
+  // the field still showed the number as if it had been kept.
+  loadedAgent(3);
+  server.use(
+    http.put(`/api/v1/agents/${AGENT}/draft`, () =>
+      HttpResponse.json(
+        {
+          code: "sandbox_memory_ceiling_exceeded",
+          detail: "The agent asks for a 8192 MB sandbox and this platform allows 4096 MB.",
+          context: { asked: 8192, allowed: 4096 },
+        },
+        { status: 422 },
+      ),
+    ),
+  );
+  const scrolled = vi.fn();
+  const original = Element.prototype.scrollIntoView;
+  Element.prototype.scrollIntoView = scrolled;
+  try {
+    renderDetail();
+    const personality = await screen.findByLabelText("人格");
+    await userEvent.type(personality, " more");
+    await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+    const refusal = await screen.findByText(/8192.*4096/);
+    const alert = refusal.closest("[role='alert']") ?? refusal.closest(".ant-alert");
+    expect(alert).not.toBeNull();
+    await waitFor(() => expect(scrolled).toHaveBeenCalled());
+    expect(scrolled.mock.contexts.some((element) => (element as Element).contains(refusal))).toBe(true);
+    expect(alert!.contains(document.activeElement)).toBe(true);
+  } finally {
+    Element.prototype.scrollIntoView = original;
+  }
+});

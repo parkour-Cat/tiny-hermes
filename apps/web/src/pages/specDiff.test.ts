@@ -17,3 +17,10 @@ test("model parameters and end user access are separate readable changes", () =>
   const rows = specDiff(base, { ...base, model_policy: { provider: "openai_compatible", endpoint_id: "model1", temperature: 0.2 }, end_user_access: { enabled: true } });
   expect(rows.map((row) => row.path)).toEqual(["end_user_access.enabled", "model_policy.temperature"]);
 });
+test("a key absent on one side and null on the other is no change", () => {
+  // The form writes `completion: null` where the published version has no
+  // key at all; the backend normalizes both to the same document. Listing
+  // them as "— → null" told the author they had changed three things.
+  const rows = specDiff(base, { ...base, completion: null, context_budget: null, delegation: null } as AgentSpecDocument);
+  expect(rows).toEqual([]);
+});

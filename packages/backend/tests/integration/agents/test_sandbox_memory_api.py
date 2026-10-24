@@ -38,6 +38,8 @@ def test_a_size_above_the_ceiling_is_refused_with_both_numbers(
     assert refused.json()["code"] == "sandbox_memory_ceiling_exceeded"
     assert "8192" in refused.json()["detail"]
     assert "4096" in refused.json()["detail"]
+    # The console words this itself, in the reader's language, from these.
+    assert refused.json()["context"] == {"asked": 8192, "allowed": 4096}
 
 
 def test_a_size_below_the_floor_is_refused_by_the_document(
