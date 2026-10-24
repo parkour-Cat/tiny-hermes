@@ -193,6 +193,10 @@ async def test_cleanup_of_a_container_something_else_removed_succeeds(
     docker_client.containers.get(await _container_of(controller, box.sandbox_id)).remove(
         force=True
     )
+    # And its data volume: what removed the soak's container took the volume
+    # with it, and the first fix, which covered the container only, still
+    # failed there on the volume's 404.
+    docker_client.volumes.get(f"tiny-hermes-data-{RUN}").remove(force=True)
     leases.expire(run_id=RUN)
 
     await controller.cleanup(run_id=RUN, sandbox_id=box.sandbox_id)
