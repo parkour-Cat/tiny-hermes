@@ -58,6 +58,10 @@ CHANNEL_REPLIES = "channel_replies"
 _PLATFORM = RunCapabilities(can_control=True, can_retry=True)
 
 
+#: How many of a pass's first scans run in order, one after another: reclaim
+#: expired leases, isolate interrupted sandboxes, reclaim sandboxes, recover.
+_RECOVERY_CHAIN = 4
+
 #: The scans that run once every `housekeeping_seconds` rather than every pass.
 #: Named once here: the staleness alerts in `observability/alerts.yml` hold
 #: these to a looser deadline, and a test checks the two lists agree.
@@ -79,6 +83,10 @@ class SchedulerSettings:
     #: timeouts. Late by a minute changes nothing anyone sees; every pass, they
     #: were most of an idle scheduler's 52 statements a second.
     housekeeping_seconds: float = 60.0
+    #: How long one scan may take before it is abandoned and reported failed
+    #: (2026-10-24). Scans run at once, so one that hangs no longer holds the
+    #: rest, but it would still hold the next pass.
+    scan_timeout_seconds: float = 120.0
 
 
 class SandboxCleanup(Protocol):
@@ -145,16 +153,19 @@ class SchedulerRuntime:
         self._replies = replies
 
     async def run_once(self) -> None:
-        """Every scan once, each on its own.
+        """Every scan once, each on its own, all at once (2026-10-24).
 
-        A scan that throws is logged under its name and the rest still run:
-        one bad row must not stop recovery, approval expiry and cleanup on
-        every cycle after it. The failures are raised together at the end, so
-        a caller still sees them.
+        A scan that throws, or outlasts `scan_timeout_seconds`, is logged under
+        its name and the rest still run: one bad row must not stop recovery,
+        approval expiry and cleanup on every cycle after it. The failures are
+        raised together at the end, so a caller still sees them.
 
-        The order is kept for latency, not safety. Recovery skips a Run whose
-        sandbox reservation is still live, so a cleanup scan that failed
-        delays that Run's recovery rather than racing it.
+        Only the recovery chain (the first four) keeps an order, and that for
+        latency, not safety. Recovery skips a Run whose sandbox reservation is
+        still live, so a cleanup scan that failed delays that Run's recovery
+        rather than racing it. The other scans depend on none of each other
+        within a pass; each has its own transaction and scan lock, and they
+        already run beside every Worker and API request.
         """
         now = datetime.now(UTC)
         housekeeping = self._housekeeping_due is None or self._clock() >= self._housekeeping_due
@@ -191,10 +202,11 @@ class SchedulerRuntime:
             ("dispatch_channel_replies", self._dispatch_channel_replies),
         )
         failures: list[Exception] = []
-        for name, scan in scans:
+
+        async def one(name: str, scan: Callable[[], Awaitable[None]]) -> None:
             started = time.monotonic()
             try:
-                await scan()
+                await asyncio.wait_for(scan(), self._settings.scan_timeout_seconds)
             except Exception as error:
                 SCAN_ERRORS.labels(scan=name).inc()
                 logger.exception("scheduler scan failed", extra={"scan": name})
@@ -206,6 +218,14 @@ class SchedulerRuntime:
                 SCAN_LAST_SUCCESS.labels(scan=name).set_to_current_time()
             finally:
                 SCAN_SECONDS.labels(scan=name).observe(time.monotonic() - started)
+
+        chain, rest = scans[:_RECOVERY_CHAIN], scans[_RECOVERY_CHAIN:]
+
+        async def in_order() -> None:
+            for name, scan in chain:
+                await one(name, scan)
+
+        await asyncio.gather(in_order(), *(one(name, scan) for name, scan in rest))
         if failures:
             raise ExceptionGroup("scheduler scans failed", failures)
 

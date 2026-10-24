@@ -84,6 +84,9 @@ class Settings(BaseSettings):
     #: How often the scheduler's housekeeping scans run (2026-10-24). The
     #: `SchedulerHousekeepingStalled` alert allows four minutes.
     scheduler_housekeeping_seconds: int = Field(default=60, ge=1, le=180)
+    #: How long one scheduler scan may run before it is abandoned and reported
+    #: failed (2026-10-24); scans run at once, so this bounds a pass.
+    scheduler_scan_timeout_seconds: int = Field(default=120, ge=1, le=3_600)
     #: The metrics port (observability design §4.1). Its own port, never the
     #: public API one, and Compose publishes no host port for it. 0 serves
     #: nothing.
