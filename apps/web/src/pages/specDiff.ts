@@ -10,7 +10,10 @@ function normalized(spec: AgentSpecDocument): unknown {
 }
 
 function flattened(value: unknown, prefix = "", result: Record<string, string> = {}): Record<string, string> {
-  if (value !== null && typeof value === "object" && Object.keys(value).length > 0) {
+  // Null is the absence the backend normalizes it to: the form writes
+  // `completion: null` where a published version has no key at all.
+  if (value === null) return result;
+  if (typeof value === "object" && Object.keys(value).length > 0) {
     for (const [key, child] of Object.entries(value)) flattened(child, prefix ? `${prefix}.${key}` : key, result);
   } else result[prefix] = JSON.stringify(value);
   return result;

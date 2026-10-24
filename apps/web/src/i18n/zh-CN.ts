@@ -911,6 +911,10 @@ export const zhCN = {
   limitSave: "保存",
   limitSaved: "已保存",
   limitReadOnly: "只有工作空间管理员可以修改。",
+  ceilingSandboxMemory: "沙箱内存填的是 {asked} MB，平台最多允许 {allowed} MB。需要更大的沙箱，请平台管理员调高上限。",
+  ceilingExecution: "单次执行时间填的是 {asked} 秒，这个工作空间最多允许 {allowed} 秒。工作空间管理员可以在「设置 → 运行上限」里调高。",
+  ceilingModelCalls: "模型调用次数填的是 {asked}，最多允许 {allowed}。工作空间管理员可以在「设置 → 运行上限」里调高，但不能超过平台上限。",
+  ceilingToolCalls: "工具调用次数填的是 {asked}，平台最多允许 {allowed}。需要更多，请平台管理员调高上限。",
 } as const;
 
 export type MessageKey = keyof typeof zhCN;

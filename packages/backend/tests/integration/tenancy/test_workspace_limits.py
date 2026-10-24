@@ -140,6 +140,7 @@ def test_an_agent_may_not_ask_for_longer_than_its_workspace_allows(
     refused = _draft(client, scope, max_execution_seconds=1800)
     assert refused.status_code == 422
     assert refused.json()["code"] == "execution_ceiling_exceeded"
+    assert refused.json()["context"] == {"asked": 1800, "allowed": 900}
     assert "900" in refused.json()["detail"]
 
     _set(client, workspace_id, scope, agent_max_execution_seconds=3600)
@@ -155,3 +156,23 @@ def test_an_agent_may_ask_for_more_rounds_once_its_workspace_allows_them(
     _set(client, workspace_id, scope, agent_max_model_calls=60)
 
     assert _draft(client, scope, max_model_calls=60).status_code == 200
+
+
+def test_too_many_model_calls_is_refused_with_both_numbers_in_context(
+    client: TestClient, workspace_id: str, scope: dict[str, str]
+) -> None:
+    refused = _draft(client, scope, max_model_calls=21)
+
+    assert refused.status_code == 422
+    assert refused.json()["code"] == "round_ceiling_exceeded"
+    assert refused.json()["context"] == {"asked": 21, "allowed": 20}
+
+
+def test_too_many_tool_calls_is_refused_with_both_numbers_in_context(
+    client: TestClient, workspace_id: str, scope: dict[str, str]
+) -> None:
+    refused = _draft(client, scope, max_tool_calls=201)
+
+    assert refused.status_code == 422
+    assert refused.json()["code"] == "tool_call_ceiling_exceeded"
+    assert refused.json()["context"] == {"asked": 201, "allowed": 200}
