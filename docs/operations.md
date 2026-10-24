@@ -603,6 +603,25 @@ docker compose --env-file ../../.env --profile observability up -d --wait
 告警规则在 `deploy/compose/observability/alerts.yml`，只有规则，没有通知渠道。接企业自己的
 Alertmanager。阈值都是初值，要在试点之后定。
 
+### 12.4 告警演练过什么（2026-10-24）
+
+每条规则在 `alerts.test.yml` 里都有用例：用合成的指标数据证明它在条件满足时会响、差一点时不响。CI
+用 `promtool test rules` 跑这些用例。在本机栈上真的触发过的：
+
+| 怎么触发 | 告警 | 多久响 |
+|---|---|---|
+| 每分钟约 46 次错误密码登录 | `LoginFailuresSpiking` | 3 分钟 |
+| 停掉 Worker，提交一个任务 | `QueueWaitingTooLong` | 6.5 分钟（等满 1 分钟才算超时，再持续 5 分钟） |
+| 停掉 scheduler | `ProcessMissing`（之前 30 秒是 `ProcessDown`） | 3.5 分钟 |
+
+**演练前，停掉 scheduler 不会触发任何告警。**Prometheus 按服务名找目标，容器一停，名字解析不到，目标
+就从列表里消失了；它发布的所有指标也一起没了，连 `QueueWaitingTooLong` 读的排队指标都是它发的。新加
+的 `ProcessMissing` 用 `absent()` 发现「某个服务一个目标都没有」，`ProcessDown` 发现「目标还在但抓
+不到数据」。
+
+没有真的触发过的（只有规则测试）：`WorkerLanesSaturated`、`SchedulerScanStalled`（进程活着但某项扫描
+一直失败）、`SchedulerHousekeepingStalled`、`SandboxAdmissionRefusing`、`EgressDenialsSpiking`。
+
 ### 12.4 指标里没有什么
 
 - **没有工作空间、用户、Run 的 id，也没有工具名、模型端点名、出站目标主机。**这些标签的取值
