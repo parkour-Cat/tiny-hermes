@@ -165,8 +165,10 @@ tests:
         values: "1x40"
       - series: 'up{job="tiny-hermes", service="egress-proxy"}'
         values: "1x40"
+      # `stale`, not `_`: a target leaving discovery is ended with a
+      # staleness marker, which the drill saw within 30 s.
       - series: 'up{job="tiny-hermes", service="scheduler"}'
-        values: "1x4 _x36"
+        values: "1x4 stale"
     alert_rule_test:
       - eval_time: 1m
         alertname: ProcessMissing
