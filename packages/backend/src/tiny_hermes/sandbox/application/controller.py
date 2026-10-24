@@ -169,6 +169,7 @@ class SandboxController:
         memory_ceiling_mb: int | None = None,
         name: str = "default",
         commit: Callable[[], Awaitable[None]] | None = None,
+        runtime: str = "runc",
     ) -> None:
         self.engine = engine
         self.store = store
@@ -186,6 +187,8 @@ class SandboxController:
         #: commits its registration, and with it the admission lock, before it
         #: builds the container. None keeps the lock to the end of the call.
         self._commit = commit
+        #: The OCI runtime every new sandbox runs on (§1.25, v2.25).
+        self.runtime = runtime
         #: The largest sandbox an Agent may declare (§21.3, v2.22). `ceiling`
         #: is the default profile, so its memory is the size of an Agent that
         #: declares none; None here means that is also the largest.
@@ -251,6 +254,7 @@ class SandboxController:
                 egress=None
                 if self.networking is None
                 else self.networking.attachment(instance_id),
+                runtime=self.runtime,
             )
         except ContainerPolicyError as refused:
             # Before Docker is asked, so a refused image leaves nothing behind.
