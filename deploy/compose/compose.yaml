@@ -110,6 +110,9 @@ x-base-env: &base-env
   # This sandbox host's name (tier C, v2.23). Every sandbox it makes is
   # recorded under it; a single host keeps `default`.
   SANDBOX_CONTROLLER_NAME: ${SANDBOX_CONTROLLER_NAME:-default}
+  # The OCI runtime sandboxes run on (§1.25, v2.25): `runc`, or `runsc` where
+  # gVisor is installed. The controller will not start on one Docker lacks.
+  SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:-runc}
   # What other hosts dial to reach this one, `tls://` (tier C §4.1). Empty for
   # a single host on the shared socket.
   SANDBOX_CONTROLLER_ADVERTISE_URL: ${SANDBOX_CONTROLLER_ADVERTISE_URL:-}

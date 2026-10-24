@@ -709,3 +709,27 @@ async def test_two_commands_on_one_sandbox_run_at_once_and_each_gets_its_own_out
     assert first.output == "alpha"
     assert second.output == "bravo"
     assert elapsed < 1.8, f"the two executes were serialized ({elapsed:.2f}s)"
+
+
+async def test_a_sandbox_runs_on_the_runtime_the_controller_names(
+    controller: SandboxController, docker_client: Any
+) -> None:
+    """§1.25, v2.25: named, not left to the daemon's default."""
+    box = await acquired(controller)
+
+    container = docker_client.containers.get(await _container_of(controller, box.sandbox_id))
+    assert container.attrs["HostConfig"]["Runtime"] == "runc"
+
+
+def test_this_docker_is_checked_for_the_runtime_before_the_controller_starts(
+    docker_client: Any,
+) -> None:
+    from tiny_hermes.sandbox.cli import docker_runtimes, require_runtime
+
+    available = docker_runtimes(docker_client)
+
+    assert "runc" in available
+    require_runtime("runc", available=available)
+    if "runsc" not in available:
+        with pytest.raises(SystemExit, match="runsc"):
+            require_runtime("runsc", available=available)

@@ -141,6 +141,25 @@ class _Registry(Protocol):
     ) -> Any: ...
 
 
+def docker_runtimes(client: Any) -> tuple[str, ...]:
+    """The OCI runtimes this Docker daemon can start containers with."""
+    runtimes: dict[str, Any] = client.info().get("Runtimes") or {}
+    return tuple(sorted(str(name) for name in runtimes))
+
+
+def require_runtime(wanted: str, *, available: tuple[str, ...]) -> None:
+    """Stop here when the configured runtime is not installed (§1.25, v2.25).
+
+    Starting anyway would fail every sandbox, one acquire at a time, with an
+    error naming the container rather than the setting.
+    """
+    if wanted not in available:
+        raise SystemExit(
+            f"SANDBOX_RUNTIME={wanted} is not a runtime this Docker has "
+            f"({', '.join(available) or 'none listed'}); install it or name one of those"
+        )
+
+
 async def register_this_host(hosts: _Registry, settings: Settings, *, budget_mb: int) -> None:
     """Write this host's row before serving anything (tier C §4.1).
 
@@ -194,6 +213,7 @@ async def _serve() -> None:
     # every acquire later, and a retired setting is warned about once.
     networking = _networking(settings)
     client: Any = docker.from_env(timeout=_DOCKER_CALL_TIMEOUT_SECONDS)  # noqa: TID251 - the one place, by design
+    require_runtime(settings.sandbox_runtime, available=docker_runtimes(client))
 
     def controller_on(session: AsyncSession) -> SandboxController:
         return SandboxController(
@@ -207,6 +227,7 @@ async def _serve() -> None:
             memory_budget_mb=budget,
             memory_ceiling_mb=settings.sandbox_ceiling_memory_mb,
             name=settings.sandbox_controller_name,
+            runtime=settings.sandbox_runtime,
             # §21.3, v2.24: an acquire commits its registration, and with it
             # the admission lock, before Docker builds the container.
             commit=session.commit,

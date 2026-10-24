@@ -416,3 +416,14 @@ def test_one_named_controller_is_not_a_pool() -> None:
 
 def test_placement_skips_a_host_silent_for_thirty_seconds_unless_told_otherwise() -> None:
     assert _settings().sandbox_host_stale_seconds == 30
+
+
+def test_sandboxes_run_on_runc_unless_told_otherwise() -> None:
+    assert _settings().sandbox_runtime == "runc"
+    assert _settings(sandbox_runtime="runsc").sandbox_runtime == "runsc"
+
+
+@pytest.mark.parametrize("runtime", ["", "run sc", "../runsc", "RUNSC;rm"])
+def test_a_runtime_name_that_is_not_a_name_is_refused(runtime: str) -> None:
+    with pytest.raises(ValidationError, match="sandbox_runtime"):
+        _settings(sandbox_runtime=runtime)
