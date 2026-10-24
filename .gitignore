@@ -34,3 +34,6 @@ tests/e2e/.auth/
 # 显式指定 `-f` 就不会自动加载 override，所以 CI 从来没读到过这个文件。
 # 本机的 `redeploy.sh` 用的是不带 `-f` 的 `docker compose`，会自动加载它。
 deploy/compose/compose.override.yaml
+
+# Interview preparation is personal and stays off GitHub.
+docs/interview-guide.md
