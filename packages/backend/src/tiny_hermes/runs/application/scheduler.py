@@ -294,60 +294,10 @@ class SchedulerRuntime:
                     # Design §9/§6.3: a Run whose rollback recorded where it
                     # must land moves there only now, with the destruction
                     # confirmed and named.
-                    await self._confirm_cleanup_intent(
+                    await confirm_cleanup_intent(
                         session, reservation.run_id, reservation.instance_id
                     )
                 await session.commit()
-
-    async def _confirm_cleanup_intent(
-        self, session: AsyncSession, run_id: UUID, sandbox_id: UUID
-    ) -> None:
-        intent = (
-            await session.execute(
-                select(
-                    RunRow.workspace_id,
-                    RunRow.workspace_cleanup_target,
-                    RunRow.workspace_cleanup_sandbox_id,
-                ).where(RunRow.id == run_id)
-            )
-        ).one_or_none()
-        if intent is None or intent.workspace_cleanup_target is None:
-            return
-        if intent.workspace_cleanup_sandbox_id != sandbox_id:
-            # The recorded intent names a different sandbox; this confirmation
-            # is not the one it is waiting for.
-            return
-        target = WorkspaceCleanupTarget(intent.workspace_cleanup_target)
-        destinations: dict[WorkspaceCleanupTarget, tuple[RunSignal, PauseReason | None]] = {
-            WorkspaceCleanupTarget.PAUSED_LIMIT: (
-                RunSignal.LIMIT_CLEANUP_CONFIRMED,
-                PauseReason.LIMIT,
-            ),
-            WorkspaceCleanupTarget.FAILED_CONFLICT: (RunSignal.RECOVERY_FAILED, None),
-        }
-        if target not in destinations:
-            # `queued` belongs to the reacquire-and-continue flow M1 does not
-            # take; a row carrying it is a bug worth hearing about, not acting on.
-            logger.error("unhandled cleanup target", extra={"run_id": str(run_id)})
-            return
-        signal, reason = destinations[target]
-        try:
-            await SqlRunStore(session).apply_signal(
-                ApplySignalCommand(
-                    workspace_id=intent.workspace_id,
-                    run_id=run_id,
-                    signal=signal,
-                    pause_reason=reason,
-                    request_id=f"scheduler-cleanup-{run_id}",
-                    capabilities=_PLATFORM,
-                    confirmed_sandbox_id=sandbox_id,
-                )
-            )
-        except Exception:
-            # The intent stays recorded; the next sweep tries again.
-            logger.exception(
-                "cleanup confirmation failed", extra={"run_id": str(run_id)}
-            )
 
     async def _recover_interrupted(self) -> None:
         recovered: list[UUID] = []
@@ -613,3 +563,57 @@ class SchedulerRuntime:
             snapshot = await SqlRunStore(session).workspace_of(run_id)
         if snapshot is not None:
             await self._notifier.publish(snapshot, run_id)
+
+
+async def confirm_cleanup_intent(session: AsyncSession, run_id: UUID, sandbox_id: UUID) -> None:
+    """Move a Run waiting on this sandbox's destruction to where it was headed.
+
+    Called once the destruction is confirmed: by the Scheduler's cleanup, and
+    by an operator retiring the host the sandbox was on (tier C §4.8).
+    """
+    intent = (
+        await session.execute(
+            select(
+                RunRow.workspace_id,
+                RunRow.workspace_cleanup_target,
+                RunRow.workspace_cleanup_sandbox_id,
+            ).where(RunRow.id == run_id)
+        )
+    ).one_or_none()
+    if intent is None or intent.workspace_cleanup_target is None:
+        return
+    if intent.workspace_cleanup_sandbox_id != sandbox_id:
+        # The recorded intent names a different sandbox; this confirmation
+        # is not the one it is waiting for.
+        return
+    target = WorkspaceCleanupTarget(intent.workspace_cleanup_target)
+    destinations: dict[WorkspaceCleanupTarget, tuple[RunSignal, PauseReason | None]] = {
+        WorkspaceCleanupTarget.PAUSED_LIMIT: (
+            RunSignal.LIMIT_CLEANUP_CONFIRMED,
+            PauseReason.LIMIT,
+        ),
+        WorkspaceCleanupTarget.FAILED_CONFLICT: (RunSignal.RECOVERY_FAILED, None),
+    }
+    if target not in destinations:
+        # `queued` belongs to the reacquire-and-continue flow M1 does not
+        # take; a row carrying it is a bug worth hearing about, not acting on.
+        logger.error("unhandled cleanup target", extra={"run_id": str(run_id)})
+        return
+    signal, reason = destinations[target]
+    try:
+        await SqlRunStore(session).apply_signal(
+            ApplySignalCommand(
+                workspace_id=intent.workspace_id,
+                run_id=run_id,
+                signal=signal,
+                pause_reason=reason,
+                request_id=f"scheduler-cleanup-{run_id}",
+                capabilities=_PLATFORM,
+                confirmed_sandbox_id=sandbox_id,
+            )
+        )
+    except Exception:
+        # The intent stays recorded; the next sweep tries again.
+        logger.exception(
+            "cleanup confirmation failed", extra={"run_id": str(run_id)}
+        )
