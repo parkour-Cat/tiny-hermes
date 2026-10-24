@@ -399,7 +399,8 @@ class SandboxController:
             await self._require_here(claim.instance_id)
             if claim.status is not ReservationStatus.ISOLATED:
                 raise SandboxRefused(RefusalReason.RESERVATION_STILL_LIVE)
-        await self.engine.remove_volume(_volume_name(run_id))
+        # Already gone is what was wanted, as for the container (2026-10-24).
+        await self.engine.remove_volume_if_present(_volume_name(run_id))
         await self.audit.record(
             AuditEntry(
                 action="sandbox.volume_remove",
@@ -712,7 +713,8 @@ class SandboxController:
         # Container first, then volume: the volume cannot be in use once the
         # container is confirmed gone. Session state lives in object-store revisions;
         # a Run's teardown owes the host nothing but this reclamation.
-        await self.engine.remove_volume(_volume_name(run_id))
+        # Already gone is what was wanted, as for the container (2026-10-24).
+        await self.engine.remove_volume_if_present(_volume_name(run_id))
         await self.audit.record(
             AuditEntry(
                 action="sandbox.volume_remove",
