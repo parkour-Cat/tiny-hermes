@@ -23,7 +23,11 @@ groups:
 
       - alert: SchedulerScanStalled
         # 5x the default one-second scan interval, with room for slow scans.
-        expr: time() - max by (scan) (tiny_hermes_scheduler_scan_last_success_timestamp) > 60
+        # Not the housekeeping scans, which run once a minute (2026-10-24) and
+        # would go stale between runs under this deadline.
+        expr: >-
+          time() - max by (scan) (tiny_hermes_scheduler_scan_last_success_timestamp{scan!~"cancel_aged_compat_timeouts|collect_expired_records|collect_upload_garbage|expire_artifacts"})
+          > 60
         for: 2m
         labels: {severity: critical}
         annotations:
@@ -31,6 +35,19 @@ groups:
           description: >-
             One scan failing every cycle, or the scheduler stopped. Recovery,
             approval expiry and cleanup live in these scans.
+
+      - alert: SchedulerHousekeepingStalled
+        # Three missed minutes, not one late pass: these run once a minute.
+        expr: >-
+          time() - max by (scan) (tiny_hermes_scheduler_scan_last_success_timestamp{scan=~"cancel_aged_compat_timeouts|collect_expired_records|collect_upload_garbage|expire_artifacts"})
+          > 240
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "Scheduler housekeeping {{ $labels.scan }} has not succeeded for four minutes"
+          description: >-
+            Expired records, upload garbage and old artifacts are not being
+            removed. Nothing a Run waits on lives here; disk and table sizes grow.
 
       - alert: SandboxAdmissionRefusing
         expr: increase(tiny_hermes_sandbox_admission_rejected_total[1m]) > 0

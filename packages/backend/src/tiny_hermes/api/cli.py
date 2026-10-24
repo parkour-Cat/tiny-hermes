@@ -433,6 +433,7 @@ async def _scheduler() -> None:
         settings=SchedulerSettings(
             max_recovery_attempts=settings.max_recovery_attempts,
             event_retention_hours=settings.event_retention_hours,
+            housekeeping_seconds=settings.scheduler_housekeeping_seconds,
         ),
     )
     stop = _stop_on_termination()

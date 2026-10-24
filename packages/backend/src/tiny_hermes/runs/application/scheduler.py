@@ -58,11 +58,27 @@ CHANNEL_REPLIES = "channel_replies"
 _PLATFORM = RunCapabilities(can_control=True, can_retry=True)
 
 
+#: The scans that run once every `housekeeping_seconds` rather than every pass.
+#: Named once here: the staleness alerts in `observability/alerts.yml` hold
+#: these to a looser deadline, and a test checks the two lists agree.
+HOUSEKEEPING_SCANS = (
+    "cancel_aged_compat_timeouts",
+    "collect_expired_records",
+    "collect_upload_garbage",
+    "expire_artifacts",
+)
+
+
 @dataclass(frozen=True)
 class SchedulerSettings:
     max_recovery_attempts: int
     event_retention_hours: int
     batch_size: int = 100
+    #: How often the housekeeping scans run (2026-10-24): deleting expired
+    #: records, upload garbage and old artifacts, and cancelling 24-hour compat
+    #: timeouts. Late by a minute changes nothing anyone sees; every pass, they
+    #: were most of an idle scheduler's 52 statements a second.
+    housekeeping_seconds: float = 60.0
 
 
 class SandboxCleanup(Protocol):
@@ -108,8 +124,12 @@ class SchedulerRuntime:
         sandbox: SandboxCleanup | None = None,
         objects: ObjectStore | None = None,
         replies: ChannelReplies | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._sessions = session_factory
+        self._clock = clock
+        #: None until the first pass, which always does the housekeeping.
+        self._housekeeping_due: float | None = None
         self._notifier = notifier
         self._settings = settings
         # Absent in a deployment with no tools, which still needs every other
@@ -137,6 +157,9 @@ class SchedulerRuntime:
         delays that Run's recovery rather than racing it.
         """
         now = datetime.now(UTC)
+        housekeeping = self._housekeeping_due is None or self._clock() >= self._housekeeping_due
+        if housekeeping:
+            self._housekeeping_due = self._clock() + self._settings.housekeeping_seconds
         scans: tuple[tuple[str, Callable[[], Awaitable[None]]], ...] = (
             ("reclaim_expired_leases", lambda: self._reclaim_expired_leases(now)),
             # Worker-side freeze/destroy failures interrupt the Run after its
@@ -155,10 +178,16 @@ class SchedulerRuntime:
             ("settle_child_waits", self._settle_child_waits),
             ("cascade_cancel_children", self._cascade_cancel_children),
             ("expire_approvals", lambda: self._expire_approvals(now)),
-            ("cancel_aged_compat_timeouts", lambda: self._cancel_aged_compat_timeouts(now)),
-            ("collect_expired_records", lambda: self._collect_expired_records(now)),
-            ("collect_upload_garbage", lambda: self._collect_upload_garbage(now)),
-            ("expire_artifacts", lambda: self._expire_artifacts(now)),
+            *(
+                (
+                    ("cancel_aged_compat_timeouts", lambda: self._cancel_aged_compat_timeouts(now)),
+                    ("collect_expired_records", lambda: self._collect_expired_records(now)),
+                    ("collect_upload_garbage", lambda: self._collect_upload_garbage(now)),
+                    ("expire_artifacts", lambda: self._expire_artifacts(now)),
+                )
+                if housekeeping
+                else ()
+            ),
             ("dispatch_channel_replies", self._dispatch_channel_replies),
         )
         failures: list[Exception] = []

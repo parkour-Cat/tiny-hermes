@@ -699,8 +699,7 @@ class SandboxController:
         )
 
     async def _remove(self, run_id: UUID, sandbox_id: UUID) -> None:
-        reservation = await self._reservation(run_id, sandbox_id)
-        instance = await self.store.read_instance(sandbox_id)
+        reservation, instance = await self._claim(run_id, sandbox_id)
         # Before the container goes: once Docker has the address back it may
         # hand it to the next container, and a stale row would make that
         # container this Run.
@@ -727,7 +726,15 @@ class SandboxController:
         if not await self.leases.holds(run_id, lease_id):
             raise SandboxRefused(RefusalReason.LEASE_INVALID)
 
-    async def _reservation(self, run_id: UUID, sandbox_id: UUID) -> SandboxReservation:
+    async def _claim(
+        self, run_id: UUID, sandbox_id: UUID
+    ) -> tuple[SandboxReservation, SandboxInstance | None]:
+        """The Run's live claim on this sandbox, and the instance, read once.
+
+        Every check a call makes is answered from this one read: whose claim
+        it is, and which host the sandbox is on. Each call used to read the
+        instance two or three times (2026-10-24), about five calls a round.
+        """
         found = await self.store.live_for_run(run_id)
         if found is None:
             raise SandboxRefused(RefusalReason.NO_RESERVATION)
@@ -735,23 +742,29 @@ class SandboxController:
             # The `sandbox_id` is the caller's input, so it is checked rather
             # than trusted.
             raise SandboxRefused(RefusalReason.RESERVATION_NOT_OWNED)
-        await self._require_here(sandbox_id)
-        return found
+        instance = await self.store.read_instance(sandbox_id)
+        self._refuse_elsewhere(instance)
+        return found, instance
+
+    async def _reservation(self, run_id: UUID, sandbox_id: UUID) -> SandboxReservation:
+        reservation, _ = await self._claim(run_id, sandbox_id)
+        return reservation
 
     async def _require_here(self, sandbox_id: UUID) -> None:
+        self._refuse_elsewhere(await self.store.read_instance(sandbox_id))
+
+    def _refuse_elsewhere(self, instance: SandboxInstance | None) -> None:
         """Refuse a sandbox recorded on another host (tier C).
 
         Routing sends every call to the sandbox's own host, so this is what
         stands when one arrives elsewhere anyway: acting on it here would be
         acting on a container this host does not have, or making a second.
         """
-        instance = await self.store.read_instance(sandbox_id)
         if instance is not None and instance.controller != self.name:
             raise SandboxRefused(RefusalReason.RESERVATION_ELSEWHERE)
 
     async def _require_owned(self, run_id: UUID, sandbox_id: UUID) -> SandboxInstance:
-        await self._reservation(run_id, sandbox_id)
-        instance = await self.store.read_instance(sandbox_id)
+        _, instance = await self._claim(run_id, sandbox_id)
         if instance is None:
             raise SandboxRefused(RefusalReason.NO_RESERVATION)
         return instance

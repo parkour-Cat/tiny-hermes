@@ -1,6 +1,7 @@
 import hashlib
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
@@ -226,6 +227,20 @@ _CANCELLABLE_STATUSES = frozenset(
 #: memories from being loaded into a process to find out.
 MEMORY_READ_LIMIT = 200
 
+
+
+@dataclass(frozen=True)
+class _PublishedVersion:
+    agent_id: UUID
+    spec: AgentSpec
+
+
+#: Published Agent versions this process has read, by id, the least recently
+#: used dropped first (2026-10-24). A published version never changes (its
+#: content hash is fixed) and a Run's version never changes, yet a Worker read
+#: the row, parsed its spec, and looked up its Agent again twice every round.
+_VERSIONS: OrderedDict[UUID, _PublishedVersion] = OrderedDict()
+_VERSION_CACHE_SIZE = 1024
 
 class SqlRunStore:
     """PostgreSQL Run Coordination adapter.
@@ -930,6 +945,20 @@ class SqlRunStore:
             request_id,
         )
 
+    async def _published(self, version_id: UUID) -> _PublishedVersion | None:
+        cached = _VERSIONS.get(version_id)
+        if cached is not None:
+            _VERSIONS.move_to_end(version_id)
+            return cached
+        row = await self._session.get(AgentVersionRow, version_id)
+        if row is None:
+            return None
+        found = _PublishedVersion(agent_id=row.agent_id, spec=AgentSpec.model_validate(row.spec))
+        _VERSIONS[version_id] = found
+        if len(_VERSIONS) > _VERSION_CACHE_SIZE:
+            _VERSIONS.popitem(last=False)
+        return found
+
     async def execution_context(self, workspace_id: UUID, run_id: UUID) -> ExecutionContext | None:
         """Read everything one round needs, and nothing a Worker may write."""
         run = await self._session.scalar(
@@ -937,7 +966,7 @@ class SqlRunStore:
         )
         if run is None:
             return None
-        version = await self._session.get(AgentVersionRow, run.agent_version_id)
+        version = await self._published(run.agent_version_id)
         budget = await self._session.get(RunBudgetScopeRow, run.budget_root_run_id)
         if version is None or budget is None:
             return None
@@ -955,7 +984,7 @@ class SqlRunStore:
         if owning is None or owning.session_mode == SessionMode.EPHEMERAL.value:
             scoped = scoped.where(SessionMessageRow.source_run_id == run.id)
         found = await self._session.scalars(scoped.order_by(SessionMessageRow.sequence))
-        spec = AgentSpec.model_validate(version.spec)
+        spec = version.spec
         history = tuple(
             # `source_run_id` carried: `_run_request` and the post-run review
             # (§15.4) both pick out this Run's own turns by it, and without it
@@ -1513,11 +1542,10 @@ class SqlRunStore:
         """
         if session is None:  # pragma: no cover - the caller read it
             return ()
-        agent_id = await self._session.scalar(
-            select(AgentVersionRow.agent_id).where(AgentVersionRow.id == run.agent_version_id)
-        )
-        if agent_id is None:  # pragma: no cover - a Run always has a version
+        version = await self._published(run.agent_version_id)
+        if version is None:  # pragma: no cover - a Run always has a version
             return ()
+        agent_id = version.agent_id
         library = SqlMemoryLibrary(self._session)
         found: list[RememberedFact] = []
         for scope in scopes_for_run(
