@@ -26,7 +26,12 @@ from tiny_hermes.sandbox.application.controller import (
     SandboxRefused,
 )
 from tiny_hermes.sandbox.domain.container_policy import DEFAULT_PROFILE
-from tiny_hermes.sandbox.domain.models import CacheState, ReservationStatus
+from tiny_hermes.sandbox.domain.models import (
+    CacheState,
+    InstanceStatus,
+    ReservationStatus,
+    SandboxInstance,
+)
 from tiny_hermes.sandbox.infrastructure.docker_engine import DockerEngine
 from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
 from tiny_hermes.sandbox.observation import publish_sandbox_gauges
@@ -55,6 +60,8 @@ class Platform:
         self._leases = leases
         self.audit = audit
         self.leases: dict[UUID, UUID] = {}
+        #: Replaced by tests that need Docker slower, failing, or paused.
+        self.engine_type: type[DockerEngine] = DockerEngine
 
     async def call[T](
         self,
@@ -90,8 +97,11 @@ class Platform:
         host: str,
     ) -> SandboxController:
         return SandboxController(
-            engine=DockerEngine(self._docker, extra_labels={LABEL: "1"}),
+            engine=self.engine_type(self._docker, extra_labels={LABEL: "1"}),
             store=SqlSandboxStore(session),
+            # As the socket dispatch wires it (v2.24): the acquire commits its
+            # registration before it creates the container.
+            commit=session.commit,
             approved_digests=(self._digest,),
             leases=self._leases,
             audit=self.audit,
@@ -128,6 +138,16 @@ class Platform:
         assert found is not None
         return found.controller
 
+    async def instance_of(self, sandbox_id: UUID) -> SandboxInstance:
+        async with self._sessions() as session:
+            found = await SqlSandboxStore(session).read_instance(sandbox_id)
+        assert found is not None
+        return found
+
+    async def committed(self, host: str = "default") -> int:
+        async with self._sessions() as session:
+            return await SqlSandboxStore(session).committed_memory_mb(host)
+
     async def memory_of(self, sandbox_id: UUID) -> int:
         async with self._sessions() as session:
             found = await SqlSandboxStore(session).read_instance(sandbox_id)
@@ -153,8 +173,18 @@ class Platform:
     async def container_of(self, sandbox_id: UUID) -> str:
         async with self._sessions() as session:
             found = await SqlSandboxStore(session).read_instance(sandbox_id)
-        assert found is not None
+        assert found is not None and found.container_id is not None
         return found.container_id
+
+    def expire_lease(self, run_id: UUID) -> None:
+        """What happens to a Worker's lease when the process holding it dies."""
+        self._leases.expire(run_id=run_id)
+
+    async def claim_of_instance(self, run_id: UUID) -> UUID:
+        async with self._sessions() as session:
+            found = await SqlSandboxStore(session).live_for_run(run_id)
+        assert found is not None
+        return found.instance_id
 
     async def claim_of(self, run_id: UUID) -> ReservationStatus | None:
         async with self._sessions() as session:
@@ -502,3 +532,122 @@ async def test_one_host_does_not_wait_on_anothers_admission(
         await asyncio.wait_for(platform.acquire(uuid4(), host="sbx-b"), timeout=20)
 
         await holding.rollback()
+
+
+# -- containers are created outside the admission lock (§21.3, v2.24) ---------
+#
+# On 2026-10-24, 120 long tasks waited 2.7 s each for the admission lock: it
+# was held until the container was built, so a host built its sandboxes one
+# at a time. The lock now covers counting and registering only.
+
+CREATE_DELAY = 1.0
+
+
+class SlowEngine(DockerEngine):
+    """Docker taking a second to start each container."""
+
+    async def create(self, config: Any) -> str:
+        await asyncio.sleep(CREATE_DELAY)
+        return await super().create(config)
+
+
+class BrokenEngine(DockerEngine):
+    """Docker refusing to start a container, after the volume was made."""
+
+    async def create(self, config: Any) -> str:
+        del config
+        raise RuntimeError("the daemon refused the container")
+
+
+class Crash(BaseException):
+    """The controller process dying: nothing after it runs, no handler sees it."""
+
+
+class CrashingEngine(DockerEngine):
+    """The container is started, and then the controller dies."""
+
+    async def create(self, config: Any) -> str:
+        await super().create(config)
+        raise Crash
+
+
+async def test_two_sandboxes_are_built_at_once_rather_than_in_turn(platform: Platform) -> None:
+    platform.engine_type = SlowEngine
+    started = asyncio.get_running_loop().time()
+
+    await asyncio.gather(platform.acquire(uuid4()), platform.acquire(uuid4()))
+
+    elapsed = asyncio.get_running_loop().time() - started
+    assert elapsed < 2 * CREATE_DELAY - 0.2, f"{elapsed:.2f}s: built in turn, not at once"
+
+
+async def test_building_outside_the_lock_still_admits_only_what_fits(platform: Platform) -> None:
+    """The count and the registration stay under the lock, so two acquires
+    still cannot both take the last room while their containers build."""
+    platform.engine_type = SlowEngine
+
+    outcomes = await asyncio.gather(
+        platform.acquire(uuid4(), budget=256),
+        platform.acquire(uuid4(), budget=256),
+        return_exceptions=True,
+    )
+
+    refused = [o for o in outcomes if isinstance(o, SandboxRefused)]
+    assert len(refused) == 1
+    assert refused[0].reason is RefusalReason.MEMORY_BUDGET_EXHAUSTED
+
+
+async def test_a_container_that_fails_to_start_leaves_nothing_and_frees_its_room(
+    platform: Platform,
+) -> None:
+    """Its registration was committed before the build. Left behind, it would
+    be a `creating` instance holding memory for ever."""
+    run = uuid4()
+    platform.engine_type = BrokenEngine
+
+    with pytest.raises(RuntimeError, match="refused the container"):
+        await platform.acquire(run, budget=256)
+
+    assert await platform.committed() == 0
+    assert await platform.claim_of(run) is None
+    assert platform.labelled() == 0
+    platform.engine_type = DockerEngine
+    await platform.acquire(uuid4(), budget=256)
+
+
+async def test_the_sweep_leaves_a_container_whose_acquire_is_still_finishing(
+    platform: Platform, docker_client: Any
+) -> None:
+    """Registered before it is built, so the sweep can tell a container on
+    its way from one whose acquire died."""
+    run = uuid4()
+    platform.engine_type = CrashingEngine
+    with pytest.raises(Crash):
+        await platform.acquire(run)
+    sandbox = (await platform.claim_of_instance(run))
+    assert (await platform.instance_of(sandbox)).status is InstanceStatus.CREATING
+    platform.engine_type = DockerEngine
+
+    await platform.call(lambda c: c.sweep())
+
+    assert platform.labelled() == 1
+
+
+async def test_cleaning_up_after_a_crash_mid_build_finds_the_container_by_its_label(
+    platform: Platform,
+) -> None:
+    """The Scheduler's lease-expiry cleanup reaches an instance the crash left
+    `creating`, with no container id written; its container still has to go."""
+    run = uuid4()
+    platform.engine_type = CrashingEngine
+    with pytest.raises(Crash):
+        await platform.acquire(run)
+    sandbox = await platform.claim_of_instance(run)
+    platform.engine_type = DockerEngine
+    platform.expire_lease(run)
+
+    await platform.call(lambda c: c.cleanup(run_id=run, sandbox_id=sandbox))
+
+    assert platform.labelled() == 0
+    assert (await platform.instance_of(sandbox)).status is InstanceStatus.DESTROYED
+    assert await platform.committed() == 0

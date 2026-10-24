@@ -37,6 +37,9 @@ LIVE_RESERVATIONS = (ReservationStatus.ACTIVE, ReservationStatus.KEPT, Reservati
 
 
 class InstanceStatus(StrEnum):
+    #: Registered and counted against its host's budget, its container not
+    #: yet built (§21.3, v2.24): the build happens outside the admission lock.
+    CREATING = "creating"
     RUNNING = "running"
     FROZEN = "frozen"
     ISOLATED = "isolated"
@@ -60,7 +63,8 @@ class CacheState(StrEnum):
 @dataclass(frozen=True)
 class SandboxInstance:
     id: UUID
-    container_id: str
+    #: None while `creating`: the row is written before the container exists.
+    container_id: str | None
     image_digest: str
     resource_profile: str
     #: Regenerated on every new container, so a test — and a tool — can tell

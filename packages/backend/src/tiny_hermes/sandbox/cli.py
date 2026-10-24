@@ -207,6 +207,9 @@ async def _serve() -> None:
             memory_budget_mb=budget,
             memory_ceiling_mb=settings.sandbox_ceiling_memory_mb,
             name=settings.sandbox_controller_name,
+            # §21.3, v2.24: an acquire commits its registration, and with it
+            # the admission lock, before Docker builds the container.
+            commit=session.commit,
         )
 
     async def dispatch(action: str, payload: dict[str, Any]) -> dict[str, Any]:

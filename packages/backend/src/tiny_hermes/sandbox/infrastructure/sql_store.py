@@ -298,6 +298,17 @@ class SqlSandboxStore:
         await self._session.flush()
         return _instance(row)
 
+    async def complete_instance(self, instance_id: UUID, container_id: str) -> SandboxInstance:
+        """A `creating` instance's container is built: record it, now running."""
+        row = await self._session.get(SandboxInstanceRow, instance_id)
+        if row is None:
+            raise UnknownInstance
+        row.container_id = container_id
+        row.status = InstanceStatus.RUNNING.value
+        row.updated_at = datetime.now(UTC)
+        await self._session.flush()
+        return _instance(row)
+
     async def _require(self, reservation_id: UUID) -> SandboxReservationRow:
         row = await self._session.get(SandboxReservationRow, reservation_id)
         if row is None:

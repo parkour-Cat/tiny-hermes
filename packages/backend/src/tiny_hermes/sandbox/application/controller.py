@@ -14,6 +14,7 @@ of a Run that is at that moment executing in it.
 import logging
 import random
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -167,6 +168,7 @@ class SandboxController:
         memory_budget_mb: int | None = None,
         memory_ceiling_mb: int | None = None,
         name: str = "default",
+        commit: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.engine = engine
         self.store = store
@@ -180,6 +182,10 @@ class SandboxController:
         #: This sandbox host's name (tier C). Its admission, eviction and
         #: every call count only what is recorded under it.
         self.name = name
+        #: Commits this call's transaction so far (§21.3, v2.24): an acquire
+        #: commits its registration, and with it the admission lock, before it
+        #: builds the container. None keeps the lock to the end of the call.
+        self._commit = commit
         #: The largest sandbox an Agent may declare (§21.3, v2.22). `ceiling`
         #: is the default profile, so its memory is the size of an Agent that
         #: declares none; None here means that is also the largest.
@@ -250,35 +256,64 @@ class SandboxController:
             # Before Docker is asked, so a refused image leaves nothing behind.
             raise SandboxRefused(RefusalReason.IMAGE_NOT_APPROVED) from refused
 
+        # Counted and registered under the admission lock, then committed, so
+        # the lock is not held while Docker builds the container (§21.3,
+        # v2.24): a host builds its sandboxes at once, not in turn. The row is
+        # `creating` and its memory counts from here, so two acquires still
+        # cannot both take the last room.
         await self._admit(chosen.memory_mb)
-        # Workspace design §7: a fresh instance restores into an empty volume.
-        # Whatever this Run left on the host goes first — the volume of an
-        # instance discarded or evicted, a container a crash never recorded —
-        # so neither old files nor a stranger sharing the mount survive.
-        await self._clear_leftovers(run_id)
-        # Explicitly, before the container, and with the full ownership chain
-        # in labels: the Scheduler that later reclaims an orphan enumerates by
-        # label (design §13), and it can only see what was written.
-        await self.engine.create_volume(_volume_name(run_id), config.volume_labels)
-        if self.networking is not None:
-            await self._open_network(self.networking, instance_id, config.volume_labels)
-        container_id = await self.engine.create(config)
-        await self.store.reserve(
+        reservation = await self.store.reserve(
             run_id=run_id,
             workspace_id=workspace_id,
             instance=SandboxInstance(
                 id=instance_id,
-                container_id=container_id,
+                container_id=None,
                 image_digest=config.image,
                 resource_profile=profile,
                 boot_id=uuid.uuid4().hex,
-                status=InstanceStatus.RUNNING,
+                status=InstanceStatus.CREATING,
                 memory_mb=chosen.memory_mb,
                 controller=self.name,
             ),
         )
+        if self._commit is not None:
+            await self._commit()
+        try:
+            # Workspace design §7: a fresh instance restores into an empty
+            # volume. Whatever this Run left on the host goes first — the
+            # volume of an instance discarded or evicted, a container a crash
+            # never recorded — so neither old files nor a stranger sharing the
+            # mount survive.
+            await self._clear_leftovers(run_id)
+            # Explicitly, before the container, and with the full ownership
+            # chain in labels: the Scheduler that later reclaims an orphan
+            # enumerates by label (design §13), and it can only see what was
+            # written.
+            await self.engine.create_volume(_volume_name(run_id), config.volume_labels)
+            if self.networking is not None:
+                await self._open_network(self.networking, instance_id, config.volume_labels)
+            container_id = await self.engine.create(config)
+        except Exception:
+            # The registration was committed; left alone it would hold its
+            # memory as a `creating` row for ever. Committed here because the
+            # dispatch rolls back on anything but a refusal.
+            await self._abandon(reservation, run_id)
+            if self._commit is not None:
+                await self._commit()
+            raise
+        await self.store.complete_instance(instance_id, container_id)
         await self._register_address(container_id, run_id, instance_id)
         return AcquireResult(sandbox_id=instance_id, cache_state=CacheState.RESET)
+
+    async def _abandon(self, reservation: SandboxReservation, run_id: UUID) -> None:
+        """Undo a build that failed: whatever got made, and the registration."""
+        instance = await self.store.read_instance(reservation.instance_id)
+        if instance is not None:
+            await self._remove_container(instance)
+            await self._close_network(instance.id)
+            await self.store.set_instance_status(instance.id, InstanceStatus.DESTROYED)
+        await self.engine.remove_volume_if_present(_volume_name(run_id))
+        await self.store.release(reservation.id)
 
     async def execute(
         self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID, command: SandboxCommand
@@ -287,7 +322,7 @@ class SandboxController:
         instance = await self._require_running(run_id, sandbox_id)
         if not _inside_workspace(command.cwd):
             raise SandboxRefused(RefusalReason.WORKING_DIRECTORY_NOT_ALLOWED)
-        return await self.engine.execute(instance.container_id, command)
+        return await self.engine.execute(_container(instance), command)
 
     # -- Workspace actions ---------------------------------------------------
 
@@ -303,7 +338,7 @@ class SandboxController:
         instance = await self._require_frozen(run_id, sandbox_id)
         if declared_total < 0:
             raise SandboxRefused(RefusalReason.WORKING_DIRECTORY_NOT_ALLOWED)
-        return WorkspaceTicket(container_id=instance.container_id)
+        return WorkspaceTicket(container_id=_container(instance))
 
     async def workspace_import_failed(self, *, run_id: UUID, sandbox_id: UUID) -> None:
         """An interrupted import leaves a tree nobody can vouch for.
@@ -328,14 +363,14 @@ class SandboxController:
     ) -> tuple[ScannedEntry, ...]:
         await self._require_lease(run_id, lease_id)
         instance = await self._require_frozen(run_id, sandbox_id)
-        return await self.engine.scan_tree(instance.container_id, DATA_MOUNT)
+        return await self.engine.scan_tree(_container(instance), DATA_MOUNT)
 
     async def workspace_export(
         self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID
     ) -> WorkspaceTicket:
         await self._require_lease(run_id, lease_id)
         instance = await self._require_frozen(run_id, sandbox_id)
-        return WorkspaceTicket(container_id=instance.container_id)
+        return WorkspaceTicket(container_id=_container(instance))
 
     async def execute_stream(
         self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID, command: SandboxCommand
@@ -345,7 +380,7 @@ class SandboxController:
         instance = await self._require_running(run_id, sandbox_id)
         if not _inside_workspace(command.cwd):
             raise SandboxRefused(RefusalReason.WORKING_DIRECTORY_NOT_ALLOWED)
-        return WorkspaceTicket(container_id=instance.container_id)
+        return WorkspaceTicket(container_id=_container(instance))
 
     async def volume_remove(self, *, run_id: UUID, sandbox_id: UUID) -> None:
         """Scheduler authority: reclaim a data volume nothing live still owns.
@@ -377,7 +412,7 @@ class SandboxController:
     async def freeze(self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID) -> None:
         await self._require_lease(run_id, lease_id)
         instance = await self._require_running(run_id, sandbox_id)
-        await self.engine.pause(instance.container_id)
+        await self.engine.pause(_container(instance))
         # Before the status, so there is no window in which a paused container
         # is still somebody as far as the proxy is concerned.
         await self.store.clear_egress_address(sandbox_id)
@@ -386,9 +421,9 @@ class SandboxController:
     async def thaw(self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID) -> None:
         await self._require_lease(run_id, lease_id)
         instance = await self._require_owned(run_id, sandbox_id)
-        await self.engine.unpause(instance.container_id)
+        await self.engine.unpause(_container(instance))
         await self.store.set_instance_status(sandbox_id, InstanceStatus.RUNNING)
-        await self._register_address(instance.container_id, run_id, sandbox_id)
+        await self._register_address(_container(instance), run_id, sandbox_id)
 
     async def destroy(self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID) -> None:
         await self._require_lease(run_id, lease_id)
@@ -486,7 +521,7 @@ class SandboxController:
         instance = await self.store.read_instance(existing.instance_id)
         if instance is None:
             return None
-        if not await self.engine.unpause_if_present(instance.container_id):
+        if not await self.engine.unpause_if_present(_container(instance)):
             # The row outlived its container: an eviction rolled back after
             # the container went, or somebody removed it by hand. Discarded
             # like an expired keep, and the Run gets a new instance.
@@ -494,7 +529,7 @@ class SandboxController:
         await self.store.set_instance_status(instance.id, InstanceStatus.RUNNING)
         # The freeze that ended the last slice took the address away, and the
         # Worker does not thaw a reused instance: this is its thaw.
-        await self._register_address(instance.container_id, existing.run_id, instance.id)
+        await self._register_address(_container(instance), existing.run_id, instance.id)
         return AcquireResult(sandbox_id=instance.id, cache_state=CacheState.REUSED)
 
     async def _admit(self, needed_mb: int) -> None:
@@ -550,7 +585,7 @@ class SandboxController:
         workspace, as after the idle TTL. The volume stays, as in `_discard`,
         until that acquire clears it or the host sweep finds it unowned.
         """
-        await self.engine.remove_if_present(instance.container_id)
+        await self._remove_container(instance)
         await self._close_network(instance.id)
         await self.store.set_instance_status(instance.id, InstanceStatus.DESTROYED)
         await self.store.release(reservation.id)
@@ -566,7 +601,7 @@ class SandboxController:
     async def _discard(self, reservation: SandboxReservation) -> None:
         instance = await self.store.read_instance(reservation.instance_id)
         if instance is not None:
-            await self.engine.remove_if_present(instance.container_id)
+            await self._remove_container(instance)
             await self._close_network(instance.id)
             await self.store.set_instance_status(instance.id, InstanceStatus.DESTROYED)
         await self.store.release(reservation.id)
@@ -612,16 +647,32 @@ class SandboxController:
         instance = await self.store.read_instance(instance_id)
         return instance is not None and instance.status is not InstanceStatus.DESTROYED
 
+    async def _remove_container(self, instance: SandboxInstance, *, confirm: bool = False) -> None:
+        """Remove an instance's container, by id or, before one was written, by label.
+
+        An instance left `creating` by a crash mid-build may have a container
+        nobody wrote down; it still carries the instance label it was made
+        with. `confirm` keeps `_remove`'s rule: the container must be gone.
+        """
+        if instance.container_id is not None:
+            if confirm:
+                await self.engine.remove(instance.container_id)
+            else:
+                await self.engine.remove_if_present(instance.container_id)
+            return
+        for found in await self.engine.containers_labelled(_INSTANCE_LABEL, str(instance.id)):
+            await self.engine.remove_if_present(found.id)
+
     async def _recorded(self, found: ContainerInfo) -> bool:
         instance_id = _label_uuid(found.labels, _INSTANCE_LABEL)
         if instance_id is None:
             return False
         instance = await self.store.read_instance(instance_id)
-        return (
-            instance is not None
-            and instance.status is not InstanceStatus.DESTROYED
-            and instance.container_id == found.id
-        )
+        if instance is None or instance.status is InstanceStatus.DESTROYED:
+            return False
+        # Registered before it is built (v2.24): a `creating` row with no
+        # container id yet is an acquire on its way, not one that died.
+        return instance.status is InstanceStatus.CREATING or instance.container_id == found.id
 
     async def _audit_sweep(self, labels: dict[str, str], detail: str) -> None:
         run_id = _label_uuid(labels, _RUN_LABEL)
@@ -655,7 +706,7 @@ class SandboxController:
         # container this Run.
         await self.store.clear_egress_address(sandbox_id)
         if instance is not None:
-            await self.engine.remove(instance.container_id)
+            await self._remove_container(instance, confirm=True)
             await self._close_network(sandbox_id)
             await self.store.set_instance_status(sandbox_id, InstanceStatus.DESTROYED)
         await self.store.release(reservation.id)
@@ -790,3 +841,14 @@ class _Recording:
 
     async def record(self, entry: AuditEntry) -> None:
         self.entries.append(entry)
+
+
+def _container(instance: SandboxInstance) -> str:
+    """The container of an instance an operation needs built.
+
+    Only a `creating` instance has none, and nothing but its own acquire may
+    act on it before the build finishes.
+    """
+    if instance.container_id is None:
+        raise SandboxRefused(RefusalReason.NOT_RUNNING)
+    return instance.container_id

@@ -52,7 +52,7 @@ class SandboxInstanceRow(IdMixin, CreatedAtMixin, Base):
         Index("ix_sandbox_instances_controller_status", "controller", "status"),
     )
 
-    container_id: Mapped[str] = mapped_column(String(128))
+    container_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     image_digest: Mapped[str] = mapped_column(String(80))
     resource_profile: Mapped[str] = mapped_column(String(40))
     boot_id: Mapped[str] = mapped_column(String(64))
