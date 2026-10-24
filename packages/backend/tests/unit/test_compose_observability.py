@@ -142,3 +142,18 @@ def test_housekeeping_scans_are_not_held_to_the_every_pass_deadline() -> None:
     assert 'scan=~"' in housekeeping
     deadline = int(re.findall(r">\s*(\d+)", housekeeping)[-1])
     assert deadline >= 3 * 60, "three missed minutes, not one late pass"
+
+
+def test_every_alert_has_a_promtool_test() -> None:
+    """An alert nobody has seen fire is a guess about what will. The
+    2026-10-24 drill found one that could not fire at all; `alerts.test.yml`
+    shows each rule firing on its condition, and CI runs it with promtool."""
+    tests = yaml.safe_load((OBSERVABILITY / "alerts.test.yml").read_text(encoding="utf-8"))
+    tested = {
+        case["alertname"]
+        for group in tests["tests"]
+        for case in group.get("alert_rule_test", [])
+        if case.get("exp_alerts")
+    }
+
+    assert set(_rules()) <= tested, set(_rules()) - tested

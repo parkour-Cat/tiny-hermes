@@ -29,6 +29,12 @@ jobs:
       - run: uv run ruff check packages/backend migrations scripts
       - run: uv run pyright
       - run: uv run pytest packages/backend/tests/unit -v
+      # Every alert shown firing on its condition (2026-10-24): one rule was
+      # found unable to fire at all, and nothing had ever run it.
+      - name: Alert rules fire as written
+        run: >-
+          docker run --rm -v "$PWD/deploy/compose/observability:/o"
+          --entrypoint promtool prom/prometheus:v3.5.0 test rules /o/alerts.test.yml
 
   backend-integration:
     runs-on: ubuntu-latest
