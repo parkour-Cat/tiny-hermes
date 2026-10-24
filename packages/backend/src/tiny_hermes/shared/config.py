@@ -193,6 +193,13 @@ class Settings(BaseSettings):
     #: in the volume the three of them share. None is that socket.
     sandbox_controller_url: str | None = None
     sandbox_controller_listen: str | None = None
+    #: What other hosts dial to reach this controller (tier C §4.1), written
+    #: into its `sandbox_hosts` row. Always `tls://`: only mutual TLS crosses
+    #: a network, and a socket path is a path on this host alone.
+    sandbox_controller_advertise_url: str | None = None
+    #: How often a controller marks its row alive. Placement skips a host not
+    #: heard from in a while; nothing is released for it (§4.8).
+    sandbox_host_heartbeat_seconds: int = Field(default=10, ge=1, le=300)
     #: The old spelling, a bare path naming both ends. Kept for one release so a
     #: deployment's `.env` does not stop working on upgrade.
     sandbox_controller_socket: str | None = None
@@ -300,6 +307,19 @@ class Settings(BaseSettings):
     @property
     def approved_image_digests(self) -> tuple[str, ...]:
         return (self.sandbox_image_digest,) if self.sandbox_image_digest else ()
+
+    @field_validator("sandbox_controller_advertise_url", mode="before")
+    @classmethod
+    def read_an_empty_advertisement_as_unset(cls, value: object) -> object:
+        # Compose passes `${SANDBOX_CONTROLLER_ADVERTISE_URL:-}`, "" when unset.
+        return None if value == "" else value
+
+    @field_validator("sandbox_controller_advertise_url")
+    @classmethod
+    def advertise_only_tls(cls, value: str | None) -> str | None:
+        if value is not None and not value.startswith("tls://"):
+            raise ValueError("sandbox_controller_advertise_url must be a tls:// address")
+        return value
 
     @field_validator("outbound_allowed_cidrs")
     @classmethod

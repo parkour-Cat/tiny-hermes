@@ -83,3 +83,46 @@ class SandboxReservation:
     status: ReservationStatus
     idle_expires_at: datetime | None = None
     isolation_reason: str | None = None
+
+
+class HostState(StrEnum):
+    """Whether placement may put a new sandbox on a host (tier C §4.8).
+
+    Only an operator changes it. A restarting controller refreshes its row and
+    leaves this alone, so neither a drained host nor a retired one comes back
+    by restarting.
+    """
+
+    ACTIVE = "active"
+    #: No new sandboxes; the ones it has thaw, expire and are reclaimed.
+    DRAINING = "draining"
+    #: Confirmed gone, its sandboxes released. Its pool is free to reuse.
+    RETIRED = "retired"
+
+
+@dataclass(frozen=True)
+class SandboxHost:
+    """A sandbox host as it registered itself (tier C §4.1)."""
+
+    name: str
+    #: What other hosts dial, always `tls://`; None for a single host on a
+    #: Unix socket, whose path means nothing anywhere else.
+    url: str | None
+    memory_budget_mb: int | None
+    network_pool: str | None
+    state: HostState
+    seen_at: datetime
+
+
+class NetworkPoolOverlap(Exception):
+    """A host's network pool overlaps one still in use (tier C §4.6).
+
+    Sandbox addresses are unique across the pool only because each host hands
+    them out of its own disjoint range; the egress proxy names a Run by
+    address alone.
+    """
+
+    def __init__(self, *, other: str, other_pool: str) -> None:
+        super().__init__(f"overlaps {other}'s network pool {other_pool}")
+        self.other = other
+        self.other_pool = other_pool
