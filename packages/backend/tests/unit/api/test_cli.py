@@ -191,7 +191,7 @@ async def _serve_workers(
     monkeypatch.setattr(cli, "_notifier", new_notifier)
     monkeypatch.setattr(cli, "_workspace", nothing)
     monkeypatch.setattr(cli, "_ensure_bucket", no_bucket)
-    def no_controller(_: Settings, __: Role) -> None:
+    def no_controller(_: Settings, __: Role, ___: Any) -> None:
         return None
 
     monkeypatch.setattr(cli, "_controller", no_controller)

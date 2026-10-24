@@ -60,9 +60,11 @@ from tiny_hermes.runs.infrastructure.sql_children import SqlChildRuns
 from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.runs.ports.http_calls import EgressClaim
 from tiny_hermes.runs.ports.notifier import WakeUpNotifier
+from tiny_hermes.sandbox.infrastructure.sql_hosts import SqlHostDirectory
 from tiny_hermes.sandbox.transport.adapter import SandboxClient
+from tiny_hermes.sandbox.transport.pool import SandboxPool
 from tiny_hermes.sandbox.transport.tls import Role
-from tiny_hermes.sandbox.transport.wiring import controller_client
+from tiny_hermes.sandbox.transport.wiring import controller_client, host_connector
 from tiny_hermes.secrets.domain.envelope import optional_kek
 from tiny_hermes.secrets.infrastructure.sql_store import SqlSecretStore
 from tiny_hermes.session_workspace.domain.models import WorkspaceQuota
@@ -236,7 +238,7 @@ def _worker_runtime(
         # Absent when no image is approved: a deployment that has not chosen
         # one cannot run a tool, and a Run that binds one fails rather than
         # running the command anywhere else.
-        sandbox=_controller(settings, Role.WORKER),
+        sandbox=_controller(settings, Role.WORKER, sessions),
         workspace=workspace,
         # Skill text is read from the catalog the same database holds, so a
         # deployment configures nothing extra to give an Agent skills.
@@ -348,10 +350,18 @@ def _egress(settings: Settings, claim: EgressClaim | None = None) -> EgressRoute
     )
 
 
-def _controller(settings: Settings, role: Role) -> SandboxClient | None:
-    """The Controller, over its socket or TLS, when this deployment has one."""
+def _controller(
+    settings: Settings, role: Role, sessions: async_sessionmaker[AsyncSession]
+) -> SandboxClient | SandboxPool | None:
+    """The Controller, over its socket or TLS, or the pool of them (tier C),
+    when this deployment has one."""
     if not settings.sandbox_image_digest:
         return None
+    if settings.sandbox_pool:
+        return SandboxPool(
+            SqlHostDirectory(sessions, settings.sandbox_host_stale_seconds),
+            connect=host_connector(settings, role=role),
+        )
     return SandboxClient(controller_client(settings, role=role))
 
 
@@ -417,7 +427,7 @@ async def _scheduler() -> None:
     runtime = SchedulerRuntime(
         session_factory=sessions,
         notifier=notifier,
-        sandbox=_controller(settings, Role.SCHEDULER),
+        sandbox=_controller(settings, Role.SCHEDULER, sessions),
         objects=None if workspace is None else workspace.objects,
         replies=_channel_replies(settings, senders),
         settings=SchedulerSettings(

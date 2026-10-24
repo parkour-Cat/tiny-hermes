@@ -9,6 +9,8 @@ from tiny_hermes.sandbox.transport.address import ControllerAddress
 from tiny_hermes.sandbox.transport.tls import TlsFiles
 
 DEFAULT_CONTROLLER_URL = "unix:///run/tiny-hermes/controller.sock"
+#: The `SANDBOX_CONTROLLER_URL` that names no host but the registered pool.
+SANDBOX_POOL = "pool"
 
 #: `deploy/compose/compose.yaml`'s `:-` fallbacks; `test_compose_exposure`
 #: fails when the two disagree. The database password is matched inside the
@@ -200,6 +202,9 @@ class Settings(BaseSettings):
     #: How often a controller marks its row alive. Placement skips a host not
     #: heard from in a while; nothing is released for it (§4.8).
     sandbox_host_heartbeat_seconds: int = Field(default=10, ge=1, le=300)
+    #: How long a host may go unheard before placement stops choosing it. It
+    #: keeps its sandboxes: being cut off is not being gone (§4.8).
+    sandbox_host_stale_seconds: int = Field(default=30, ge=5, le=3_600)
     #: The old spelling, a bare path naming both ends. Kept for one release so a
     #: deployment's `.env` does not stop working on upgrade.
     sandbox_controller_socket: str | None = None
@@ -274,6 +279,12 @@ class Settings(BaseSettings):
     tiny_hermes_kek_id: str = "v1"
     tiny_hermes_previous_kek: str = ""
     tiny_hermes_previous_kek_id: str = ""
+
+    @property
+    def sandbox_pool(self) -> bool:
+        """`SANDBOX_CONTROLLER_URL=pool`: the hosts come from `sandbox_hosts`
+        (tier C §4.9) rather than from one configured address."""
+        return self.sandbox_controller_url == SANDBOX_POOL
 
     @property
     def controller_address(self) -> ControllerAddress:
@@ -397,15 +408,22 @@ class Settings(BaseSettings):
             )
         # Parsed here so a bad value stops the process at startup rather than at
         # the first Run that needs a sandbox.
-        caller, listener = self.controller_address, self.controller_listen_address
-        if caller.is_tls or listener.is_tls:
+        listener = self.controller_listen_address
+        caller_tls = self.sandbox_pool or self.controller_address.is_tls
+        if caller_tls or listener.is_tls:
             for name in (
                 "sandbox_controller_ca_file",
                 "sandbox_controller_cert_file",
                 "sandbox_controller_key_file",
             ):
                 if getattr(self, name) is None:
-                    raise ValueError(f"a tls:// controller address needs {name.upper()}")
+                    # Every host in a pool is another machine: only mutual TLS
+                    # crosses a network.
+                    what = (
+                        "a sandbox host pool" if self.sandbox_pool
+                        else "a tls:// controller address"
+                    )
+                    raise ValueError(f"{what} needs {name.upper()}")
         if (
             listener.is_tls
             and listener.host in ("0.0.0.0", "::")  # noqa: S104 - this is the refusal

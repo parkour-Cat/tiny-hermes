@@ -9,7 +9,9 @@ setting to change in the message, instead of failing on every call.
 
 import logging
 import ssl
+from collections.abc import Callable
 
+from tiny_hermes.sandbox.transport.adapter import SandboxClient
 from tiny_hermes.sandbox.transport.address import ControllerAddress
 from tiny_hermes.sandbox.transport.client import ControllerClient
 from tiny_hermes.sandbox.transport.tls import (
@@ -33,6 +35,20 @@ def controller_client(settings: Settings, *, role: Role) -> ControllerClient:
     return ControllerClient(address, tls=client_context(files))
 
 
+def host_connector(settings: Settings, *, role: Role) -> Callable[[str], SandboxClient]:
+    """How a pool dials each host it reads from `sandbox_hosts` (tier C §4.4).
+
+    One TLS context for every host, checked once here as `controller_client`
+    checks its one: a Worker with the wrong certificate stops at startup.
+    """
+    context = client_context(_check_files(settings, role))
+
+    def connect(url: str) -> SandboxClient:
+        return SandboxClient(ControllerClient(ControllerAddress.parse(url), tls=context))
+
+    return connect
+
+
 def controller_listener(settings: Settings) -> tuple[ControllerAddress, ssl.SSLContext | None]:
     address = settings.controller_listen_address
     if not address.is_tls:
@@ -40,6 +56,12 @@ def controller_listener(settings: Settings) -> tuple[ControllerAddress, ssl.SSLC
     files = _files(settings)
     _check(files, Role.CONTROLLER)
     return address, server_context(files)
+
+
+def _check_files(settings: Settings, role: Role) -> TlsFiles:
+    files = _files(settings)
+    _check(files, role)
+    return files
 
 
 def _files(settings: Settings) -> TlsFiles:
