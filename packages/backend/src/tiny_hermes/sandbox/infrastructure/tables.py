@@ -46,6 +46,8 @@ class SandboxInstanceRow(IdMixin, CreatedAtMixin, Base):
         CheckConstraint(
             "image_digest LIKE 'sha256:%'", name="ck_sandbox_instances_digest"
         ),
+        # Admission sums one host's live instances (tier C).
+        Index("ix_sandbox_instances_controller_status", "controller", "status"),
     )
 
     container_id: Mapped[str] = mapped_column(String(128))
@@ -54,6 +56,9 @@ class SandboxInstanceRow(IdMixin, CreatedAtMixin, Base):
     boot_id: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(20))
     memory_mb: Mapped[int] = mapped_column(Integer, server_default=text("1024"))
+    #: The sandbox host this instance lives on (tier C). Admission sums one
+    #: host's instances; a controller refuses any other host's.
+    controller: Mapped[str] = mapped_column(String(64), server_default=text("'default'"))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )

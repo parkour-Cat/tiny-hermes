@@ -156,6 +156,7 @@ async def _serve() -> None:
             networking=networking,
             memory_budget_mb=budget,
             memory_ceiling_mb=settings.sandbox_ceiling_memory_mb,
+            name=settings.sandbox_controller_name,
         )
 
     async def dispatch(action: str, payload: dict[str, Any]) -> dict[str, Any]:

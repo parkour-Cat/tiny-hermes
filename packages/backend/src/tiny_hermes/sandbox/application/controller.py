@@ -73,6 +73,9 @@ class RefusalReason(StrEnum):
     #: the Run fails rather than queueing to be refused again.
     MEMORY_OUT_OF_RANGE = "memory_out_of_range"
     NETWORK_POOL_EXHAUSTED = "network_pool_exhausted"
+    #: Tier C: the sandbox, or the Run's live claim, is recorded on another
+    #: sandbox host. This host has no such container and does nothing.
+    RESERVATION_ELSEWHERE = "reservation_elsewhere"
     WORKING_DIRECTORY_NOT_ALLOWED = "working_directory_not_allowed"
 
 
@@ -163,6 +166,7 @@ class SandboxController:
         networking: SandboxNetworking | None = None,
         memory_budget_mb: int | None = None,
         memory_ceiling_mb: int | None = None,
+        name: str = "default",
     ) -> None:
         self.engine = engine
         self.store = store
@@ -173,6 +177,9 @@ class SandboxController:
         #: The sum of instance memory limits this controller admits (§21.3).
         #: None admits without counting, which only tests and tools want.
         self.memory_budget_mb = memory_budget_mb
+        #: This sandbox host's name (tier C). Its admission, eviction and
+        #: every call count only what is recorded under it.
+        self.name = name
         #: The largest sandbox an Agent may declare (§21.3, v2.22). `ceiling`
         #: is the default profile, so its memory is the size of an Agent that
         #: declares none; None here means that is also the largest.
@@ -200,6 +207,10 @@ class SandboxController:
         # cannot go between this read and the unpause.
         existing = await self.store.live_for_run_locked(run_id)
         if existing is not None:
+            # Before thawing or discarding anything: a claim on another host
+            # is a sandbox this host does not have, and making a second one
+            # here is two sandboxes writing one workspace.
+            await self._require_here(existing.instance_id)
             warm = await self._thaw_if_warm(existing)
             if warm is not None:
                 return warm
@@ -263,6 +274,7 @@ class SandboxController:
                 boot_id=uuid.uuid4().hex,
                 status=InstanceStatus.RUNNING,
                 memory_mb=chosen.memory_mb,
+                controller=self.name,
             ),
         )
         await self._register_address(container_id, run_id, instance_id)
@@ -349,6 +361,7 @@ class SandboxController:
         if claim is not None:
             if claim.instance_id != sandbox_id:
                 raise SandboxRefused(RefusalReason.RESERVATION_NOT_OWNED)
+            await self._require_here(claim.instance_id)
             if claim.status is not ReservationStatus.ISOLATED:
                 raise SandboxRefused(RefusalReason.RESERVATION_STILL_LIVE)
         await self.engine.remove_volume(_volume_name(run_id))
@@ -403,7 +416,7 @@ class SandboxController:
         either, nothing mounts it again: a Run that comes back restores into
         a new one.
         """
-        await self.store.lock_admission()
+        await self.store.lock_admission(self.name)
         containers = 0
         for found in await self.engine.containers_labelled(_RUN_LABEL):
             if await self._recorded(found):
@@ -494,7 +507,7 @@ class SandboxController:
         """
         # Taken even without a budget: the host sweep relies on every acquire
         # holding it from before `docker run` until its row commits.
-        await self.store.lock_admission()
+        await self.store.lock_admission(self.name)
         budget = self.memory_budget_mb
         if budget is None:
             return
@@ -502,12 +515,12 @@ class SandboxController:
             # Never fits, however much is evicted: refusing it as exhausted
             # would requeue the Run to be refused every ten seconds, forever.
             raise SandboxRefused(RefusalReason.MEMORY_OUT_OF_RANGE)
-        shortfall = await self.store.committed_memory_mb() + needed_mb - budget
+        shortfall = await self.store.committed_memory_mb(self.name) + needed_mb - budget
         if shortfall <= 0:
             return
         chosen: list[tuple[SandboxReservation, SandboxInstance]] = []
         freed = 0
-        for reservation in await self.store.evictable_keeps():
+        for reservation in await self.store.evictable_keeps(self.name):
             if freed >= shortfall:
                 break
             # A frozen instance under a kept claim may still belong to a Run
@@ -671,7 +684,19 @@ class SandboxController:
             # The `sandbox_id` is the caller's input, so it is checked rather
             # than trusted.
             raise SandboxRefused(RefusalReason.RESERVATION_NOT_OWNED)
+        await self._require_here(sandbox_id)
         return found
+
+    async def _require_here(self, sandbox_id: UUID) -> None:
+        """Refuse a sandbox recorded on another host (tier C).
+
+        Routing sends every call to the sandbox's own host, so this is what
+        stands when one arrives elsewhere anyway: acting on it here would be
+        acting on a container this host does not have, or making a second.
+        """
+        instance = await self.store.read_instance(sandbox_id)
+        if instance is not None and instance.controller != self.name:
+            raise SandboxRefused(RefusalReason.RESERVATION_ELSEWHERE)
 
     async def _require_owned(self, run_id: UUID, sandbox_id: UUID) -> SandboxInstance:
         await self._reservation(run_id, sandbox_id)

@@ -70,6 +70,8 @@ class SandboxInstance:
     #: The limit the container was created with, which admission counts
     #: (§21.3). 1024 was every instance's limit before it was configurable.
     memory_mb: int = 1024
+    #: The sandbox host it lives on (tier C, v2.23); `default` on a single one.
+    controller: str = "default"
 
 
 @dataclass(frozen=True)
