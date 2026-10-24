@@ -133,13 +133,16 @@ class FakeStore:
         return await self.live_for_run(run_id)
 
     # Admission: these tests run without a budget, so it never counts.
-    async def lock_admission(self) -> None:
+    async def lock_admission(self, controller: str = "default") -> None:
+        del controller
         self.admission_locks += 1
 
-    async def committed_memory_mb(self) -> int:
+    async def committed_memory_mb(self, controller: str | None = None) -> int:
+        del controller
         return 0
 
-    async def evictable_keeps(self) -> list[SandboxReservation]:
+    async def evictable_keeps(self, controller: str | None = None) -> list[SandboxReservation]:
+        del controller
         return []
 
     async def live_for_run(self, run_id: UUID) -> SandboxReservation | None:

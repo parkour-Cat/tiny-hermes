@@ -348,3 +348,22 @@ def test_the_sandbox_memory_ceiling_may_not_sit_below_the_instance_default() -> 
 
 def test_the_sandbox_memory_ceiling_may_equal_the_default() -> None:
     assert _settings(sandbox_memory_mb=2048, sandbox_ceiling_memory_mb=2048)
+
+
+def test_a_lone_sandbox_host_is_called_default() -> None:
+    """Tier C: every row written before there could be two hosts is `default`,
+    so a single host must keep that name to still own them."""
+    assert _settings().sandbox_controller_name == "default"
+
+
+@pytest.mark.parametrize("name", ["sbx-a", "host7", "a"])
+def test_a_sandbox_host_name_is_a_short_lowercase_word(name: str) -> None:
+    assert _settings(sandbox_controller_name=name).sandbox_controller_name == name
+
+
+@pytest.mark.parametrize("name", ["", "SBX", "sbx a", "sbx/a", "-sbx", "x" * 64])
+def test_a_sandbox_host_name_that_could_be_mistaken_is_refused(name: str) -> None:
+    """It is a key in the database and a word in logs and audit; a path, a
+    space or a case difference would be two hosts that look like one."""
+    with pytest.raises(ValidationError, match="sandbox_controller_name"):
+        _settings(sandbox_controller_name=name)

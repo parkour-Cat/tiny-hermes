@@ -47,6 +47,7 @@ def _instance(row: SandboxInstanceRow) -> SandboxInstance:
         boot_id=row.boot_id,
         status=InstanceStatus(row.status),
         memory_mb=row.memory_mb,
+        controller=row.controller,
     )
 
 
@@ -69,6 +70,7 @@ class SqlSandboxStore:
                 boot_id=instance.boot_id,
                 status=instance.status.value,
                 memory_mb=instance.memory_mb,
+                controller=instance.controller,
             )
         )
         row = SandboxReservationRow(
@@ -165,22 +167,26 @@ class SqlSandboxStore:
         )
         return [_reservation(row) for row in found.scalars()]
 
-    async def lock_admission(self) -> None:
+    async def lock_admission(self, controller: str = "default") -> None:
         """Held until this transaction ends, by every acquire that adds memory.
 
         Counting, creating and inserting under it is what stops two acquires
-        from both counting the same free space.
+        from both counting the same free space. One lock per sandbox host
+        (tier C): each host's budget is its own memory, so two hosts' acquires
+        have nothing to wait on each other for.
         """
         await self._session.execute(
-            text("SELECT pg_advisory_xact_lock(:key)"), {"key": _ADMISSION_LOCK_KEY}
+            text("SELECT pg_advisory_xact_lock(:key, hashtext(:controller))"),
+            {"key": _ADMISSION_LOCK_KEY, "controller": controller},
         )
 
-    async def committed_memory_mb(self) -> int:
+    async def committed_memory_mb(self, controller: str | None = None) -> int:
         """The limits of every container a live claim may still hold.
 
         Isolated claims count: nobody could confirm their container went.
+        One host's, or with no host named the whole pool's (the gauge).
         """
-        total = await self._session.scalar(
+        query = (
             select(func.coalesce(func.sum(SandboxInstanceRow.memory_mb), 0))
             .join(
                 SandboxReservationRow,
@@ -188,6 +194,9 @@ class SqlSandboxStore:
             )
             .where(SandboxReservationRow.status.in_([e.value for e in LIVE_RESERVATIONS]))
         )
+        if controller is not None:
+            query = query.where(SandboxInstanceRow.controller == controller)
+        total = await self._session.scalar(query)
         return int(total or 0)
 
     async def live_instances_by_status(self) -> dict[str, int]:
@@ -203,7 +212,7 @@ class SqlSandboxStore:
         )
         return {str(status): int(count) for status, count in rows.all()}
 
-    async def evictable_keeps(self) -> list[SandboxReservation]:
+    async def evictable_keeps(self, controller: str | None = None) -> list[SandboxReservation]:
         """Frozen instances under a kept claim, the earliest deadline first.
 
         Candidates, not verdicts: a thawed instance keeps its `kept` claim
@@ -211,7 +220,7 @@ class SqlSandboxStore:
         see that the Run holds no live lease. Locked, skipping any row another
         transaction holds: the Run that owns it may be thawing it right now.
         """
-        found = await self._session.execute(
+        query = (
             select(SandboxReservationRow)
             .join(
                 SandboxInstanceRow,
@@ -221,8 +230,14 @@ class SqlSandboxStore:
                 SandboxReservationRow.status == ReservationStatus.KEPT.value,
                 SandboxInstanceRow.status == InstanceStatus.FROZEN.value,
             )
-            .order_by(SandboxReservationRow.idle_expires_at, SandboxReservationRow.id)
-            .with_for_update(of=SandboxReservationRow, skip_locked=True)
+        )
+        if controller is not None:
+            # Evicting on another host frees nothing on this one (tier C).
+            query = query.where(SandboxInstanceRow.controller == controller)
+        found = await self._session.execute(
+            query.order_by(
+                SandboxReservationRow.idle_expires_at, SandboxReservationRow.id
+            ).with_for_update(of=SandboxReservationRow, skip_locked=True)
         )
         return [_reservation(row) for row in found.scalars()]
 

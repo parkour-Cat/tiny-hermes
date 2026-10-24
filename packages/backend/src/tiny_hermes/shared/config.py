@@ -224,6 +224,12 @@ class Settings(BaseSettings):
     #: Each sandbox's memory limit. It bounds the container's processes and its
     #: tmpfs mounts together, and it is what admission counts (§21.3).
     sandbox_memory_mb: int = Field(default=1_024, ge=256, le=32_768)
+    #: This sandbox host's name (tier C, v2.23). Every sandbox it makes is
+    #: recorded under it, and it acts on no other's. A single host keeps
+    #: `default`, the name every row written before there could be two has.
+    sandbox_controller_name: str = Field(
+        default="default", pattern=r"^[a-z0-9][a-z0-9-]{0,62}$"
+    )
     #: The largest sandbox an Agent may declare (§21.3, v2.22). The value above
     #: is the size of an Agent that declares none.
     sandbox_ceiling_memory_mb: int = Field(default=4_096, ge=256, le=32_768)

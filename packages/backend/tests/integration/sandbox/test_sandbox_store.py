@@ -256,6 +256,9 @@ async def test_sandbox_instances_has_no_host_path_column(engine: AsyncEngine) ->
         "status",
         # An integer: nothing a path could be written into.
         "memory_mb",
+        # A host's *name* (tier C), held to `^[a-z0-9][a-z0-9-]{0,62}$` by
+        # the setting that writes it: no slash, so no path.
+        "controller",
         "created_at",
         "updated_at",
     }

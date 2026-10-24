@@ -107,6 +107,9 @@ x-base-env: &base-env
   SANDBOX_SWEEP_SECONDS: ${SANDBOX_SWEEP_SECONDS:-300}
   # Sandbox memory admission (§21.3): each sandbox's limit, and the sum of
   # limits the controller admits. An empty budget is half the host's memory.
+  # This sandbox host's name (tier C, v2.23). Every sandbox it makes is
+  # recorded under it; a single host keeps `default`.
+  SANDBOX_CONTROLLER_NAME: ${SANDBOX_CONTROLLER_NAME:-default}
   SANDBOX_MEMORY_MB: ${SANDBOX_MEMORY_MB:-1024}
   # The largest sandbox an Agent may declare (§21.3, v2.22): the API refuses a
   # draft above it, the controller an acquire above it. The value above is the
