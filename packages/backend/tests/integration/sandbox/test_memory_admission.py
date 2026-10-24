@@ -173,7 +173,7 @@ class Platform:
     async def container_of(self, sandbox_id: UUID) -> str:
         async with self._sessions() as session:
             found = await SqlSandboxStore(session).read_instance(sandbox_id)
-        assert found is not None
+        assert found is not None and found.container_id is not None
         return found.container_id
 
     def expire_lease(self, run_id: UUID) -> None:

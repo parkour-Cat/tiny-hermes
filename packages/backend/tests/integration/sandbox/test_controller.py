@@ -642,7 +642,7 @@ async def test_a_deployment_with_no_approved_image_cannot_start_a_sandbox(
 
 async def _container_of(controller: SandboxController, sandbox_id: UUID) -> str:
     found = await controller.store.read_instance(sandbox_id)
-    assert found is not None
+    assert found is not None and found.container_id is not None
     return found.container_id
 
 

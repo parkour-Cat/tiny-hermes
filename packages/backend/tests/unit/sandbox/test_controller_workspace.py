@@ -8,6 +8,7 @@ checkpoint files a background process is still changing.
 
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -210,6 +211,13 @@ class FakeStore:
         )
         self.instances[instance_id] = fresh
         return fresh
+
+    async def complete_instance(self, instance_id: UUID, container_id: str) -> SandboxInstance:
+        built = replace(
+            self.instances[instance_id], container_id=container_id, status=InstanceStatus.RUNNING
+        )
+        self.instances[instance_id] = built
+        return built
 
     def _update(
         self,
