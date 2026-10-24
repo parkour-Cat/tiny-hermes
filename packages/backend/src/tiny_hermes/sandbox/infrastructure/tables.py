@@ -7,6 +7,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from tiny_hermes.runs.infrastructure import tables as run_tables  # noqa: F401
 from tiny_hermes.sandbox.domain.models import (
     LIVE_RESERVATIONS,
+    HostState,
     InstanceStatus,
     ReservationStatus,
 )
@@ -20,6 +21,7 @@ REFERENCED_TABLE_MODULES = (run_tables,)
 
 RESERVATION_STATUSES = tuple(entry.value for entry in ReservationStatus)
 INSTANCE_STATUSES = tuple(entry.value for entry in InstanceStatus)
+HOST_STATES = tuple(entry.value for entry in HostState)
 _LIVE = ", ".join(f"'{entry.value}'" for entry in LIVE_RESERVATIONS)
 
 
@@ -127,3 +129,25 @@ class SandboxEgressAddressRow(CreatedAtMixin, Base):
         ForeignKey("runs.id", ondelete="CASCADE"), nullable=False
     )
     sandbox_id: Mapped[UUID] = mapped_column(index=True)
+
+
+class SandboxHostRow(CreatedAtMixin, Base):
+    """A sandbox host, written by its own controller (tier C §4.1).
+
+    In the database rather than in every Worker's configuration, so adding a
+    host is starting it, not reconfiguring and restarting everything that
+    dials it. A wrong `url` is bounded: the dialer still has to complete
+    mutual TLS with a certificate the platform's CA issued for that name.
+    """
+
+    __tablename__ = "sandbox_hosts"
+    __table_args__ = (
+        CheckConstraint(_in_values("state", HOST_STATES), name="ck_sandbox_hosts_state"),
+    )
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    memory_budget_mb: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    network_pool: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    state: Mapped[str] = mapped_column(String(16), server_default=text("'active'"))
+    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

@@ -20,7 +20,7 @@ from dataclasses import replace
 from datetime import datetime
 from ipaddress import IPv4Network, ip_network
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 import docker
@@ -40,8 +40,10 @@ from tiny_hermes.sandbox.domain.container_policy import (
     ResourceProfile,
     SandboxNetworking,
 )
+from tiny_hermes.sandbox.domain.models import NetworkPoolOverlap
 from tiny_hermes.sandbox.infrastructure.docker_engine import DockerEngine
 from tiny_hermes.sandbox.infrastructure.lease_authority import SqlLeaseAuthority
+from tiny_hermes.sandbox.infrastructure.sql_hosts import SqlSandboxHosts
 from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
 from tiny_hermes.sandbox.observation import observe_forever, publish_sandbox_gauges
 from tiny_hermes.sandbox.transport.server import ControllerServer, ServerStream
@@ -128,6 +130,54 @@ def memory_budget_mb(settings: Settings, *, meminfo: Path = Path("/proc/meminfo"
     return half
 
 
+class _Registry(Protocol):
+    async def register(
+        self,
+        *,
+        name: str,
+        url: str | None,
+        memory_budget_mb: int | None,
+        network_pool: str | None,
+    ) -> Any: ...
+
+
+async def register_this_host(hosts: _Registry, settings: Settings, *, budget_mb: int) -> None:
+    """Write this host's row before serving anything (tier C §4.1).
+
+    An overlapping network pool stops the controller here, naming the other
+    host: serving anyway would hand out addresses that host may hand out too,
+    and the egress proxy, which names a Run by address alone, would charge one
+    Run's traffic to another (§4.6).
+    """
+    try:
+        await hosts.register(
+            name=settings.sandbox_controller_name,
+            url=settings.sandbox_controller_advertise_url,
+            memory_budget_mb=budget_mb,
+            network_pool=settings.sandbox_network_pool or None,
+        )
+    except NetworkPoolOverlap as overlap:
+        raise SystemExit(
+            f"SANDBOX_NETWORK_POOL={settings.sandbox_network_pool} overlaps sandbox host "
+            f"{overlap.other}'s {overlap.other_pool}; give each host a range of its own"
+        ) from overlap
+
+
+async def heartbeat_forever(beat: Callable[[], Awaitable[None]], *, every: float) -> None:
+    """Mark this host alive every `every` seconds, until cancelled.
+
+    A failed beat is logged and the next one tries again: a host the database
+    briefly could not hear is skipped by placement for a while, and nothing
+    else follows from that (§4.8).
+    """
+    while True:
+        await asyncio.sleep(every)
+        try:
+            await beat()
+        except Exception:
+            logger.warning("sandbox host heartbeat failed", exc_info=True)
+
+
 def main() -> None:
     configure_logging()
     serve_configured_metrics(get_settings())
@@ -197,6 +247,19 @@ async def _serve() -> None:
             await session.commit()
             return answer
 
+    async with sessions() as session:
+        await register_this_host(SqlSandboxHosts(session), settings, budget_mb=budget)
+        await session.commit()
+
+    async def beat() -> None:
+        async with sessions() as session:
+            await SqlSandboxHosts(session).heartbeat(settings.sandbox_controller_name)
+            await session.commit()
+
+    beating = asyncio.create_task(
+        heartbeat_forever(beat, every=settings.sandbox_host_heartbeat_seconds)
+    )
+
     address, tls = controller_listener(settings)
     server = ControllerServer(
         dispatch=dispatch,
@@ -212,6 +275,7 @@ async def _serve() -> None:
             "listen": str(address),
             "sandbox_memory_mb": ceiling.memory_mb,
             "sandbox_memory_budget_mb": budget,
+            "sandbox_controller_name": settings.sandbox_controller_name,
         },
     )
     async def sweep_once() -> SweepResult:
@@ -235,6 +299,7 @@ async def _serve() -> None:
     finally:
         observing.cancel()
         sweeping.cancel()
+        beating.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await sweeping
         await server.stop()

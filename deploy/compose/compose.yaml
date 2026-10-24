@@ -110,6 +110,9 @@ x-base-env: &base-env
   # This sandbox host's name (tier C, v2.23). Every sandbox it makes is
   # recorded under it; a single host keeps `default`.
   SANDBOX_CONTROLLER_NAME: ${SANDBOX_CONTROLLER_NAME:-default}
+  # What other hosts dial to reach this one, `tls://` (tier C §4.1). Empty for
+  # a single host on the shared socket.
+  SANDBOX_CONTROLLER_ADVERTISE_URL: ${SANDBOX_CONTROLLER_ADVERTISE_URL:-}
   SANDBOX_MEMORY_MB: ${SANDBOX_MEMORY_MB:-1024}
   # The largest sandbox an Agent may declare (§21.3, v2.22): the API refuses a
   # draft above it, the controller an acquire above it. The value above is the

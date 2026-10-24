@@ -367,3 +367,22 @@ def test_a_sandbox_host_name_that_could_be_mistaken_is_refused(name: str) -> Non
     space or a case difference would be two hosts that look like one."""
     with pytest.raises(ValidationError, match="sandbox_controller_name"):
         _settings(sandbox_controller_name=name)
+
+
+@pytest.mark.parametrize("url", ["tls://10.0.0.5:7700", "tls://sbx-a.internal:7700"])
+def test_a_sandbox_host_advertises_a_tls_address(url: str) -> None:
+    assert _settings(sandbox_controller_advertise_url=url).sandbox_controller_advertise_url == url
+
+
+@pytest.mark.parametrize("url", ["unix:///run/c.sock", "http://10.0.0.5:7700", "10.0.0.5:7700"])
+def test_a_sandbox_host_never_advertises_anything_but_tls(url: str) -> None:
+    """Tier C §4.1: another host dials what is advertised, and only mutual TLS
+    crosses a network; a socket path is a path on this host alone."""
+    with pytest.raises(ValidationError, match="sandbox_controller_advertise_url"):
+        _settings(sandbox_controller_advertise_url=url)
+
+
+def test_an_empty_advertised_address_is_none() -> None:
+    """Compose passes `${SANDBOX_CONTROLLER_ADVERTISE_URL:-}`, "" when unset:
+    a single host on a socket, which advertises nothing."""
+    assert _settings(sandbox_controller_advertise_url="").sandbox_controller_advertise_url is None
