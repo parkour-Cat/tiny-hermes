@@ -1,0 +1,196 @@
+# promtool rule tests for alerts.yml (2026-10-24). Each rule is shown firing on
+# the condition it names and staying quiet just short of it. Run with:
+#
+#   docker run --rm -v "$PWD/deploy/compose/observability:/o" --entrypoint promtool \
+#     prom/prometheus:v3.5.0 test rules /o/alerts.test.yml
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 15s
+
+tests:
+  # A Run has waited over a minute, for five minutes.
+  - interval: 1m
+    input_series:
+      - series: tiny_hermes_queue_oldest_age_seconds
+        values: "70+60x10"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: QueueWaitingTooLong
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: QueueWaitingTooLong
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: A claimable Run has waited over a minute for five minutes
+              description: Capacity is short. Check worker lanes and sandbox admission.
+
+  # 95% of lanes busy for ten minutes; 85% never fires.
+  - interval: 1m
+    input_series:
+      - series: 'tiny_hermes_worker_lanes{state="busy"}'
+        values: "19x15"
+      - series: 'tiny_hermes_worker_lanes{state="total"}'
+        values: "20x15"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: WorkerLanesSaturated
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: WorkerLanesSaturated
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: Over 90% of worker lanes have been busy for ten minutes
+  - interval: 1m
+    input_series:
+      - series: 'tiny_hermes_worker_lanes{state="busy"}'
+        values: "17x15"
+      - series: 'tiny_hermes_worker_lanes{state="total"}'
+        values: "20x15"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: WorkerLanesSaturated
+        exp_alerts: []
+
+  # A latency scan stops succeeding: its timestamp stops moving at 0s. A
+  # housekeeping scan whose timestamp moves once a minute stays quiet under
+  # both rules; one that stops for five minutes fires its own.
+  - interval: 15s
+    input_series:
+      - series: 'tiny_hermes_scheduler_scan_last_success_timestamp{scan="recover_interrupted"}'
+        values: "0x40"
+      - series: 'tiny_hermes_scheduler_scan_last_success_timestamp{scan="collect_expired_records"}'
+        values: "0x3 60x3 120x3 180x3 240x3 300x3 360x3 420x3 480x3 540x3 600x3"
+      - series: 'tiny_hermes_scheduler_scan_last_success_timestamp{scan="expire_artifacts"}'
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: SchedulerScanStalled
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: SchedulerScanStalled
+        exp_alerts:
+          - exp_labels: {severity: critical, scan: recover_interrupted}
+            exp_annotations:
+              summary: "Scheduler scan recover_interrupted has not succeeded for over a minute"
+              description: >-
+                One scan failing every cycle, or the scheduler stopped. Recovery,
+                approval expiry and cleanup live in these scans.
+      - eval_time: 5m
+        alertname: SchedulerHousekeepingStalled
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: SchedulerHousekeepingStalled
+        exp_alerts:
+          - exp_labels: {severity: warning, scan: expire_artifacts}
+            exp_annotations:
+              summary: "Scheduler housekeeping expire_artifacts has not succeeded for four minutes"
+              description: >-
+                Expired records, upload garbage and old artifacts are not being
+                removed. Nothing a Run waits on lives here; disk and table sizes grow.
+
+  # Admission refuses something every minute for ten minutes. Sampled every
+  # 15 s, as prometheus.yml scrapes: a one-minute `increase` needs two samples
+  # inside its window, which one-minute samples do not give it.
+  - interval: 15s
+    input_series:
+      - series: tiny_hermes_sandbox_admission_rejected_total
+        values: "0+1x60"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: SandboxAdmissionRefusing
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: SandboxAdmissionRefusing
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: The sandbox memory budget has refused acquires for ten minutes
+
+  # Refusals jump from about one a minute to sixty a minute.
+  - interval: 1m
+    input_series:
+      - series: 'tiny_hermes_egress_connections_total{decision="deny"}'
+        values: "0+1x70 70+60x15"
+    alert_rule_test:
+      - eval_time: 65m
+        alertname: EgressDenialsSpiking
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: EgressDenialsSpiking
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: Egress refusals are five times the last hour's rate
+              description: An Agent misconfigured, or something probing. The proxy log names hosts.
+
+  # Forty bad logins a minute for five minutes; twenty a minute never fires.
+  # Sampled every 15 s, for the reason the admission test gives.
+  - interval: 15s
+    input_series:
+      - series: 'tiny_hermes_login_attempts_total{outcome="bad_credentials"}'
+        values: "0+10x40"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: LoginFailuresSpiking
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: LoginFailuresSpiking
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: Over 30 failed logins a minute
+  - interval: 15s
+    input_series:
+      - series: 'tiny_hermes_login_attempts_total{outcome="bad_credentials"}'
+        values: "0+5x40"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: LoginFailuresSpiking
+        exp_alerts: []
+
+  # 2026-10-24 drill: a stopped scheduler left no `up` series at all (its DNS
+  # name stopped resolving), and with it went every metric it publishes, the
+  # queue's included. Nothing fired for five minutes. A process with no target
+  # is missing; one with a target that answers nothing is down.
+  - interval: 15s
+    input_series:
+      - series: 'up{job="tiny-hermes", service="api"}'
+        values: "1x40"
+      - series: 'up{job="tiny-hermes", service="worker"}'
+        values: "1x40"
+      - series: 'up{job="tiny-hermes", service="controller"}'
+        values: "1x40"
+      - series: 'up{job="tiny-hermes", service="egress-proxy"}'
+        values: "1x40"
+      # `stale`, not `_`: a target leaving discovery is ended with a
+      # staleness marker, which the drill saw within 30 s.
+      - series: 'up{job="tiny-hermes", service="scheduler"}'
+        values: "1x4 stale"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: ProcessMissing
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: ProcessMissing
+        exp_alerts:
+          - exp_labels: {severity: critical, job: tiny-hermes, service: scheduler}
+            exp_annotations:
+              summary: "No scheduler process is running"
+              description: >-
+                Nothing serves its metrics, so no other alert about it can fire.
+                Without a scheduler, interrupted Runs are not recovered and the
+                queue's own metrics stop.
+  - interval: 15s
+    input_series:
+      - series: 'up{job="tiny-hermes", service="worker", instance="10.0.0.9:9464"}'
+        values: "1x4 0x36"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ProcessDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: tiny-hermes, service: worker, instance: "10.0.0.9:9464"}
+            exp_annotations:
+              summary: "worker at 10.0.0.9:9464 is not answering"

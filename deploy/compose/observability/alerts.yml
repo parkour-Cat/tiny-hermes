@@ -4,6 +4,34 @@
 groups:
   - name: tiny-hermes
     rules:
+      - alert: ProcessMissing
+        # 2026-10-24 drill: a stopped scheduler left no `up` series at all,
+        # since Prometheus finds these by DNS name and the name stopped
+        # resolving. Every alert reading its metrics went quiet with it,
+        # QueueWaitingTooLong included. `absent` is what sees a target that
+        # is not there, where `up == 0` sees one that is there and failing.
+        expr: >-
+          absent(up{job="tiny-hermes", service="api"})
+          or absent(up{job="tiny-hermes", service="worker"})
+          or absent(up{job="tiny-hermes", service="scheduler"})
+          or absent(up{job="tiny-hermes", service="controller"})
+          or absent(up{job="tiny-hermes", service="egress-proxy"})
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "No {{ $labels.service }} process is running"
+          description: >-
+            Nothing serves its metrics, so no other alert about it can fire.
+            Without a scheduler, interrupted Runs are not recovered and the
+            queue's own metrics stop.
+
+      - alert: ProcessDown
+        expr: up{job="tiny-hermes"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.service }} at {{ $labels.instance }} is not answering"
+
       - alert: QueueWaitingTooLong
         expr: max(tiny_hermes_queue_oldest_age_seconds) > 60
         for: 5m

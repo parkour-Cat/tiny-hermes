@@ -350,6 +350,26 @@ controller、Scheduler 和 Worker；进程只在启动时读证书。
 WORKER_CONCURRENCY=16 docker compose up -d --scale worker=2
 ```
 
+**2026-10-24 补充：真实模型下，进程数看 CPU，通道数看并发，两件事分开算。**
+
+| 测量 | 每个进程的 CPU | 出处 |
+|---|---|---|
+| 确定性模型，4 个进程 × 32 条通道，124 个任务同时执行 | 90% 到 95%，接近一个核 | [沙箱在准入锁外创建](superpowers/verification/2026-10-24-sandbox-creation-outside-lock.md) |
+| 真实模型（DeepSeek）短对话 | **每条消息约 0.22 核·秒**，和通道数无关 | [真实模型压测](superpowers/verification/2026-10-23-real-model-probe.md) |
+
+确定性模型几乎不花时间等，一轮接一轮地跑，所以 K = 32 就能把一个核跑满，这证实了 K = 16 的
+建议。真实模型一次调用要等一两秒，这段时间通道不花 CPU，所以：
+
+- **进程数 N**：每个进程每秒能处理的短消息约 0.7 ÷ 0.22 ≈ 3 条（留三成余量）。
+  `N ≥ 高峰每秒消息数 ÷ 3`，再按核数封顶（一个进程最多用一个核）。
+- **通道数 N × K**：要大于同时执行的任务数，也就是「每秒消息数 × 每条执行秒数」加上长任务数。
+  通道等模型时几乎不花 CPU，真实模型下 K 可以开到 32；这时数据库连接池跟着变大，按 8.3 节重算。
+
+例：高峰每秒 6 条短消息、每条执行约 1.5 秒、另有 20 个长任务。N ≥ 6 ÷ 3 = 2；同时执行约
+6 × 1.5 + 20 = 29 路，2 个进程 × K = 16 = 32 条通道够用。
+
+带工具的长任务每一轮还要做工作区的打包和提交，它的 CPU 没有单独测过，上面的 0.22 只对短对话成立。
+
 ### 8.3 数据库连接：按池的上限算，不按平时用到的算
 
 每个进程的连接池都有上限，它们加起来必须不超过 Postgres 的 `max_connections`
@@ -582,6 +602,25 @@ docker compose --env-file ../../.env --profile observability up -d --wait
 
 告警规则在 `deploy/compose/observability/alerts.yml`，只有规则，没有通知渠道。接企业自己的
 Alertmanager。阈值都是初值，要在试点之后定。
+
+### 12.4 告警演练过什么（2026-10-24）
+
+每条规则在 `alerts.test.yml` 里都有用例：用合成的指标数据证明它在条件满足时会响、差一点时不响。CI
+用 `promtool test rules` 跑这些用例。在本机栈上真的触发过的：
+
+| 怎么触发 | 告警 | 多久响 |
+|---|---|---|
+| 每分钟约 46 次错误密码登录 | `LoginFailuresSpiking` | 3 分钟 |
+| 停掉 Worker，提交一个任务 | `QueueWaitingTooLong` | 6.5 分钟（等满 1 分钟才算超时，再持续 5 分钟） |
+| 停掉 scheduler | `ProcessMissing`（之前 30 秒是 `ProcessDown`） | 3.5 分钟 |
+
+**演练前，停掉 scheduler 不会触发任何告警。**Prometheus 按服务名找目标，容器一停，名字解析不到，目标
+就从列表里消失了；它发布的所有指标也一起没了，连 `QueueWaitingTooLong` 读的排队指标都是它发的。新加
+的 `ProcessMissing` 用 `absent()` 发现「某个服务一个目标都没有」，`ProcessDown` 发现「目标还在但抓
+不到数据」。
+
+没有真的触发过的（只有规则测试）：`WorkerLanesSaturated`、`SchedulerScanStalled`（进程活着但某项扫描
+一直失败）、`SchedulerHousekeepingStalled`、`SandboxAdmissionRefusing`、`EgressDenialsSpiking`。
 
 ### 12.4 指标里没有什么
 
