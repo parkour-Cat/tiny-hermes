@@ -290,10 +290,10 @@ async def test_an_uncertain_reference_keeps_the_object_and_the_claim(
     assert [outcome.finished for outcome in finished] == [True]
 
 
-async def test_a_committed_row_with_failed_deletion_keeps_its_debt(
-    scoped: AsyncSession, objects: MinioObjectStore, ids: Ids
-) -> None:
-    store = SqlWorkspaceStore(scoped)
+async def _committed(
+    scoped: AsyncSession, objects: MinioObjectStore, store: SqlWorkspaceStore, ids: Ids
+) -> RegisterUpload:
+    """A committed upload whose post-commit cleanup has not run yet."""
     digest = "5" * 64
     command, _ = await _stage_candidate(
         objects, store, ids, expires_at=_now() + HOUR, final_bodies={digest: b"live"}
@@ -326,6 +326,14 @@ async def test_a_committed_row_with_failed_deletion_keeps_its_debt(
         revision_id=command.candidate_revision_id,
         artifact_id=None,
     )
+    return command
+
+
+async def test_a_committed_row_with_failed_deletion_keeps_its_debt(
+    scoped: AsyncSession, objects: MinioObjectStore, ids: Ids
+) -> None:
+    store = SqlWorkspaceStore(scoped)
+    command = await _committed(scoped, objects, store, ids)
 
     broken = await _collect_everything(store, _RefusingDeletes(objects))
     assert [outcome.finished for outcome in broken] == [False]
@@ -340,6 +348,28 @@ async def test_a_committed_row_with_failed_deletion_keeps_its_debt(
     assert settled is not None
     assert not settled.cleanup_pending
     assert await objects.stat(ObjectRef(key=command.candidate_index_key)) is None
+
+
+async def test_a_claim_the_committer_settled_first_is_finished_not_a_failure(
+    scoped: AsyncSession, objects: MinioObjectStore, ids: Ids
+) -> None:
+    """2026-10-24 soak: the committer clears its own staging right after the
+    commit, and the collector can claim the same row in that moment. Whoever
+    settles second used to raise `UploadStateConflict`; on the committer's
+    side that is swallowed, on the collector's it failed the whole scan and
+    skipped the rest of the batch. The debt is clear either way."""
+    store = SqlWorkspaceStore(scoped)
+    command = await _committed(scoped, objects, store, ids)
+    (stale,) = await store.claim_cleanup(_now(), limit=50)
+    await store.finish_cleanup(command.upload_id)  # the committer, first
+
+    outcome = await reclaim_upload(stale, store=store, objects=objects, oracle=_Oracle())
+
+    assert outcome.finished
+    settled = await store.read(command.upload_id)
+    assert settled is not None
+    assert settled.status is UploadStatus.COMMITTED
+    assert not settled.cleanup_pending
 
 
 async def test_an_index_that_fails_verification_freezes_the_cleanup(
