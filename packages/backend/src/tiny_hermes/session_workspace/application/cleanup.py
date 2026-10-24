@@ -25,7 +25,11 @@ from tiny_hermes.session_workspace.ports.objects import (
     ObjectStorageUnavailable,
     ObjectStore,
 )
-from tiny_hermes.session_workspace.ports.store import ObjectUpload, WorkspaceStore
+from tiny_hermes.session_workspace.ports.store import (
+    ObjectUpload,
+    UploadStateConflict,
+    WorkspaceStore,
+)
 
 INDEX_SCHEMA_VERSION = 1
 #: An index enumerates keys and digests, not content; far beyond this it is
@@ -169,7 +173,14 @@ async def _reclaim(
 
     deleted += await _drain_staging(upload, objects)
     await objects.delete_many([index_ref])
-    await store.finish_cleanup(upload.upload_id)
+    try:
+        await store.finish_cleanup(upload.upload_id)
+    except UploadStateConflict:
+        # The guard only refuses a row whose debt is already clear: the
+        # committer settles its own staging right after a commit, and this
+        # claim can land in that moment (2026-10-24 soak). Both sides delete
+        # the same staging and index, which deleting twice leaves the same.
+        pass
     return CleanupOutcome(
         upload_id=upload.upload_id, finished=True, deleted_objects=deleted + 1
     )
