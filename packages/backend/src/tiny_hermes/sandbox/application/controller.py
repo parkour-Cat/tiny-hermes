@@ -399,7 +399,8 @@ class SandboxController:
             await self._require_here(claim.instance_id)
             if claim.status is not ReservationStatus.ISOLATED:
                 raise SandboxRefused(RefusalReason.RESERVATION_STILL_LIVE)
-        await self.engine.remove_volume(_volume_name(run_id))
+        # Already gone is what was wanted, as for the container (2026-10-24).
+        await self.engine.remove_volume_if_present(_volume_name(run_id))
         await self.audit.record(
             AuditEntry(
                 action="sandbox.volume_remove",
@@ -647,18 +648,18 @@ class SandboxController:
         instance = await self.store.read_instance(instance_id)
         return instance is not None and instance.status is not InstanceStatus.DESTROYED
 
-    async def _remove_container(self, instance: SandboxInstance, *, confirm: bool = False) -> None:
+    async def _remove_container(self, instance: SandboxInstance) -> None:
         """Remove an instance's container, by id or, before one was written, by label.
 
         An instance left `creating` by a crash mid-build may have a container
         nobody wrote down; it still carries the instance label it was made
-        with. `confirm` keeps `_remove`'s rule: the container must be gone.
+        with. A container that is already gone is what was wanted: on
+        2026-10-24 one deleted outside the platform made every cleanup of its
+        Run fail on Docker's 404, and the Run stayed interrupted for good.
+        Any other failure still raises.
         """
         if instance.container_id is not None:
-            if confirm:
-                await self.engine.remove(instance.container_id)
-            else:
-                await self.engine.remove_if_present(instance.container_id)
+            await self.engine.remove_if_present(instance.container_id)
             return
         for found in await self.engine.containers_labelled(_INSTANCE_LABEL, str(instance.id)):
             await self.engine.remove_if_present(found.id)
@@ -705,14 +706,15 @@ class SandboxController:
         # container this Run.
         await self.store.clear_egress_address(sandbox_id)
         if instance is not None:
-            await self._remove_container(instance, confirm=True)
+            await self._remove_container(instance)
             await self._close_network(sandbox_id)
             await self.store.set_instance_status(sandbox_id, InstanceStatus.DESTROYED)
         await self.store.release(reservation.id)
         # Container first, then volume: the volume cannot be in use once the
         # container is confirmed gone. Session state lives in object-store revisions;
         # a Run's teardown owes the host nothing but this reclamation.
-        await self.engine.remove_volume(_volume_name(run_id))
+        # Already gone is what was wanted, as for the container (2026-10-24).
+        await self.engine.remove_volume_if_present(_volume_name(run_id))
         await self.audit.record(
             AuditEntry(
                 action="sandbox.volume_remove",

@@ -208,7 +208,9 @@ class DockerEngine:
         return str(direct) if direct else None
 
     async def create_volume(self, name: str, labels: dict[str, str]) -> str:
-        volume = await self._call(self.client.volumes.create, name=name, labels=labels)
+        volume = await self._call(
+            self.client.volumes.create, name=name, labels={**labels, **(self.extra_labels or {})}
+        )
         return str(volume.name)
 
     async def remove_volume(self, name: str) -> None:
@@ -237,7 +239,7 @@ class DockerEngine:
         """Every container carrying the label, running or not."""
         selector = label if value is None else f"{label}={value}"
         found: list[dict[str, Any]] = await self._call(
-            self.client.api.containers, all=True, filters={"label": selector}
+            self.client.api.containers, all=True, filters={"label": self._selectors(selector)}
         )
         return [
             ContainerInfo(id=str(entry["Id"]), labels=dict(entry.get("Labels") or {}))
@@ -309,7 +311,7 @@ class DockerEngine:
     ) -> list[NetworkInfo]:
         selector = label if value is None else f"{label}={value}"
         found: list[dict[str, Any]] = await self._call(
-            self.client.api.networks, filters={"label": selector}
+            self.client.api.networks, filters={"label": self._selectors(selector)}
         )
         return [
             NetworkInfo(name=str(entry["Name"]), labels=dict(entry.get("Labels") or {}))
@@ -319,7 +321,7 @@ class DockerEngine:
     async def volumes_labelled(self, label: str) -> list[VolumeInfo]:
         """Every volume carrying the label — by label, never by parsed name."""
         found: list[Any] = await self._call(
-            self.client.volumes.list, filters={"label": label}
+            self.client.volumes.list, filters={"label": self._selectors(label)}
         )
         infos: list[VolumeInfo] = []
         for volume in found:
@@ -538,6 +540,18 @@ class DockerEngine:
                 list[tuple[int, bytes]], untyped.frames_iter(sock, tty=False)
             ):
                 yield frame[1]
+
+    def _selectors(self, selector: str) -> list[str]:
+        """The label filter, narrowed to this engine's own labels when it has any.
+
+        Docker ANDs a list of label filters. An engine given labels of its own
+        lists only what carries them (2026-10-24): the integration suite's
+        controllers share a developer's Docker with a running stack, and their
+        sweep removed that stack's live sandbox. A deployment gives none, and
+        lists, sweeps and reclaims its whole host as before.
+        """
+        own = [f"{key}={value}" for key, value in (self.extra_labels or {}).items()]
+        return [selector, *own]
 
     async def _call(self, work: Any, *args: Any, **kwargs: Any) -> Any:
         from docker.errors import DockerException  # noqa: PLC0415 - narrow the import
