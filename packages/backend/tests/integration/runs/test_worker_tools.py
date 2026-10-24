@@ -53,6 +53,8 @@ class StandInSandbox:
     output: str = "a.txt\n"
     calls: list[str] = field(default_factory=list[str])
     sandbox_id: UUID = field(default_factory=uuid4)
+    #: The `memory_mb` each acquire asked for (§21.3, v2.22).
+    sizes: list[int | None] = field(default_factory=list[int | None])
 
     async def acquire(
         self,
@@ -62,9 +64,11 @@ class StandInSandbox:
         workspace_id: UUID,
         profile: str,
         session_id: UUID | None = None,
+        memory_mb: int | None = None,
     ) -> Any:
         del run_id, lease_id, workspace_id, profile, session_id
         self.calls.append("acquire")
+        self.sizes.append(memory_mb)
         return _Acquired(self.sandbox_id, self.cache_state)
 
     async def execute(
@@ -117,7 +121,7 @@ def _tool(command: str = "ls", said: str = "") -> ModelResponse:
 
 @pytest.fixture
 def agent_with_tools(client: TestClient, scope: dict[str, str]) -> Any:
-    def build(tools: list[str]) -> str:
+    def build(tools: list[str], **extra: Any) -> str:
         alias = f"tooled-{uuid4().hex[:8]}"
         agent = client.post(
             "/api/v1/agents", headers=scope, json={"name": "Tooled", "alias": alias}
@@ -125,7 +129,7 @@ def agent_with_tools(client: TestClient, scope: dict[str, str]) -> Any:
         draft = client.put(
             f"/api/v1/agents/{agent['id']}/draft",
             headers=scope,
-            json={"expected_revision": 1, "spec": {**VALID_SPEC, "tools": tools}},
+            json={"expected_revision": 1, "spec": {**VALID_SPEC, "tools": tools, **extra}},
         ).json()
         client.post(
             f"/api/v1/agents/{agent['id']}/publish",
@@ -597,3 +601,29 @@ async def test_a_tool_call_and_its_sandbox_are_timed_by_kind(
 
     assert metric("tiny_hermes_tool_call_seconds_count", kind="shell", outcome="ok") == shell + 1
     assert metric("tiny_hermes_sandbox_acquire_seconds_count", outcome="cold") == cold + 1
+
+
+async def test_the_sandbox_is_asked_for_at_the_size_the_agent_declared(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_with_tools: Any
+) -> None:
+    """§21.3, v2.22: the size lives on the published version, and has to
+    travel from it to the acquire, or the controller sizes it by default."""
+    agent = agent_with_tools(["shell.exec"], sandbox={"memory_mb": 384})
+    submit(client, scope, agent, "list the files")
+    sandbox = StandInSandbox()
+
+    await drive(engine, Recording(_tool(), _text("done")), sandbox)
+
+    assert sandbox.sizes == [384]
+
+
+async def test_an_agent_that_declared_no_size_leaves_it_to_the_controller(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine, agent_with_tools: Any
+) -> None:
+    agent = agent_with_tools(["shell.exec"])
+    submit(client, scope, agent, "list the files")
+    sandbox = StandInSandbox()
+
+    await drive(engine, Recording(_tool(), _text("done")), sandbox)
+
+    assert sandbox.sizes == [None]

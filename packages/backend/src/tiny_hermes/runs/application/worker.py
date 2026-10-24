@@ -305,6 +305,7 @@ class SandboxSession(Protocol):
         workspace_id: UUID,
         profile: str,
         session_id: UUID | None = None,
+        memory_mb: int | None = None,
     ) -> Any: ...
 
     async def execute(
@@ -849,6 +850,9 @@ class WorkerRuntime:
                 workspace_id=claimed.run.workspace_id,
                 session_id=claimed.run.session_id,
                 profile=DEFAULT_PROFILE.name,
+                # §21.3, v2.22: the published version's own size, or the
+                # instance default when it declared none.
+                memory_mb=None if context.spec.sandbox is None else context.spec.sandbox.memory_mb,
             )
         except SandboxRefused as refused:
             acquire_ended("refused")

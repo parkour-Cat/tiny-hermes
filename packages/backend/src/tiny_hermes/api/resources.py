@@ -425,6 +425,7 @@ class ApplicationResources:
                         max_model_calls=self.settings.agent_max_model_calls,
                         max_tool_calls=self.settings.agent_max_tool_calls,
                         max_execution_seconds=self.settings.agent_max_execution_seconds,
+                        sandbox_memory_mb=self.settings.sandbox_ceiling_memory_mb,
                     ),
                     CatalogSkillBindings(SqlSkillStore(session)),
                     # What this workspace approved, so a published version can

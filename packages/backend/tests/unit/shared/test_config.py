@@ -337,3 +337,14 @@ def test_in_development_the_compose_defaults_still_start(name: str, value: str) 
     """The local stack and CI run on them; refusing here would only move the
     default into every developer's `.env`."""
     assert getattr(_settings(**{name: value}), name) == value
+
+
+def test_the_sandbox_memory_ceiling_may_not_sit_below_the_instance_default() -> None:
+    """§21.3, v2.22: a default above the ceiling would be a size no Agent
+    could ask for and every Agent that asks for nothing gets."""
+    with pytest.raises(ValidationError, match="sandbox_ceiling_memory_mb"):
+        _settings(sandbox_memory_mb=2048, sandbox_ceiling_memory_mb=1024)
+
+
+def test_the_sandbox_memory_ceiling_may_equal_the_default() -> None:
+    assert _settings(sandbox_memory_mb=2048, sandbox_ceiling_memory_mb=2048)

@@ -87,6 +87,11 @@ class ResourceProfile:
         )
 
 
+#: The smallest sandbox there is (§21.3): `SANDBOX_MEMORY_MB`'s floor, and the
+#: smallest an Agent may declare (v2.22).
+MIN_SANDBOX_MEMORY_MB = 256
+
+
 #: Technical design §11.2's M1 default, and in phase 3B the only profile there
 #: is. A second one arrives with something that needs it.
 DEFAULT_PROFILE = ResourceProfile(

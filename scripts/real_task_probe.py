@@ -80,7 +80,9 @@ class _ProbeConsole(ProbeConsole):
             json={"agent_max_model_calls": calls},
         ).raise_for_status()
 
-    def publish_task_agent(self, workspace: str, alias: str, endpoint: str, calls: int) -> str:
+    def publish_task_agent(
+        self, workspace: str, alias: str, endpoint: str, calls: int, sandbox_mb: int | None
+    ) -> str:
         created = self._client.post(
             "/api/v1/agents",
             headers=self._headers(workspace),
@@ -98,6 +100,9 @@ class _ProbeConsole(ProbeConsole):
                     "personality": PERSONALITY,
                     "model_policy": {"provider": "openai_compatible", "endpoint_id": endpoint},
                     "tools": ["shell.exec"],
+                    # §21.3, v2.22: absent unless asked, so the default run
+                    # measures the instance default as before.
+                    **({"sandbox": {"memory_mb": sandbox_mb}} if sandbox_mb else {}),
                     "limits": {
                         "max_execution_seconds": 900,
                         "max_elapsed_seconds": 86_400,
@@ -240,14 +245,21 @@ def _summary(values: list[float]) -> dict[str, float]:
 
 
 def probe(
-    endpoint: str, tasks: int, calls: int, drain_seconds: float, label: str
+    endpoint: str,
+    tasks: int,
+    calls: int,
+    drain_seconds: float,
+    label: str,
+    sandbox_mb: int | None = None,
 ) -> dict[str, Any]:
     with httpx.Client(base_url=API, timeout=60.0, trust_env=False) as client:
         console = _ProbeConsole(client)
         console.sign_in()
         workspace = console.create_workspace(f"probe-real-{time.time_ns()}")
         console.limit_model_calls(workspace, calls)
-        agent = console.publish_task_agent(workspace, f"real-{time.time_ns()}", endpoint, calls)
+        agent = console.publish_task_agent(
+            workspace, f"real-{time.time_ns()}", endpoint, calls, sandbox_mb
+        )
         sessions = [console.open_session(workspace, agent) for _ in range(tasks)]
         database = _Database(database_url())
         try:
@@ -282,7 +294,12 @@ def probe(
     tool_calls = [r for r in finished if r["tool_calls"]]
     return {
         "label": label,
-        "offered": {"tasks": tasks, "model_calls_allowed": calls, "endpoint": endpoint},
+        "offered": {
+            "tasks": tasks,
+            "model_calls_allowed": calls,
+            "endpoint": endpoint,
+            "sandbox_memory_mb": sandbox_mb,
+        },
         "stack": {"workers": workers, **host_shape()},
         "wall_s": wall,
         "status_counts": status_counts,
@@ -329,6 +346,12 @@ def main() -> int:
     parser.add_argument("--model-calls", type=int, default=40, help="each task's model call budget")
     parser.add_argument("--drain-seconds", type=float, default=1200.0)
     parser.add_argument("--label", default="real-task")
+    parser.add_argument(
+        "--sandbox-mb",
+        type=int,
+        default=None,
+        help="the Agent's declared sandbox memory (§21.3, v2.22); unset is the instance default",
+    )
     arguments = parser.parse_args()
     result = probe(
         arguments.endpoint,
@@ -336,6 +359,7 @@ def main() -> int:
         arguments.model_calls,
         arguments.drain_seconds,
         arguments.label,
+        arguments.sandbox_mb,
     )
     print(json.dumps(result, indent=2, default=str))
     return 0

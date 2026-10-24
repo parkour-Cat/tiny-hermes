@@ -22,6 +22,7 @@ from tiny_hermes.agents.application.service import (
     ModelEndpointUnavailable,
     ModelOutputLimitTooHigh,
     RoundCeilingExceeded,
+    SandboxMemoryCeilingExceeded,
     SkillBindingUnavailable,
     SkillBoundTwice,
     SkillSummaryBudgetExceeded,
@@ -709,6 +710,17 @@ def as_app_error(error: AgentCatalogError) -> AppError:
             detail=(
                 f"The agent asks for {error.asked} model calls and this "
                 f"platform allows {error.allowed}."
+            ),
+        )
+    if isinstance(error, SandboxMemoryCeilingExceeded):
+        return AppError(
+            code="sandbox_memory_ceiling_exceeded",
+            title="Too large a sandbox",
+            status=422,
+            # Both numbers, and who sets the ceiling (§21.3, v2.22).
+            detail=(
+                f"The agent asks for a {error.asked} MB sandbox and this platform "
+                f"allows {error.allowed} MB; a platform administrator can raise it."
             ),
         )
     if isinstance(error, ExecutionCeilingExceeded):

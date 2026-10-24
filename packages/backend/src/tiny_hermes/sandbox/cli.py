@@ -155,6 +155,7 @@ async def _serve() -> None:
             ceiling=ceiling,
             networking=networking,
             memory_budget_mb=budget,
+            memory_ceiling_mb=settings.sandbox_ceiling_memory_mb,
         )
 
     async def dispatch(action: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -280,6 +281,8 @@ async def _invoke(
             workspace_id=UUID(str(payload["workspace_id"])),
             session_id=None if raw_session is None else UUID(str(raw_session)),
             profile=str(payload["profile"]),
+            # Absent from a Worker older than v2.22, and then the default.
+            memory_mb=None if payload.get("memory_mb") is None else int(payload["memory_mb"]),
         )
         return {"sandbox_id": str(answer.sandbox_id), "cache_state": answer.cache_state.value}
 

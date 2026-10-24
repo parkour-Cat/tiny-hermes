@@ -224,6 +224,9 @@ class Settings(BaseSettings):
     #: Each sandbox's memory limit. It bounds the container's processes and its
     #: tmpfs mounts together, and it is what admission counts (§21.3).
     sandbox_memory_mb: int = Field(default=1_024, ge=256, le=32_768)
+    #: The largest sandbox an Agent may declare (§21.3, v2.22). The value above
+    #: is the size of an Agent that declares none.
+    sandbox_ceiling_memory_mb: int = Field(default=4_096, ge=256, le=32_768)
     #: The sum of sandbox memory limits the controller admits. None means half
     #: the host's memory, read by the controller when it starts: Settings runs
     #: in every process and only the controller's host is the one that counts.
@@ -386,6 +389,17 @@ class Settings(BaseSettings):
                 f"SANDBOX_CONTROLLER_LISTEN={listener} is every interface; name the "
                 "private one, or set SANDBOX_CONTROLLER_LISTEN_ANY=true on a host whose "
                 "every interface is private"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def reject_a_sandbox_default_above_its_ceiling(self) -> "Settings":
+        # A default above the ceiling is a size no Agent could ask for and
+        # every Agent that asks for nothing gets.
+        if self.sandbox_ceiling_memory_mb < self.sandbox_memory_mb:
+            raise ValueError(
+                f"sandbox_ceiling_memory_mb={self.sandbox_ceiling_memory_mb} is below "
+                f"sandbox_memory_mb={self.sandbox_memory_mb}"
             )
         return self
 

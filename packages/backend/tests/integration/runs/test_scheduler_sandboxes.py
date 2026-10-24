@@ -106,8 +106,9 @@ class PersistingDestroyFailure:
         workspace_id: UUID,
         profile: str,
         session_id: UUID | None = None,
+        memory_mb: int | None = None,
     ) -> AcquiredSandbox:
-        del lease_id, profile, session_id
+        del lease_id, profile, session_id, memory_mb
         async with self._sessions() as session:
             await SqlSandboxStore(session).reserve(
                 run_id=run_id, workspace_id=workspace_id, instance=self._instance

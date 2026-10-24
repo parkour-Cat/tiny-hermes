@@ -91,3 +91,38 @@ async def test_an_acquire_that_connected_and_heard_nothing_may_have_been_sent() 
     )
 
     assert failure.sent is True
+
+
+class _RecordingClient:
+    """A client that answers every acquire and keeps what it was sent."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+
+    async def call(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        del action
+        self.sent.append(payload)
+        return {"sandbox_id": str(uuid4()), "cache_state": "reset"}
+
+
+async def test_an_agents_declared_size_is_sent_with_the_acquire() -> None:
+    """§21.3, v2.22: the size crosses the socket or the controller never sees it."""
+    client = _RecordingClient()
+    sandbox = SandboxClient(cast(ControllerClient, client))
+
+    await sandbox.acquire(
+        run_id=uuid4(), lease_id=uuid4(), workspace_id=uuid4(), profile="default", memory_mb=384
+    )
+
+    assert client.sent[0]["memory_mb"] == 384
+
+
+async def test_no_declared_size_sends_no_key() -> None:
+    """A controller from before v2.22 reads the payload by name; one that is
+    sent nothing new has nothing to misread, and sizes by its default."""
+    client = _RecordingClient()
+    sandbox = SandboxClient(cast(ControllerClient, client))
+
+    await sandbox.acquire(run_id=uuid4(), lease_id=uuid4(), workspace_id=uuid4(), profile="default")
+
+    assert "memory_mb" not in client.sent[0]
