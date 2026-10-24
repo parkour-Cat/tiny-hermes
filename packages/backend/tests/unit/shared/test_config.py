@@ -380,3 +380,9 @@ def test_a_sandbox_host_never_advertises_anything_but_tls(url: str) -> None:
     crosses a network; a socket path is a path on this host alone."""
     with pytest.raises(ValidationError, match="sandbox_controller_advertise_url"):
         _settings(sandbox_controller_advertise_url=url)
+
+
+def test_an_empty_advertised_address_is_none() -> None:
+    """Compose passes `${SANDBOX_CONTROLLER_ADVERTISE_URL:-}`, "" when unset:
+    a single host on a socket, which advertises nothing."""
+    assert _settings(sandbox_controller_advertise_url="").sandbox_controller_advertise_url is None
