@@ -284,6 +284,16 @@ class DockerEngine:
             ipv4_address=address,
         )
 
+    async def network_endpoints(self, name: str) -> tuple[str | None, frozenset[str]]:
+        """A network's subnet and the names of the containers on it."""
+        details: dict[str, Any] = await self._call(self.client.api.inspect_network, name)
+        ipam: dict[str, Any] = details.get("IPAM") or {}
+        pools: list[dict[str, Any]] = ipam.get("Config") or []
+        first: dict[str, Any] = pools[0] if pools else {}
+        subnet = str(first["Subnet"]) if first.get("Subnet") else None
+        endpoints: dict[str, dict[str, Any]] = details.get("Containers") or {}
+        return subnet, frozenset(str(endpoint.get("Name", "")) for endpoint in endpoints.values())
+
     async def remove_network_if_present(self, name: str) -> bool:
         """Every endpoint off it first, the proxy's included: Docker will not
         remove a network something is still attached to."""

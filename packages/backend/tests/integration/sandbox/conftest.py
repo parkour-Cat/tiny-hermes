@@ -10,6 +10,7 @@ anything left over. A leaked container on a developer's machine is a real cost
 and this suite is the thing most likely to cause one.
 """
 
+import contextlib
 import os
 import shutil
 import tempfile
@@ -21,7 +22,7 @@ from uuid import UUID, uuid4
 
 import docker
 import pytest
-from docker.errors import DockerException
+from docker.errors import DockerException, NotFound
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from tiny_hermes.sandbox.application.controller import (
     AuditEntry,
@@ -306,4 +307,7 @@ def proxy(docker_client: Any, image_digest: str) -> Iterator[Any]:
         detach=True,
     )
     yield container
-    container.remove(force=True)
+    # By name: a test may have replaced the container with another of the same
+    # name, as recreating the real proxy does.
+    with contextlib.suppress(NotFound):
+        docker_client.containers.get(container.name).remove(force=True)
