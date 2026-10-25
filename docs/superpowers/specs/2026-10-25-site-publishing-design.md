@@ -101,7 +101,7 @@ Agent 绑定 `site.publish` 后，在做完网站的那一轮之后调用：
 
 被发布的 JavaScript 是模型写的，会在**打开链接的人的浏览器里**执行。
 
-- **独立来源。** 预览服务用 `SITE_PUBLIC_URL`，必须和控制台、API 不是同一个来源（不同域名，或者至少不同端口）。启动时检查，同源就拒绝启动。这样模型的脚本拿不到控制台的 cookie，也调不了控制台的接口。
+- **独立主机。** 预览服务用 `SITE_PUBLIC_URL`，必须和控制台**不是同一个主机名**。只是端口不同不够：端口不同虽然是不同的来源，但 cookie 不区分端口，浏览器会把控制台的登录 cookie 发给预览服务，网站上的脚本也能读到控制台那个非 HttpOnly 的 CSRF cookie（2026-10-25 准备浏览器验收时发现，原设计写的是「至少不同端口」）。启动时检查，主机名相同就拒绝启动。本机演示用 `localhost` 和 `127.0.0.1` 两个主机名。
 - **响应头：**
   - `Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'none'; base-uri 'none'`。网站可以运行脚本、加载自己的文件，但不能把数据发到别处，也不能被别的页面嵌入。
   - `X-Content-Type-Options: nosniff`。`Content-Type` 按扩展名决定，不按内容猜。

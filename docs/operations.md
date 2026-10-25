@@ -821,7 +821,7 @@ Docker 关于代理容器的 `start` 事件，收到就清扫一次，把代理�
 
 ```bash
 # .env
-SITE_PUBLIC_URL=https://sites.example.com     # 网站的来源，必须和控制台不同源
+SITE_PUBLIC_URL=https://sites.example.com     # 必须和控制台是不同的主机名，只是端口不同不够
 SITE_SIGNING_SECRET=...                        # 至少 32 个字符，不要复用 SESSION_COOKIE_SECRET
 CONSOLE_BASE_URL=https://hermes.example.com    # 成员登录时要回到这里
 cd deploy/compose
@@ -829,7 +829,11 @@ docker compose --env-file ../../.env --profile sites up -d --wait
 ```
 
 - `site` 服务监听 8090，前面的反向代理负责 TLS。只接受 GET 和 HEAD。
-- 三个配置有任何一个不对（没配密钥、没配控制台地址、和控制台同源），所有进程都会拒绝启动，并说明原因。
+- 三个配置有任何一个不对（没配密钥、没配控制台地址、和控制台主机名相同），所有进程都会拒绝启动，并说明原因。
+- **为什么必须是不同的主机名**：cookie 不区分端口。同一主机名下，浏览器会把控制台的登录 cookie 发给网站，网站上的
+  脚本也能读到控制台的 CSRF cookie。本机演示用 `CONSOLE_BASE_URL=http://127.0.0.1:3000`、
+  `SITE_PUBLIC_URL=http://localhost:8090`。控制台的 cookie 不要设成整个上级域名都有效（`Domain=.example.com`），
+  否则子域名之间也会互相带上。
 - 不设 `SITE_PUBLIC_URL` 时，功能整体关闭，Agent 调用 `site.publish` 会得到「本部署没有开启网站发布」。
 
 ### 18.2 日常

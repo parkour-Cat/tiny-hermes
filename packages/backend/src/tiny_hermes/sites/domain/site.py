@@ -174,3 +174,8 @@ def _origin(url: str) -> tuple[str, str, int]:
 
 def same_origin(first: str, second: str) -> bool:
     return _origin(first) == _origin(second)
+
+
+def same_host(first: str, second: str) -> bool:
+    """Whether two URLs share a host, which is what cookies go by: not the port."""
+    return _origin(first)[1] == _origin(second)[1]

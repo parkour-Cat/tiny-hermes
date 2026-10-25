@@ -468,11 +468,13 @@ class Settings(BaseSettings):
         if not self.console_base_url:
             # The members' door sends people to the console to sign in.
             raise ValueError("site_public_url needs console_base_url")
-        from tiny_hermes.sites.domain.site import same_origin  # noqa: PLC0415 - a cycle otherwise
+        from tiny_hermes.sites.domain.site import same_host  # noqa: PLC0415 - a cycle otherwise
 
-        if same_origin(self.site_public_url, self.console_base_url):
-            # A site's script on the console's origin would ride its session.
-            raise ValueError("site_public_url must be a different origin from console_base_url")
+        if same_host(self.site_public_url, self.console_base_url):
+            # Another port is another origin, but cookies ignore ports: on the
+            # console's host a site's script could read the console's CSRF
+            # cookie, and the browser would send the console's session along.
+            raise ValueError("site_public_url must be on a different host from console_base_url")
         return self
 
     @model_validator(mode="after")

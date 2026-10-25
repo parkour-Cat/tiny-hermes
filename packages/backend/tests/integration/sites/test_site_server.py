@@ -193,7 +193,7 @@ def test_the_site_must_be_on_another_host_not_just_another_port(settings: Settin
 
 def test_the_site_origin_must_not_be_the_console_s(settings: Settings) -> None:
     """Same origin, a site's script would ride the console's session."""
-    with pytest.raises(ValueError, match="origin"):
+    with pytest.raises(ValueError, match="host"):
         Settings.model_validate(
             {**settings.model_dump(), "site_public_url": CONSOLE_URL + "/sites"}
         )
