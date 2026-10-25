@@ -33,6 +33,9 @@ class SpyStreams:
     def __init__(self) -> None:
         self.received = bytearray()
         self.refusal: str | None = None
+        #: Raised after the first frames of a send are out, as a sandbox's
+        #: container vanishing mid-exec does.
+        self.fails_mid_send: Exception | None = None
         self.to_send = b""
         self.receive_limit = 8 * 1024 * 1024
 
@@ -78,6 +81,9 @@ class SpyStreams:
             await channel.push(document)
             return await channel.finish_send()
         await channel.start_send(total_limit=len(self.to_send))
+        if self.fails_mid_send is not None:
+            await channel.push(self.to_send[:1024])
+            raise self.fails_mid_send
         await channel.push(self.to_send)
         return await channel.finish_send()
 
@@ -156,6 +162,29 @@ async def test_a_refusal_beats_the_first_frame(
             "workspace_export", {"run_id": "r"}, _swallow, limit=1024
         )
     assert refused.value.reason == "lease_invalid"
+
+
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [(_Refused("sandbox_unavailable"), "sandbox_unavailable"), (RuntimeError("x"), "RuntimeError")],
+)
+async def test_a_failure_after_the_first_frames_arrives_as_that_failure(
+    wired: tuple[SpyStreams, ControllerClient], failure: Exception, reason: str
+) -> None:
+    """2026-10-24 soak: a container vanished mid-exec, and the worker heard
+    `stream_frame_too_large`. The server wrote its refusal as the JSON line
+    it uses outside a stream, and the client, reading frames, took `{"er` for
+    a length of two billion. The real reason never arrived, so the adapter
+    could not map it and the slice failed on a raw transport error."""
+    spy, client = wired
+    spy.to_send = BODY
+    spy.fails_mid_send = failure
+
+    with pytest.raises(ControllerClient.Refused) as refused:
+        await client.receive_stream(
+            "workspace_export", {"run_id": "r"}, _swallow, limit=len(BODY)
+        )
+    assert refused.value.reason == reason
 
 
 async def test_a_declared_total_above_the_server_limit_dies_at_start(

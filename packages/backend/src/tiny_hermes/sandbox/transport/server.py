@@ -108,6 +108,9 @@ class ServerStream:
         self._hasher = hashlib.sha256()
         self._data_frames = 0
         self._write_lock = asyncio.Lock()
+        #: Between START and END or ERROR: the client is reading frames, and
+        #: a failure must reach it as one before the answer line.
+        self._sending = False
         self.received_bytes = 0
 
     async def receive(self, *, declared_limit: int) -> AsyncIterator[bytes]:
@@ -142,6 +145,7 @@ class ServerStream:
         async with self._write_lock:
             await self._write_frame(Frame(FrameType.START, 0, payload))
             self._sequence = 1
+            self._sending = True
 
     async def push(self, chunk: bytes) -> None:
         async with self._write_lock:
@@ -156,6 +160,8 @@ class ServerStream:
     async def progress(self) -> None:
         """A keep-alive with no payload and no digest contribution (design §5.3)."""
         async with self._write_lock:
+            if not self._sending:
+                return
             await self._write_frame(Frame(FrameType.PROGRESS, self._sequence, b""))
             self._sequence += 1
 
@@ -183,7 +189,23 @@ class ServerStream:
                 Frame(FrameType.END, self._sequence, json.dumps(totals).encode())
             )
             self._sequence += 1
+            self._sending = False
         return totals
+
+    async def abandon_send(self) -> None:
+        """End a send that failed midway with an ERROR frame (2026-10-24).
+
+        The refusal follows as the answer line, as after END. Written as a
+        line while the client still read frames, its `{"er` was taken for a
+        frame length, and the client heard `stream_frame_too_large` instead
+        of why. A no-op when no send is open.
+        """
+        async with self._write_lock:
+            if not self._sending:
+                return
+            self._sending = False
+            await self._write_frame(Frame(FrameType.ERROR, self._sequence, b""))
+            self._sequence += 1
 
     async def _ready(self) -> None:
         self._writer.write(json.dumps({"result": {"stream": "ready"}}).encode() + b"\n")
@@ -377,8 +399,10 @@ class ControllerServer:
         try:
             return {"result": await self._stream_dispatch(action, payload, channel)}
         except StreamAborted:
+            await channel.abandon_send()
             return {"error": ProtocolError.STREAM_FAILED.value}
         except Exception as refused:  # noqa: BLE001 - every refusal is a reply
+            await channel.abandon_send()
             return _refusal(action, refused)
 
     async def _answer(self, line: bytes, allowed: frozenset[str] | None) -> dict[str, Any]:
