@@ -16,11 +16,13 @@ from tiny_hermes.channels.domain.blocked import BlockedNotice, notice_from_docum
 from tiny_hermes.channels.domain.command_receipt import CommandReceipt
 from tiny_hermes.channels.domain.commands import ChatCommand, CommandName, parse
 from tiny_hermes.channels.domain.events import ChannelEvent
+from tiny_hermes.channels.domain.files import inbox_name
 from tiny_hermes.channels.domain.image_reference import feishu_reference
 from tiny_hermes.identity.ports.end_user_store import UpsertedIdentity
 from tiny_hermes.runs.application.service import SessionBusy
 from tiny_hermes.runs.domain.models import (
     EndUserEscape,
+    FileBlock,
     ImageBlock,
     RunPurpose,
     SessionMode,
@@ -116,6 +118,7 @@ class RunEntry(Protocol):
         request_id: str,
         images: Sequence[ImageBlock] = (),
         purpose: RunPurpose = RunPurpose.ANSWER,
+        files: Sequence[FileBlock] = (),
     ) -> AcceptedRun: ...
 
     async def request_compaction(self, session_id: UUID) -> bool:
@@ -195,7 +198,8 @@ class ChannelIngestion:
         # model untouched" claim true rather than aspirational: `parse`
         # rejecting `command` is what lets `event.text` fall through here
         # unchanged.
-        command = parse(event.text, has_images=bool(event.images))
+        # An attachment makes it a message, not a command, as a picture does.
+        command = parse(event.text, has_images=bool(event.images or event.files))
         if command is not None:
             return await self._command(
                 binding, event, command, subject.end_user_id, request_id
@@ -244,6 +248,19 @@ class ChannelIngestion:
                     media_type="image/*",
                 )
                 for picture in event.images
+            ),
+            # §1.27, v2.27: files by reference too, fetched by the Worker into
+            # the sandbox's inbox under the name parsing already made safe.
+            files=tuple(
+                FileBlock(
+                    reference=feishu_reference(
+                        message_id=attached.message_id, file_key=attached.file_key
+                    ),
+                    # Again here, whoever built the event: the name becomes a
+                    # path in the sandbox, so it is never trusted on arrival.
+                    name=inbox_name(attached.name),
+                )
+                for attached in event.files
             ),
         )
         # §497: saving the pending Run is allowed, staying quiet about it is

@@ -113,8 +113,9 @@ class FakeRuns:
         request_id: str,
         images: Sequence[Any] = (),
         purpose: Any = None,
+        files: Sequence[Any] = (),
     ) -> Any:
-        del workspace_id, request_id
+        del workspace_id, request_id, files
         # 真的那一边会拒。`RunCoordination.submit_end_user_run` 第一句就是
         # `_require_idempotency_key(idempotency_key)`，空的直接抛。这个假的
         # 以前照单全收，于是 `/compact` 传了 `None` 也一路绿——线上第一条

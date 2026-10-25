@@ -262,6 +262,14 @@ class RunEventType(StrEnum):
     # transition. Technical design §11.3 requires the Agent be told, and this
     # is the half a person reads.
     SANDBOX_CACHE_RESET = "sandbox_cache_reset"
+    #: §1.27, v2.27: an attachment fetched into the sandbox's inbox, once per
+    #: Run and reference, so a later slice does not overwrite what the Agent
+    #: made of it; or one that could not be, and the reason the model was told.
+    ATTACHMENT_PLACED = "attachment_placed"
+    ATTACHMENT_FAILED = "attachment_failed"
+    #: §1.27, v2.27: one `file.send` that reached the person, or was saved
+    #: for them to download. Path and size only, never the content.
+    FILE_SENT = "file_sent"
 
     RUN_LEASE_ACQUIRED = "run_lease_acquired"
     RUN_SLICE_ENDED = "run_slice_ended"
@@ -442,6 +450,23 @@ class ImageBlock:
 
 
 @dataclass(frozen=True)
+class FileBlock:
+    """A file somebody sent, by reference (§1.27, v2.27).
+
+    Not text the model is sent: the model reads the note written beside it,
+    and this is for the Worker, which fetches the file into `inbox/{name}` the
+    first time the Run opens its sandbox. `name` is already safe for that
+    path. Bytes are not here, for `ImageBlock`'s reason.
+    """
+
+    reference: str
+    name: str
+
+    def document(self) -> dict[str, Any]:
+        return {"type": "file", "reference": self.reference, "name": self.name}
+
+
+@dataclass(frozen=True)
 class ReasoningBlock:
     """A thinking model's own scratch work, kept so it can be handed back.
 
@@ -530,7 +555,7 @@ class ToolResultBlock:
         }
 
 
-Block = TextBlock | ReasoningBlock | ImageBlock | ToolCallBlock | ToolResultBlock
+Block = TextBlock | ReasoningBlock | ImageBlock | FileBlock | ToolCallBlock | ToolResultBlock
 
 
 @dataclass(frozen=True)
@@ -722,6 +747,13 @@ def message_from_document(document: dict[str, Any]) -> CanonicalMessage:
                 ImageBlock(
                     reference=str(part.get("reference", "")),
                     media_type=str(part.get("media_type", "")),
+                )
+            )
+        elif kind == "file":
+            blocks.append(
+                FileBlock(
+                    reference=str(part.get("reference", "")),
+                    name=str(part.get("name", "")),
                 )
             )
         elif kind == "tool_call":

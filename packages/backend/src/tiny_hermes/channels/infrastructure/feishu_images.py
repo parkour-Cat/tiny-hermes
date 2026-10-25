@@ -77,4 +77,50 @@ class FeishuImageFetcher:
         return f"data:{media_type};base64,{encoded}"
 
 
-__all__: list[str] = ["MAX_IMAGE_BYTES", "FeishuImageFetcher", "ImageTooLarge"]
+#: What one attached file may weigh (§1.27, v2.27): `file.write`'s own ceiling,
+#: since the file reaches the sandbox through the same helper.
+MAX_FILE_BYTES = 16 * 1024 * 1024
+
+
+class FileTooLarge(Exception):
+    """Refused rather than cut: half a spreadsheet opens as a broken one."""
+
+
+class FeishuFileFetcher:
+    """Downloads one attached file, as bytes for the sandbox's inbox (§1.27, v2.27)."""
+
+    def __init__(
+        self, client: OutboundPost, *, base_url: str = "https://open.feishu.cn/open-apis"
+    ) -> None:
+        self._client = client
+        self._tokens = FeishuSender(client, base_url=base_url)
+        self._base_url = base_url
+
+    async def file_bytes(
+        self, *, app_id: str, app_secret: str, message_id: str, file_key: str
+    ) -> bytes:
+        token = await self._tokens.token_for(app_id, app_secret)
+        answer = await self._client.request(
+            "GET",
+            f"{self._base_url}/im/v1/messages/{message_id}"
+            f"/resources/{file_key}?type=file",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        body = answer.content
+        if answer.status_code != 200 or answer.headers.get("Content-Type", "").startswith(
+            "application/json"
+        ):
+            raise FeishuApiRefused(answer.status_code, f"file download refused: {body[:200]!r}")
+        if len(body) > MAX_FILE_BYTES:
+            raise FileTooLarge(f"file is {len(body)} bytes, over the {MAX_FILE_BYTES} ceiling")
+        return body
+
+
+__all__: list[str] = [
+    "MAX_FILE_BYTES",
+    "MAX_IMAGE_BYTES",
+    "FeishuFileFetcher",
+    "FeishuImageFetcher",
+    "FileTooLarge",
+    "ImageTooLarge",
+]

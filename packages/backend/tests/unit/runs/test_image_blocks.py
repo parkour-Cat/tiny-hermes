@@ -100,6 +100,7 @@ def test_every_block_type_is_estimated() -> None:
     )
     from tiny_hermes.runs.domain.models import (
         Block,
+        FileBlock,
         ReasoningBlock,
         ToolCallBlock,
         ToolResultBlock,
@@ -109,6 +110,7 @@ def test_every_block_type_is_estimated() -> None:
         TextBlock: TextBlock(text="hello"),
         ReasoningBlock: ReasoningBlock(text="thinking"),
         ImageBlock: ImageBlock(reference="a1", media_type="image/png"),
+        FileBlock: FileBlock(reference="feishu:om:fk", name="a.xlsx"),
         ToolCallBlock: ToolCallBlock(call_id="c1", name="file.read", arguments={}),
         ToolResultBlock: ToolResultBlock(
             call_id="c1", output="out", exit_code=0, failed=False

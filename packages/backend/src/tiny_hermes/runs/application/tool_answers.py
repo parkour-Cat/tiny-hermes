@@ -16,6 +16,7 @@ Every path returns a result. A model left without an answer to a call it made
 will retry it or invent what it returned.
 """
 
+import hashlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -24,6 +25,11 @@ from uuid import UUID
 from tiny_hermes.agents.domain.models import WritePolicy
 from tiny_hermes.memory.domain.policy import CandidateOutcome
 from tiny_hermes.memory.domain.search import SearchRefused, request_for
+from tiny_hermes.runs.application.file_sends import (
+    MAX_FILES_PER_RUN,
+    FileSender,
+    FileSendRefused,
+)
 from tiny_hermes.runs.domain.approval import ApprovalType, normalize_call
 from tiny_hermes.runs.domain.models import (
     CallerType,
@@ -65,6 +71,7 @@ from tiny_hermes.tools.domain.registry import (
     ToolRefused,
     artifact_read_of,
     delegation_of,
+    file_send_of,
     memory_body_of,
     session_search_of,
     site_publish_of,
@@ -552,6 +559,69 @@ async def answer_site_publish(
         ),
         exit_code=0,
         failed=False,
+    )
+
+
+async def answer_file_send(
+    sender: FileSender | None,
+    context: ExecutionContext,
+    call: ToolCallBlock,
+    *,
+    workspace_id: UUID,
+    session_id: UUID,
+    sent_earlier: int,
+) -> tuple[ToolResultBlock, ReservedEvent | None]:
+    """Send one saved file to the person (§1.27, v2.27).
+
+    `sent_earlier` counts this Run's sends so far, this round's included,
+    so the ceiling is the Run's and not a round's.
+    """
+    if "file.send" not in context.tools:
+        return refusal(call.call_id, RefusalReason.NOT_AUTHORIZED), None
+    try:
+        path = file_send_of(call)
+    except ToolRefused as refused_call:
+        return refusal(call.call_id, refused_call.reason, refused_call.detail), None
+    if sender is None:
+        return text_refusal(call.call_id, "this deployment does not send files"), None
+    if sent_earlier >= MAX_FILES_PER_RUN:
+        return (
+            text_refusal(
+                call.call_id,
+                f"this task has already sent {MAX_FILES_PER_RUN} files, the most one "
+                "task may; put the rest in one archive and send that",
+            ),
+            None,
+        )
+    try:
+        sent = await sender.send(
+            workspace_id=workspace_id,
+            session_id=session_id,
+            run_id=context.run_id,
+            path=path,
+            # Feishu's own deduplication: a retry after a failure that came
+            # after the request left delivers once, not twice.
+            delivery_key=hashlib.sha256(f"{context.run_id}:{call.call_id}".encode()).hexdigest()[
+                :40
+            ],
+        )
+    except FileSendRefused as refused_file:
+        return text_refusal(call.call_id, f"{refused_file.reason}: {refused_file.detail}"), None
+    output = (
+        f"Sent {sent.name} ({sent.size} bytes) to the person in Feishu."
+        if sent.delivered
+        else (
+            f"This conversation is not in Feishu, so nothing was sent. {sent.name} is "
+            f"saved in the workspace at {path}; tell the person they can download it "
+            "from this Run's files."
+        )
+    )
+    return (
+        ToolResultBlock(call_id=call.call_id, output=output, exit_code=0, failed=False),
+        ReservedEvent(
+            event_type=RunEventType.FILE_SENT,
+            payload={"path": path, "size": sent.size, "delivered": sent.delivered},
+        ),
     )
 
 

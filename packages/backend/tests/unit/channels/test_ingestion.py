@@ -91,9 +91,11 @@ class FakeRuns:
         request_id: str,
         images: Sequence[Any] = (),
         purpose: Any = None,
+        files: Sequence[Any] = (),
     ) -> Any:
         del workspace_id, text, request_id, purpose
         self.images = list(images)
+        self.files = list(files)
         self.submitted.append((end_user_id, session_id, idempotency_key))
         return AcceptedRun(run_id=uuid4(), document=self.document, replayed=False)
 
@@ -267,6 +269,32 @@ async def test_an_image_message_reaches_the_run_as_a_reference() -> None:
     assert runs.images == [
         ImageBlock(reference="feishu:om_msg:img_k", media_type="image/*")
     ]
+
+
+async def test_a_file_message_reaches_the_run_as_a_reference_with_a_safe_name() -> None:
+    """§1.27, v2.27: the same seam for a file. The name is made safe here, so
+    the note the model reads and the path the Worker writes are one name."""
+    from tiny_hermes.channels.domain.events import ChannelFile
+    from tiny_hermes.runs.domain.models import FileBlock
+
+    runs = FakeRuns()
+    ingestion = ChannelIngestion(
+        subjects=FakeSubjects(), conversations=FakeConversations(), runs=runs
+    )
+
+    await ingestion.run_for(
+        binding=BINDING,
+        event=ChannelEvent(
+            channel="feishu",
+            channel_event_id="om_1",
+            external_user_id="ou_zhang",
+            text="",
+            files=(ChannelFile(message_id="om_msg", file_key="file_k", name="../销售.xlsx"),),
+        ),
+        request_id="req-1",
+    )
+
+    assert runs.files == [FileBlock(reference="feishu:om_msg:file_k", name="销售.xlsx")]
 
 
 async def test_a_text_message_carries_no_image_reference() -> None:

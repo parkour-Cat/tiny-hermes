@@ -26,11 +26,14 @@ from tiny_hermes.model_catalog.domain.pricing import (
 )
 from tiny_hermes.model_catalog.domain.pricing import unknown as unknown_cost
 from tiny_hermes.model_catalog.infrastructure.sql_store import SqlModelEndpointStore
+from tiny_hermes.runs.application.attachments import FileSource, unavailable_note, unplaced
+from tiny_hermes.runs.application.file_sends import FileSender
 from tiny_hermes.runs.application.images import ImageSource, resolve_images
 from tiny_hermes.runs.application.service import LeaseLost, StateVersionConflict
 from tiny_hermes.runs.application.tool_answers import (
     answer_agent_delegate,
     answer_artifact_read,
+    answer_file_send,
     answer_http_call,
     answer_mcp_call,
     answer_memory_remember,
@@ -165,7 +168,12 @@ from tiny_hermes.tools.application.execute import (
     StreamedCommandRunner,
     run_tool_call,
 )
-from tiny_hermes.tools.domain.files import DATA_ROOT, FILE_HELPER, changes_workspace
+from tiny_hermes.tools.domain.files import (
+    DATA_ROOT,
+    FILE_HELPER,
+    changes_workspace,
+    inbox_write_command,
+)
 from tiny_hermes.tools.domain.http_calls import HTTP_PREFIX, HttpRequestPlan
 from tiny_hermes.tools.domain.mcp import (
     MCP_PREFIX,
@@ -239,6 +247,33 @@ class _LeaseHandle:
     lease_id: UUID
     version: int
     lost: bool = False
+
+
+def _with_notes(
+    appended: tuple[CanonicalMessage, ...], notes: tuple[str, ...]
+) -> tuple[CanonicalMessage, ...]:
+    """The round's turns, with `notes` ahead of its first tool result.
+
+    In a tool result rather than a turn of its own, because every provider
+    accepts a tool result's text and not every one accepts a user turn
+    between a call and its answer. A round with no tool result left (an
+    approval wait discards them) keeps the notes for no one; the failure is
+    still in the Run's events.
+    """
+    message = "\n".join(notes)
+    out: list[CanonicalMessage] = []
+    done = False
+    for turn in appended:
+        if not done and turn.role == "tool":
+            blocks = list(turn.blocks)
+            for index, block in enumerate(blocks):
+                if isinstance(block, ToolResultBlock):
+                    blocks[index] = replace(block, output=f"{message}\n\n{block.output}")
+                    done = True
+                    break
+            turn = CanonicalMessage(turn.role, tuple(blocks))
+        out.append(turn)
+    return tuple(out)
 
 
 @dataclass(frozen=True)
@@ -359,6 +394,13 @@ class WorkerRuntime:
         children: ChildRuns | None = None,
         artifacts: ArtifactReads | None = None,
         sites: SitePublisher | None = None,
+        #: Fetches attachments into the sandbox's inbox (§1.27, v2.27). `None`
+        #: on a deployment with no channel that sends files; an attachment is
+        #: then reported unavailable to the model rather than left unmentioned.
+        files: FileSource | None = None,
+        #: Sends a saved file to the person (§1.27, v2.27). Absent, `file.send`
+        #: says this deployment does not send files.
+        file_sends: FileSender | None = None,
     ) -> None:
         self._sessions = session_factory
         self._model = model
@@ -390,6 +432,8 @@ class WorkerRuntime:
         # are different facts and a model cannot tell them apart.
         self._searches = searches
         self._images = images
+        self._files = files
+        self._file_sends = file_sends
         # Absent, `agent.delegate` is refused rather than answered with an
         # empty list of children: a parent told it started nothing and a
         # parent told nobody wired delegation are different situations, and
@@ -505,6 +549,9 @@ class WorkerRuntime:
             self._renew_until_done(workspace_id, claimed.run.id, handle)
         )
         box: _Sandbox | None = None
+        # Set when this slice's sandbox opens, spent by that round (v2.27).
+        attachment_notes: tuple[str, ...] = ()
+        attachments_placed = False
         try:
             first = await self._read_context(workspace_id, claimed.run.id)
             if first is None:
@@ -590,6 +637,11 @@ class WorkerRuntime:
                     )
                     if box is None:
                         return
+                    # Before any of the round's commands, so the note the model
+                    # read beside the file is true by the time it looks.
+                    attachment_notes, attachments_placed = await self._place_attachments(
+                        claimed, handle, box
+                    )
 
                 try:
                     work = await self._answer_tools(
@@ -616,6 +668,14 @@ class WorkerRuntime:
                     )
                     return
                 appended, wrote = work.appended, work.wrote
+                if attachment_notes:
+                    appended = _with_notes(appended, attachment_notes)
+                    attachment_notes = ()
+                if attachments_placed:
+                    # The checkpoint after this round is what keeps the file:
+                    # a later sandbox restores it instead of fetching again.
+                    wrote = True
+                    attachments_placed = False
                 # Before the re-read, for the same reason the tool calls are:
                 # a cancellation that arrives while a check is running should
                 # be seen by the read that follows it.
@@ -1200,6 +1260,76 @@ class WorkerRuntime:
             return False
         return int(probe.exit_code) == 0
 
+    async def _files_sent(self, claimed: ClaimedRun) -> int:
+        """`file.send`s this Run has made in earlier rounds (§1.27, v2.27)."""
+        async with self._sessions() as session:
+            return await SqlRunStore(session).event_count(
+                claimed.run.workspace_id, claimed.run.id, RunEventType.FILE_SENT
+            )
+
+    async def _place_attachments(
+        self, claimed: ClaimedRun, handle: _LeaseHandle, box: _Sandbox
+    ) -> tuple[tuple[str, ...], bool]:
+        """Puts the Session's unplaced attachments in `inbox/` (§1.27, v2.27).
+
+        Returns notes for the model about the ones that could not be placed,
+        and whether any was. Each is recorded as an event either way, so no
+        later sandbox fetches it again over what the Agent made of it.
+        """
+        sandbox = self._sandbox
+        if sandbox is None:  # pragma: no cover - a box implies a sandbox
+            return (), False
+        run = claimed.run
+        async with self._sessions() as session:
+            store = SqlRunStore(session)
+            settled = await store.settled_attachments(run.workspace_id, run.session_id)
+            pending = unplaced(
+                await store.list_session_messages(run.workspace_id, run.session_id), settled
+            )
+        notes: list[str] = []
+        placed = False
+        for attached in pending:
+            reason: str | None = None
+            size = 0
+            try:
+                if self._files is None:
+                    raise LookupError("this deployment fetches no attachments")
+                body = await self._files.file_bytes_for(attached.reference, run.session_id)
+                size = len(body)
+                result = await sandbox.execute(
+                    run_id=run.id,
+                    lease_id=handle.lease_id,
+                    sandbox_id=box.sandbox_id,
+                    command=inbox_write_command(attached.name, body),
+                )
+                if int(result.exit_code) != 0:
+                    reason = "the sandbox refused the write"
+            except SandboxGone:
+                # Left unsettled: the round's own commands meet the same
+                # absence and interrupt the slice, and the next sandbox tries.
+                return tuple(notes), placed
+            except Exception as error:
+                logger.warning(
+                    "attachment not placed",
+                    extra={"run_id": str(run.id), "error": type(error).__name__},
+                )
+                reason = str(error)[:200] or type(error).__name__
+            if reason is None:
+                placed = True
+                await self._append_event(
+                    claimed,
+                    RunEventType.ATTACHMENT_PLACED,
+                    {"reference": attached.reference, "name": attached.name, "bytes": size},
+                )
+            else:
+                notes.append(unavailable_note(attached.name, reason))
+                await self._append_event(
+                    claimed,
+                    RunEventType.ATTACHMENT_FAILED,
+                    {"reference": attached.reference, "name": attached.name, "reason": reason},
+                )
+        return tuple(notes), placed
+
     async def _discard_sandbox(
         self, claimed: ClaimedRun, handle: _LeaseHandle, box: _Sandbox
     ) -> None:
@@ -1454,6 +1584,20 @@ class WorkerRuntime:
                         session_id=claimed.run.session_id,
                     )
                 )
+                continue
+            if call.name == "file.send":
+                answered, event = await answer_file_send(
+                    self._file_sends,
+                    context,
+                    call,
+                    workspace_id=claimed.run.workspace_id,
+                    session_id=claimed.run.session_id,
+                    sent_earlier=await self._files_sent(claimed)
+                    + sum(1 for held in events if held.event_type is RunEventType.FILE_SENT),
+                )
+                results.append(answered)
+                if event is not None:
+                    events.append(event)
                 continue
             if call.name == "artifact.read":
                 results.append(

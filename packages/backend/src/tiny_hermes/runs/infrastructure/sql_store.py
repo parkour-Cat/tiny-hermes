@@ -3593,6 +3593,42 @@ class SqlRunStore:
             raise UnknownRun
         return version.agent_id
 
+    async def event_count(self, workspace_id: UUID, run_id: UUID, kind: RunEventType) -> int:
+        return int(
+            await self._session.scalar(
+                select(func.count())
+                .select_from(RunEventRow)
+                .where(
+                    RunEventRow.workspace_id == workspace_id,
+                    RunEventRow.run_id == run_id,
+                    RunEventRow.event_type == kind.value,
+                )
+            )
+            or 0
+        )
+
+    async def settled_attachments(self, workspace_id: UUID, session_id: UUID) -> frozenset[str]:
+        """References the Worker has already placed, or given up on, in any
+        Run of this Session (§1.27, v2.27). Session-wide because the Run that
+        received a file is often not the one that opens a sandbox."""
+        payloads = (
+            await self._session.scalars(
+                select(RunEventRow.payload)
+                .join(RunRow, RunRow.id == RunEventRow.run_id)
+                .where(
+                    RunEventRow.workspace_id == workspace_id,
+                    RunRow.session_id == session_id,
+                    RunEventRow.event_type.in_(
+                        (
+                            RunEventType.ATTACHMENT_PLACED.value,
+                            RunEventType.ATTACHMENT_FAILED.value,
+                        )
+                    ),
+                )
+            )
+        ).all()
+        return frozenset(str(payload.get("reference", "")) for payload in payloads)
+
     async def list_session_messages(
         self, workspace_id: UUID, session_id: UUID
     ) -> Sequence[StoredMessage]:

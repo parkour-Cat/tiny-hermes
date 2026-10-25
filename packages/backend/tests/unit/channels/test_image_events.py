@@ -90,9 +90,10 @@ def test_a_text_message_carries_no_images() -> None:
     assert event.text == "在吗"
 
 
-@pytest.mark.parametrize("kind", ["audio", "file", "sticker"])
+@pytest.mark.parametrize("kind", ["audio", "sticker"])
 def test_other_message_types_are_still_refused(kind: str) -> None:
-    """Only images. A voice note needs transcription and a file needs a
-    reader, and neither exists — saying so remains the honest answer."""
+    """A voice note needs transcription, which does not exist — saying so
+    remains the honest answer. Files are read since v2.27
+    (`test_file_events.py`)."""
     with pytest.raises(UnsupportedMessageType):
         event_from_envelope(_envelope({"message_type": kind, "content": "{}"}))
