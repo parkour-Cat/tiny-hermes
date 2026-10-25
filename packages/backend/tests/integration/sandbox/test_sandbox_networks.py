@@ -10,6 +10,7 @@ nothing is added to the image for these tests.
 """
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator, Callable
 from ipaddress import IPv4Network
 from typing import Any
@@ -256,3 +257,42 @@ async def test_a_recreated_proxy_is_put_back_on_every_live_sandbox_network(
     ]
     assert endpoint["IPv4Address"].split("/")[0] == str(subnet[2])
     assert await _reaches(sandbox, "egress-proxy", 3128) is True
+
+
+async def test_a_recreated_proxy_is_put_back_as_soon_as_it_starts(
+    networked: SandboxController,
+    docker_client: Any,
+    image_digest: str,
+    proxy: Any,
+    runs: Callable[[], UUID],
+) -> None:
+    """The sweep alone left sandboxes without a way out for up to one sweep
+    interval, five minutes by default. Docker announces the proxy's start, and
+    a sweep on that announcement closes the gap to seconds."""
+    from tiny_hermes.sandbox.cli import sweep_on_start  # noqa: PLC0415
+
+    _, sandbox = await _run(networked, docker_client, runs())
+    engine = DockerEngine(docker_client, extra_labels={LABEL: "1"})
+    watching = asyncio.create_task(
+        sweep_on_start(lambda: engine.container_starts(proxy.name), networked.sweep)
+    )
+    try:
+        await asyncio.sleep(1)  # subscribed before the start it must see
+        proxy.remove(force=True)
+        docker_client.containers.run(
+            image_digest,
+            entrypoint=["perl", "-e", LISTEN.format(port=3128)],
+            name=proxy.name,
+            labels={LABEL: "1"},
+            detach=True,
+        )
+        for _ in range(40):
+            if await _reaches(sandbox, "egress-proxy", 3128):
+                break
+            await asyncio.sleep(0.25)
+
+        assert await _reaches(sandbox, "egress-proxy", 3128) is True
+    finally:
+        watching.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watching

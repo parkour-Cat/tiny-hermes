@@ -199,7 +199,11 @@ async def test_a_controller_with_its_own_label_sweeps_only_containers_carrying_i
         workspace_id=WORKSPACE,
         approved_digests=(image_digest,),
     )
-    someone_elses = await DockerEngine(docker_client).create(config)
+    # Another owner's rather than a deployment's: unlabelled, the running
+    # stack's own sweep took it too, sometimes before this test's assertion.
+    someone_elses = await DockerEngine(
+        docker_client, extra_labels={LABEL: "someone-else"}
+    ).create(config)
     try:
         await platform.call(lambda c: c.sweep())
 
@@ -208,3 +212,36 @@ async def test_a_controller_with_its_own_label_sweeps_only_containers_carrying_i
         # Already gone when the sweep took it, which is the failure above.
         with contextlib.suppress(NotFound):
             docker_client.containers.get(someone_elses).remove(force=True)
+
+
+async def test_a_deployment_engine_leaves_resources_another_owner_labelled_alone(
+    docker_client: Any, image_digest: str
+) -> None:
+    """The other direction of the label above, found the same day: a running
+    stack's controller swept the integration suite's live containers, killing
+    commands mid-test (exit 137 before their timeout), about one suite run in
+    two. A resource carrying an owner label belongs to the engine with that
+    label; an engine with none leaves it alone and lists everything else."""
+    run_id = uuid4()
+    config = container_config(
+        digest=image_digest,
+        profile=DEFAULT_PROFILE,
+        run_id=run_id,
+        instance_id=uuid4(),
+        workspace_id=WORKSPACE,
+        approved_digests=(image_digest,),
+    )
+    owned = DockerEngine(docker_client, extra_labels={LABEL: "1"})
+    await owned.create_volume(f"tiny-hermes-data-{run_id}", config.volume_labels)
+    theirs = await owned.create(config)
+    deployment = DockerEngine(docker_client)
+    try:
+        listed = {found.id for found in await deployment.containers_labelled("tiny-hermes.run")}
+        volumes = {found.name for found in await deployment.volumes_labelled("tiny-hermes.run")}
+
+        assert theirs not in listed
+        assert f"tiny-hermes-data-{run_id}" not in volumes
+        assert theirs in {found.id for found in await owned.containers_labelled("tiny-hermes.run")}
+    finally:
+        docker_client.containers.get(theirs).remove(force=True)
+        docker_client.volumes.get(f"tiny-hermes-data-{run_id}").remove(force=True)

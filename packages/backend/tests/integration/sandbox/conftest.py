@@ -28,7 +28,7 @@ from tiny_hermes.sandbox.application.controller import (
     AuditEntry,
     SandboxController,
 )
-from tiny_hermes.sandbox.infrastructure.docker_engine import DockerEngine
+from tiny_hermes.sandbox.infrastructure.docker_engine import OWNER_LABEL, DockerEngine
 from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
 from tiny_hermes.sandbox.transport.address import ControllerAddress
 from tiny_hermes.sandbox.transport.certs import issue, issue_ca, write_pair
@@ -40,7 +40,10 @@ from tiny_hermes.sandbox.transport.tls import Role, TlsFiles, client_context, se
 #: rather than skipping: a sandbox suite that quietly does not run is worse
 #: than one that takes a minute the first time.
 IMAGE_TAG = "tiny-hermes-sandbox:test"
-LABEL = "tiny-hermes.test"
+#: The owner label (2026-10-24): a deployment's engine leaves alone what
+#: carries it, so a stack running on the same Docker does not sweep the
+#: suite's live containers, and the suite's engines list only their own.
+LABEL = OWNER_LABEL
 
 
 #: What `sockaddr_un.sun_path` holds, including its terminator. 104 on

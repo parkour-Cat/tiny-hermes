@@ -74,6 +74,13 @@ class DockerUnavailable(Exception):
     """
 
 
+#: Who a resource belongs to, when it is not a deployment's own. A resource
+#: carrying it is listed only by an engine with the same label; an engine
+#: without one (a deployment) leaves it alone (2026-10-24: a running stack's
+#: controller swept the integration suite's live containers).
+OWNER_LABEL = "tiny-hermes.owner"
+
+
 class ContainerGone(DockerUnavailable):
     """The daemon answered: no such container.
 
@@ -251,6 +258,7 @@ class DockerEngine:
         return [
             ContainerInfo(id=str(entry["Id"]), labels=dict(entry.get("Labels") or {}))
             for entry in found
+            if self._owns(entry.get("Labels"))
         ]
 
     # -- sandbox networks (product design §1.21.4) ----------------------------
@@ -290,6 +298,26 @@ class DockerEngine:
             aliases=aliases,
             ipv4_address=address,
         )
+
+    async def container_starts(self, name: str) -> AsyncIterator[None]:
+        """One item each time the named container starts, until the stream ends.
+
+        Docker's event stream is a blocking generator, read here one event per
+        worker thread. It ends when the daemon restarts; the caller reopens it.
+        """
+        events: Any = await self._call(
+            self.client.events,
+            decode=True,
+            filters={"type": "container", "event": "start", "container": name},
+        )
+        try:
+            while True:
+                event = await asyncio.to_thread(next, events, None)
+                if event is None:
+                    return
+                yield
+        finally:
+            events.close()
 
     async def network_endpoints(self, name: str) -> tuple[str | None, frozenset[str]]:
         """A network's subnet and the names of the containers on it."""
@@ -339,6 +367,7 @@ class DockerEngine:
         return [
             NetworkInfo(name=str(entry["Name"]), labels=dict(entry.get("Labels") or {}))
             for entry in found
+            if self._owns(entry.get("Labels"))
         ]
 
     async def volumes_labelled(self, label: str) -> list[VolumeInfo]:
@@ -350,7 +379,8 @@ class DockerEngine:
         for volume in found:
             attrs = cast(dict[str, Any], volume.attrs or {})
             labels = cast(dict[str, str], attrs.get("Labels") or {})
-            infos.append(VolumeInfo(name=str(volume.name), labels=dict(labels)))
+            if self._owns(labels):
+                infos.append(VolumeInfo(name=str(volume.name), labels=dict(labels)))
         return infos
 
     # -- workspace trees -------------------------------------------------------
@@ -599,6 +629,15 @@ class DockerEngine:
                 list[tuple[int, bytes]], untyped.frames_iter(sock, tty=False)
             ):
                 yield frame[1]
+
+    def _owns(self, labels: dict[str, str] | None) -> bool:
+        """Whether a listed resource is this engine's, by `OWNER_LABEL`.
+
+        Docker's filters cannot say "without this label", so it is decided
+        here: the owner a resource names, if any, must be this engine's own.
+        """
+        theirs = (labels or {}).get(OWNER_LABEL)
+        return theirs == (self.extra_labels or {}).get(OWNER_LABEL)
 
     def _selectors(self, selector: str) -> list[str]:
         """The label filter, narrowed to this engine's own labels when it has any.
