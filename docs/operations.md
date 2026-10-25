@@ -850,3 +850,15 @@ docker compose --env-file ../../.env --profile sites up -d --wait
   另一个网站的 token，就能读到它的文件；成员网站的话，还要访问者恰好也持有那个网站的通行凭证。token 是 32 字节的
   随机数，不可猜，但这不是严格隔离。要严格隔离，需要每个网站一个子域名，首版不支持。
 - **网站内容是模型写的**：内容安全策略限制了它不能向本站以外发请求、不能被嵌入别的页面，但页面上写了什么，平台不审查。
+
+## 19. 沙箱里的办公能力（v2.27）
+
+默认沙箱镜像带 Python 3 和处理办公文件的库：openpyxl、pandas（表格），python-docx（Word），python-pptx（PPT），
+pypdf、pdfminer（读 PDF），matplotlib（画图，默认中文字体是文泉驿微米黑，PDF 里嵌入的是 TrueType 字体，中文可以搜索）。
+
+- **安全限制不变**：仍然没有网络、只读根文件系统、非 root 用户；镜像里没有 pip、apt、curl、wget。
+- **镜像体积**：约 645 MB，原来约 100 MB。在本机测，建容器加第一次执行约 0.2 秒，和原来一样；第一次导入这些库
+  （包括重建 matplotlib 的字体缓存）约 0.65 秒。
+- **可重复构建的限制**：基础镜像按摘要固定，但 Debian 包的版本跟着软件源走，不同时间构建出来的镜像，包版本可能不同。
+  `python-pptx` 按版本和 sha256 固定。上线前要把构建出来的镜像摘要写进 `SANDBOX_IMAGE_DIGEST`。
+- **没有的**：LibreOffice（体积太大），所以沙箱里不能把 Word 转成 PDF，也不能渲染 PPT 的预览图。

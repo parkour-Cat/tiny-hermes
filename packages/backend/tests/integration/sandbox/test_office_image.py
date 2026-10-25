@@ -12,18 +12,17 @@ from tiny_hermes.sandbox.infrastructure.docker_engine import DockerEngine
 from .conftest import LABEL
 
 OFFICE_ROUND_TRIP = r'''
-import io, json
+import io, json, warnings
+warnings.simplefilter("always")
 from openpyxl import Workbook, load_workbook
 from docx import Document
 from pptx import Presentation
 import pandas as pd
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
 from matplotlib.backends.backend_pdf import PdfPages
 from pypdf import PdfReader
-import pdfplumber
+from pdfminer.high_level import extract_text
 
 out = {}
 wb = Workbook(); ws = wb.active
@@ -35,19 +34,17 @@ out["docx"] = [p.text for p in Document("t.docx").paragraphs]
 p = Presentation(); s = p.slides.add_slide(p.slide_layouts[0])
 s.shapes.title.text = "季度汇报"; p.save("t.pptx")
 out["pptx"] = Presentation("t.pptx").slides[0].shapes.title.text
-names = [f.name for f in font_manager.fontManager.ttflist]
-cjk = [n for n in names if "CJK" in n or "WenQuanYi" in n or "Noto Sans SC" in n]
-out["cjk_font"] = sorted(set(cjk))[:1]
-if cjk:
-    plt.rcParams["font.family"] = cjk[0]
+# No font settings here: an Agent will not know to make any, so the defaults
+# must already draw Chinese.
 fig, ax = plt.subplots()
 ax.bar(["华东", "华北"], [1200, 800]); ax.set_title("各部门销售额")
-with PdfPages("t.pdf") as pdf:
-    pdf.savefig(fig)
+with warnings.catch_warnings(record=True) as caught:
+    with PdfPages("t.pdf") as pdf:
+        pdf.savefig(fig)
+out["missing_glyphs"] = [str(w.message) for w in caught if "missing from font" in str(w.message)]
 fig.savefig("t.png")
 out["pdf_pages"] = len(PdfReader("t.pdf").pages)
-with pdfplumber.open("t.pdf") as doc:
-    out["pdf_text"] = doc.pages[0].extract_text() or ""
+out["pdf_text"] = extract_text("t.pdf")
 print(json.dumps(out, ensure_ascii=False))
 '''
 
@@ -80,7 +77,7 @@ async def test_office_files_round_trip_in_a_policy_shaped_sandbox(
     assert found["pandas"] == 1200
     assert found["docx"] == ["会议纪要", "待办：张三 周五前"]
     assert found["pptx"] == "季度汇报"
-    assert found["cjk_font"], "no CJK font: Chinese in a chart would come out as boxes"
+    assert found["missing_glyphs"] == [], "Chinese in a default chart would come out as boxes"
     assert found["pdf_pages"] == 1
     assert "各部门销售额" in found["pdf_text"]
 

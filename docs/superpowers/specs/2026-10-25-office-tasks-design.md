@@ -23,7 +23,7 @@
 
 ### 1. 沙箱能处理办公文件
 
-沙箱镜像加上 Python 3，以及处理办公文件的库：表格（openpyxl、pandas）、Word（python-docx）、PPT（python-pptx）、PDF（pypdf、pdfplumber）、画图（matplotlib，配中文字体）。
+沙箱镜像加上 Python 3，以及处理办公文件的库：表格（openpyxl、pandas）、Word（python-docx）、PPT（python-pptx）、PDF（pypdf、pdfminer；pdfplumber 在 Debian 里没有包，不装）、画图（matplotlib，配中文字体）。
 
 - **做法：** 直接升级默认镜像，不做按 Agent 选镜像。平台现在只批准一个镜像（`SANDBOX_IMAGE_DIGEST`），多镜像要改审批模型，等真有需求再做。
 - **代价：** 镜像会从约 100 MB 变大，具体大小在实现时量出来；沙箱建容器的速度要重新测。
