@@ -33,7 +33,11 @@ from tiny_hermes.session_workspace.ports.objects import (
     staging_object,
     staging_prefix_key,
 )
-from tiny_hermes.session_workspace.ports.store import RegisterUpload, UploadTotals
+from tiny_hermes.session_workspace.ports.store import (
+    RegisterUpload,
+    UploadStateConflict,
+    UploadTotals,
+)
 
 HOUR = timedelta(hours=1)
 
@@ -294,9 +298,31 @@ async def _committed(
     scoped: AsyncSession, objects: MinioObjectStore, store: SqlWorkspaceStore, ids: Ids
 ) -> RegisterUpload:
     """A committed upload whose post-commit cleanup has not run yet."""
+    command, _ = await _ready(scoped, objects, store, ids, expires_at=_now() + HOUR)
+    await _commit(store, command)
+    return command
+
+
+async def _commit(store: SqlWorkspaceStore, command: RegisterUpload) -> None:
+    await store.mark_committed(
+        command.upload_id,
+        revision_id=command.candidate_revision_id,
+        artifact_id=None,
+    )
+
+
+async def _ready(
+    scoped: AsyncSession,
+    objects: MinioObjectStore,
+    store: SqlWorkspaceStore,
+    ids: Ids,
+    *,
+    expires_at: datetime,
+) -> tuple[RegisterUpload, tuple[ObjectRef, ...]]:
+    """A `ready` candidate, with the revision row its commit will name."""
     digest = "5" * 64
-    command, _ = await _stage_candidate(
-        objects, store, ids, expires_at=_now() + HOUR, final_bodies={digest: b"live"}
+    command, finals = await _stage_candidate(
+        objects, store, ids, expires_at=expires_at, final_bodies={digest: b"live"}
     )
     await store.mark_ready(
         command.upload_id, totals=UploadTotals(total_bytes=4, object_count=1)
@@ -321,12 +347,7 @@ async def _committed(
         )
     )
     await scoped.flush()
-    await store.mark_committed(
-        command.upload_id,
-        revision_id=command.candidate_revision_id,
-        artifact_id=None,
-    )
-    return command
+    return command, finals
 
 
 async def test_a_committed_row_with_failed_deletion_keeps_its_debt(
@@ -370,6 +391,56 @@ async def test_a_claim_the_committer_settled_first_is_finished_not_a_failure(
     assert settled is not None
     assert settled.status is UploadStatus.COMMITTED
     assert not settled.cleanup_pending
+
+
+class _CommitLandsAtFirstDelete:
+    """The real store, with a commit that lands as the collector starts deleting.
+
+    A commit slower than the staging lifetime: the Worker stalled, or its
+    process was paused, past `expires_at`.
+    """
+
+    def __init__(self, inner: MinioObjectStore, commit: Any) -> None:
+        self._inner = inner
+        self._commit = commit
+        self.commit_refused: Exception | None = None
+        self._landed = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    async def delete_many(self, refs: Sequence[ObjectRef]) -> None:
+        if not self._landed:
+            self._landed = True
+            try:
+                await self._commit()
+            except UploadStateConflict as refused:
+                self.commit_refused = refused
+        await self._inner.delete_many(refs)
+
+
+async def test_a_commit_landing_while_an_expired_candidate_is_reclaimed_loses_nothing(
+    scoped: AsyncSession, objects: MinioObjectStore, ids: Ids
+) -> None:
+    """2026-10-25 review: the collector claims a timed-out `ready` row by
+    reading it, deletes the finals no retained manifest names yet, and only
+    then settles the row. A commit landing in between was accepted, since
+    commit checks the status and not the deadline, and the revision it made
+    named objects already gone. Either the commit is refused, or what it
+    names survives."""
+    store = SqlWorkspaceStore(scoped)
+    command, finals = await _ready(scoped, objects, store, ids, expires_at=_now() - HOUR)
+    racing = _CommitLandsAtFirstDelete(objects, lambda: _commit(store, command))
+
+    await _collect_everything(store, racing)
+
+    row = await store.read(command.upload_id)
+    assert row is not None
+    if row.status is UploadStatus.COMMITTED:
+        for final in finals:
+            assert await objects.stat(final) is not None, "a committed revision lost its blob"
+    else:
+        assert racing.commit_refused is not None, "the commit neither landed nor was refused"
 
 
 async def test_an_index_that_fails_verification_freezes_the_cleanup(
