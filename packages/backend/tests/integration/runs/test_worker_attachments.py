@@ -11,10 +11,10 @@ from uuid import UUID
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
-from tiny_hermes.runs.application.worker import WorkerRuntime, WorkerSettings
+from tiny_hermes.runs.application.worker import WorkerRuntime, WorkerSettings, WorkspaceRuntime
 from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
 from tiny_hermes.sandbox.domain.command import CommandResult, SandboxCommand
-from tiny_hermes.session_workspace.application.service import WorkspaceQuota, WorkspaceRuntime
+from tiny_hermes.session_workspace.domain.models import WorkspaceQuota
 from tiny_hermes.session_workspace.infrastructure.minio_store import MinioObjectStore
 from tiny_hermes.tools.domain.files import FILE_HELPER
 
@@ -26,8 +26,9 @@ from .test_worker_workspace import (  # pyright: ignore[reportPrivateUsage]
     _submit,  # pyright: ignore[reportPrivateUsage]
     _tool,  # pyright: ignore[reportPrivateUsage]
 )
-from .test_worker_workspace import objects as objects_fixture  # noqa: F401 - registers `objects`
-from .test_worker_workspace import tooled_agent as tooled_agent_fixture  # noqa: F401
+from .test_worker_workspace import (  # noqa: F401 - registers the fixtures by their own names
+    objects as objects_fixture,  # pyright: ignore[reportUnusedImport]
+)
 
 BODY = b"PK\x03\x04 the bytes of a spreadsheet"
 
