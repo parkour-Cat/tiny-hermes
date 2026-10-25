@@ -15,7 +15,7 @@ import contextlib
 import json
 import logging
 import signal
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime
 from ipaddress import IPv4Network, ip_network
@@ -309,6 +309,16 @@ async def _serve() -> None:
             return result
 
     sweeping = asyncio.create_task(sweep_forever(sweep_once, every=settings.sandbox_sweep_seconds))
+    watching = (
+        None
+        if networking is None
+        else asyncio.create_task(
+            sweep_on_start(
+                lambda: DockerEngine(client).container_starts(networking.proxy_container),
+                sweep_once,
+            )
+        )
+    )
 
     async def publish_once() -> None:
         async with sessions() as session:
@@ -323,6 +333,8 @@ async def _serve() -> None:
     finally:
         observing.cancel()
         sweeping.cancel()
+        if watching is not None:
+            watching.cancel()
         beating.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await sweeping
@@ -352,6 +364,33 @@ async def sweep_forever(
                     extra={"containers": result.containers, "volumes": result.volumes},
                 )
         await asyncio.sleep(every)
+
+
+async def sweep_on_start(
+    starts: Callable[[], AsyncIterator[None]],
+    sweep_once: Callable[[], Awaitable[SweepResult]],
+    *,
+    retry_seconds: float = 5.0,
+) -> None:
+    """Sweep each time the egress proxy starts, until cancelled.
+
+    A recreated proxy is back on its own networks only, and the periodic sweep
+    left every live sandbox without a way out until it next ran. Docker says
+    when the proxy starts; sweeping then puts it back within seconds. The
+    periodic sweep stays as the backstop for an event this stream missed.
+    """
+    while True:
+        try:
+            async for _ in starts():
+                try:
+                    await sweep_once()
+                except Exception:
+                    logger.warning("sweep after the proxy started failed", exc_info=True)
+                else:
+                    logger.info("swept after the egress proxy started")
+        except Exception:
+            logger.warning("watching the egress proxy failed", exc_info=True)
+        await asyncio.sleep(retry_seconds)
 
 
 async def _invoke(

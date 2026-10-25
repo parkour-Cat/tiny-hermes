@@ -291,6 +291,26 @@ class DockerEngine:
             ipv4_address=address,
         )
 
+    async def container_starts(self, name: str) -> AsyncIterator[None]:
+        """One item each time the named container starts, until the stream ends.
+
+        Docker's event stream is a blocking generator, read here one event per
+        worker thread. It ends when the daemon restarts; the caller reopens it.
+        """
+        events: Any = await self._call(
+            self.client.events,
+            decode=True,
+            filters={"type": "container", "event": "start", "container": name},
+        )
+        try:
+            while True:
+                event = await asyncio.to_thread(next, events, None)
+                if event is None:
+                    return
+                yield
+        finally:
+            events.close()
+
     async def network_endpoints(self, name: str) -> tuple[str | None, frozenset[str]]:
         """A network's subnet and the names of the containers on it."""
         details: dict[str, Any] = await self._call(self.client.api.inspect_network, name)
