@@ -159,7 +159,11 @@ def docker_client() -> Iterator[Any]:
     client.close()
 
 
-@pytest.fixture(params=["runc", "runsc"])
+#: The runtimes the sandbox suite knows how to run on.
+RUNTIMES = ("runc", "runsc")
+
+
+@pytest.fixture(params=RUNTIMES)
 def sandbox_runtime(request: pytest.FixtureRequest, docker_client: Any) -> str:
     """Every real controller test, on each runtime this Docker has (§1.25).
 
@@ -169,6 +173,21 @@ def sandbox_runtime(request: pytest.FixtureRequest, docker_client: Any) -> str:
     which today includes CI.
     """
     runtime = str(request.param)
+    #: CI names the runtimes it installed, so a missing one fails rather
+    #: than skipping half the suite in silence; and its second pass, which
+    #: only varies Redis, names runc alone.
+    named = os.environ.get("SANDBOX_TEST_RUNTIMES")
+    if named is not None:
+        wanted = {name.strip() for name in named.split(",") if name.strip()}
+        unknown = wanted - set(RUNTIMES)
+        if unknown:
+            # A misspelt name would otherwise skip the runtime it meant.
+            pytest.fail(f"SANDBOX_TEST_RUNTIMES names unknown runtimes: {sorted(unknown)}")
+        if runtime not in wanted:
+            pytest.skip(f"SANDBOX_TEST_RUNTIMES leaves out {runtime}")
+        if runtime not in (docker_client.info().get("Runtimes") or {}):
+            pytest.fail(f"SANDBOX_TEST_RUNTIMES names {runtime}, which this Docker does not have")
+        return runtime
     if runtime not in (docker_client.info().get("Runtimes") or {}):
         pytest.skip(f"this Docker has no {runtime} runtime")
     return runtime
