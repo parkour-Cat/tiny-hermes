@@ -4,7 +4,6 @@ its sealed secret; only the network is recorded instead of reached."""
 
 import json
 from typing import Any
-from uuid import UUID
 
 import httpx
 from fastapi.testclient import TestClient
@@ -178,7 +177,7 @@ async def _transcript(engine: AsyncEngine, run_id: str) -> str:
 
 async def _one(engine: AsyncEngine, sql: str, run_id: str) -> Any:
     async with engine.connect() as db:
-        return (await db.execute(text(sql), {"run": UUID(run_id)})).one_or_none()
+        return (await db.execute(text(sql), {"run": run_id})).one_or_none()
 
 
 async def test_a_saved_file_is_uploaded_and_sent_to_the_person_who_asked(
@@ -200,7 +199,8 @@ async def test_a_saved_file_is_uploaded_and_sent_to_the_person_who_asked(
     assert json.loads(message["json"]["content"]) == {"file_key": "fk_up"}
     event = await _one(
         engine,
-        "SELECT payload FROM run_events WHERE run_id = :run AND event_type = 'file_sent'",
+        "SELECT payload FROM run_events "
+        "WHERE run_id = CAST(:run AS uuid) AND event_type = 'file_sent'",
         run_id,
     )
     assert event is not None
@@ -208,7 +208,7 @@ async def test_a_saved_file_is_uploaded_and_sent_to_the_person_who_asked(
     audit = await _one(
         engine,
         "SELECT context FROM audit_events WHERE action = 'file.sent' "
-        "AND context->>'run_id' = CAST(:run AS text)",
+        "AND context->>'run_id' = :run",
         run_id,
     )
     assert audit is not None
