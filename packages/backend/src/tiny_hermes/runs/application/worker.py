@@ -130,7 +130,8 @@ from tiny_hermes.sandbox.application.controller import (
 )
 from tiny_hermes.sandbox.domain.command import SandboxCommand
 from tiny_hermes.sandbox.domain.container_policy import DEFAULT_PROFILE
-from tiny_hermes.sandbox.domain.models import CacheState
+from tiny_hermes.sandbox.domain.models import CacheState, ReservationStatus
+from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
 from tiny_hermes.session_workspace.application.committer import SqlWorkspaceLedger
 from tiny_hermes.session_workspace.application.service import (
     SessionWorkspaceService,
@@ -742,10 +743,12 @@ class WorkerRuntime:
                     box = continuation
                     continue
 
-                if decision.signal is not None and box is not None:
+                if decision.signal is not None:
                     # Before the lease is released, per product design §16. A
                     # freeze or destroy that cannot be confirmed makes this an
                     # `interrupted` Run rather than the outcome the round had.
+                    # Without a sandbox this slice, one an earlier slice kept
+                    # warm is still this Run's to end (§1526).
                     decision = await self._close_sandbox(claimed, handle, box, decision)
                     box = None if decision.signal is not RunSignal.INTERRUPTED else box
 
@@ -827,8 +830,12 @@ class WorkerRuntime:
             claimed,
             handle,
             context.state_version,
-            SliceDecision(
-                RunSignal.SAFE_PAUSE_REACHED, PauseReason.TOOL_BUDGET_EXCEEDED
+            # Paused before this slice opened a sandbox: one an earlier slice
+            # kept warm is ended first (§1526).
+            await self._end_kept(
+                claimed,
+                handle,
+                SliceDecision(RunSignal.SAFE_PAUSE_REACHED, PauseReason.TOOL_BUDGET_EXCEEDED),
             ),
             _no_round(),
             executed_ms=0,
@@ -1975,7 +1982,7 @@ class WorkerRuntime:
         self,
         claimed: ClaimedRun,
         handle: _LeaseHandle,
-        box: "_Sandbox",
+        box: "_Sandbox | None",
         decision: SliceDecision,
     ) -> SliceDecision:
         """Freeze or destroy before the lease goes, and say so if it did not.
@@ -1987,6 +1994,8 @@ class WorkerRuntime:
         sandbox = self._sandbox
         if sandbox is None:
             return decision
+        if box is None:
+            return await self._end_kept(claimed, handle, decision)
         try:
             if decision.signal is RunSignal.SLICE_ENDED:
                 await sandbox.freeze(
@@ -2014,6 +2023,33 @@ class WorkerRuntime:
             return SliceDecision(RunSignal.INTERRUPTED)
         return decision
 
+    async def _end_kept(
+        self, claimed: ClaimedRun, handle: _LeaseHandle, decision: SliceDecision
+    ) -> SliceDecision:
+        """End the sandbox an earlier slice kept warm, when this Run is leaving.
+
+        A slice that only answered takes no sandbox, so the one frozen at the
+        end of the slice before is still kept (2026-10-25, a real model's last
+        slice). §1526: a terminal, waiting or paused Run keeps nothing warm.
+        A slice boundary leaves it for the next slice, which is what it is for.
+        An isolated claim is the Scheduler's to clean up, and is left to it.
+        """
+        sandbox = self._sandbox
+        if sandbox is None or decision.signal in (None, RunSignal.SLICE_ENDED):
+            return decision
+        async with self._sessions() as session:
+            kept = await SqlSandboxStore(session).live_for_run(claimed.run.id)
+        if kept is None or kept.status is not ReservationStatus.KEPT:
+            return decision
+        try:
+            await sandbox.destroy(
+                run_id=claimed.run.id, lease_id=handle.lease_id, sandbox_id=kept.instance_id
+            )
+        except Exception:
+            logger.exception("kept sandbox destroy failed", extra={"run_id": str(claimed.run.id)})
+            return SliceDecision(RunSignal.INTERRUPTED)
+        return decision
+
     async def _fail(
         self,
         claimed: ClaimedRun,
@@ -2024,13 +2060,18 @@ class WorkerRuntime:
         executed_ms: int = 0,
     ) -> None:
         """`spent` is a model call this slice already made and must still be
-        charged for; without one, nothing was called and nothing is charged."""
+        charged for; without one, nothing was called and nothing is charged.
+
+        Reached before this slice opened a sandbox, so one an earlier slice
+        kept warm is ended here (§1526), or the Run is interrupted instead.
+        """
+        decision = await self._end_kept(claimed, handle, SliceDecision(RunSignal.FAILED))
         if spent is None:
             await self._record(
                 claimed,
                 handle,
                 context.state_version,
-                SliceDecision(RunSignal.FAILED),
+                decision,
                 _no_round(failure=reason),
                 executed_ms=0,
             )
@@ -2039,7 +2080,7 @@ class WorkerRuntime:
             claimed,
             handle,
             context.state_version,
-            SliceDecision(RunSignal.FAILED),
+            decision,
             replace(spent, stop_reason=StopReason.FAILED, failure=reason),
             executed_ms,
             prices=context.prices,
@@ -2700,8 +2741,7 @@ class WorkerRuntime:
         `_bill_summary_call` 单独记成 `CONTEXT_SUMMARY_BILLED`，不属于这里。
         """
         decision = SliceDecision(RunSignal.COMPLETED, None)
-        if box is not None:
-            decision = await self._close_sandbox(claimed, handle, box, decision)
+        decision = await self._close_sandbox(claimed, handle, box, decision)
         await self._record(
             claimed,
             handle,
@@ -2739,8 +2779,7 @@ class WorkerRuntime:
             },
         )
         decision = SliceDecision(RunSignal.SAFE_PAUSE_REACHED, PauseReason.CONTEXT_OVERFLOW)
-        if box is not None:
-            decision = await self._close_sandbox(claimed, handle, box, decision)
+        decision = await self._close_sandbox(claimed, handle, box, decision)
         await self._record(
             claimed,
             handle,
@@ -2775,8 +2814,7 @@ class WorkerRuntime:
         decision = SliceDecision(
             RunSignal.SAFE_PAUSE_REACHED, PauseReason.LIMIT, limit_reached=True
         )
-        if box is not None:
-            decision = await self._close_sandbox(claimed, handle, box, decision)
+        decision = await self._close_sandbox(claimed, handle, box, decision)
         await self._record(
             claimed,
             handle,
