@@ -579,3 +579,133 @@ async def test_retiring_a_dead_host_lets_its_interrupted_run_recover(
         )
     assert status == "queued"
     assert await reservation_status(sessions, run_id) == ReservationStatus.RELEASED.value
+
+
+@dataclass
+class KeptOnlySandbox:
+    """A Run's sandbox kept warm from an earlier slice, and nothing else.
+
+    `destroy` releases the reservation as the real Controller does, or fails
+    to confirm when told to. Every other action would mean this slice took a
+    sandbox it did not need.
+    """
+
+    sessions: async_sessionmaker[AsyncSession]
+    fails: bool = False
+    destroyed: list[UUID] = field(default_factory=list[UUID])
+
+    async def destroy(self, *, run_id: UUID, lease_id: UUID, sandbox_id: UUID) -> None:
+        del lease_id
+        if self.fails:
+            raise RuntimeError("the daemon did not confirm destroy")
+        self.destroyed.append(sandbox_id)
+        async with self.sessions.begin() as session:
+            store = SqlSandboxStore(session)
+            reservation = await store.live_for_run(run_id)
+            assert reservation is not None
+            await store.release(reservation.id)
+
+    async def acquire(self, **_: Any) -> Any:
+        raise AssertionError("a reply in words takes no sandbox")
+
+    async def freeze(self, **_: Any) -> None:
+        raise AssertionError("a finished Run is not frozen")
+
+    async def thaw(self, **_: Any) -> None:
+        raise AssertionError("a finished Run has nothing to thaw")
+
+    async def keep(self, **_: Any) -> None:
+        raise AssertionError("a finished Run is not kept warm")
+
+
+class DoneInWords:
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        del request
+        return ModelResponse(stop_reason=StopReason.COMPLETED, text="done")
+
+
+async def _run_with_a_kept_sandbox(
+    client: TestClient, scope: dict[str, str], sessions: async_sessionmaker[AsyncSession]
+) -> tuple[UUID, UUID]:
+    alias = f"kept-{uuid4().hex[:8]}"
+    agent = client.post(
+        "/api/v1/agents", headers=scope, json={"name": "Kept", "alias": alias}
+    ).json()
+    draft = client.put(
+        f"/api/v1/agents/{agent['id']}/draft",
+        headers=scope,
+        json={"expected_revision": 1, "spec": {**VALID_SPEC, "tools": ["shell.exec"]}},
+    ).json()
+    client.post(
+        f"/api/v1/agents/{agent['id']}/publish",
+        headers=scope,
+        json={"expected_revision": draft["revision"]},
+    ).raise_for_status()
+    session_id = client.post(
+        "/api/v1/sessions", headers=scope, json={"agent_id": agent["id"]}
+    ).json()["id"]
+    created = client.post(
+        "/api/v1/runs",
+        headers={**scope, "Idempotency-Key": uuid4().hex},
+        json={"session_id": session_id, "input": "finish in words"},
+    ).json()
+    run_id = UUID(created["id"])
+    async with sessions() as session:
+        store = SqlSandboxStore(session)
+        made = await store.reserve(
+            run_id=run_id, workspace_id=UUID(scope["X-Workspace-Id"]), instance=instance()
+        )
+        await store.keep(made.id, idle_expires_at=datetime.now(UTC) + timedelta(minutes=5))
+        await session.commit()
+    return run_id, made.instance_id
+
+
+async def _one_slice(sessions: async_sessionmaker[AsyncSession], sandbox: Any) -> None:
+    await WorkerRuntime(
+        session_factory=sessions,
+        model=DoneInWords(),
+        notifier=NullWakeUpNotifier(),
+        sandbox=sandbox,
+        settings=WorkerSettings(
+            worker_id="worker-kept", lease_seconds=30, max_slice_seconds=30, idle_poll_seconds=1
+        ),
+    ).run_once()
+
+
+async def _status(engine: AsyncEngine, run_id: UUID) -> str:
+    async with engine.connect() as connection:
+        return str(
+            await connection.scalar(text("SELECT status FROM runs WHERE id = :id"), {"id": run_id})
+        )
+
+
+async def test_a_run_that_finishes_in_words_destroys_the_sandbox_an_earlier_slice_kept(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine
+) -> None:
+    """§1526: a terminal Run keeps nothing warm. Found by a real model on
+    2026-10-25: its last slice only answered, took no sandbox, and so the one
+    frozen at the end of the slice before stayed kept for the full idle TTL
+    after the Run had completed."""
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    run_id, sandbox_id = await _run_with_a_kept_sandbox(client, scope, sessions)
+    sandbox = KeptOnlySandbox(sessions)
+
+    await _one_slice(sessions, sandbox)
+
+    assert await _status(engine, run_id) == "completed"
+    assert sandbox.destroyed == [sandbox_id]
+    assert await reservation_status(sessions, run_id) == ReservationStatus.RELEASED.value
+
+
+async def test_a_kept_sandbox_that_cannot_be_destroyed_interrupts_instead_of_completing(
+    client: TestClient, scope: dict[str, str], engine: AsyncEngine
+) -> None:
+    """As for a sandbox the slice held (§16): an unconfirmed destroy is not a
+    finished Run, and the Scheduler's cleanup takes it from there."""
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    run_id, _ = await _run_with_a_kept_sandbox(client, scope, sessions)
+
+    await _one_slice(sessions, KeptOnlySandbox(sessions, fails=True))
+
+    assert await _status(engine, run_id) == "interrupted"
+    assert await reservation_status(sessions, run_id) == ReservationStatus.KEPT.value
