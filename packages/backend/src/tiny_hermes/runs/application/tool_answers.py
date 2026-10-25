@@ -46,6 +46,8 @@ from tiny_hermes.runs.ports.proposals import SkillProposals
 from tiny_hermes.runs.ports.searches import SessionSearches
 from tiny_hermes.runs.ports.skills import SkillLibrary
 from tiny_hermes.runs.ports.store import ExecutionContext, ReservedEvent
+from tiny_hermes.sites.application.publisher import SitePublisher
+from tiny_hermes.sites.domain.site import SiteRefused
 from tiny_hermes.tools.domain.http_calls import (
     HTTP_PREFIX,
     BoundOperation,
@@ -65,6 +67,7 @@ from tiny_hermes.tools.domain.registry import (
     delegation_of,
     memory_body_of,
     session_search_of,
+    site_publish_of,
     skill_load_of,
     skill_propose_of,
     wait_seconds_of,
@@ -498,6 +501,55 @@ async def answer_artifact_read(
     return ToolResultBlock(
         call_id=call.call_id,
         output=found.text,
+        exit_code=0,
+        failed=False,
+    )
+
+
+async def answer_site_publish(
+    sites: SitePublisher | None,
+    context: ExecutionContext,
+    call: ToolCallBlock,
+    *,
+    workspace_id: UUID,
+    session_id: UUID,
+) -> ToolResultBlock:
+    """Publish the session's saved snapshot of a directory as a site (§1.26, v2.26).
+
+    The link is in this answer and nowhere else the model or a console list
+    can read it back from, so the answer says to hand it on.
+    """
+    if "site.publish" not in context.tools:
+        return refusal(call.call_id, RefusalReason.NOT_AUTHORIZED)
+    try:
+        path, title = site_publish_of(call)
+    except ToolRefused as refused_call:
+        return refusal(call.call_id, refused_call.reason, refused_call.detail)
+    if sites is None or not sites.enabled:
+        return text_refusal(call.call_id, "this deployment does not publish sites")
+    try:
+        published = await sites.publish(
+            workspace_id=workspace_id,
+            session_id=session_id,
+            run_id=context.run_id,
+            root=path,
+            title=title,
+        )
+    except SiteRefused as refused_site:
+        return text_refusal(call.call_id, f"{refused_site.reason}: {refused_site.detail}")
+    who = (
+        "members of this workspace (they sign in to open it)"
+        if published.visibility == "members"
+        else "anyone with the link"
+    )
+    return ToolResultBlock(
+        call_id=call.call_id,
+        output=(
+            f"Published: {published.url}\n"
+            f"Who can open it: {who}\n"
+            f"Expires: {published.expires_at.isoformat(timespec='minutes')}\n"
+            "This link is shown only here. Give it to the person in your reply."
+        ),
         exit_code=0,
         failed=False,
     )

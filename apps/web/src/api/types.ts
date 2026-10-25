@@ -504,6 +504,9 @@ export const IMPLEMENTED_TOOLS = [
   // §16.1 (v2.12). `test_todo.py` compares this list with the backend's, so
   // a tool added there and forgotten here fails a test rather than a user.
   "todo.write",
+  // §16.1 (v2.26). Publishes a workspace directory as a site and hands back
+  // the link; useless unless the deployment sets SITE_PUBLIC_URL.
+  "site.publish",
 ] as const;
 
 /**
