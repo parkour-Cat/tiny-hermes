@@ -1,6 +1,7 @@
 """The site origin itself (§1.26, v2.26): what it serves, with which headers,
 and who it lets in."""
 
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -71,11 +72,12 @@ def _ticket(publication_id: UUID, *, seconds: int = 60, nonce: str | None = None
 
 
 @pytest.fixture
-def site(engine: AsyncEngine, settings: Settings) -> TestClient:
-    return TestClient(
-        create_site_app(settings, publisher=_publisher(engine, settings)),
-        base_url=SITE_PUBLIC_URL,
-    )
+def site(empty_database: None, settings: Settings) -> Iterator[TestClient]:
+    """Built from settings, as the process builds it. Entered, so every
+    request runs on one loop: its engine's connections belong to that loop."""
+    del empty_database
+    with TestClient(create_site_app(settings), base_url=SITE_PUBLIC_URL) as client:
+        yield client
 
 
 async def test_a_site_open_to_anyone_is_served_with_its_own_types_and_strict_headers(

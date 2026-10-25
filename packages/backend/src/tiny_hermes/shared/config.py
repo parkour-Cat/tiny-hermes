@@ -455,8 +455,18 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def reject_a_site_origin_without_a_signing_secret(self) -> "Settings":
-        if self.site_public_url and not self.site_signing_secret:
+        if not self.site_public_url:
+            return self
+        if not self.site_signing_secret:
             raise ValueError("site_public_url needs site_signing_secret (32 characters or more)")
+        if not self.console_base_url:
+            # The members' door sends people to the console to sign in.
+            raise ValueError("site_public_url needs console_base_url")
+        from tiny_hermes.sites.domain.site import same_origin  # noqa: PLC0415 - a cycle otherwise
+
+        if same_origin(self.site_public_url, self.console_base_url):
+            # A site's script on the console's origin would ride its session.
+            raise ValueError("site_public_url must be a different origin from console_base_url")
         return self
 
     @model_validator(mode="after")

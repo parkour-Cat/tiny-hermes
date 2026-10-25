@@ -42,6 +42,7 @@ tiny-hermes-worker = "tiny_hermes.api.cli:worker_main"
 tiny-hermes-scheduler = "tiny_hermes.api.cli:scheduler_main"
 tiny-hermes-controller = "tiny_hermes.sandbox.cli:main"
 tiny-hermes-egress = "tiny_hermes.egress.cli:main"
+tiny-hermes-site = "tiny_hermes.sites.cli:main"
 
 [build-system]
 requires = ["hatchling"]
