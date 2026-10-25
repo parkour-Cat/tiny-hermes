@@ -143,6 +143,12 @@ x-app-env: &app-env
   # endpoint registered before 4C still resolves. Create a platform Secret
   # and point an endpoint at its id to exercise rewrap.
   TINY_HERMES_MODEL_KEY_EXAMPLE: ${TINY_HERMES_MODEL_KEY_EXAMPLE:-}
+  # Published sites (§1.26, v2.26). Empty SITE_PUBLIC_URL leaves publishing
+  # off; set it, with a signing secret of 32+ characters and CONSOLE_BASE_URL
+  # on a different origin, and start the `site` service (profile `sites`).
+  SITE_PUBLIC_URL: ${SITE_PUBLIC_URL:-}
+  SITE_SIGNING_SECRET: ${SITE_SIGNING_SECRET:-}
+  SITE_PUBLICATION_TTL_DAYS: ${SITE_PUBLICATION_TTL_DAYS:-7}
 
 # Every long-running service has `restart: unless-stopped`. When the Docker
 # daemon itself restarts — on 2026-09-30 the OOM killer took it — every
@@ -239,6 +245,34 @@ services:
       timeout: 3s
       retries: 20
     ports: ["8000:8000"]
+
+  # Published sites (§1.26, v2.26), on an origin of their own: never behind
+  # the console's, or a site's script would ride the console's session. Off
+  # unless asked for (`--profile sites`), since without SITE_PUBLIC_URL it has
+  # nothing to serve and refuses to start.
+  site:
+    restart: unless-stopped
+    profiles: ["sites"]
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    command: ["/app/.venv/bin/tiny-hermes-site"]
+    environment: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      seaweedfs:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8090/healthz')
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports: ["8090:8090"]
 
   # The Worker and the Scheduler run the console script directly rather than
   # through `uv run`, so PID 1 is the process itself: SIGTERM reaches the loop

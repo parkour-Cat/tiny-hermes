@@ -504,6 +504,9 @@ export const IMPLEMENTED_TOOLS = [
   // §16.1 (v2.12). `test_todo.py` compares this list with the backend's, so
   // a tool added there and forgotten here fails a test rather than a user.
   "todo.write",
+  // §16.1 (v2.26). Publishes a workspace directory as a site and hands back
+  // the link; useless unless the deployment sets SITE_PUBLIC_URL.
+  "site.publish",
 ] as const;
 
 /**
@@ -888,3 +891,16 @@ export type WorkspaceLimitsResponse = {
   ceilings: LimitValues;
 };
 
+
+/** A published site (§1.26, v2.26). The link is never listed. */
+export type SiteResponse = {
+  id: string;
+  run_id: string;
+  title: string | null;
+  root: string;
+  visibility: "members" | "link";
+  created_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+  active: boolean;
+};

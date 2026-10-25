@@ -246,6 +246,13 @@ class Settings(BaseSettings):
     #: or `runsc` (gVisor) on a host where it is installed. The controller
     #: refuses to start on one its Docker does not have.
     sandbox_runtime: str = Field(default="runc", pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$")
+    #: Where published sites are served (§1.26, v2.26): its own origin, never
+    #: the console's. Unset, publishing is off and `site.publish` says so.
+    site_public_url: str | None = None
+    #: Signs the members' tickets and passes. Not the console's cookie secret:
+    #: a compromised site process must not be able to mint console sessions.
+    site_signing_secret: str | None = Field(default=None, min_length=32)
+    site_publication_ttl_days: int = Field(default=7, ge=1, le=90)
     #: This sandbox host's name (tier C, v2.23). Every sandbox it makes is
     #: recorded under it, and it acts on no other's. A single host keeps
     #: `default`, the name every row written before there could be two has.
@@ -328,6 +335,12 @@ class Settings(BaseSettings):
     @property
     def approved_image_digests(self) -> tuple[str, ...]:
         return (self.sandbox_image_digest,) if self.sandbox_image_digest else ()
+
+    @field_validator("site_public_url", "site_signing_secret", mode="before")
+    @classmethod
+    def read_an_empty_site_setting_as_unset(cls, value: object) -> object:
+        # Compose passes `${SITE_PUBLIC_URL:-}`, "" when unset: off, not invalid.
+        return None if value == "" else value
 
     @field_validator("sandbox_controller_advertise_url", mode="before")
     @classmethod
@@ -444,6 +457,24 @@ class Settings(BaseSettings):
                 "private one, or set SANDBOX_CONTROLLER_LISTEN_ANY=true on a host whose "
                 "every interface is private"
             )
+        return self
+
+    @model_validator(mode="after")
+    def reject_a_site_origin_without_a_signing_secret(self) -> "Settings":
+        if not self.site_public_url:
+            return self
+        if not self.site_signing_secret:
+            raise ValueError("site_public_url needs site_signing_secret (32 characters or more)")
+        if not self.console_base_url:
+            # The members' door sends people to the console to sign in.
+            raise ValueError("site_public_url needs console_base_url")
+        from tiny_hermes.sites.domain.site import same_host  # noqa: PLC0415 - a cycle otherwise
+
+        if same_host(self.site_public_url, self.console_base_url):
+            # Another port is another origin, but cookies ignore ports: on the
+            # console's host a site's script could read the console's CSRF
+            # cookie, and the browser would send the console's session along.
+            raise ValueError("site_public_url must be on a different host from console_base_url")
         return self
 
     @model_validator(mode="after")

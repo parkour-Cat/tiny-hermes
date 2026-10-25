@@ -72,3 +72,62 @@ async def seed_files(
             .values(workspace_revision_id=revision_id)
         )
     return revision_id, body
+
+
+async def seed_site(
+    engine: AsyncEngine,
+    settings: Settings,
+    run_id: str,
+    files: dict[str, bytes],
+) -> UUID:
+    """A committed revision holding `files`, made the session's latest."""
+    entries = tuple(WorkspaceEntry.file(path, body, mode=0o644) for path, body in files.items())
+    manifest = build_manifest(entries, schema_version=1)
+    revision_id = uuid4()
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions.begin() as db:
+        run = (await db.execute(select(RunRow).where(RunRow.id == UUID(run_id)))).scalar_one()
+        objects = MinioObjectStore(
+            endpoint=settings.s3_endpoint,
+            access_key=settings.s3_access_key,
+            secret_key=settings.s3_secret_key,
+            bucket=settings.s3_bucket,
+        )
+        await objects.ensure_bucket()
+        for body in files.values():
+            await objects.put_stream(
+                blob_object(
+                    workspace_id=run.workspace_id,
+                    session_id=run.session_id,
+                    digest=hashlib.sha256(body).hexdigest(),
+                ),
+                _chunks(body),
+                limit_bytes=len(body) + 1,
+            )
+        ref = manifest_object(
+            workspace_id=run.workspace_id, session_id=run.session_id, revision_id=revision_id
+        )
+        encoded = manifest.canonical_bytes()
+        await objects.put_stream(ref, _chunks(encoded), limit_bytes=len(encoded) + 1)
+        db.add(
+            WorkspaceRevisionRow(
+                id=revision_id,
+                workspace_id=run.workspace_id,
+                session_id=run.session_id,
+                parent_revision_id=None,
+                manifest_schema_version=1,
+                manifest_object_key=ref.key,
+                manifest_sha256=hashlib.sha256(encoded).hexdigest(),
+                total_bytes=manifest.total_bytes,
+                object_count=manifest.object_count,
+                created_by_run_id=run.id,
+            )
+        )
+        await db.flush()
+        run.checkpoint_workspace_revision_id = revision_id
+        await db.execute(
+            update(SessionRow)
+            .where(SessionRow.id == run.session_id)
+            .values(workspace_revision_id=revision_id)
+        )
+    return revision_id

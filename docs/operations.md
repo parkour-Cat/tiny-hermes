@@ -811,3 +811,42 @@ Docker 关于代理容器的 `start` 事件，收到就清扫一次，把代理�
 测试会打这个标签，作用是让开发机上正在跑的栈和集成测试互不清扫对方的东西。**不要给生产的资源打这个标签**：
 打了之后，生产的清扫和回收就看不见它们了。
 - 本机试装测到的开销：短命令每次多约 10 毫秒，大量写文件慢约 4 倍，每个沙箱多约 13 MiB 内存。
+
+## 18. 发布静态网站（v2.26）
+
+[设计](superpowers/specs/2026-10-25-site-publishing-design.md)。Agent 绑定 `site.publish` 后，可以把工作区里的一个目录发布成网站，
+返回一个链接。
+
+### 18.1 开启
+
+```bash
+# .env
+SITE_PUBLIC_URL=https://sites.example.com     # 必须和控制台是不同的主机名，只是端口不同不够
+SITE_SIGNING_SECRET=...                        # 至少 32 个字符，不要复用 SESSION_COOKIE_SECRET
+CONSOLE_BASE_URL=https://hermes.example.com    # 成员登录时要回到这里
+cd deploy/compose
+docker compose --env-file ../../.env --profile sites up -d --wait
+```
+
+- `site` 服务监听 8090，前面的反向代理负责 TLS。只接受 GET 和 HEAD。
+- 三个配置有任何一个不对（没配密钥、没配控制台地址、和控制台主机名相同），所有进程都会拒绝启动，并说明原因。
+- **为什么必须是不同的主机名**：cookie 不区分端口。同一主机名下，浏览器会把控制台的登录 cookie 发给网站，网站上的
+  脚本也能读到控制台的 CSRF cookie。本机演示用 `CONSOLE_BASE_URL=http://127.0.0.1:3000`、
+  `SITE_PUBLIC_URL=http://localhost:8090`。控制台的 cookie 不要设成整个上级域名都有效（`Domain=.example.com`），
+  否则子域名之间也会互相带上。
+- 不设 `SITE_PUBLIC_URL` 时，功能整体关闭，Agent 调用 `site.publish` 会得到「本部署没有开启网站发布」。
+
+### 18.2 日常
+
+- **控制台「网站」页面**：列出每个网站的标题、来自哪个 Run、谁能打开、什么时候过期。任何成员可以撤销；
+  `workspace_admin` 和 `developer` 可以延长（每次从现在起再加 `SITE_PUBLICATION_TTL_DAYS`，最长发布后 90 天）；
+  只有 `workspace_admin` 能改成「任何拿到链接的人都能打开」。
+- **链接只在发布时出现一次**：在 Run 的会话记录里。库里只存 token 的哈希，列表里也不显示链接。丢了就重新发布。
+- **审计**：`site.published`、`site.revoked`、`site.extended`、`site.visibility_changed`。
+
+### 18.3 已知风险
+
+- **同一来源下的网站可以互相读取**：所有网站都在 `SITE_PUBLIC_URL` 这一个来源下，路径不同。一个网站的脚本如果知道
+  另一个网站的 token，就能读到它的文件；成员网站的话，还要访问者恰好也持有那个网站的通行凭证。token 是 32 字节的
+  随机数，不可猜，但这不是严格隔离。要严格隔离，需要每个网站一个子域名，首版不支持。
+- **网站内容是模型写的**：内容安全策略限制了它不能向本站以外发请求、不能被嵌入别的页面，但页面上写了什么，平台不审查。

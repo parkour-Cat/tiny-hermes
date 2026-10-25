@@ -36,6 +36,7 @@ from tiny_hermes.runs.application.tool_answers import (
     answer_memory_remember,
     answer_platform_tool,
     answer_session_search,
+    answer_site_publish,
     answer_skill_load,
     answer_skill_propose,
     answer_todo_write,
@@ -158,6 +159,7 @@ from tiny_hermes.shared.metrics import (
     timed,
 )
 from tiny_hermes.shared.tracing import context_from, tracer
+from tiny_hermes.sites.application.publisher import SitePublisher
 from tiny_hermes.tools.application.execute import (
     ArtifactUpload,
     StreamedCommandRunner,
@@ -356,6 +358,7 @@ class WorkerRuntime:
         images: ImageSource | None = None,
         children: ChildRuns | None = None,
         artifacts: ArtifactReads | None = None,
+        sites: SitePublisher | None = None,
     ) -> None:
         self._sessions = session_factory
         self._model = model
@@ -395,6 +398,9 @@ class WorkerRuntime:
         # Absent, `artifact.read` is refused rather than answered with
         # nothing: an empty answer reads to a model like an empty file.
         self._artifacts = artifacts
+        # Absent, or without a site origin, `site.publish` says this
+        # deployment does not publish sites (§1.26, v2.26).
+        self._sites = sites
         # Optional, because a deployment with no tools configured needs none.
         # A Run that binds a tool and finds this absent fails rather than
         # running the command anywhere else — product design §16 leaves no
@@ -1437,6 +1443,17 @@ class WorkerRuntime:
                 results.append(answered)
                 if event is not None:
                     events.append(event)
+                continue
+            if call.name == "site.publish":
+                results.append(
+                    await answer_site_publish(
+                        self._sites,
+                        context,
+                        call,
+                        workspace_id=claimed.run.workspace_id,
+                        session_id=claimed.run.session_id,
+                    )
+                )
                 continue
             if call.name == "artifact.read":
                 results.append(

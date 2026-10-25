@@ -81,6 +81,7 @@ from tiny_hermes.session_workspace.infrastructure.sql_files import SqlWorkspaceF
 from tiny_hermes.shared.config import Settings, get_settings
 from tiny_hermes.shared.database import application_engine
 from tiny_hermes.shared.errors import AppError, AuditedDenial
+from tiny_hermes.sites.application.publisher import SitePublisher, SiteSettings
 from tiny_hermes.skills.application.service import SkillCatalog
 from tiny_hermes.skills.infrastructure.outbound_tarball import OutboundTarballSource
 from tiny_hermes.skills.infrastructure.sql_store import SqlSkillStore
@@ -96,6 +97,7 @@ class ApplicationResources:
         self._session_factory: async_sessionmaker[AsyncSession] | None = None
         self._notifier: WakeUpNotifier | None = None
         self._object_store: MinioObjectStore | None = None
+        self._site_publisher: SitePublisher | None = None
         self._event_hub: EventStreamHub | None = None
         self._event_push: RedisRunEventPush | None = None
         self._event_listener: asyncio.Task[None] | None = None
@@ -467,6 +469,20 @@ class ApplicationResources:
                 # claims before the Run exists and sleeps a whole idle poll.
                 for workspace_id, run_id in coordination.announcements():
                     await self.wake_up_notifier().publish(workspace_id, run_id)
+
+    def site_publisher(self) -> SitePublisher:
+        """Published sites (§1.26, v2.26); off when SITE_PUBLIC_URL is unset."""
+        if self._site_publisher is None:
+            self._site_publisher = SitePublisher(
+                sessions=self.session_factory(),
+                objects=self.object_store(),
+                settings=SiteSettings(
+                    public_url=self.settings.site_public_url,
+                    signing_secret=self.settings.site_signing_secret,
+                    ttl_days=self.settings.site_publication_ttl_days,
+                ),
+            )
+        return self._site_publisher
 
     def object_store(self) -> MinioObjectStore:
         if self._object_store is None:

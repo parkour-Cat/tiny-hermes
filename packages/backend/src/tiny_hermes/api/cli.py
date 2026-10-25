@@ -75,6 +75,7 @@ from tiny_hermes.shared.errors import AppError
 from tiny_hermes.shared.logging import configure_logging
 from tiny_hermes.shared.metrics import serve_configured_metrics
 from tiny_hermes.shared.tracing import configure_tracing
+from tiny_hermes.sites.application.publisher import SitePublisher, SiteSettings
 
 if TYPE_CHECKING:
     # Annotations only. The module pulls in the Feishu SDK, which is 10k modules
@@ -315,6 +316,19 @@ def _worker_runtime(
         # this is the only way one opens what it was passed.
         artifacts=SqlArtifactReads(
             sessions, None if workspace is None else workspace.objects
+        ),
+        # Published from the session's saved snapshot (§1.26, v2.26), so it
+        # needs the object store; off unless SITE_PUBLIC_URL is set.
+        sites=None
+        if workspace is None
+        else SitePublisher(
+            sessions=sessions,
+            objects=workspace.objects,
+            settings=SiteSettings(
+                public_url=settings.site_public_url,
+                signing_secret=settings.site_signing_secret,
+                ttl_days=settings.site_publication_ttl_days,
+            ),
         ),
         settings=WorkerSettings(
             worker_id=worker_id,

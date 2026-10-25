@@ -49,6 +49,7 @@ IMPLEMENTED_TOOLS = (
     "agent.delegate",
     "artifact.read",
     "todo.write",
+    "site.publish",
 )
 
 #: Tools the platform answers itself. `authorize` turns a call into a
@@ -67,6 +68,7 @@ PLATFORM_TOOLS = frozenset(
         "agent.delegate",
         "artifact.read",
         "todo.write",
+        "site.publish",
     }
 )
 
@@ -529,6 +531,62 @@ SESSION_SEARCH_SCHEMA: dict[str, Any] = {
 
 SESSION_SEARCH_ARGUMENTS = frozenset({"query", "limit"})
 
+#: §1.26, v2.26. The longest title the console lists a site under.
+MAX_SITE_TITLE = 100
+
+SITE_PUBLISH_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "site.publish",
+        "description": (
+            "Publish a static website from the workspace and get a link to it. "
+            "The directory must contain index.html; HTML, CSS, JavaScript, "
+            "images, fonts and JSON are served, nothing runs on a server. "
+            "Call this in its own round, after the round that wrote the files: "
+            "files written in the same round are not saved yet. The link is "
+            "shown once, here; give it to the person in your reply."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The site's directory in the workspace. Default: site",
+                },
+                "title": {
+                    "type": "string",
+                    "description": (
+                        f"A short name for the site, at most {MAX_SITE_TITLE} characters."
+                    ),
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+}
+
+SITE_PUBLISH_ARGUMENTS = frozenset({"path", "title"})
+
+
+def site_publish_of(call: ToolCallBlock) -> tuple[str, str | None]:
+    """What `site.publish` asked for: a directory and an optional title.
+
+    Shape only. Whether the directory is a site is answered against the saved
+    snapshot, where the files are.
+    """
+    unknown = set(call.arguments) - SITE_PUBLISH_ARGUMENTS
+    if unknown:
+        raise ToolRefused(
+            RefusalReason.INVALID_ARGUMENTS, call.call_id, ",".join(sorted(unknown))
+        )
+    path = call.arguments.get("path", "site")
+    if not isinstance(path, str) or not path.strip():
+        raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "path")
+    title = call.arguments.get("title")
+    if title is not None and (not isinstance(title, str) or len(title) > MAX_SITE_TITLE):
+        raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "title")
+    return path.strip(), (title.strip() or None) if isinstance(title, str) else None
+
 
 def session_search_of(call: ToolCallBlock) -> tuple[str, int | None]:
     """What `session.search` asked for, or a refusal.
@@ -816,6 +874,8 @@ def schemas_for(bound: tuple[str, ...]) -> list[dict[str, Any]]:
             schemas.append(ARTIFACT_READ_SCHEMA)
         elif name == "todo.write":
             schemas.append(TODO_WRITE_SCHEMA)
+        elif name == "site.publish":
+            schemas.append(SITE_PUBLISH_SCHEMA)
         elif name in FILE_SCHEMAS:
             schemas.append(FILE_SCHEMAS[name])
     return schemas

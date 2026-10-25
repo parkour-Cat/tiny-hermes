@@ -95,6 +95,8 @@ export const NAV_GROUPS: NavGroup[] = [
       { key: "audit", labelKey: "audit", introKey: "auditIntro", path: "audit", roles: null },
       // 依据：/api/v1/usage 对 viewer 200
       { key: "usage", labelKey: "usage", introKey: "usageIntro", path: "usage", roles: null },
+      // 依据：/api/v1/sites 对所有成员 200（v2.26 §1.26）
+      { key: "sites", labelKey: "sites", introKey: "sitesIntro", path: "sites", roles: null },
       // 依据：memory/application/subject_service.py 的 STEWARDS = {workspace_admin}
       //（平台管理员另算，见 GroupedPage）
       { key: "sessions", labelKey: "searchSessions", introKey: "searchSessionsIntro", path: "session-search", roles: ["workspace_admin"] },

@@ -18,6 +18,7 @@ from tiny_hermes.secrets.infrastructure import tables as secret_tables
 from tiny_hermes.session_workspace.infrastructure import tables as workspace_tables
 from tiny_hermes.shared.config import Settings
 from tiny_hermes.shared.database import Base
+from tiny_hermes.sites.infrastructure import tables as site_tables
 from tiny_hermes.skills.infrastructure import tables as skill_tables
 
 from integration.support import EventsUrl, ReadStream
@@ -31,6 +32,8 @@ assert workspace_tables.ObjectUploadRow.__tablename__
 assert artifact_tables.ArtifactRow.__tablename__
 assert secret_tables.SecretRow.__tablename__
 assert skill_tables.SkillRow.__tablename__
+assert site_tables.SitePublicationRow.__tablename__
+assert site_tables.SiteTicketUseRow.__tablename__
 assert end_user_tables.EndUserRow.__tablename__
 assert end_user_session_tables.EndUserSessionRow.__tablename__
 

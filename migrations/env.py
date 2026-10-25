@@ -28,6 +28,7 @@ from tiny_hermes.session_workspace.infrastructure import (  # noqa: F401
     tables as workspace_tables,
 )
 from tiny_hermes.shared.database import Base
+from tiny_hermes.sites.infrastructure import tables as site_tables  # noqa: F401
 from tiny_hermes.skills.infrastructure import tables as skill_tables  # noqa: F401
 from tiny_hermes.tenancy.infrastructure import tables as tenancy_tables  # noqa: F401
 

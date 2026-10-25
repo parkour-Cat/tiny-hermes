@@ -47,6 +47,7 @@ from tiny_hermes.runs.presentation.routes import run_router, session_router, usa
 from tiny_hermes.secrets.presentation.routes import secret_router
 from tiny_hermes.shared.config import Settings
 from tiny_hermes.shared.errors import AppError, AuditedDenial
+from tiny_hermes.sites.presentation.routes import site_router
 from tiny_hermes.skills.presentation.routes import skill_proposal_router, skill_router
 from tiny_hermes.tenancy.presentation.routes import workspace_router
 
@@ -140,6 +141,7 @@ def create_app(
     app.include_router(artifact_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(secret_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(outbound_scope_router(resources), dependencies=_CONSOLE_ONLY)
+    app.include_router(site_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(skill_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(http_tool_router(resources), dependencies=_CONSOLE_ONLY)
     app.include_router(approval_router(resources), dependencies=_CONSOLE_ONLY)
