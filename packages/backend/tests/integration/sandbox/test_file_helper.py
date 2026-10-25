@@ -16,9 +16,10 @@ from typing import Any
 
 import pytest
 
+from .conftest import LABEL
+
 HELPER = "/usr/local/bin/tiny-hermes-file-helper"
 ROOT = "/workspace/data"
-LABEL = "tiny-hermes.test"
 
 
 @dataclass(frozen=True)

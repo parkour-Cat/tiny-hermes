@@ -24,7 +24,8 @@ from tiny_hermes.sandbox.domain.container_policy import (
 )
 from tiny_hermes.sandbox.infrastructure.docker_engine import DockerEngine
 
-LABEL = "tiny-hermes.test"
+from .conftest import LABEL
+
 DATA = "/workspace/data"
 
 

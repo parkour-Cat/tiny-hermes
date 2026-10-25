@@ -34,7 +34,8 @@ from tiny_hermes.sandbox.domain.container_policy import (
 )
 from tiny_hermes.sandbox.infrastructure.docker_engine import DockerEngine
 
-LABEL = "tiny-hermes.test"
+from .conftest import LABEL
+
 #: A public address, used as a literal so the probe needs no DNS: what is being
 #: asked is whether a route exists, and a name would answer a different
 #: question when resolution itself is what fails.
