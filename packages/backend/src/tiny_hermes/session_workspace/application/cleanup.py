@@ -38,6 +38,10 @@ INDEX_LIMIT_BYTES = 1024 * 1024
 #: How many staged objects one reclaim pass will enumerate and delete.
 STAGING_BATCH = 1000
 
+#: Statuses a candidate may still be committed from. A claimed one in these is
+#: timed out, and fenced before it is reclaimed.
+_LIVE = frozenset({UploadStatus.UPLOADING, UploadStatus.FINALIZING, UploadStatus.READY})
+
 
 class Reference(StrEnum):
     """What the collector knows about one final key's other users."""
@@ -142,6 +146,23 @@ async def _reclaim(
 ) -> CleanupOutcome:
     deleted = 0
     index_ref = ObjectRef(key=upload.candidate_index_key)
+
+    if upload.status in _LIVE:
+        # The claim was a read. A timed-out candidate is fenced before anything
+        # is deleted: commit checks the status, not the deadline, so a commit
+        # slower than the staging lifetime (2026-10-25 review) landed after the
+        # finals went, and its revision named objects that were gone. Fenced,
+        # that commit is refused; if it landed first, this pass deletes nothing
+        # and the next claim meets the row as committed.
+        try:
+            await store.abandon(upload.upload_id, reason="expired")
+        except UploadStateConflict:
+            return CleanupOutcome(
+                upload_id=upload.upload_id,
+                finished=False,
+                deleted_objects=0,
+                retry_reason="moved on since it was claimed",
+            )
 
     if upload.status is not UploadStatus.COMMITTED:
         # Final keys may exist for any candidate that reached `finalizing`.
