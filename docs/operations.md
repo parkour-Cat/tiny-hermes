@@ -787,8 +787,11 @@ v2.25 起 `SANDBOX_RUNTIME` 决定沙箱用哪个 OCI 运行时，默认 `runc`�
     `/etc/hosts`（[记录](superpowers/verification/2026-10-24-gvisor-compat.md)）；
   - 缓存目录（`/workspace/cache`）的 inode 上限不生效：**没修**，这是 gVisor 的 tmpfs 本身的问题。它的总量
     仍受大小上限和容器内存约束。
-- 装了 `runsc` 的机器上，沙箱集成测试会自动在两种运行时下各跑一遍。CI 没装 `runsc`，那一半会跳过。
-  所以**换运行时之前，要在装好的机器上把沙箱集成测试跑一遍**。
+- 装了 `runsc` 的机器上，沙箱集成测试会自动在两种运行时下各跑一遍。CI 的 backend-integration 会装固定版本
+  的 gVisor（`20261019.0`，按 sha512 校验），并用 `SANDBOX_TEST_RUNTIMES=runc,runsc` 要求两种都在：少一种就
+  失败，不会悄悄跳过。本地不设这个变量时，没装的运行时会被跳过。
+- **CI 测的是 x86_64 上那个固定版本。** 生产上的 gVisor 版本、CPU 架构不一样时，换之前还要在那台机器上
+  再跑一遍沙箱集成测试。
 - 本机栈按 CI 的出网设置跑过一次（[记录](superpowers/verification/2026-10-24-proxy-reattach.md)）：
   gVisor 下，沙箱可以通过真实的 `egress-proxy` 访问已授权的目标；没授权的目标会被拒绝；绕过代理直连
   会失败。
