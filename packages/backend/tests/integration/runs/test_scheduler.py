@@ -594,7 +594,10 @@ async def test_a_scan_that_hangs_is_abandoned_and_reported_without_holding_the_r
     engine: AsyncEngine, empty_database: None
 ) -> None:
     del empty_database
-    runtime = _runtime(engine, scan_timeout_seconds=0.5)
+    # Two seconds, not half of one: the timeout applies to every scan, and
+    # on a loaded CI runner (2026-10-25) a real scan took longer than 0.5 s
+    # and was reported alongside the hung one.
+    runtime = _runtime(engine, scan_timeout_seconds=2.0)
     ran: list[str] = []
 
     async def hang(_: str) -> None:
@@ -611,8 +614,11 @@ async def test_a_scan_that_hangs_is_abandoned_and_reported_without_holding_the_r
     with pytest.raises(ExceptionGroup) as failed:
         await runtime.run_once()
 
-    assert asyncio.get_running_loop().time() - started < 3.0
+    assert asyncio.get_running_loop().time() - started < 8.0
     assert sorted(ran) == ["_expire_approvals", "_recover_interrupted"]
-    [timeout] = failed.value.exceptions
+    [timeout] = [
+        error
+        for error in failed.value.exceptions
+        if "dispatch_channel_replies" in " ".join(getattr(error, "__notes__", []))
+    ]
     assert isinstance(timeout, TimeoutError)
-    assert "dispatch_channel_replies" in " ".join(getattr(timeout, "__notes__", []))

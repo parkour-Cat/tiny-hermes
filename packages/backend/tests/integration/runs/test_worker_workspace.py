@@ -8,6 +8,7 @@ gateway sandbox over real PostgreSQL and MinIO.
 """
 
 import asyncio
+import contextlib
 import hashlib
 import io
 import os
@@ -1136,9 +1137,22 @@ async def test_a_lane_refused_sandbox_room_goes_straight_on_to_a_run_without_too
     sandbox wait too (P95 0.02 s became 2.0 s)."""
     _submit(client, scope, tooled_agent(["shell.exec"]))
     message, _ = _submit(client, scope, tooled_agent([]))
-    worker = _full_worker(engine, objects, FullSandbox(), idle_poll_seconds=2)
-
-    await _run_forever_for(worker, 1.0)
+    # An idle poll far longer than the wait allowed: a lane that paused would
+    # only come back after 30 s. A fixed one-second window, as before, failed
+    # on a loaded CI runner (2026-10-25) with the lane doing the right thing.
+    worker = _full_worker(engine, objects, FullSandbox(), idle_poll_seconds=30)
+    stop = asyncio.Event()
+    running = asyncio.create_task(worker.run_forever(stop))
+    try:
+        for _ in range(100):
+            if (await _run_row(engine, message)).status == "completed":
+                break
+            await asyncio.sleep(0.1)
+    finally:
+        # Cancelled, not stopped: a stop is only seen after the idle wait.
+        running.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running
 
     assert (await _run_row(engine, message)).status == "completed"
 
