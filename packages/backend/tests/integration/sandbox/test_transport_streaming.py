@@ -36,6 +36,9 @@ class SpyStreams:
         #: Raised after the first frames of a send are out, as a sandbox's
         #: container vanishing mid-exec does.
         self.fails_mid_send: Exception | None = None
+        #: Cut the connection after the first frames, as a controller that
+        #: dies mid-send does: no ERROR frame, no answer line.
+        self.drops_mid_send = False
         self.to_send = b""
         self.receive_limit = 8 * 1024 * 1024
 
@@ -84,6 +87,10 @@ class SpyStreams:
         if self.fails_mid_send is not None:
             await channel.push(self.to_send[:1024])
             raise self.fails_mid_send
+        if self.drops_mid_send:
+            await channel.push(self.to_send[:1024])
+            channel._writer.transport.abort()  # pyright: ignore[reportPrivateUsage]
+            raise ConnectionResetError("dropped mid-send")
         await channel.push(self.to_send)
         return await channel.finish_send()
 
@@ -185,6 +192,33 @@ async def test_a_failure_after_the_first_frames_arrives_as_that_failure(
             "workspace_export", {"run_id": "r"}, _swallow, limit=len(BODY)
         )
     assert refused.value.reason == reason
+
+
+async def test_a_stream_cut_mid_send_is_unreachable_and_the_next_call_works(
+    wired: tuple[SpyStreams, ControllerClient],
+) -> None:
+    """A controller that dies mid-send says nothing more: no ERROR frame, no
+    answer. The client must report that as unreachable — nothing was decided
+    — within its own timeout rather than wait, and the server must answer the
+    next call. Written after the behaviour, to hold it."""
+    spy, client = wired
+    spy.to_send = BODY
+    spy.drops_mid_send = True
+
+    with pytest.raises(ControllerClient.Unreachable):
+        await asyncio.wait_for(
+            client.receive_stream("workspace_export", {"run_id": "r"}, _swallow, limit=len(BODY)),
+            timeout=10,
+        )
+
+    spy.drops_mid_send = False
+    received = bytearray()
+
+    async def sink(chunk: bytes) -> None:
+        received.extend(chunk)
+
+    await client.receive_stream("workspace_export", {"run_id": "r"}, sink, limit=len(BODY))
+    assert bytes(received) == BODY
 
 
 async def test_a_declared_total_above_the_server_limit_dies_at_start(
