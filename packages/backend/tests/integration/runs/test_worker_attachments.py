@@ -1,6 +1,6 @@
 """A file somebody sent reaches the sandbox's inbox before the Agent looks
 (§1.27, v2.27): fetched by the Worker, written with the same helper
-`file.write` uses, and only for the Run that received it."""
+`file.write` uses, once per Session."""
 
 import json
 from collections.abc import Callable
@@ -18,6 +18,7 @@ from tiny_hermes.session_workspace.domain.models import WorkspaceQuota
 from tiny_hermes.session_workspace.infrastructure.minio_store import MinioObjectStore
 from tiny_hermes.tools.domain.files import FILE_HELPER
 
+from . import test_worker_workspace as _workspace
 from .test_worker_workspace import (  # pyright: ignore[reportPrivateUsage]
     GatewaySandbox,
     Recording,
@@ -26,9 +27,10 @@ from .test_worker_workspace import (  # pyright: ignore[reportPrivateUsage]
     _submit,  # pyright: ignore[reportPrivateUsage]
     _tool,  # pyright: ignore[reportPrivateUsage]
 )
-from .test_worker_workspace import (  # noqa: F401 - registers the fixtures by their own names
-    objects as objects_fixture,  # pyright: ignore[reportUnusedImport]
-)
+
+# pytest finds a fixture by the module attribute it is bound to.
+objects = _workspace.objects
+tooled_agent = _workspace.tooled_agent
 
 BODY = b"PK\x03\x04 the bytes of a spreadsheet"
 
