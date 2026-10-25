@@ -218,3 +218,41 @@ async def test_a_command_in_a_networked_sandbox_still_runs(
     )
 
     assert result.output.strip() == "fine"
+
+
+async def test_a_recreated_proxy_is_put_back_on_every_live_sandbox_network(
+    networked: SandboxController,
+    docker_client: Any,
+    image_digest: str,
+    proxy: Any,
+    runs: Callable[[], UUID],
+) -> None:
+    """A proxy container that is recreated — an upgrade, `compose up` — comes
+    back on the default bridge only. Nothing joined it to the sandbox networks
+    again, so every sandbox alive across the change lost its way out until it
+    was rebuilt. The sweep now puts it back, at the address the sandbox's hosts
+    entry already names."""
+    _, sandbox = await _run(networked, docker_client, runs())
+    [network] = _networks_of(sandbox)
+    proxy.remove(force=True)
+    docker_client.containers.run(
+        image_digest,
+        entrypoint=["perl", "-e", LISTEN.format(port=3128)],
+        name=proxy.name,
+        labels={LABEL: "1"},
+        detach=True,
+    )
+    assert await _reaches(sandbox, "egress-proxy", 3128) is False
+
+    await networked.sweep()
+
+    attached = docker_client.networks.get(network)
+    attached.reload()
+    subnet = IPv4Network(attached.attrs["IPAM"]["Config"][0]["Subnet"])
+    [(_, endpoint)] = [
+        (key, value)
+        for key, value in attached.attrs["Containers"].items()
+        if value["Name"] == proxy.name
+    ]
+    assert endpoint["IPv4Address"].split("/")[0] == str(subnet[2])
+    assert await _reaches(sandbox, "egress-proxy", 3128) is True
