@@ -37,6 +37,12 @@ class SqlWorkspaceFiles:
             return None
         return await self._source(workspace_id, session_id, row.workspace_revision_id)
 
+    async def revision_source(
+        self, workspace_id: UUID, session_id: UUID, revision_id: UUID
+    ) -> FileSource:
+        """One pinned revision, whatever the session has moved on to since."""
+        return await self._source(workspace_id, session_id, revision_id)
+
     async def _source(
         self,
         workspace_id: UUID,

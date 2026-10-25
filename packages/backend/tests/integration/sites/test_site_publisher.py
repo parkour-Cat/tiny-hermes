@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
-from tiny_hermes.runs.infrastructure.tables import RunRow, SessionRow
+from tiny_hermes.runs.infrastructure.tables import RunRow
 from tiny_hermes.session_workspace.infrastructure.minio_store import MinioObjectStore
 from tiny_hermes.shared.config import Settings
 from tiny_hermes.sites.application.publisher import (
@@ -19,6 +19,7 @@ from tiny_hermes.sites.application.publisher import (
 )
 from tiny_hermes.sites.domain.site import SiteRefused
 from tiny_hermes.sites.infrastructure.tables import SitePublicationRow
+from tiny_hermes.tenancy.infrastructure.tables import WorkspaceRow
 
 from ..workspace_file_support import seed_site
 
@@ -29,7 +30,12 @@ APP = b"document.title = 'hello';"
 
 
 def _publisher(engine: AsyncEngine, settings: Settings, **overrides: Any) -> SitePublisher:
-    site = {"public_url": PUBLIC, "signing_secret": SECRET, "ttl_days": 7, **overrides}
+    site: dict[str, Any] = {
+        "public_url": PUBLIC,
+        "signing_secret": SECRET,
+        "ttl_days": 7,
+        **overrides,
+    }
     return SitePublisher(
         sessions=async_sessionmaker(engine, expire_on_commit=False),
         objects=MinioObjectStore(
@@ -161,10 +167,10 @@ async def test_a_revoked_or_expired_link_resolves_to_nothing(
     assert await publisher.resolve("not-a-token") is None
 
 
-async def test_erasing_the_session_takes_its_sites_with_it(
+async def test_erasing_the_workspace_takes_its_sites_with_it(
     engine: AsyncEngine, settings: Settings, submitted_run: dict[str, Any]
 ) -> None:
-    """Erasure wins over sharing: the revision row goes, and the link with it."""
+    """Erasure wins over sharing: the revision rows go, and the links with them."""
     run_id = str(submitted_run["id"])
     await seed_site(engine, settings, run_id, {"site/index.html": INDEX})
     workspace, session, run = await _ids(engine, run_id)
@@ -174,7 +180,7 @@ async def test_erasing_the_session_takes_its_sites_with_it(
     )
 
     async with engine.begin() as db:
-        await db.execute(delete(SessionRow).where(SessionRow.id == session))
+        await db.execute(delete(WorkspaceRow).where(WorkspaceRow.id == workspace))
 
     assert await publisher.resolve(_token(published.url)) is None
 

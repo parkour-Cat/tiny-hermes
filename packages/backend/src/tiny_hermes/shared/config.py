@@ -246,6 +246,13 @@ class Settings(BaseSettings):
     #: or `runsc` (gVisor) on a host where it is installed. The controller
     #: refuses to start on one its Docker does not have.
     sandbox_runtime: str = Field(default="runc", pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$")
+    #: Where published sites are served (§1.26, v2.26): its own origin, never
+    #: the console's. Unset, publishing is off and `site.publish` says so.
+    site_public_url: str | None = None
+    #: Signs the members' tickets and passes. Not the console's cookie secret:
+    #: a compromised site process must not be able to mint console sessions.
+    site_signing_secret: str | None = Field(default=None, min_length=32)
+    site_publication_ttl_days: int = Field(default=7, ge=1, le=90)
     #: This sandbox host's name (tier C, v2.23). Every sandbox it makes is
     #: recorded under it, and it acts on no other's. A single host keeps
     #: `default`, the name every row written before there could be two has.
@@ -444,6 +451,12 @@ class Settings(BaseSettings):
                 "private one, or set SANDBOX_CONTROLLER_LISTEN_ANY=true on a host whose "
                 "every interface is private"
             )
+        return self
+
+    @model_validator(mode="after")
+    def reject_a_site_origin_without_a_signing_secret(self) -> "Settings":
+        if self.site_public_url and not self.site_signing_secret:
+            raise ValueError("site_public_url needs site_signing_secret (32 characters or more)")
         return self
 
     @model_validator(mode="after")
