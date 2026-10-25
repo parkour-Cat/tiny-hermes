@@ -20,6 +20,10 @@ from tiny_hermes.sandbox.domain.command import (
     ALLOWED_WORKING_DIRECTORIES,
     SandboxCommand,
 )
+from tiny_hermes.session_workspace.domain.manifest import (
+    InvalidWorkspacePath,
+    normalize_workspace_path,
+)
 from tiny_hermes.tools.domain.files import (
     FILE_ARGUMENTS,
     FileArgumentsInvalid,
@@ -50,6 +54,7 @@ IMPLEMENTED_TOOLS = (
     "artifact.read",
     "todo.write",
     "site.publish",
+    "file.send",
 )
 
 #: Tools the platform answers itself. `authorize` turns a call into a
@@ -69,6 +74,7 @@ PLATFORM_TOOLS = frozenset(
         "artifact.read",
         "todo.write",
         "site.publish",
+        "file.send",
     }
 )
 
@@ -588,6 +594,55 @@ def site_publish_of(call: ToolCallBlock) -> tuple[str, str | None]:
     return path.strip(), (title.strip() or None) if isinstance(title, str) else None
 
 
+FILE_SEND_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "file.send",
+        "description": (
+            "Send one file from the workspace to the person you are talking to. "
+            "In Feishu it arrives in the conversation as a file they can open; "
+            "elsewhere you are told where they can download it. At most 30 MB, "
+            "and 10 files per task. Call this in its own round, after the round "
+            "that wrote the file: files written in the same round are not saved yet."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The file's path in the workspace, e.g. out/report.xlsx",
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+def file_send_of(call: ToolCallBlock) -> str:
+    """What `file.send` asked for: one workspace path.
+
+    Shape only. Whether the file exists, and is small enough, is answered
+    against the saved snapshot, where the files are.
+    """
+    unknown = set(call.arguments) - {"path"}
+    if unknown:
+        raise ToolRefused(
+            RefusalReason.INVALID_ARGUMENTS, call.call_id, ",".join(sorted(unknown))
+        )
+    raw = call.arguments.get("path")
+    if not isinstance(raw, str):
+        raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "path")
+    given = raw.strip()
+    while given.startswith("./"):
+        given = given[2:]
+    try:
+        return normalize_workspace_path(given)
+    except InvalidWorkspacePath as refused_path:
+        raise ToolRefused(RefusalReason.INVALID_ARGUMENTS, call.call_id, "path") from refused_path
+
+
 def session_search_of(call: ToolCallBlock) -> tuple[str, int | None]:
     """What `session.search` asked for, or a refusal.
 
@@ -876,6 +931,8 @@ def schemas_for(bound: tuple[str, ...]) -> list[dict[str, Any]]:
             schemas.append(TODO_WRITE_SCHEMA)
         elif name == "site.publish":
             schemas.append(SITE_PUBLISH_SCHEMA)
+        elif name == "file.send":
+            schemas.append(FILE_SEND_SCHEMA)
         elif name in FILE_SCHEMAS:
             schemas.append(FILE_SCHEMAS[name])
     return schemas

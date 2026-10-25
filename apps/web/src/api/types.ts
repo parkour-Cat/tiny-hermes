@@ -507,6 +507,9 @@ export const IMPLEMENTED_TOOLS = [
   // §16.1 (v2.26). Publishes a workspace directory as a site and hands back
   // the link; useless unless the deployment sets SITE_PUBLIC_URL.
   "site.publish",
+  // §16.1 (v2.27). Sends a saved workspace file into the Feishu conversation;
+  // elsewhere the Agent is told to point at the Run's files instead.
+  "file.send",
 ] as const;
 
 /**

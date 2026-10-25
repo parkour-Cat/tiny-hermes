@@ -20,7 +20,9 @@ from tiny_hermes.channels.application.feishu_service import FeishuChannelService
 from tiny_hermes.channels.application.ingestion import ChannelIngestion
 from tiny_hermes.channels.application.outbound import ChannelReplyDispatcher
 from tiny_hermes.channels.application.webhook_service import FeishuWebhookService
+from tiny_hermes.channels.infrastructure.feishu_images import MAX_FILE_BYTES
 from tiny_hermes.channels.infrastructure.feishu_sender import FeishuSender
+from tiny_hermes.channels.infrastructure.file_delivery import ChannelFileSender
 from tiny_hermes.channels.infrastructure.run_images import ChannelImageSource
 from tiny_hermes.channels.infrastructure.sql_channel_store import SqlChannelStore
 from tiny_hermes.channels.infrastructure.tables import ChannelBindingRow
@@ -269,6 +271,22 @@ def _worker_runtime(
             ),
             optional_kek(settings.tiny_hermes_kek),
         ),
+        # §1.27, v2.27: a file a person sent, fetched the same way into the
+        # sandbox's inbox. Its own client because a file may weigh more than
+        # the general response ceiling allows; the fetcher's 16 MB is the limit.
+        files=ChannelImageSource(
+            sessions,
+            lambda workspace_id: SafeOutboundClient(
+                egress=_workspace_egress(settings, workspace_id),
+                connect_timeout=settings.outbound_connect_timeout_seconds,
+                read_timeout=settings.outbound_read_timeout_seconds,
+                max_redirects=settings.outbound_max_redirects,
+                max_response_bytes=max(
+                    settings.outbound_max_response_bytes, MAX_FILE_BYTES + 1
+                ),
+            ),
+            optional_kek(settings.tiny_hermes_kek),
+        ),
         # An Agent's calls to somebody else's API leave from here rather than
         # from the sandbox, so the credential stays on this side and the
         # request passes the same egress boundary as every other outbound
@@ -329,6 +347,23 @@ def _worker_runtime(
                 signing_secret=settings.site_signing_secret,
                 ttl_days=settings.site_publication_ttl_days,
             ),
+        ),
+        # §1.27, v2.27: a saved file, sent into the Feishu conversation the
+        # Session belongs to; elsewhere the model is told where to find it.
+        # Leaves through the workspace's egress, like fetching an attachment.
+        file_sends=None
+        if workspace is None
+        else ChannelFileSender(
+            sessions,
+            workspace.objects,
+            lambda workspace_id: SafeOutboundClient(
+                egress=_workspace_egress(settings, workspace_id),
+                connect_timeout=settings.outbound_connect_timeout_seconds,
+                read_timeout=settings.outbound_read_timeout_seconds,
+                max_redirects=settings.outbound_max_redirects,
+                max_response_bytes=settings.outbound_max_response_bytes,
+            ),
+            optional_kek(settings.tiny_hermes_kek),
         ),
         settings=WorkerSettings(
             worker_id=worker_id,

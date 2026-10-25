@@ -117,6 +117,19 @@ def _bounded_int(
     return value
 
 
+def inbox_write_command(name: str, body: bytes) -> SandboxCommand:
+    """Writes an attachment to `inbox/{name}` (§1.27, v2.27).
+
+    `file.write`'s own helper and ceiling, so an attachment can reach no path
+    and no size a model's write could not. The name is checked again here
+    rather than trusted from the transcript it was read out of.
+    """
+    path = _safe_path({"path": f"inbox/{name}"})
+    if path.count("/") != 1:
+        raise FilePathRefused(f"an attachment is a single name under inbox/: {name!r}")
+    return _helper(["write", path, str(WRITE_LIMIT_BYTES)], stdin=body)
+
+
 def _helper(arguments: list[str], *, stdin: bytes | None = None) -> SandboxCommand:
     return SandboxCommand(
         argv=[FILE_HELPER, "--root", DATA_ROOT, *arguments],

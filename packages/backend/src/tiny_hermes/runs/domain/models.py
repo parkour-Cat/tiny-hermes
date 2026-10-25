@@ -262,6 +262,14 @@ class RunEventType(StrEnum):
     # transition. Technical design §11.3 requires the Agent be told, and this
     # is the half a person reads.
     SANDBOX_CACHE_RESET = "sandbox_cache_reset"
+    #: §1.27, v2.27: an attachment fetched into the sandbox's inbox, once per
+    #: Run and reference, so a later slice does not overwrite what the Agent
+    #: made of it; or one that could not be, and the reason the model was told.
+    ATTACHMENT_PLACED = "attachment_placed"
+    ATTACHMENT_FAILED = "attachment_failed"
+    #: §1.27, v2.27: one `file.send` that reached the person, or was saved
+    #: for them to download. Path and size only, never the content.
+    FILE_SENT = "file_sent"
 
     RUN_LEASE_ACQUIRED = "run_lease_acquired"
     RUN_SLICE_ENDED = "run_slice_ended"

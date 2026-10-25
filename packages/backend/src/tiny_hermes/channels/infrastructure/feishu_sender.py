@@ -171,6 +171,25 @@ class FeishuSender:
         found: Any = cast(dict[str, Any], data).get("message_id")
         return found if isinstance(found, str) and found else None
 
+    async def send_file(
+        self,
+        *,
+        app_id: str,
+        app_secret: str,
+        open_id: str,
+        file_key: str,
+        delivery_key: str | None = None,
+    ) -> None:
+        """A `file` message naming an upload (§1.27, v2.27)."""
+        await self._send(
+            app_id=app_id,
+            app_secret=app_secret,
+            open_id=open_id,
+            msg_type="file",
+            content=json.dumps({"file_key": file_key}),
+            delivery_key=delivery_key,
+        )
+
     async def update_card(
         self,
         *,
@@ -255,6 +274,11 @@ class FeishuSender:
             expires_at=self._now() + max(lifetime - _EXPIRY_MARGIN_SECONDS, 60),
         )
         return value
+
+    def envelope_of(self, answer: httpx.Response) -> dict[str, Any]:
+        """`_envelope`, for another caller in this package that sends its own
+        request with this sender's token."""
+        return self._envelope(answer)
 
     def _envelope(self, answer: httpx.Response) -> dict[str, Any]:
         """Feishu's own envelope, or a refusal.
