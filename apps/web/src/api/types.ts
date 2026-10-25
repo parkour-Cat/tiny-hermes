@@ -891,3 +891,16 @@ export type WorkspaceLimitsResponse = {
   ceilings: LimitValues;
 };
 
+
+/** A published site (§1.26, v2.26). The link is never listed. */
+export type SiteResponse = {
+  id: string;
+  run_id: string;
+  title: string | null;
+  root: string;
+  visibility: "members" | "link";
+  created_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+  active: boolean;
+};

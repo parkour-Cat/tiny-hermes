@@ -45,13 +45,15 @@ function renderSites(role: Role): void {
 }
 
 test("a published site is listed by title, who can open it and when it ends, without its link", async () => {
-  server.use(http.get("/api/v1/sites", () => HttpResponse.json([ACTIVE, { ...ACTIVE, id: "x", title: null, active: false, revoked_at: "2026-10-25T01:00:00Z" }])));
+  server.use(http.get("/api/v1/sites", () => HttpResponse.json([ACTIVE, { ...ACTIVE, id: "x", title: null, visibility: "link", active: false, revoked_at: "2026-10-25T01:00:00Z" }])));
   renderSites("viewer");
 
   expect(await screen.findByText("Ledger")).toBeInTheDocument();
   expect(screen.getByText("仅成员")).toBeInTheDocument();
+  expect(screen.getByText("任何人")).toBeInTheDocument();
+  expect(screen.getByText("未命名网站")).toBeInTheDocument();
   expect(screen.getByText("已撤销")).toBeInTheDocument();
-  expect(screen.getByText("site")).toBeInTheDocument();
+  expect(screen.getAllByText("site")).toHaveLength(2);
   expect(screen.queryByText(/\/s\//)).toBeNull();
 });
 
@@ -100,7 +102,7 @@ test("an administrator is asked before a site is opened to anyone with the link"
   await userEvent.click(await screen.findByRole("button", { name: "改为任何人可打开" }));
   const dialog = await screen.findByRole("dialog");
   expect(within(dialog).getByText(/拿到链接的任何人/)).toBeInTheDocument();
-  await userEvent.click(within(dialog).getByRole("button", { name: "确定" }));
+  await userEvent.click(within(dialog).getByRole("button", { name: "改为任何人可打开" }));
 
   await waitFor(() => expect(opened).toEqual({ visibility: "link" }));
 });

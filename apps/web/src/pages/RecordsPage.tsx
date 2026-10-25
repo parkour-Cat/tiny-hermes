@@ -2,6 +2,7 @@ import { GroupedPage } from "../layout/GroupedPage";
 import { SessionSearchPage } from "./SessionSearchPage";
 import { AuditPage } from "./AuditPage";
 import { SubjectDataPage } from "./SubjectDataPage";
+import { SitesPage } from "./SitesPage";
 import { UsagePage } from "./UsagePage";
 import { useLocation } from "react-router-dom";
 
@@ -14,6 +15,7 @@ export function RecordsPage() {
       render={(key) =>
         key === "audit" ? <AuditPage /> :
         key === "usage" ? <UsagePage /> :
+        key === "sites" ? <SitesPage /> :
         key === "subjects" ? <SubjectDataPage key={search} /> :
         key === "sessions" ? <SessionSearchPage /> : null
       }
