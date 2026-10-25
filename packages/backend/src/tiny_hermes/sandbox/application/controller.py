@@ -18,6 +18,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
+from ipaddress import IPv4Network
 from typing import Protocol
 from uuid import UUID
 
@@ -472,6 +473,7 @@ class SandboxController:
         if self.networking is not None:
             for network in await self.engine.networks_labelled(_RUN_LABEL):
                 if await self._network_recorded(network.labels):
+                    await self._keep_proxy_on(self.networking, network.name)
                     continue
                 if await self.engine.remove_network_if_present(network.name):
                     await self._audit_sweep(network.labels, "network nothing recorded removed")
@@ -651,6 +653,25 @@ class SandboxController:
             )
             return address
         raise SandboxRefused(RefusalReason.NETWORK_POOL_EXHAUSTED)
+
+    async def _keep_proxy_on(self, networking: SandboxNetworking, name: str) -> None:
+        """Put the proxy back on a live sandbox's network if it is not there.
+
+        A recreated proxy container comes back on its own networks only, and
+        nothing else joins it to the sandbox networks again: every sandbox
+        alive across the change had no way out until it was rebuilt. Back at
+        the fixed address, which is what the sandbox's hosts entry names.
+        """
+        subnet, attached = await self.engine.network_endpoints(name)
+        if subnet is None or networking.proxy_container in attached:
+            return
+        await self.engine.connect(
+            name,
+            networking.proxy_container,
+            [networking.proxy_alias],
+            address=str(IPv4Network(subnet)[2]),
+        )
+        logger.warning("egress proxy put back on a sandbox network", extra={"network": name})
 
     async def _close_network(self, instance_id: UUID) -> None:
         """After the container: Docker will not remove a network in use."""
