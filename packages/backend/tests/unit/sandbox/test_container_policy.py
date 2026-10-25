@@ -6,6 +6,7 @@ opens a socket. A test here that fails is a container that would have been built
 wrong; a test in `test_controller.py` that fails is a container that *was*.
 """
 
+from dataclasses import replace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -244,6 +245,9 @@ def test_the_docker_arguments_are_exactly_these_and_no_others() -> None:
         # §1.25, v2.25: named every time, so `runc` is a choice the config made
         # rather than whatever the daemon defaults to.
         "runtime",
+        # 2026-10-24: the proxy by address, since gVisor does not answer
+        # Docker's embedded DNS. Empty without a boundary.
+        "extra_hosts",
         "image",
         "command",
         "user",
@@ -322,3 +326,15 @@ def test_the_runtime_is_runc_unless_another_is_named() -> None:
     its own between a sandbox and the host's."""
     assert config().as_docker_kwargs()["runtime"] == "runc"
     assert config(runtime="runsc").as_docker_kwargs()["runtime"] == "runsc"
+
+
+def test_a_sandbox_without_a_boundary_is_told_no_hosts() -> None:
+    assert config().as_docker_kwargs()["extra_hosts"] == {}
+
+
+def test_the_hosts_a_sandbox_is_given_reach_docker_as_they_are() -> None:
+    """The controller fills these in once the proxy has an address on the
+    sandbox's network; the config only carries them."""
+    given = replace(config(), extra_hosts={"egress-proxy": "10.249.0.2"})
+
+    assert given.as_docker_kwargs()["extra_hosts"] == {"egress-proxy": "10.249.0.2"}

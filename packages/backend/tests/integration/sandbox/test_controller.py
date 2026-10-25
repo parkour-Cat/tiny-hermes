@@ -490,6 +490,7 @@ async def test_a_reused_instance_is_somebody_to_the_proxy_again(
     image_digest: str,
     leases: StubLeases,
     proxy: Any,
+    sandbox_runtime: str,
 ) -> None:
     """The proxy knows a sandbox only by its address row. A slice ends with
     freeze, which deletes the row, and the next slice's acquire hands the
@@ -510,6 +511,7 @@ async def test_a_reused_instance_is_somebody_to_the_proxy_again(
                 approved_digests=(image_digest,),
                 leases=leases,
                 networking=networking,
+                runtime=sandbox_runtime,
             )
             first = await acquired(controller, run_id=run_id)
             await controller.freeze(run_id=run_id, lease_id=LEASE, sandbox_id=first.sandbox_id)
@@ -712,13 +714,13 @@ async def test_two_commands_on_one_sandbox_run_at_once_and_each_gets_its_own_out
 
 
 async def test_a_sandbox_runs_on_the_runtime_the_controller_names(
-    controller: SandboxController, docker_client: Any
+    controller: SandboxController, docker_client: Any, sandbox_runtime: str
 ) -> None:
     """§1.25, v2.25: named, not left to the daemon's default."""
     box = await acquired(controller)
 
     container = docker_client.containers.get(await _container_of(controller, box.sandbox_id))
-    assert container.attrs["HostConfig"]["Runtime"] == "runc"
+    assert container.attrs["HostConfig"]["Runtime"] == sandbox_runtime
 
 
 def test_this_docker_is_checked_for_the_runtime_before_the_controller_starts(

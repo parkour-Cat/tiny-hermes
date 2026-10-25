@@ -158,6 +158,21 @@ def docker_client() -> Iterator[Any]:
     client.close()
 
 
+@pytest.fixture(params=["runc", "runsc"])
+def sandbox_runtime(request: pytest.FixtureRequest, docker_client: Any) -> str:
+    """Every real controller test, on each runtime this Docker has (§1.25).
+
+    The 2026-10-24 gVisor trial found the suite was the compatibility list:
+    switched to `runsc` by hand it failed seven tests, on behaviour nothing
+    else would have shown. `runsc` is skipped where it is not installed,
+    which today includes CI.
+    """
+    runtime = str(request.param)
+    if runtime not in (docker_client.info().get("Runtimes") or {}):
+        pytest.skip(f"this Docker has no {runtime} runtime")
+    return runtime
+
+
 @pytest.fixture(scope="session")
 def image_digest(docker_client: Any) -> str:
     root = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..")
@@ -254,6 +269,7 @@ async def controller(
     image_digest: str,
     leases: StubLeases,
     audit: RecordingAudit,
+    sandbox_runtime: str,
 ) -> AsyncIterator[SandboxController]:
     sessions: async_sessionmaker[AsyncSession] = async_sessionmaker(
         engine, expire_on_commit=False
@@ -265,6 +281,7 @@ async def controller(
             approved_digests=(image_digest,),
             leases=leases,
             audit=audit,
+            runtime=sandbox_runtime,
         )
         await session.commit()
 
