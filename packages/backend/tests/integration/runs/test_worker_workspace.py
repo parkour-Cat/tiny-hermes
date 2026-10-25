@@ -53,6 +53,7 @@ from tiny_hermes.runs.ports.store import (
 )
 from tiny_hermes.sandbox.application.controller import (
     RefusalReason,
+    SandboxGone,
     SandboxRefused,
     SandboxUnreachable,
 )
@@ -923,6 +924,14 @@ class UnreachableSandbox(GatewaySandbox):
         raise SandboxUnreachable("no answer", sent=self.sent)
 
 
+class GoneSandbox(GatewaySandbox):
+    """A sandbox whose container went away between rounds (2026-10-24 soak)."""
+
+    async def execute(self, **_: Any) -> CommandResult:
+        self.calls.append("execute")
+        raise SandboxGone("ContainerGone")
+
+
 class BrokenSandbox(GatewaySandbox):
     """A Controller that answered with something the Worker cannot use."""
 
@@ -985,6 +994,31 @@ async def test_an_acquire_that_may_have_reached_the_controller_interrupts(
         ),
     ).run_once()
     assert (await _run_row(engine, run)).status == "queued"
+
+
+async def test_a_sandbox_gone_mid_slice_interrupts_the_run_at_once(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    objects: MinioObjectStore,
+    tooled_agent: Callable[[list[str]], str],
+) -> None:
+    """Before, the slice raised, the Worker logged an unexpected failure, and
+    the Run sat on its lease until it expired before the Scheduler found it.
+    Interrupted now, it is recovered on the Scheduler's next pass: its claim
+    isolated and reclaimed, and a fresh sandbox at the next acquire."""
+    run, _ = _submit(client, scope, tooled_agent(["shell.exec"]))
+    sandbox = GoneSandbox()
+
+    await _drive(engine, Recording(sandbox, _tool()), sandbox, objects)
+
+    assert "execute" in sandbox.calls
+    assert (await _run_row(engine, run)).status == "interrupted"
+    assert "run_failed" not in await _events_of(engine, run)
+    # As at an unreachable acquire: the call that asked is charged, and its
+    # tool call is not kept for the next slice to find unanswered.
+    assert await _consumed_model_calls(engine, run) == 1
+    assert await _roles(engine, run) == ["user"]
 
 
 async def test_a_controller_answer_the_worker_cannot_use_still_fails_the_run(

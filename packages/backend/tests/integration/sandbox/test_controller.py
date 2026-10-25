@@ -30,7 +30,11 @@ from tiny_hermes.sandbox.application.controller import (
 from tiny_hermes.sandbox.domain.command import SandboxCommand
 from tiny_hermes.sandbox.domain.container_policy import SandboxNetworking
 from tiny_hermes.sandbox.domain.models import CacheState, InstanceStatus
-from tiny_hermes.sandbox.infrastructure.docker_engine import ContainerNotRunning, DockerEngine
+from tiny_hermes.sandbox.infrastructure.docker_engine import (
+    ContainerGone,
+    ContainerNotRunning,
+    DockerEngine,
+)
 from tiny_hermes.sandbox.infrastructure.sql_store import SqlSandboxStore
 
 from ..conftest import VALID_SPEC
@@ -618,6 +622,36 @@ async def test_freezing_a_container_that_died_says_so_rather_than_blaming_docker
 
     with pytest.raises(ContainerNotRunning):
         await controller.freeze(run_id=RUN, lease_id=LEASE, sandbox_id=box.sandbox_id)
+
+
+async def test_a_command_in_a_stopped_sandbox_says_it_stopped(
+    controller: SandboxController, docker_client: Any
+) -> None:
+    """Not `DockerUnavailable`: the daemon answered, and the Worker treats a
+    sandbox that cannot run anything differently from a daemon it cannot ask."""
+    box = await acquired(controller)
+    docker_client.containers.get(await _container_of(controller, box.sandbox_id)).kill()
+
+    with pytest.raises(ContainerNotRunning):
+        await controller.execute(
+            run_id=RUN, lease_id=LEASE, sandbox_id=box.sandbox_id, command=command(["true"])
+        )
+
+
+async def test_a_command_in_a_sandbox_whose_container_is_gone_says_so(
+    controller: SandboxController, docker_client: Any
+) -> None:
+    """2026-10-24 soak: the container was removed between rounds, and the
+    next command met Docker's 404 as `DockerUnavailable`."""
+    box = await acquired(controller)
+    docker_client.containers.get(await _container_of(controller, box.sandbox_id)).remove(
+        force=True
+    )
+
+    with pytest.raises(ContainerGone):
+        await controller.execute(
+            run_id=RUN, lease_id=LEASE, sandbox_id=box.sandbox_id, command=command(["true"])
+        )
 
 
 async def test_destroy_removes_the_container_and_ends_the_reservation(

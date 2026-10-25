@@ -12,6 +12,7 @@ from uuid import uuid4
 import pytest
 from tiny_hermes.sandbox.application.controller import (
     RefusalReason,
+    SandboxGone,
     SandboxRefused,
     SandboxUnreachable,
 )
@@ -56,6 +57,18 @@ async def test_an_unnameable_error_keeps_the_transport_error() -> None:
         await sandbox.volume_remove(run_id=uuid4(), sandbox_id=uuid4())
 
     assert refused.value.reason == "DockerUnavailable"
+
+
+@pytest.mark.parametrize("reason", ["ContainerGone", "ContainerNotRunning"])
+async def test_a_sandbox_that_can_run_nothing_arrives_as_gone(reason: str) -> None:
+    """Named so the Worker can end the slice as interrupted at once, rather
+    than fail on a transport error and wait out its lease."""
+    sandbox = _sandbox(reason)
+
+    with pytest.raises(SandboxGone) as gone:
+        await sandbox.volume_remove(run_id=uuid4(), sandbox_id=uuid4())
+
+    assert gone.value.reason == reason
 
 
 class _SilentClient:
