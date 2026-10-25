@@ -10,6 +10,7 @@ from tiny_hermes.sites.domain.site import (
     SiteRefused,
     media_type,
     new_token,
+    same_host,
     same_origin,
     security_headers,
     select_site,
@@ -170,3 +171,17 @@ def test_two_urls_share_an_origin_when_scheme_host_and_port_agree(
     a: str, b: str, same: bool
 ) -> None:
     assert same_origin(a, b) is same
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "same"),
+    [
+        ("http://127.0.0.1:8000", "http://127.0.0.1:8090", True),
+        ("http://localhost:8090", "http://127.0.0.1:3000", False),
+        ("https://hermes.example.com", "https://sites.example.com", False),
+        ("https://Hermes.example.com", "http://hermes.example.com:8443", True),
+    ],
+)
+def test_two_urls_share_a_host_whatever_their_ports(a: str, b: str, same: bool) -> None:
+    """What cookies go by: a host, never a port."""
+    assert same_host(a, b) is same

@@ -181,6 +181,16 @@ async def test_a_revoked_site_is_gone_even_with_a_valid_pass(
     assert site.get(base).status_code == 404
 
 
+def test_the_site_must_be_on_another_host_not_just_another_port(settings: Settings) -> None:
+    """Cookies ignore ports: on the console's host, a site's script could read
+    the console's CSRF cookie and the browser would send the console's session
+    to the site. Another origin is not enough; it has to be another host."""
+    with pytest.raises(ValueError, match="host"):
+        Settings.model_validate(
+            {**settings.model_dump(), "site_public_url": "http://127.0.0.1:8090"}
+        )
+
+
 def test_the_site_origin_must_not_be_the_console_s(settings: Settings) -> None:
     """Same origin, a site's script would ride the console's session."""
     with pytest.raises(ValueError, match="origin"):

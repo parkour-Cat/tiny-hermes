@@ -1,7 +1,8 @@
 import pytest
 from tiny_hermes.shared.config import Settings
 
-SITE_PUBLIC_URL = "http://127.0.0.1:8090"
+#: Another host, not just another port: cookies are shared across ports.
+SITE_PUBLIC_URL = "http://localhost:8090"
 CONSOLE_URL = "http://127.0.0.1:3000"
 SITE_SECRET = "a-site-signing-secret-of-32-chars!"  # noqa: S105 - a test value
 
