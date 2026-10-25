@@ -15,7 +15,11 @@ from tiny_hermes.shared.config import Settings
 from tiny_hermes.sites.application.publisher import Published, SitePublisher, SiteSettings
 from tiny_hermes.sites.domain.site import verify
 
-from ..tenancy.test_workspace_members import _headers_for, _member, _seed_user
+from ..tenancy.test_workspace_members import (  # pyright: ignore[reportPrivateUsage]
+    _headers_for,  # pyright: ignore[reportPrivateUsage]
+    _member,  # pyright: ignore[reportPrivateUsage]
+    _seed_user,  # pyright: ignore[reportPrivateUsage]
+)
 from ..workspace_file_support import seed_site
 from .conftest import SITE_PUBLIC_URL, SITE_SECRET
 
