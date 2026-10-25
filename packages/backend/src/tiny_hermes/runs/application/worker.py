@@ -123,7 +123,11 @@ from tiny_hermes.runs.ports.store import (
     StoredSummary,
 )
 from tiny_hermes.sandbox.application.controller import RefusalReason as SandboxRefusal
-from tiny_hermes.sandbox.application.controller import SandboxRefused, SandboxUnreachable
+from tiny_hermes.sandbox.application.controller import (
+    SandboxGone,
+    SandboxRefused,
+    SandboxUnreachable,
+)
 from tiny_hermes.sandbox.domain.command import SandboxCommand
 from tiny_hermes.sandbox.domain.container_policy import DEFAULT_PROFILE
 from tiny_hermes.sandbox.domain.models import CacheState
@@ -580,9 +584,30 @@ class WorkerRuntime:
                     if box is None:
                         return
 
-                work = await self._answer_tools(
-                    claimed, handle, box, response, context, mcp
-                )
+                try:
+                    work = await self._answer_tools(
+                        claimed, handle, box, response, context, mcp
+                    )
+                except SandboxGone as gone:
+                    # The container went between rounds (2026-10-24 soak).
+                    # Raised, the slice failed as unexpected and the Run sat
+                    # on its lease until it expired. Interrupted, the
+                    # Scheduler isolates and reclaims the claim on its next
+                    # pass, and the next acquire builds a fresh sandbox.
+                    logger.warning(
+                        "sandbox gone mid-slice, interrupting",
+                        extra={"run_id": str(claimed.run.id), "reason": gone.reason},
+                    )
+                    await self._record(
+                        claimed,
+                        handle,
+                        context.state_version,
+                        SliceDecision(RunSignal.INTERRUPTED),
+                        response,
+                        executed_ms,
+                        prices=context.prices,
+                    )
+                    return
                 appended, wrote = work.appended, work.wrote
                 # Before the re-read, for the same reason the tool calls are:
                 # a cancellation that arrives while a check is running should

@@ -74,6 +74,14 @@ class DockerUnavailable(Exception):
     """
 
 
+class ContainerGone(DockerUnavailable):
+    """The daemon answered: no such container.
+
+    Removed outside the platform, or by a sweep that should not have, as on
+    2026-10-24. A subclass for the reason `ContainerNotRunning` gives.
+    """
+
+
 class ContainerNotRunning(DockerUnavailable):
     """The daemon answered: the container is there and has stopped.
 
@@ -126,8 +134,7 @@ class DockerEngine:
     # daemon and controller threads as the execs that do the work. Only
     # `address_of` still inspects, because the inspect is what it reads.
     async def execute(self, container_id: str, command: SandboxCommand) -> CommandResult:
-        handle = await self._call(
-            self.client.api.exec_create,
+        handle = await self._exec_create(
             container_id,
             cmd=_bounded(command),
             workdir=command.cwd,
@@ -433,8 +440,7 @@ class DockerEngine:
         is read and discarded so a noisy child can always finish writing
         instead of blocking on a full pipe (design §11).
         """
-        handle = await self._call(
-            self.client.api.exec_create,
+        handle = await self._exec_create(
             container_id,
             cmd=_bounded(command),
             workdir=command.cwd,
@@ -488,18 +494,44 @@ class DockerEngine:
         except DockerUnavailable as failure:
             # A sandbox past its memory with nothing left to kill dies whole,
             # and the freeze at the end of its slice is the first call to
-            # meet that. Asked once more so the failure says which it was; if
-            # the daemon cannot answer this either, the original stands.
-            try:
-                state = await self._call(self.client.api.inspect_container, container_id)
-            except DockerUnavailable:
-                state = None
-            if state is not None and not state["State"]["Running"]:
-                raise ContainerNotRunning(
-                    f"container exited with {state['State']['ExitCode']}"
-                    f"{' after an OOM kill' if state['State']['OOMKilled'] else ''}"
-                ) from failure
-            raise
+            # meet that.
+            raise await self._why_unusable(container_id, failure) from failure
+
+    async def _exec_create(self, container_id: str, **options: Any) -> Any:
+        """`exec_create`, naming a container that cannot run anything."""
+        try:
+            return await self._call(self.client.api.exec_create, container_id, **options)
+        except DockerUnavailable as failure:
+            raise await self._why_unusable(container_id, failure) from failure
+
+    async def _why_unusable(
+        self, container_id: str, failure: DockerUnavailable
+    ) -> DockerUnavailable:
+        """Which failure a refused call on a container was.
+
+        Asked only after the call failed, so the path that works pays no extra
+        inspection. If the daemon cannot answer this either, the original
+        failure stands.
+        """
+        from docker.errors import NotFound  # noqa: PLC0415 - narrow the import
+
+        if isinstance(failure.__cause__, NotFound):
+            return ContainerGone(f"no such container: {container_id[:12]}")
+        try:
+            state: dict[str, Any] = await self._call(
+                self.client.api.inspect_container, container_id
+            )
+        except DockerUnavailable as asked:
+            if isinstance(asked.__cause__, NotFound):
+                return ContainerGone(f"no such container: {container_id[:12]}")
+            return failure
+        status: dict[str, Any] = state.get("State") or {}
+        if not status.get("Running"):
+            return ContainerNotRunning(
+                f"container exited with {status.get('ExitCode')}"
+                f"{' after an OOM kill' if status.get('OOMKilled') else ''}"
+            )
+        return failure
 
     async def unpause(self, container_id: str) -> None:
         await self._call(self.client.api.unpause, container_id)
