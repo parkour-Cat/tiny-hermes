@@ -798,8 +798,16 @@ v2.25 起 `SANDBOX_RUNTIME` 决定沙箱用哪个 OCI 运行时，默认 `runc`�
 
 ### 17.1 出网代理被重建之后
 
-代理容器被重建（升级、`compose up --force-recreate`）后，只会回到它自己的网络上。controller 的清扫
-（启动时一次，之后每 `SANDBOX_SWEEP_SECONDS`，默认 300 秒）会把它重新连回每个还在用的沙箱网络，用的是
-固定地址，日志写 `egress proxy put back on a sandbox network`。**在这之前的这段时间里，沙箱出不了网**。
-重建代理之后想立刻恢复，可以重启 controller，它启动时就会清扫一次。
+代理容器被重建（升级、`compose up --force-recreate`）后，只会回到它自己的网络上。controller 会订阅
+Docker 关于代理容器的 `start` 事件，收到就清扫一次，把代理按固定地址连回每个还在用的沙箱网络，一般几秒内
+完成。日志依次是 `swept after the egress proxy started` 和 `egress proxy put back on a sandbox network`。
+
+定期清扫（启动时一次，之后每 `SANDBOX_SWEEP_SECONDS`，默认 300 秒）是兜底：事件流断开期间漏掉的那次重建，
+最晚在下一次定期清扫时补上。Docker 守护进程重启后，事件流会自动重新订阅。
+
+### 17.2 归属标签（`tiny-hermes.owner`）
+
+带这个标签的容器、网络、卷，只归带同样标签的引擎管；部署里的引擎不带它，所以不会去碰这些资源。现在只有
+测试会打这个标签，作用是让开发机上正在跑的栈和集成测试互不清扫对方的东西。**不要给生产的资源打这个标签**：
+打了之后，生产的清扫和回收就看不见它们了。
 - 本机试装测到的开销：短命令每次多约 10 毫秒，大量写文件慢约 4 倍，每个沙箱多约 13 MiB 内存。
