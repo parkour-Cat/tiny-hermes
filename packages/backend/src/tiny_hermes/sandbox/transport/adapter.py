@@ -19,6 +19,7 @@ from uuid import UUID
 
 from tiny_hermes.sandbox.application.controller import (
     RefusalReason,
+    SandboxGone,
     SandboxRefused,
     SandboxUnreachable,
 )
@@ -59,18 +60,17 @@ class SandboxClient:
         try:
             return await self._client.call(action, payload)
         except ControllerClient.Refused as refused:
-            try:
-                reason = RefusalReason(refused.reason)
-            except ValueError:
-                # Not every "error" on the wire is a decided refusal. The
-                # server answers any exception with its class name, so an
-                # infrastructure failure arrives as, say, `DockerUnavailable`.
-                # Raising the enum's own ValueError turned "the Controller
-                # could not do it" into a crash inside the caller; the
-                # Scheduler's cleanup logged that in a loop. Keep the
-                # transport's error, which is what `_refusal` already does.
-                raise refused from None
-            raise SandboxRefused(reason) from refused
+            # Not every "error" on the wire is a decided refusal. The server
+            # answers any exception with its class name, so an infrastructure
+            # failure arrives as, say, `DockerUnavailable`. Raising the enum's
+            # own ValueError turned "the Controller could not do it" into a
+            # crash inside the caller; the Scheduler's cleanup logged that in a
+            # loop. `_refusal` keeps the transport's error for those, and names
+            # a sandbox that can run nothing more.
+            translated = self._refusal(refused)
+            if translated is refused:
+                raise
+            raise translated from refused
 
     async def acquire(
         self,
@@ -299,10 +299,17 @@ class SandboxClient:
         )
 
     def _refusal(self, refused: ControllerClient.Refused) -> Exception:
+        if refused.reason in _GONE:
+            return SandboxGone(refused.reason)
         try:
             return SandboxRefused(RefusalReason(refused.reason))
         except ValueError:
             return refused
+
+
+#: The Controller answers an engine failure with its class name. These two
+#: say the sandbox can run nothing more, which the Worker acts on.
+_GONE = frozenset({"ContainerGone", "ContainerNotRunning"})
 
 
 async def _one_chunk(data: bytes) -> AsyncIterator[bytes]:

@@ -86,6 +86,20 @@ class SandboxRefused(Exception):
         self.reason = reason
 
 
+class SandboxGone(Exception):
+    """The sandbox's container is gone or has stopped: it can run nothing more.
+
+    Not a refusal, which is the platform deciding, and not `SandboxUnreachable`,
+    where nothing was decided: the daemon answered, and the answer is that this
+    sandbox is over. The Worker interrupts the Run, so its claim is isolated and
+    reclaimed and the next acquire builds a fresh one.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class SandboxUnreachable(Exception):
     """No answer came back from the Controller, so nothing was decided.
 
