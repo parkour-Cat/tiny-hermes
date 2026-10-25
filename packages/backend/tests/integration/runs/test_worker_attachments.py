@@ -102,8 +102,17 @@ async def _slice(
     ).run_once()
 
 
-def _writes(sandbox: CommandLog) -> list[tuple[list[str], bytes | None]]:
-    return [(argv, stdin) for argv, stdin in sandbox.commands if argv[:2] == [FILE_HELPER, "write"]]
+def _is_write(argv: list[str]) -> bool:
+    return argv[0] == FILE_HELPER and "write" in argv
+
+
+def _writes(sandbox: CommandLog) -> list[tuple[str, bytes | None]]:
+    """(path, body) for each helper write, in order."""
+    return [
+        (argv[argv.index("write") + 1], stdin)
+        for argv, stdin in sandbox.commands
+        if _is_write(argv)
+    ]
 
 
 async def test_a_file_the_run_received_is_in_the_inbox_before_the_agent_s_first_command(
@@ -120,12 +129,10 @@ async def test_a_file_the_run_received_is_in_the_inbox_before_the_agent_s_first_
 
     await _slice(engine, Recording(sandbox, _tool("ls inbox")), sandbox, objects, attachments)
 
-    [(argv, stdin)] = _writes(sandbox)
-    assert argv[2] == "inbox/a.xlsx" and stdin == BODY
-    first_model_command = next(
-        i for i, (argv, _) in enumerate(sandbox.commands) if argv[:2] != [FILE_HELPER, "write"]
-    )
-    assert sandbox.commands.index((argv, stdin)) < first_model_command
+    assert _writes(sandbox) == [("inbox/a.xlsx", BODY)]
+    placed = next(i for i, (argv, _) in enumerate(sandbox.commands) if _is_write(argv))
+    agent_s = next(i for i, (argv, _) in enumerate(sandbox.commands) if "ls inbox" in argv)
+    assert placed < agent_s
     assert [reference for reference, _ in attachments.asked] == ["feishu:om_1:file_k"]
     assert (await _run_row(engine, run)).status == "completed"
 
@@ -158,15 +165,15 @@ async def test_a_file_that_cannot_be_fetched_is_said_to_the_model_not_skipped(
     assert "run_failed" not in await _events_of(engine, run)
 
 
-async def test_only_this_run_s_files_are_fetched(
+async def test_a_file_placed_once_is_not_fetched_again(
     client: TestClient,
     scope: dict[str, str],
     engine: AsyncEngine,
     objects: MinioObjectStore,
     tooled_agent: Callable[[list[str]], str],
 ) -> None:
-    """An earlier message's file is already in the saved workspace; fetching
-    it again would overwrite whatever the Agent made of it since."""
+    """It is in the saved workspace from then on; fetching it again would
+    overwrite whatever the Agent made of it since."""
     agent = tooled_agent(["shell.exec"])
     first, session = _submit(client, scope, agent)
     await _attach(engine, first, "old.xlsx")
@@ -180,4 +187,29 @@ async def test_only_this_run_s_files_are_fetched(
 
     assert _writes(sandbox) == []
     assert attachments.asked == []
+    assert (await _run_row(engine, second)).status == "completed"
+
+
+async def test_a_file_sent_on_its_own_is_placed_by_the_run_that_first_needs_a_sandbox(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    objects: MinioObjectStore,
+    tooled_agent: Callable[[list[str]], str],
+) -> None:
+    """A Feishu file arrives as a message of its own, and its Run usually
+    just answers 「收到」 — no command, so no sandbox. The work is asked for
+    in the next message, and that Run must find the file where the note said."""
+    agent = tooled_agent(["shell.exec"])
+    first, session = _submit(client, scope, agent)
+    await _attach(engine, first, "sent-alone.xlsx")
+    words_only = Attachments()
+    await _slice(engine, Recording(GatewaySandbox()), GatewaySandbox(), objects, words_only)
+    assert words_only.asked == []
+    second, _ = _submit(client, scope, agent, session_id=session)
+    sandbox = CommandLog()
+
+    await _slice(engine, Recording(sandbox, _tool("ls inbox")), sandbox, objects, Attachments())
+
+    assert _writes(sandbox) == [("inbox/sent-alone.xlsx", BODY)]
     assert (await _run_row(engine, second)).status == "completed"
