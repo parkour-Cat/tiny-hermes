@@ -1021,6 +1021,44 @@ async def test_a_sandbox_gone_mid_slice_interrupts_the_run_at_once(
     assert await _roles(engine, run) == ["user"]
 
 
+async def test_a_sandbox_that_keeps_going_away_fails_the_run_once_recovery_runs_out(
+    client: TestClient,
+    scope: dict[str, str],
+    engine: AsyncEngine,
+    objects: MinioObjectStore,
+    tooled_agent: Callable[[list[str]], str],
+) -> None:
+    """Each loss interrupts the Run at once now (#155). One that keeps
+    happening must still end — failed, and saying why — rather than cycle
+    between interrupted and queued for as long as anyone lets it. Written
+    after the behaviour; it passed the first time it ran correctly."""
+    run, _ = _submit(client, scope, tooled_agent(["shell.exec"]))
+    sandbox = GoneSandbox()
+    scheduler = SchedulerRuntime(
+        session_factory=async_sessionmaker(engine, expire_on_commit=False),
+        notifier=NullWakeUpNotifier(),
+        sandbox=sandbox,
+        settings=SchedulerSettings(
+            max_recovery_attempts=2, event_retention_hours=24, batch_size=50
+        ),
+    )
+
+    for _ in range(6):
+        model = Recording(sandbox, _tool(), _tool(), _tool(), _tool())
+        await _drive(engine, model, sandbox, objects)
+        await scheduler.run_once()
+        if (await _run_row(engine, run)).status in ("failed", "completed"):
+            break
+
+    row = await _run_row(engine, run)
+    assert row.status == "failed"
+    events = await _events_of(engine, run)
+    assert events.count("run_interrupted") == 3, events
+    # Recovery refused once the attempts ran out; the Run fails there.
+    assert events[-1] == "run_recovery_failed", " ".join(events)
+    assert sandbox.calls.count("execute") == 3
+
+
 async def test_a_controller_answer_the_worker_cannot_use_still_fails_the_run(
     client: TestClient,
     scope: dict[str, str],
