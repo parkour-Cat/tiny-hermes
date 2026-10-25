@@ -223,8 +223,10 @@ class ControllerClient:
                     await sink(frame.payload)
                     receiver.credit(len(frame.payload))
                 if decision.finished:
-                    if frame.type is not FrameType.END:
+                    if frame.type is FrameType.CANCEL:
                         raise ControllerClient.Refused("stream_cancelled")
+                    # END or ERROR: the answer line follows either way, and
+                    # after ERROR it carries the refusal.
                     break
 
             line = await asyncio.wait_for(reader.readline(), timeout=self._timeout)
