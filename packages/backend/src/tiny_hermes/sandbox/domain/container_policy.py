@@ -198,6 +198,11 @@ class ContainerConfig:
     #: The OCI runtime (§1.25, v2.25). Named on every container rather than
     #: left to the daemon's default, so `runc` is this config's choice.
     runtime: str = "runc"
+    #: Names the sandbox resolves from `/etc/hosts`: the proxy, at its fixed
+    #: address on this sandbox's network, when there is a boundary. Docker's
+    #: embedded DNS does not answer inside gVisor (2026-10-24 trial), and a
+    #: hosts entry answers on both runtimes.
+    extra_hosts: dict[str, str] = field(default_factory=lambda: {})
 
     def as_docker_kwargs(self) -> dict[str, Any]:
         """The exact argument set, and no more.
@@ -208,6 +213,7 @@ class ContainerConfig:
         """
         return {
             "runtime": self.runtime,
+            "extra_hosts": dict(self.extra_hosts),
             "image": self.image,
             "command": ["sleep", "infinity"],
             "user": self.user,

@@ -63,6 +63,7 @@ async def networked(
     leases: StubLeases,
     audit: RecordingAudit,
     proxy: Any,
+    sandbox_runtime: str,
 ) -> AsyncIterator[SandboxController]:
     sessions: async_sessionmaker[AsyncSession] = async_sessionmaker(
         engine, expire_on_commit=False
@@ -77,6 +78,7 @@ async def networked(
             networking=SandboxNetworking(
                 proxy_url="http://egress-proxy:3128", proxy_container=proxy.name, pool=POOL
             ),
+            runtime=sandbox_runtime,
         )
         await session.commit()
     for leftover in docker_client.containers.list(

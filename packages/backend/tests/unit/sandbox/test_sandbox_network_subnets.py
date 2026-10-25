@@ -43,8 +43,11 @@ class NetworkedEngine(FakeEngine):
         if len(self.subnets) <= self._taken:
             raise SubnetTaken(subnet)
 
-    async def connect(self, network: str, container: str, aliases: list[str]) -> None:
+    async def connect(
+        self, network: str, container: str, aliases: list[str], *, address: str | None = None
+    ) -> None:
         self.calls.append(("connect", (network, container, tuple(aliases))))
+        self.proxy_address = address
 
     async def networks_labelled(self, label: str, value: str | None = None) -> list[Any]:
         self.calls.append(("networks_labelled", (label, value)))
@@ -95,6 +98,12 @@ async def test_the_proxy_joins_each_network_under_the_name_sandboxes_use() -> No
 
     [(_, connected)] = [call for call in engine.calls if call[0] == "connect"]
     assert connected == (f"tiny-hermes-sandbox-{made.sandbox_id}", "the-proxy", ("egress-proxy",))
+    # At a fixed address, the subnet's second after the gateway, and the
+    # sandbox resolves the proxy's name to it from its hosts (2026-10-24):
+    # gVisor does not answer Docker's embedded DNS.
+    assert engine.proxy_address == str(IPv4Network(engine.subnets[-1])[2])
+    [created] = [config for name, config in engine.calls if name == "create"]
+    assert created.extra_hosts == {"egress-proxy": engine.proxy_address}
     order = engine.names()
     assert order.index("create_network") < order.index("connect") < order.index("create")
 

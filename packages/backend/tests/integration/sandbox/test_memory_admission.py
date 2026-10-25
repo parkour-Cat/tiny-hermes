@@ -53,8 +53,10 @@ class Platform:
         image_digest: str,
         leases: StubLeases,
         audit: RecordingAudit,
+        runtime: str = "runc",
     ) -> None:
         self._sessions = async_sessionmaker(engine, expire_on_commit=False)
+        self._runtime = runtime
         self._docker = docker_client
         self._digest = image_digest
         self._leases = leases
@@ -109,6 +111,7 @@ class Platform:
             memory_budget_mb=budget,
             memory_ceiling_mb=memory_ceiling,
             name=host,
+            runtime=self._runtime,
         )
 
     async def acquire(
@@ -209,8 +212,9 @@ def platform(
     image_digest: str,
     leases: StubLeases,
     audit: RecordingAudit,
+    sandbox_runtime: str,
 ) -> Platform:
-    return Platform(engine, docker_client, image_digest, leases, audit)
+    return Platform(engine, docker_client, image_digest, leases, audit, sandbox_runtime)
 
 
 async def test_a_sandbox_that_fits_is_created_with_the_limit_it_was_counted_at(
