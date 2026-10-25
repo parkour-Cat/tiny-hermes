@@ -336,6 +336,12 @@ class Settings(BaseSettings):
     def approved_image_digests(self) -> tuple[str, ...]:
         return (self.sandbox_image_digest,) if self.sandbox_image_digest else ()
 
+    @field_validator("site_public_url", "site_signing_secret", mode="before")
+    @classmethod
+    def read_an_empty_site_setting_as_unset(cls, value: object) -> object:
+        # Compose passes `${SITE_PUBLIC_URL:-}`, "" when unset: off, not invalid.
+        return None if value == "" else value
+
     @field_validator("sandbox_controller_advertise_url", mode="before")
     @classmethod
     def read_an_empty_advertisement_as_unset(cls, value: object) -> object:
