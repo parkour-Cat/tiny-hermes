@@ -27,6 +27,7 @@ from uuid import UUID
 
 from tiny_hermes.runs.domain.models import (
     CanonicalMessage,
+    FileBlock,
     ReasoningBlock,
     StoredMessage,
     TextBlock,
@@ -349,6 +350,10 @@ def _message_estimate(message: CanonicalMessage, tokenizer: str | None) -> int:
             total += estimate_tokens(f"{block.name}{block.arguments}", tokenizer)
         elif isinstance(block, ToolResultBlock):
             total += estimate_tokens(block.output, tokenizer)
+        elif isinstance(block, FileBlock):
+            # Never sent: the model reads the note written beside it, which is
+            # a `TextBlock` and counted above. Its name is the whole cost.
+            total += estimate_tokens(block.name, tokenizer)
         else:
             # Only `ImageBlock` reaches here — pyright proves it, which is
             # why an `isinstance` check would be flagged as redundant.

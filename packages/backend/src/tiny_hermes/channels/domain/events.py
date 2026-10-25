@@ -31,6 +31,20 @@ class ChannelImage:
 
 
 @dataclass(frozen=True)
+class ChannelFile:
+    """A file the sender attached (§1.27, v2.27): where to fetch it, and its name.
+
+    Not the bytes, for `ChannelImage`'s reason. `name` is already made safe
+    for the inbox, so the note the model reads and the path the Worker writes
+    are one name.
+    """
+
+    message_id: str
+    file_key: str
+    name: str
+
+
+@dataclass(frozen=True)
 class ChannelEvent:
     """A normalized inbound event.
 
@@ -51,6 +65,8 @@ class ChannelEvent:
     #: Images attached to this message, by reference. Empty for the ordinary
     #: text message, which is almost all of them.
     images: tuple[ChannelImage, ...] = ()
+    #: Files attached to this message, by reference (§1.27, v2.27).
+    files: tuple[ChannelFile, ...] = ()
 
 
 class MalformedChannelEvent(Exception):

@@ -10,9 +10,11 @@ from typing import Any, cast
 from tiny_hermes.channels.domain._json import object_at, string_at
 from tiny_hermes.channels.domain.events import (
     ChannelEvent,
+    ChannelFile,
     ChannelImage,
     MalformedChannelEvent,
 )
+from tiny_hermes.channels.domain.files import inbox_name
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +23,7 @@ CHANNEL = "feishu"
 #: The message types §19.2's first version reads. A type outside this set is
 #: refused *answerably* — see `UnsupportedMessageType`. Absent is read as
 #: text: Feishu's v1 schema omitted the field on text messages.
-_READABLE = frozenset({"text", "", "image", "post"})
+_READABLE = frozenset({"text", "", "image", "post", "file"})
 
 
 class UnsupportedMessageType(MalformedChannelEvent):
@@ -127,6 +129,17 @@ def event_from_envelope(payload: dict[str, Any]) -> ChannelEvent:
             images=pictures,
         )
 
+    if kind == "file":
+        return ChannelEvent(
+            channel=CHANNEL,
+            channel_event_id=event_id,
+            external_user_id=open_id,
+            # A file arrives as its own message, with no words. What to do
+            # with it is the sender's next message, not the parser's guess.
+            text="",
+            files=(_file_of(message),),
+        )
+
     if kind == "image":
         return ChannelEvent(
             channel=CHANNEL,
@@ -144,6 +157,29 @@ def event_from_envelope(payload: dict[str, Any]) -> ChannelEvent:
         channel_event_id=event_id,
         external_user_id=open_id,
         text=_text_of(message),
+    )
+
+
+def _file_of(message: dict[str, Any]) -> ChannelFile:
+    """Both ids the download takes, and the name it was sent under."""
+    message_id = _message_id_of(message)
+    raw = string_at(message, "content")
+    if raw is None:
+        raise MalformedChannelEvent("file message content is not a string")
+    try:
+        parsed: object = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise MalformedChannelEvent("file content is not JSON") from error
+    if not isinstance(parsed, dict):
+        raise MalformedChannelEvent("file content is not an object")
+    content = cast(dict[str, Any], parsed)
+    file_key = string_at(content, "file_key")
+    if file_key is None:
+        raise MalformedChannelEvent("file message carries no file key")
+    return ChannelFile(
+        message_id=message_id,
+        file_key=file_key,
+        name=inbox_name(string_at(content, "file_name") or ""),
     )
 
 

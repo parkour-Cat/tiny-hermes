@@ -12,6 +12,7 @@ from tiny_hermes.runs.domain.models import (
     CanonicalMessage,
     DeliveryMode,
     EndUserEscape,
+    FileBlock,
     ImageBlock,
     RunCapabilities,
     RunListQuery,
@@ -317,6 +318,7 @@ class RunCoordination:
         request_id: str,
         images: Sequence[ImageBlock] = (),
         purpose: RunPurpose = RunPurpose.ANSWER,
+        files: Sequence[FileBlock] = (),
     ) -> AcceptedRun:
         """§5's Run half.
 
@@ -344,6 +346,19 @@ class RunCoordination:
         blocks: tuple[Block, ...] = (
             *((TextBlock(text=text),) if text else ()),
             *images,
+            # §1.27, v2.27: a note the model reads, and the reference the
+            # Worker fetches into that path the first time it opens the sandbox.
+            *(
+                part
+                for attached in files
+                for part in (
+                    TextBlock(
+                        text=f"[attachment] {attached.name} is in the workspace at "
+                        f"inbox/{attached.name}"
+                    ),
+                    attached,
+                )
+            ),
         )
         if not blocks:
             raise ValueError("a Run needs something to act on")
