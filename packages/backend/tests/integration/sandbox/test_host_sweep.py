@@ -199,7 +199,11 @@ async def test_a_controller_with_its_own_label_sweeps_only_containers_carrying_i
         workspace_id=WORKSPACE,
         approved_digests=(image_digest,),
     )
-    someone_elses = await DockerEngine(docker_client).create(config)
+    # Another owner's rather than a deployment's: unlabelled, the running
+    # stack's own sweep took it too, sometimes before this test's assertion.
+    someone_elses = await DockerEngine(
+        docker_client, extra_labels={LABEL: "someone-else"}
+    ).create(config)
     try:
         await platform.call(lambda c: c.sweep())
 
