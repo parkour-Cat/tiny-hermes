@@ -169,7 +169,11 @@ async def test_a_kept_instance_whose_container_is_gone_is_replaced_not_thawed(
     )
     until = datetime.now(UTC) + timedelta(minutes=5)
     await platform.call(lambda c: c.keep(run_id=run_id, sandbox_id=first.sandbox_id, until=until))
-    docker_client.containers.get(await platform.container_of(first.sandbox_id)).remove(force=True)
+    gone = docker_client.containers.get(await platform.container_of(first.sandbox_id))
+    # Thawed first, as an operator on gVisor must: runsc cannot kill a paused
+    # container, and `rm -f` there failed about three times in four.
+    gone.unpause()
+    gone.remove(force=True)
 
     second = await platform.acquire(run_id)
 
