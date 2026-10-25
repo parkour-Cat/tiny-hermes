@@ -15,6 +15,14 @@ down_revision: str | None = "20261024_0080"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+#: As 20261023_0075 protects every table with a `workspace_id`: a transaction
+#: carrying `app.workspace_id` sees that workspace's sites only. The site
+#: origin and the members' door look a link up without one, by design.
+_SCOPED = (
+    "coalesce(current_setting('app.workspace_id', true), '') = '' "
+    "OR workspace_id = nullif(current_setting('app.workspace_id', true), '')::uuid"
+)
+
 
 def upgrade() -> None:
     op.create_table(
@@ -49,6 +57,11 @@ def upgrade() -> None:
     )
     op.create_index("ix_site_publications_workspace_id", "site_publications", ["workspace_id"])
     op.create_index("ix_site_publications_revision_id", "site_publications", ["revision_id"])
+    op.execute("ALTER TABLE site_publications ENABLE ROW LEVEL SECURITY")
+    op.execute(
+        "CREATE POLICY workspace_isolation ON site_publications "
+        f"USING ({_SCOPED}) WITH CHECK ({_SCOPED})"
+    )
     op.create_table(
         "site_ticket_uses",
         sa.Column("nonce", sa.String(64), primary_key=True),
@@ -58,6 +71,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("site_ticket_uses")
+    op.execute("DROP POLICY IF EXISTS workspace_isolation ON site_publications")
     op.drop_index("ix_site_publications_revision_id", table_name="site_publications")
     op.drop_index("ix_site_publications_workspace_id", table_name="site_publications")
     op.drop_table("site_publications")
