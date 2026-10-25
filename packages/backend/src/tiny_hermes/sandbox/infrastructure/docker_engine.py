@@ -273,9 +273,15 @@ class DockerEngine:
                 raise SubnetTaken(subnet) from failure
             raise DockerUnavailable(str(failure)) from failure
 
-    async def connect(self, network: str, container: str, aliases: list[str]) -> None:
+    async def connect(
+        self, network: str, container: str, aliases: list[str], *, address: str | None = None
+    ) -> None:
         await self._call(
-            self.client.api.connect_container_to_network, container, network, aliases=aliases
+            self.client.api.connect_container_to_network,
+            container,
+            network,
+            aliases=aliases,
+            ipv4_address=address,
         )
 
     async def remove_network_if_present(self, name: str) -> bool:
@@ -501,6 +507,17 @@ class DockerEngine:
         return True
 
     async def remove(self, container_id: str) -> None:
+        """Force-remove, thawing a frozen container first.
+
+        gVisor cannot kill a paused container: `docker rm -f` answers "is
+        zombie and can not be killed" (2026-10-24 trial), so every reclamation
+        or eviction of a frozen sandbox failed there. runc does not need this,
+        and the extra inspection costs it one call.
+        """
+        state: dict[str, Any] = await self._call(self.client.api.inspect_container, container_id)
+        status: dict[str, Any] = state.get("State") or {}
+        if status.get("Paused"):
+            await self._call(self.client.api.unpause, container_id)
         await self._call(self.client.api.remove_container, container_id, force=True)
 
     async def remove_if_present(self, container_id: str) -> None:

@@ -295,7 +295,12 @@ class SandboxController:
             # written.
             await self.engine.create_volume(_volume_name(run_id), config.volume_labels)
             if self.networking is not None:
-                await self._open_network(self.networking, instance_id, config.volume_labels)
+                proxy_address = await self._open_network(
+                    self.networking, instance_id, config.volume_labels
+                )
+                config = replace(
+                    config, extra_hosts={self.networking.proxy_alias: proxy_address}
+                )
             container_id = await self.engine.create(config)
         except Exception:
             # The registration was committed; left alone it would hold its
@@ -622,12 +627,16 @@ class SandboxController:
 
     async def _open_network(
         self, networking: SandboxNetworking, instance_id: UUID, labels: dict[str, str]
-    ) -> None:
+    ) -> str:
         """This sandbox's bridge, on a /28 from the pool, with the proxy on it.
 
         Random rather than counted: Docker already knows which subnets are in
         use and says so when one overlaps, and a table of our own would be a
         second record of the same fact, free to disagree with the first.
+
+        Returns the proxy's address there, which is fixed — the subnet's
+        second, after the gateway — so the sandbox's hosts entry names an
+        address Docker did not pick at random.
         """
         name = networking.network_name(instance_id)
         subnets = list(networking.pool.subnets(new_prefix=_SANDBOX_PREFIX))
@@ -636,8 +645,11 @@ class SandboxController:
                 await self.engine.create_network(name, str(subnet), labels)
             except SubnetTaken:
                 continue
-            await self.engine.connect(name, networking.proxy_container, [networking.proxy_alias])
-            return
+            address = str(subnet[2])
+            await self.engine.connect(
+                name, networking.proxy_container, [networking.proxy_alias], address=address
+            )
+            return address
         raise SandboxRefused(RefusalReason.NETWORK_POOL_EXHAUSTED)
 
     async def _close_network(self, instance_id: UUID) -> None:
