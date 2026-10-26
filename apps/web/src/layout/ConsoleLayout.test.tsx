@@ -290,6 +290,15 @@ test("没有顶栏：账号、语言和主题都在侧栏底部", async () => {
 
 const RUN = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 
+/** The palette, found by its search box rather than by the dialog's name:
+ *  under test antd gives every generated id the same value (`test-id`), so
+ *  the dialog's aria-labelledby resolves to whichever element came first. */
+async function openedPalette(): Promise<HTMLElement> {
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByRole("combobox", { name: "搜索或跳转" })).toBeInTheDocument();
+  return dialog;
+}
+
 function withAgents() {
   return [
     http.get("/api/v1/agents", () =>
@@ -305,9 +314,10 @@ test("⌘K 打开全局搜索，按名字跳到设置里的一段", async () => 
   renderShell(`/workspaces/${WORKSPACE}/agents`, { count: 0 }, withAgents());
   await screen.findByRole("navigation");
   await userEvent.keyboard("{Meta>}k{/Meta}");
-  const dialog = await screen.findByRole("dialog", { name: "搜索或跳转" });
+  const dialog = await openedPalette();
   await userEvent.type(within(dialog).getByRole("combobox"), "密钥");
-  expect(within(dialog).getByRole("option", { name: /设置.*密钥/ })).toBeInTheDocument();
+  // 这一段叫「凭据保管箱」，人搜的是「密钥」：搜索也认它的常用叫法。
+  expect(within(dialog).getByRole("option", { name: /设置.*凭据保管箱/ })).toBeInTheDocument();
   await userEvent.keyboard("{Enter}");
   expect(await screen.findByTestId("where")).toHaveTextContent(`/workspaces/${WORKSPACE}/settings#secrets`);
 });
@@ -315,7 +325,7 @@ test("⌘K 打开全局搜索，按名字跳到设置里的一段", async () => 
 test("全局搜索能按名字找到 Agent", async () => {
   renderShell(`/workspaces/${WORKSPACE}/agents`, { count: 0 }, withAgents());
   await userEvent.click(await screen.findByRole("button", { name: /搜索或跳转/ }));
-  const dialog = await screen.findByRole("dialog", { name: "搜索或跳转" });
+  const dialog = await openedPalette();
   await userEvent.type(within(dialog).getByRole("combobox"), "notes");
   await userEvent.click(await within(dialog).findByRole("option", { name: /Notes tidier/ }));
   expect(await screen.findByTestId("where")).toHaveTextContent(`/workspaces/${WORKSPACE}/agents/agent-1`);
@@ -324,7 +334,7 @@ test("全局搜索能按名字找到 Agent", async () => {
 test("粘贴完整的任务 ID 可以直接打开那个任务", async () => {
   renderShell(`/workspaces/${WORKSPACE}/agents`, { count: 0 }, withAgents());
   await userEvent.click(await screen.findByRole("button", { name: /搜索或跳转/ }));
-  const dialog = await screen.findByRole("dialog", { name: "搜索或跳转" });
+  const dialog = await openedPalette();
   await userEvent.type(within(dialog).getByRole("combobox"), RUN);
   await userEvent.keyboard("{Enter}");
   expect(await screen.findByTestId("where")).toHaveTextContent(`/workspaces/${WORKSPACE}/runs/${RUN}`);
@@ -341,8 +351,8 @@ test("全局搜索不列这个角色看不见的分段", async () => {
   );
   await screen.findByRole("navigation");
   await userEvent.click(await screen.findByRole("button", { name: /搜索或跳转/ }));
-  const dialog = await screen.findByRole("dialog", { name: "搜索或跳转" });
+  const dialog = await openedPalette();
   await userEvent.type(within(dialog).getByRole("combobox"), "密钥");
-  expect(within(dialog).queryByRole("option", { name: /密钥/ })).toBeNull();
+  expect(within(dialog).queryByRole("option", { name: /凭据保管箱|程序访问/ })).toBeNull();
   expect(within(dialog).getByText("没有找到")).toBeInTheDocument();
 });
