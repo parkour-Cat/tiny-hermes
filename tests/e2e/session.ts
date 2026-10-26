@@ -50,6 +50,23 @@ export async function unfold(page: Page, title: string): Promise<void> {
   if ((await header.getAttribute("aria-expanded")) !== "true") await header.click();
 }
 
+/**
+ * Presses 确定 on the confirm that just opened, after it has stopped opening.
+ *
+ * antd scales a confirm in, and Playwright's "stable" check can pass on the
+ * animation's first frames. One CI run (PR #165, tools.spec) logged the click
+ * while the dialog still carried `ant-zoom-appear-active`; the button never
+ * went to loading, no request followed, and the dialog sat open until the
+ * test timed out. Waiting for the class to clear is what a person's reaction
+ * time does for free.
+ */
+export async function confirm(page: Page): Promise<void> {
+  const ok = page.getByRole("button", { name: "确定", exact: true });
+  await ok.waitFor();
+  await expect(page.locator('.ant-modal[class*="-appear"], .ant-modal[class*="-enter"]')).toHaveCount(0);
+  await ok.click();
+}
+
 /** Keyboard selection avoids clicking an option while the popup is moving. */
 export async function selectAntOption(page: Page, label: string, value: string): Promise<void> {
   const field = page.getByRole("combobox", { name: label, exact: true });

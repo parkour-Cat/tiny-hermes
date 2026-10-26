@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { openSection, selectAntOption, unfold } from "./session";
+import { confirm, openSection, selectAntOption, unfold } from "./session";
 
 /**
  * A skill's whole life, driven through the console against the real stack.
@@ -116,7 +116,7 @@ async function publishAgent(page: Page, scenario: string, tool: string): Promise
   await page.getByRole("button", { name: "保存草稿" }).click();
   await expect(page.getByText("草稿修订 2")).toBeVisible();
   await page.getByRole("button", { name: "发布" }).click();
-  await page.getByRole("button", { name: "确定" }).click();
+  await confirm(page);
   await expect(page.getByText("当前版本 v1")).toBeVisible();
   return name;
 }

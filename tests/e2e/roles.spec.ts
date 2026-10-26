@@ -1,5 +1,5 @@
 import { expect, test, type BrowserContext } from "@playwright/test";
-import { CONSOLE_STATE } from "./session";
+import { CONSOLE_STATE, confirm } from "./session";
 
 async function headers(context: BrowserContext, workspace: string) {
   const csrf = (await context.cookies()).find((cookie) => cookie.name === "tiny_hermes_csrf");
@@ -48,7 +48,7 @@ for (const role of ["workspace_admin", "developer", "viewer"] as const) {
         await expect(page.getByRole("button", { name: "保存草稿", exact: true })).toBeEnabled();
         await expect(personality).toHaveValue(`${role} 的未保存修改`);
         await page.getByRole("button", { name: "重新载入草稿", exact: true }).click();
-        await page.getByRole("button", { name: "确定", exact: true }).click();
+        await confirm(page);
         await expect(personality).not.toHaveValue(`${role} 的未保存修改`);
       }
       await page.getByRole("link", { name: "设置", exact: true }).click();
