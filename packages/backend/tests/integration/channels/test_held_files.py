@@ -425,3 +425,32 @@ async def test_the_scheduler_turns_a_held_message_into_a_run(
 
     assert await _run_count(engine, workspace_id) == 1
     assert await _run_of(engine, binding_id, "om_q1") is not None
+
+
+async def test_a_file_already_asked_about_keeps_its_record_when_gathered(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Found in the real chat: the question went out, and fourteen seconds
+    later the gather rewrote the row as `gathered` — so the record said
+    nobody had been asked. A settled row stays as it settled."""
+    binding_id = await _setup(engine, workspace_id, published_agent, monkeypatch)
+    _deliver_raw(client, binding_id, _file("om_f1", "file_v3_1", "orders.xlsx"))
+    await _age_delivery(engine, 10)
+    await _dispatch(engine, _Sender())
+    _deliver_raw(client, binding_id, _text("om_q1", "总金额多少？"))
+
+    await _gather(engine)
+
+    async with engine.connect() as connection:
+        found = await connection.execute(
+            text(
+                "SELECT reply_note FROM channel_events"
+                " WHERE channel_binding_id = :b AND channel_event_id = 'om_f1'"
+            ),
+            {"b": binding_id},
+        )
+        assert found.scalar_one() == "held_asked"
