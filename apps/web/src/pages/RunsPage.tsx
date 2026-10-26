@@ -9,12 +9,16 @@ import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
 import { api } from "../api/client";
 import { useT } from "../i18n/locale";
 import { StatusTag } from "../ui/StatusTag";
+import { statusLabel } from "../status";
 import { EmptyState } from "../ui/EmptyState";
 import { PageHeading } from "../ui/PageHeading";
 import { problemMessage } from "../api/messages";
 import type { AgentResponse, RunResponse, SessionResponse } from "../api/types";
 import { moment } from "../i18n/moment";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
+
+const COMMON_STATUSES = ["running", "waiting_approval", "failed", "completed"];
+const OTHER_STATUSES = ["queued", "waiting_external", "paused", "cancelling", "interrupted", "cancelled"];
 
 type SubmitValues = {
   agent_id: string;
@@ -207,7 +211,16 @@ export function RunsPage() {
       />
       <Space wrap className="page-alert">
         <Input aria-label={t("runSearch")} placeholder={t("runSearch")} value={search} allowClear onChange={(event) => filter({ q: event.target.value })} />
-        <Select aria-label={t("runStatus")} style={{ minWidth: 150 }} value={status} onChange={(value) => filter({ status: value })} options={[{ value: "", label: t("allStatuses") }, ...["queued", "running", "waiting_approval", "waiting_external", "paused", "cancelling", "interrupted", "completed", "failed", "cancelled"].map((value) => ({ value, label: <StatusTag code={value} /> }))]} />
+        {/* The four states people look for are one press away; the other six
+            stay in a select, still reachable, without crowding the row. */}
+        <div role="group" aria-label={t("runStatusFilter")} className="run-chips">
+          {["", ...COMMON_STATUSES].map((value) => (
+            <button key={value || "all"} type="button" className="run-chip" aria-pressed={status === value} onClick={() => filter({ status: value })}>
+              {value === "" ? t("runFilterAll") : statusLabel(value, t)}
+            </button>
+          ))}
+        </div>
+        <Select aria-label={t("runMoreStatuses")} style={{ minWidth: 140 }} value={OTHER_STATUSES.includes(status) ? status : undefined} placeholder={t("runMoreStatuses")} allowClear onChange={(value) => filter({ status: value ?? "" })} options={OTHER_STATUSES.map((value) => ({ value, label: <StatusTag code={value} /> }))} />
         <Select aria-label={t("allAgents")} style={{ minWidth: 150 }} value={agentFilter} onChange={(value) => filter({ agent: value })} options={[{ value: "", label: t("allAgents") }, ...(agents.data ?? []).map((agent) => ({ value: agent.id, label: agent.name }))]} />
         <TimeRangeFilter from={from} through={through} onChange={(a, b) => filter({ from: a, through: b })} />
       </Space>

@@ -855,3 +855,30 @@ html[data-theme="dark"] .th-tag-interrupted {
 .home-step { flex: none; width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--th-copper); }
 html[data-theme="dark"] .home-pill-bad { background: #3b1f1b; color: #f0a398; }
 html[data-theme="dark"] .home-pill-wait { background: #3a2d16; color: #e8c27a; }
+
+/* ---------------------------------------------------------------- run detail */
+
+.run-columns { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; margin-bottom: 20px; }
+.run-main { flex: 3 1 520px; min-width: 0; display: flex; flex-direction: column; gap: 20px; }
+.run-steps { flex: 2 1 340px; min-width: 0; }
+.run-steps-list { list-style: none; margin: 0; padding: 0; }
+.run-step { position: relative; display: flex; gap: 12px; padding-bottom: 16px; }
+.run-step:not(:last-child)::after { content: ""; position: absolute; left: 5px; top: 20px; bottom: 0; width: 2px; background: var(--th-line); }
+.run-step-node { flex: none; width: 12px; height: 12px; margin-top: 5px; border-radius: 50%; border: 2px solid var(--th-copper); background: var(--th-paper-raised); }
+.run-step-failed .run-step-node { border-color: #a3312a; background: #a3312a; }
+.run-step-pending .run-step-node { border-color: #255c99; }
+.run-step-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.run-step-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
+.run-step-title { font-weight: 500; }
+.run-step-flag { font-size: 12px; font-weight: 700; border-radius: 6px; padding: 0 6px; background: #f6e1dd; color: #8e2a23; }
+.run-step-flag-live { background: #e1eaf4; color: #1f4f85; }
+.run-step-tool { margin-left: auto; font-size: 12px; color: var(--th-ink-soft); }
+.run-step-detail { display: block; padding: 6px 10px; border-radius: 6px; background: rgb(128 128 128 / 10%); font-size: 12px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.run-step-output summary { cursor: pointer; font-size: 13px; color: var(--th-ink-soft); }
+html[data-theme="dark"] .run-step-flag { background: #3b1f1b; color: #f0a398; }
+html[data-theme="dark"] .run-step-flag-live { background: #1c2a3b; color: #9cc1ea; }
+
+.run-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.run-chip { height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--th-line); background: var(--th-paper-raised); color: var(--th-ink); font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; }
+.run-chip:hover { border-color: var(--th-ink-soft); }
+.run-chip[aria-pressed="true"] { background: var(--th-ink); border-color: var(--th-ink); color: var(--th-paper); }
