@@ -539,8 +539,13 @@ class _FakeChannels:
         self._built = 0
         self.channels: list[_FakeChannel] = []
 
-    def __call__(self, *, app_id: str, app_secret: str) -> _FakeChannel:
-        del app_id, app_secret
+    def __call__(
+        self, *, app_id: str, app_secret: str, safety: Any = None
+    ) -> _FakeChannel:
+        # `safety` is accepted and ignored: these tests are about the
+        # connection's lifecycle, and batching is pinned against the SDK's
+        # own pipeline in `test_long_connection_adapter.py`.
+        del app_id, app_secret, safety
         self._built += 1
         connect_error = self._connect_error
         if (
