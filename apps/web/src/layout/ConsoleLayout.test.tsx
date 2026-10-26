@@ -50,12 +50,12 @@ function renderShell(
   handlers: ReturnType<typeof http.get>[] = [],
 ): { hits: { count: number } } {
   server.use(
+    // A test's own handlers come first: within one `use`, the earlier handler
+    // is the one that answers, so a test can replace the signed-in user, the
+    // role, or one of the inbox queues the shell counts.
+    ...handlers,
     http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
     countingWorkspaces(hits),
-    // The shell now counts the inbox. A test that cares passes its own queue
-    // handlers, listed *before* the empty ones: within one `use`, the earlier
-    // handler is the one that answers.
-    ...handlers,
     http.get("/api/v1/workspaces/:id/members/me", () => HttpResponse.json({ role: "workspace_admin" })),
     ...emptyQueues(),
   );
@@ -342,13 +342,11 @@ test("粘贴完整的任务 ID 可以直接打开那个任务", async () => {
 
 test("全局搜索不列这个角色看不见的分段", async () => {
   // 和侧栏同一个判据：隐藏不是权限，但不邀请一次注定失败的点击。
-  renderShell(`/workspaces/${WORKSPACE}/agents`, { count: 0 }, withAgents());
-  // Added after renderShell so they win over its admin defaults: msw prefers
-  // the handler registered last, and the first request is still in flight.
-  server.use(
+  renderShell(`/workspaces/${WORKSPACE}/agents`, { count: 0 }, [
+    ...withAgents(),
     http.get("/api/v1/auth/me", () => HttpResponse.json({ ...ADMIN, is_platform_admin: false })),
     http.get("/api/v1/workspaces/:id/members/me", () => HttpResponse.json({ role: "viewer" })),
-  );
+  ]);
   await screen.findByRole("navigation");
   await userEvent.click(await screen.findByRole("button", { name: /搜索或跳转/ }));
   const dialog = await openedPalette();
