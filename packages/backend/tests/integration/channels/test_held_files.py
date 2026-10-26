@@ -1,3 +1,6 @@
+# pyright: reportPrivateUsage=false
+# The helpers are borrowed from `test_reply_dispatch.py`, the module that
+# already goes in through the webhook; a second copy would drift.
 """A Feishu message that is only a file waits for the sender's next one.
 
 Found in the real chat, not here: a file alone became a Run, and the model,
@@ -12,7 +15,7 @@ project keeps producing is the half nobody reads.
 """
 
 import json
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -20,7 +23,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from .test_reply_dispatch import (  # pyright: ignore[reportPrivateUsage]
+from .test_reply_dispatch import (
     KEY,
     SECRET_ENV,
     _age_delivery,
@@ -87,8 +90,9 @@ async def _files_on(engine: AsyncEngine, run_id: UUID) -> list[dict[str, Any]]:
             {"r": run_id},
         )
         content = found.scalar_one()
-    document = content if isinstance(content, dict) else json.loads(content)
-    return [part for part in document["parts"] if part.get("type") == "file"]
+    document = cast(dict[str, Any], content if isinstance(content, dict) else json.loads(content))
+    parts = cast(list[dict[str, Any]], document["parts"])
+    return [part for part in parts if part.get("type") == "file"]
 
 
 def _asks(sender: _Sender) -> list[dict[str, str]]:

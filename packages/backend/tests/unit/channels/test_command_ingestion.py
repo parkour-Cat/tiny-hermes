@@ -55,6 +55,12 @@ class FakeConversations:
     ) -> None:
         self.created.append((binding_id, external_user_id, session_id))
 
+    async def take_held_files(self, binding_id: UUID, external_user_id: str) -> list[Any]:
+        # Nothing held: these tests are about messages that are not files
+        # alone. `test_held_files.py` covers the hold, against the database.
+        del binding_id, external_user_id
+        return []
+
 
 class FakeRuns:
     """Plays both `RunEntry` roles this test needs: submitting an ordinary

@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, select, true, update
+from sqlalchemy import delete, func, select, true, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +28,7 @@ from tiny_hermes.channels.infrastructure.tables import (
 )
 from tiny_hermes.runs.domain.models import (
     TERMINAL_STATES,
+    FileBlock,
     RunEventType,
     RunPurpose,
     RunState,
@@ -74,6 +75,29 @@ class PendingRefusal:
     binding_id: UUID
     kind: str
     external_user_id: str
+
+
+@dataclass(frozen=True)
+class PendingHeldQuestion:
+    """A message that was only files, old enough that its sender could have
+    said what they are for by now.
+
+    `taken` is read by the dispatcher rather than filtered out here: a taken
+    row still has to be settled, or the scan meets it every pass forever.
+    """
+
+    event_row_id: UUID
+    binding_id: UUID
+    external_user_id: str
+    taken: bool
+
+
+@dataclass(frozen=True)
+class HeldDelivery:
+    """One delivery's files still waiting for the sender's next message."""
+
+    event_row_id: UUID
+    names: list[str]
 
 
 @dataclass(frozen=True)
@@ -529,6 +553,121 @@ class SqlChannelStore:
             )
         )
         await self._session.flush()
+
+    async def record_held_files(
+        self, event_row_id: UUID, files: tuple[FileBlock, ...], external_user_id: str
+    ) -> None:
+        """Hold a file-only message's files on its own delivery row.
+
+        The sender is written beside them for `record_command_receipt`'s
+        reason: a first-ever message that is a file has no conversation row.
+        """
+        await self._session.execute(
+            update(ChannelEventRow)
+            .where(ChannelEventRow.id == event_row_id)
+            .values(
+                held_files=[{"reference": f.reference, "name": f.name} for f in files],
+                held_open_id=external_user_id[:120],
+            )
+        )
+        await self._session.flush()
+
+    async def take_held_files(
+        self, binding_id: UUID, external_user_id: str
+    ) -> list[FileBlock]:
+        """What this person still has held, oldest first, and no longer held.
+
+        One `UPDATE ... RETURNING` rather than a read then a write: two
+        messages from one person in the same instant would both read the
+        same files, and the file would go with both Runs. The row lock lets
+        exactly one of them have it.
+        """
+        rows = (
+            await self._session.execute(
+                update(ChannelEventRow)
+                .where(
+                    ChannelEventRow.channel_binding_id == binding_id,
+                    ChannelEventRow.held_open_id == external_user_id[:120],
+                    ChannelEventRow.held_files.is_not(None),
+                    ChannelEventRow.held_taken_at.is_(None),
+                )
+                .values(held_taken_at=func.now())
+                .returning(
+                    ChannelEventRow.id,
+                    ChannelEventRow.received_at,
+                    ChannelEventRow.held_files,
+                )
+            )
+        ).all()
+        # RETURNING promises no order; the order sent is the order attached.
+        ordered = sorted(rows, key=lambda row: (row.received_at, row.id))
+        return [
+            FileBlock(reference=entry["reference"], name=entry["name"])
+            for row in ordered
+            for entry in cast(list[dict[str, str]], row.held_files)
+        ]
+
+    async def pending_held_questions(
+        self, older_than: datetime, limit: int = 50
+    ) -> list["PendingHeldQuestion"]:
+        """File-only messages not yet settled, received before `older_than`.
+
+        Oldest first, which the dispatcher relies on: of one person's several
+        waiting files, the earlier rows are settled as superseded before the
+        newest one asks about them all.
+        """
+        rows = (
+            await self._session.execute(
+                select(
+                    ChannelEventRow.id,
+                    ChannelEventRow.channel_binding_id,
+                    ChannelEventRow.held_open_id,
+                    ChannelEventRow.held_taken_at,
+                )
+                .where(
+                    ChannelEventRow.held_files.is_not(None),
+                    ChannelEventRow.replied_at.is_(None),
+                    ChannelEventRow.received_at <= older_than,
+                )
+                .order_by(ChannelEventRow.received_at, ChannelEventRow.id)
+                .limit(limit)
+            )
+        ).all()
+        return [
+            PendingHeldQuestion(
+                event_row_id=row.id,
+                binding_id=row.channel_binding_id,
+                external_user_id=row.held_open_id,
+                taken=row.held_taken_at is not None,
+            )
+            for row in rows
+            if row.held_open_id
+        ]
+
+    async def still_held(
+        self, binding_id: UUID, external_user_id: str
+    ) -> list["HeldDelivery"]:
+        """Every delivery whose files this person still has waiting, oldest
+        first — what a question about them has to name."""
+        rows = (
+            await self._session.execute(
+                select(ChannelEventRow.id, ChannelEventRow.held_files)
+                .where(
+                    ChannelEventRow.channel_binding_id == binding_id,
+                    ChannelEventRow.held_open_id == external_user_id[:120],
+                    ChannelEventRow.held_files.is_not(None),
+                    ChannelEventRow.held_taken_at.is_(None),
+                )
+                .order_by(ChannelEventRow.received_at, ChannelEventRow.id)
+            )
+        ).all()
+        return [
+            HeldDelivery(
+                event_row_id=row.id,
+                names=[entry["name"] for entry in cast(list[dict[str, str]], row.held_files)],
+            )
+            for row in rows
+        ]
 
     async def pending_command_receipts(
         self, limit: int = 50

@@ -29,6 +29,7 @@ from tiny_hermes.channels.application.webhook_service import (
 from tiny_hermes.channels.domain.blocked import BlockedNotice
 from tiny_hermes.channels.domain.command_receipt import CommandReceipt
 from tiny_hermes.channels.domain.feishu import CHANNEL
+from tiny_hermes.runs.domain.models import FileBlock
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,10 @@ class BindingDirectory(Protocol):
 
     async def record_command_receipt(
         self, event_row_id: UUID, receipt: CommandReceipt, external_user_id: str
+    ) -> None: ...
+
+    async def record_held_files(
+        self, event_row_id: UUID, files: tuple[FileBlock, ...], external_user_id: str
     ) -> None: ...
 
 
@@ -196,6 +201,13 @@ class FeishuChannelService:
             if delivered.receipt is not None:
                 await self._bindings.record_command_receipt(
                     outcome.claim_id, delivered.receipt, outcome.event.external_user_id
+                )
+            if delivered.held:
+                # Held on this delivery's row, in this transaction: the next
+                # message's `take_held_files` and the scan that asks the
+                # sender what to do both read it there.
+                await self._bindings.record_held_files(
+                    outcome.claim_id, delivered.held, outcome.event.external_user_id
                 )
             return Accepted(delivered=delivered)
         # The claim and the Run, joined. This call was missing for a whole

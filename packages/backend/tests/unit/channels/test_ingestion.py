@@ -56,6 +56,12 @@ class FakeConversations:
     ) -> None:
         self.remembered.append((binding_id, external_user_id, session_id))
 
+    async def take_held_files(self, binding_id: UUID, external_user_id: str) -> list[Any]:
+        # Nothing held: these tests are about messages that are not files
+        # alone. `test_held_files.py` covers the hold, against the database.
+        del binding_id, external_user_id
+        return []
+
 
 class FakeRuns:
     def __init__(self, document: dict[str, Any] | None = None) -> None:
@@ -271,9 +277,12 @@ async def test_an_image_message_reaches_the_run_as_a_reference() -> None:
     ]
 
 
-async def test_a_file_message_reaches_the_run_as_a_reference_with_a_safe_name() -> None:
+async def test_a_file_alone_is_held_as_a_reference_with_a_safe_name() -> None:
     """§1.27, v2.27: the same seam for a file. The name is made safe here, so
-    the note the model reads and the path the Worker writes are one name."""
+    the note the model reads and the path the Worker writes are one name.
+
+    Held rather than submitted since the 2026-10-26 revision: a file with no
+    words starts no Run, and waits for the sender's next message."""
     from tiny_hermes.channels.domain.events import ChannelFile
     from tiny_hermes.runs.domain.models import FileBlock
 
@@ -282,7 +291,7 @@ async def test_a_file_message_reaches_the_run_as_a_reference_with_a_safe_name() 
         subjects=FakeSubjects(), conversations=FakeConversations(), runs=runs
     )
 
-    await ingestion.run_for(
+    delivered = await ingestion.run_for(
         binding=BINDING,
         event=ChannelEvent(
             channel="feishu",
@@ -294,7 +303,9 @@ async def test_a_file_message_reaches_the_run_as_a_reference_with_a_safe_name() 
         request_id="req-1",
     )
 
-    assert runs.files == [FileBlock(reference="feishu:om_msg:file_k", name="销售.xlsx")]
+    assert delivered.run is None
+    assert delivered.held == (FileBlock(reference="feishu:om_msg:file_k", name="销售.xlsx"),)
+    assert runs.submitted == []
 
 
 async def test_a_text_message_carries_no_image_reference() -> None:

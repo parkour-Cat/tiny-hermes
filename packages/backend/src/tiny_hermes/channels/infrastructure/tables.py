@@ -145,6 +145,18 @@ class ChannelEventRow(IdMixin, Base):
                 "command_receipt IS NOT NULL AND replied_at IS NULL"
             ),
         ),
+        # A held file's two readers — migration 0083.
+        Index(
+            "ix_channel_events_held_by_sender",
+            "channel_binding_id",
+            "held_open_id",
+            postgresql_where=text("held_files IS NOT NULL AND held_taken_at IS NULL"),
+        ),
+        Index(
+            "ix_channel_events_awaiting_held_question",
+            "received_at",
+            postgresql_where=text("held_files IS NOT NULL AND replied_at IS NULL"),
+        ),
     )
 
     channel_binding_id: Mapped[UUID] = mapped_column(
@@ -221,6 +233,20 @@ class ChannelEventRow(IdMixin, Base):
     #: a command does not create a `channel_conversations` row on its own,
     #: so the scan has nowhere else to find the sender.
     command_open_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    #: The files of a message that was only files, waiting for the sender's
+    #: next message to carry them — it started no Run to hang them on. A list
+    #: of `{"reference", "name"}`; see migration 0083.
+    held_files: Mapped[list[dict[str, str]] | None] = mapped_column(
+        JSONB, nullable=True
+    )
+    #: Whose next message takes them. Here for `command_open_id`'s reason: a
+    #: first-ever message that is a file has no conversation row yet.
+    held_open_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    #: When a message took them, or `/new` dropped them. The scan asks the
+    #: sender what to do only while this is NULL.
+    held_taken_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class ChannelConversationRow(IdMixin, CreatedAtMixin, Base):

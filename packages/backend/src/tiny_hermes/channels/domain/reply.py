@@ -151,4 +151,22 @@ def progress_note() -> str:
     return "还在处理,这条要花点时间,完成后我会把结果发过来。"
 
 
-__all__ = ["MAX_REPLY_CHARS", "progress_note", "refusal_for", "reply_for"]
+def held_files_question(names: list[str]) -> str:
+    """What to ask somebody who sent files and said nothing about them.
+
+    Fixed words from the platform, not the model's: the Agent was told to ask
+    exactly this and, handed a file alone, summarised it unasked instead.
+    """
+    listed = "".join(f"《{name}》" for name in names)
+    if len(names) == 1:
+        return f"收到{listed}。需要我拿它做什么？直接回复就行。"
+    return f"收到 {len(names)} 个文件：{listed}。需要我拿它们做什么？直接回复就行。"
+
+
+__all__ = [
+    "MAX_REPLY_CHARS",
+    "held_files_question",
+    "progress_note",
+    "refusal_for",
+    "reply_for",
+]

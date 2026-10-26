@@ -85,6 +85,13 @@ class Conversations(Protocol):
         self, binding_id: UUID, external_user_id: str, session_id: UUID
     ) -> None: ...
 
+    async def take_held_files(
+        self, binding_id: UUID, external_user_id: str
+    ) -> list[FileBlock]:
+        """Everything this person sent as a file alone and no message has
+        carried yet, oldest first — and no longer held once returned."""
+        ...
+
 
 class RunEntry(Protocol):
     """`create_end_user_session` and `submit_end_user_run` are the two calls
@@ -160,6 +167,10 @@ class Delivered:
     run: AcceptedRun | None
     blocked: BlockedNotice | None
     receipt: CommandReceipt | None = None
+    #: A message that was only files: no Run, no receipt, and these held on
+    #: the delivery until the sender's next message takes them. `run` is
+    #: `None` here too, so this is the third shape a reader of `run` meets.
+    held: tuple[FileBlock, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -205,6 +216,24 @@ class ChannelIngestion:
                 binding, event, command, subject.end_user_id, request_id
             )
 
+        files = tuple(
+            FileBlock(
+                reference=feishu_reference(
+                    message_id=attached.message_id, file_key=attached.file_key
+                ),
+                # The name becomes a path in the sandbox, so it is never
+                # trusted on arrival, whoever built the event.
+                name=inbox_name(attached.name),
+            )
+            for attached in event.files
+        )
+        if files and not event.images and not event.text.strip():
+            # Office-tasks design, "只有文件的消息": a file alone says nothing
+            # about what to do with it. A Run started here hands the model a
+            # file and no request, and it guessed; the sender's next message
+            # is the request, so the file waits for it.
+            return Delivered(run=None, blocked=None, held=files)
+
         session_id = await self.conversations.session_for(
             binding.id, event.external_user_id
         )
@@ -225,6 +254,9 @@ class ChannelIngestion:
                 binding.id, event.external_user_id, session_id
             )
 
+        held = await self.conversations.take_held_files(
+            binding.id, event.external_user_id
+        )
         accepted = await self.runs.submit_end_user_run(
             binding.workspace_id,
             subject.end_user_id,
@@ -250,18 +282,8 @@ class ChannelIngestion:
                 for picture in event.images
             ),
             # §1.27, v2.27: files by reference too, fetched by the Worker into
-            # the sandbox's inbox under the name parsing already made safe.
-            files=tuple(
-                FileBlock(
-                    reference=feishu_reference(
-                        message_id=attached.message_id, file_key=attached.file_key
-                    ),
-                    # Again here, whoever built the event: the name becomes a
-                    # path in the sandbox, so it is never trusted on arrival.
-                    name=inbox_name(attached.name),
-                )
-                for attached in event.files
-            ),
+            # the sandbox's inbox. Held ones first: they were sent first.
+            files=(*held, *files),
         )
         # §497: saving the pending Run is allowed, staying quiet about it is
         # not. Read here rather than left to each transport, so a transport
@@ -290,6 +312,11 @@ class ChannelIngestion:
         `remember_session` — the two calls the ordinary path above uses to
         make a conversation exist.
         """
+        if command.name is CommandName.NEW:
+            # Starting over: a file still waiting for the old conversation's
+            # next message does not belong in the new one. Dropped before the
+            # lookup below, because a file can be all a person ever sent.
+            await self.conversations.take_held_files(binding.id, event.external_user_id)
         session_id = await self.conversations.session_for(
             binding.id, event.external_user_id
         )
