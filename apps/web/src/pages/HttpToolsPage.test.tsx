@@ -221,6 +221,21 @@ test("a host only the workspace approved is flagged too: registering works, call
   );
 });
 
+test("a host neither level approved says the platform goes first, without promising registration", async () => {
+  // A workspace entry may only narrow the platform's list, so the order is
+  // fixed — and with the workspace missing too, registration does not pass.
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
+    http.get("/api/v1/http-tools", () => HttpResponse.json([])),
+    ...scopes([], []),
+  );
+  renderTools();
+  await typeBaseUrl("https://api.tavily.com");
+  expect(await screen.findByText(/平台和工作空间都还没放行 api\.tavily\.com/)).toBeInTheDocument();
+  expect(screen.queryByText(/登记能过/)).toBeNull();
+  expect(screen.getByRole("link", { name: "去平台的出站范围" })).toBeInTheDocument();
+});
+
 test("a host both levels approve, by a wildcard, is said to be in range", async () => {
   server.use(
     http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
