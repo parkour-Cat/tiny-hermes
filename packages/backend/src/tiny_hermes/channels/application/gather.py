@@ -69,7 +69,7 @@ class GatherStore(Protocol):
         self, event_row_id: UUID, notice: BlockedNotice
     ) -> None: ...
 
-    async def settle_reply(self, event_row_id: UUID, note: str, now: datetime) -> None: ...
+    async def settle_if_open(self, event_row_id: UUID, note: str, now: datetime) -> None: ...
 
     def savepoint(self) -> AbstractAsyncContextManager[object]: ...
 
@@ -140,7 +140,9 @@ class ChannelGatherer:
     async def _settle(self, rows: list[UUID], note: str) -> None:
         now = _now()
         for row in rows:
-            await self.store.settle_reply(row, note, now)
+            # Only rows still open: a file asked about already settled as
+            # `held_asked`, and that is the record worth keeping.
+            await self.store.settle_if_open(row, note, now)
 
 
 def _files_only(event: ChannelEvent) -> bool:

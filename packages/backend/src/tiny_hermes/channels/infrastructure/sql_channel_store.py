@@ -724,6 +724,20 @@ class SqlChannelStore:
             for row in rows
         ]
 
+    async def settle_if_open(self, event_row_id: UUID, note: str, now: datetime) -> None:
+        """`settle_reply`, for a row that may already have been settled.
+
+        A file sent alone is asked about and settled `held_asked`; when the
+        person's answer later gathers it, rewriting that row as `gathered`
+        erased the only record that they had been asked.
+        """
+        await self._session.execute(
+            update(ChannelEventRow)
+            .where(ChannelEventRow.id == event_row_id, ChannelEventRow.replied_at.is_(None))
+            .values(replied_at=now, reply_note=note[:200])
+        )
+        await self._session.flush()
+
     async def mark_taken(self, event_row_ids: list[UUID]) -> None:
         await self._session.execute(
             update(ChannelEventRow)
