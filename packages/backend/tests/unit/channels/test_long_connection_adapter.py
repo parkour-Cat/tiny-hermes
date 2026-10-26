@@ -4,16 +4,23 @@
 测试不需要数据库，也不该需要。
 """
 
+import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
+from lark_oapi.channel.safety import (  # pyright: ignore[reportMissingTypeStubs]
+    SafetyPipeline,
+)
 from lark_oapi.channel.types import (  # pyright: ignore[reportMissingTypeStubs]
     Conversation,
+    FileContent,
     Identity,
     InboundMessage,
+    TextContent,
 )
 from tiny_hermes.channels.infrastructure.feishu_long_connection import (
     FeishuLongConnection,
@@ -143,3 +150,57 @@ async def test_a_non_dict_raw_still_leaves_one_log_line(
 
     assert adapter.alive is True
     assert len(caplog.records) == 1
+
+
+def _message(message_id: str, kind: str, content: str, text: str) -> InboundMessage:
+    return InboundMessage(
+        id=message_id,
+        # Now, not zero: the safety pipeline drops anything older than its
+        # stale window before it gets as far as batching.
+        create_time=int(time.time() * 1000),
+        conversation=Conversation(chat_id="oc_1", chat_type="p2p"),
+        sender=Identity(open_id="ou_zhang"),
+        content=FileContent(file_key="file_v3_1", file_name="orders.xlsx")
+        if kind == "file"
+        else TextContent(text=text),
+        raw_content_type=kind,
+        raw={"message_id": message_id, "message_type": kind, "content": content},
+    )
+
+
+async def test_a_file_sent_with_its_question_reaches_the_shared_half(
+    deliver_spy: _DeliverSpy,
+) -> None:
+    """Feishu sends a file and the words typed beside it as two messages in
+    the same instant. With the SDK's default text batching those two were
+    merged into one whose `raw` is the last message's — the words — and the
+    file was gone before `on_frame` ever ran: no row, no log line. Found by
+    a real file in a real chat, not by a test.
+
+    The pipeline here is the SDK's own, built from the safety config the
+    adapter's channel actually carries, with the arguments `FeishuChannel`
+    builds it with — so it is the SDK's merge that is under test, not a copy
+    of what we believe it does.
+    """
+    binding = LongConnectionBinding(binding_id=uuid4(), app_id="cli_x", app_secret="s")
+    adapter = FeishuLongConnection(binding, deliver_spy)
+    safety = adapter.channel().config.safety
+    pipeline = SafetyPipeline(
+        loop=asyncio.get_running_loop(),
+        on_message=adapter.on_frame,
+        dedup_config=safety.dedup,
+        batch_config=safety.text_batch,
+        media_batch_config=safety.media_batch,
+        queue_config=safety.chat_queue,
+        stale_window_ms=safety.stale_message_window_ms,
+    )
+
+    await pipeline.push_message(
+        _message("om_file", "file", '{"file_key": "file_v3_1", "file_name": "orders.xlsx"}', "")
+    )
+    await pipeline.push_message(_message("om_text", "text", '{"text": "汇总一下"}', "汇总一下"))
+    await pipeline.dispose()
+
+    delivered = {envelope["header"]["event_id"]: envelope for _, envelope in deliver_spy.calls}
+    assert set(delivered) == {"om_file", "om_text"}
+    assert delivered["om_file"]["event"]["message"]["message_type"] == "file"
