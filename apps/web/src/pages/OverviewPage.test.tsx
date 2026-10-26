@@ -55,6 +55,7 @@ function stack({ today = [], failed = [], recent = [] }: Runs = {}, seen: URLSea
     ),
     http.get("/api/v1/approvals", () => HttpResponse.json({ items: [], has_more: false })),
     http.get("/api/v1/skill-proposals", () => HttpResponse.json([])),
+    http.get("/api/v1/skills", () => HttpResponse.json([])),
     http.get("/api/v1/memories/pending", () => HttpResponse.json([])),
     http.get("/api/v1/runs", ({ request }) => {
       const params = new URL(request.url).searchParams;
@@ -141,7 +142,7 @@ test("最近的任务用对方说的第一句话当标题", async () => {
   const link = await within(recent).findByRole("link", { name: /给我做一个有关 gemini/ });
   expect(link).toHaveAttribute("href", `/workspaces/${WORKSPACE}/runs/run-1`);
   expect(within(recent).getByText(/Notes tidier/)).toBeInTheDocument();
-  expect(within(recent).getByText("64 秒")).toBeInTheDocument();
+  expect(within(recent).getByText("1 分 4 秒")).toBeInTheDocument();
 });
 
 test("任务读不到时那一块给出重试，Agent 那一块照常", async () => {
