@@ -85,11 +85,8 @@ class Conversations(Protocol):
         self, binding_id: UUID, external_user_id: str, session_id: UUID
     ) -> None: ...
 
-    async def take_held_files(
-        self, binding_id: UUID, external_user_id: str
-    ) -> list[FileBlock]:
-        """Everything this person sent as a file alone and no message has
-        carried yet, oldest first — and no longer held once returned."""
+    async def drop_held(self, binding_id: UUID, external_user_id: str) -> None:
+        """Let go of everything this person has waiting to be gathered."""
         ...
 
 
@@ -167,10 +164,11 @@ class Delivered:
     run: AcceptedRun | None
     blocked: BlockedNotice | None
     receipt: CommandReceipt | None = None
-    #: A message that was only files: no Run, no receipt, and these held on
-    #: the delivery until the sender's next message takes them. `run` is
-    #: `None` here too, so this is the third shape a reader of `run` meets.
-    held: tuple[FileBlock, ...] = ()
+    #: An ordinary message on arrival: no Run yet, held on its delivery for
+    #: the Scheduler to gather with whatever the same person sends next.
+    #: `run` is `None` here too, so this is the third shape a reader of
+    #: `run` meets.
+    held: ChannelEvent | None = None
 
 
 @dataclass(frozen=True)
@@ -179,6 +177,34 @@ class ChannelIngestion:
     conversations: Conversations
     runs: RunEntry
 
+    async def accept(
+        self,
+        *,
+        binding: ChannelBindingRecord,
+        event: ChannelEvent,
+        request_id: str,
+    ) -> Delivered:
+        """What a delivery becomes the moment it is claimed.
+
+        A command is carried out now: it changes the conversation, and doing
+        that a gather-window late would act on one the person has moved past.
+        Anything else is held. Feishu sends a file and the words typed beside
+        it as two messages, in either order — the real chat showed both — so
+        the Run waits for the Scheduler to gather what this person sent
+        together (office-tasks design, 2026-10-26).
+
+        The erased check runs here as well as in `run_for`: holding a message
+        must not become a way around §344 that answers 200 at the door.
+        """
+        subject = await self.subjects.upsert_external_identity(
+            binding.workspace_id, binding.channel, event.external_user_id
+        )
+        if subject.erased_at is not None:
+            raise ErasedSubjectRefused
+        if parse(event.text, has_images=bool(event.images or event.files)) is not None:
+            return await self.run_for(binding=binding, event=event, request_id=request_id)
+        return Delivered(run=None, blocked=None, held=event)
+
     async def run_for(
         self,
         *,
@@ -186,7 +212,7 @@ class ChannelIngestion:
         event: ChannelEvent,
         request_id: str,
     ) -> Delivered:
-        """The claimed delivery, turned into work.
+        """The claimed delivery — or a gathered batch of them — turned into work.
 
         The idempotency key is the `channel_event_id` (§569's own rule: the
         key belongs to the caller's own notion of a request). It is a second
@@ -216,23 +242,6 @@ class ChannelIngestion:
                 binding, event, command, subject.end_user_id, request_id
             )
 
-        files = tuple(
-            FileBlock(
-                reference=feishu_reference(
-                    message_id=attached.message_id, file_key=attached.file_key
-                ),
-                # The name becomes a path in the sandbox, so it is never
-                # trusted on arrival, whoever built the event.
-                name=inbox_name(attached.name),
-            )
-            for attached in event.files
-        )
-        if files and not event.images and not event.text.strip():
-            # Office-tasks design, "只有文件的消息": a file alone says nothing
-            # about what to do with it. A Run started here hands the model a
-            # file and no request, and it guessed; the sender's next message
-            # is the request, so the file waits for it.
-            return Delivered(run=None, blocked=None, held=files)
 
         session_id = await self.conversations.session_for(
             binding.id, event.external_user_id
@@ -254,9 +263,6 @@ class ChannelIngestion:
                 binding.id, event.external_user_id, session_id
             )
 
-        held = await self.conversations.take_held_files(
-            binding.id, event.external_user_id
-        )
         accepted = await self.runs.submit_end_user_run(
             binding.workspace_id,
             subject.end_user_id,
@@ -282,8 +288,18 @@ class ChannelIngestion:
                 for picture in event.images
             ),
             # §1.27, v2.27: files by reference too, fetched by the Worker into
-            # the sandbox's inbox. Held ones first: they were sent first.
-            files=(*held, *files),
+            # the sandbox's inbox under the name parsing already made safe.
+            files=tuple(
+                FileBlock(
+                    reference=feishu_reference(
+                        message_id=attached.message_id, file_key=attached.file_key
+                    ),
+                    # Again here, whoever built the event: the name becomes a
+                    # path in the sandbox, so it is never trusted on arrival.
+                    name=inbox_name(attached.name),
+                )
+                for attached in event.files
+            ),
         )
         # §497: saving the pending Run is allowed, staying quiet about it is
         # not. Read here rather than left to each transport, so a transport
@@ -313,10 +329,11 @@ class ChannelIngestion:
         make a conversation exist.
         """
         if command.name is CommandName.NEW:
-            # Starting over: a file still waiting for the old conversation's
-            # next message does not belong in the new one. Dropped before the
-            # lookup below, because a file can be all a person ever sent.
-            await self.conversations.take_held_files(binding.id, event.external_user_id)
+            # Starting over: whatever is still waiting to be gathered belongs
+            # to the old conversation, not the new one. Dropped before the
+            # lookup below, because a held message can be all a person ever
+            # sent.
+            await self.conversations.drop_held(binding.id, event.external_user_id)
         session_id = await self.conversations.session_for(
             binding.id, event.external_user_id
         )

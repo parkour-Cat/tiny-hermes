@@ -320,7 +320,11 @@ class ChannelReplyDispatcher:
         return sent
 
     async def _open_card(self, opening: PendingCard) -> bool:
-        """Put something on screen, about a second after the message landed.
+        """Put something on screen, on the first scan after the Run exists.
+
+        That is about a second after the gather starts it, so 2.5 to 3.5
+        seconds after the message landed: messages wait for the gather window
+        first (office-tasks design, 2026-10-26).
 
         A queued delivery opens with the queue card rather than 「正在处理」
         — nothing is processing it, and the queue card already carries the

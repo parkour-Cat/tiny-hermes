@@ -873,3 +873,7 @@ pypdf、pdfminer（读 PDF），matplotlib（画图，默认中文字体是文�
 
   缺权限时，下载会记成 `attachment_failed`，发送会作为失败的工具结果交给模型，Run 本身不失败。
 - **下载和上传都走工作区的出网边界**，和取图片一样，所以出网策略要放行 `open.feishu.cn`。
+- **消息不是一到就开 Run**（2026-10-26）：飞书不保证文件和一起发的文字谁先到，所以同一个人的消息先存在入站记录上，最后一条之后 `CHANNEL_GATHER_SECONDS`（默认 1.5 秒）内没有新消息，调度器才把这一批合成一个 Run，回复挂在最后一条上。代价是每条消息慢 1.5 到 2.5 秒。命令（`/new` 等）不等，立刻执行。
+  - 一批里只有文件、没有文字时不开 Run，3 秒后平台问一句「需要我拿它做什么？」，对方回复后文件跟着那条消息进 Run。`/new` 丢掉还没合批的消息和文件。
+  - **这一步在调度器里**（`gather_channel_messages` 扫描）。调度器停了，飞书消息会被收下、但不会变成 Run，`channel_events` 里能看到 `held_message` 有值而 `held_taken_at` 为空的行在累积。
+  - `reply_note` 里新增的值：`gathered`（并入了同批最后一条）、`held_asked`（问过了）、`held_taken`（问之前已被后一条带走）、`held_superseded`（同一人有更新的文件，由那一条统一问）、`dropped_by_new`。
