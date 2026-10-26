@@ -60,6 +60,8 @@ from tiny_hermes.secrets.domain.envelope import seal
 from tiny_hermes.secrets.infrastructure.sql_store import SqlSecretStore
 from tiny_hermes.shared.config import Settings
 
+from .test_reply_dispatch import _gather  # pyright: ignore[reportPrivateUsage]
+
 from ..conftest import VALID_SPEC
 
 #: Matches the `settings` fixture's `tiny_hermes_kek` in conftest.py
@@ -700,6 +702,8 @@ async def _claim_and_run(
     `channel_events` is ordered by `created_at` with no tiebreaker, so a
     positional read names a different row on a different run.
     """
+    # The frame is claimed on arrival; the Run is the Scheduler's gather's.
+    await _gather(engine)
     async with engine.connect() as connection:
         found = await connection.execute(
             text(

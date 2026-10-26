@@ -56,11 +56,10 @@ class FakeConversations:
     ) -> None:
         self.remembered.append((binding_id, external_user_id, session_id))
 
-    async def take_held_files(self, binding_id: UUID, external_user_id: str) -> list[Any]:
-        # Nothing held: these tests are about messages that are not files
-        # alone. `test_held_files.py` covers the hold, against the database.
+    async def drop_held(self, binding_id: UUID, external_user_id: str) -> None:
+        # Nothing is held in these fakes; `test_held_files.py` covers what
+        # `/new` drops, against the database.
         del binding_id, external_user_id
-        return []
 
 
 class FakeRuns:
@@ -277,12 +276,9 @@ async def test_an_image_message_reaches_the_run_as_a_reference() -> None:
     ]
 
 
-async def test_a_file_alone_is_held_as_a_reference_with_a_safe_name() -> None:
+async def test_a_file_message_reaches_the_run_as_a_reference_with_a_safe_name() -> None:
     """§1.27, v2.27: the same seam for a file. The name is made safe here, so
-    the note the model reads and the path the Worker writes are one name.
-
-    Held rather than submitted since the 2026-10-26 revision: a file with no
-    words starts no Run, and waits for the sender's next message."""
+    the note the model reads and the path the Worker writes are one name."""
     from tiny_hermes.channels.domain.events import ChannelFile
     from tiny_hermes.runs.domain.models import FileBlock
 
@@ -291,21 +287,48 @@ async def test_a_file_alone_is_held_as_a_reference_with_a_safe_name() -> None:
         subjects=FakeSubjects(), conversations=FakeConversations(), runs=runs
     )
 
-    delivered = await ingestion.run_for(
+    await ingestion.run_for(
         binding=BINDING,
         event=ChannelEvent(
             channel="feishu",
             channel_event_id="om_1",
             external_user_id="ou_zhang",
-            text="",
+            text="看看这个",
             files=(ChannelFile(message_id="om_msg", file_key="file_k", name="../销售.xlsx"),),
         ),
         request_id="req-1",
     )
 
+    assert runs.files == [FileBlock(reference="feishu:om_msg:file_k", name="销售.xlsx")]
+
+
+async def test_an_arriving_message_is_held_not_started() -> None:
+    """Office-tasks design, 2026-10-26: a message on arrival is held for the
+    Scheduler to gather with whatever the same person sends next — a file
+    and its question come in either order — so arriving starts nothing."""
+    runs = FakeRuns()
+    ingestion = ChannelIngestion(
+        subjects=FakeSubjects(), conversations=FakeConversations(), runs=runs
+    )
+
+    delivered = await ingestion.accept(binding=BINDING, event=EVENT, request_id="req-1")
+
     assert delivered.run is None
-    assert delivered.held == (FileBlock(reference="feishu:om_msg:file_k", name="销售.xlsx"),)
+    assert delivered.held == EVENT
     assert runs.submitted == []
+
+
+async def test_an_erased_subject_is_refused_on_arrival_too() -> None:
+    """Holding a message is not a way around §344: the refusal comes at the
+    door, as it did when arriving meant starting a Run."""
+    ingestion = ChannelIngestion(
+        subjects=FakeSubjects(erased_at=datetime(2026, 8, 1, tzinfo=UTC)),
+        conversations=FakeConversations(),
+        runs=FakeRuns(),
+    )
+
+    with pytest.raises(ErasedSubjectRefused):
+        await ingestion.accept(binding=BINDING, event=EVENT, request_id="req-1")
 
 
 async def test_a_text_message_carries_no_image_reference() -> None:

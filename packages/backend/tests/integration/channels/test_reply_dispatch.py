@@ -21,13 +21,18 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from tiny_hermes.channels.application.gather import ChannelGatherer
+from tiny_hermes.channels.application.ingestion import ChannelIngestion
 from tiny_hermes.channels.application.outbound import (
     ChannelReplyDispatcher,
     ReplyOutcome,
 )
 from tiny_hermes.channels.infrastructure.feishu_sender import FeishuApiRefused
 from tiny_hermes.channels.infrastructure.sql_channel_store import SqlChannelStore
+from tiny_hermes.identity.infrastructure.sql_end_user_store import SqlEndUserStore
 from tiny_hermes.model_catalog.infrastructure.credentials import CredentialResolver
+from tiny_hermes.runs.application.service import RunCoordination
+from tiny_hermes.runs.infrastructure.sql_store import SqlRunStore
 from tiny_hermes.secrets.infrastructure.sql_store import SqlSecretStore
 
 KEY = "tenant-encrypt-key"
@@ -266,7 +271,51 @@ async def _binding(
     return binding_id
 
 
-def _deliver(client: TestClient, binding_id: UUID, event_id: str = "om_1") -> UUID:
+async def _gather(engine: AsyncEngine, *, window_seconds: float = 0) -> int:
+    """One pass of the Scheduler's gather, in its own session.
+
+    A window of zero by default: these tests are about what a delivery
+    becomes, not about how long it waits, and the tests that are about the
+    wait pass a window of their own.
+    """
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as db:
+        store = SqlChannelStore(db)
+        started = await ChannelGatherer(
+            store=store,
+            ingestion=ChannelIngestion(
+                subjects=SqlEndUserStore(db),
+                conversations=store,
+                runs=RunCoordination(SqlRunStore(db)),
+            ),
+            window_seconds=window_seconds,
+        ).gather_once()
+        await db.commit()
+    return started
+
+
+async def _run_of(engine: AsyncEngine, binding_id: UUID, event_id: str) -> UUID | None:
+    """The Run a delivery's row carries, found by the pair it is unique on."""
+    async with engine.connect() as connection:
+        found = await connection.execute(
+            text(
+                "SELECT run_id FROM channel_events"
+                " WHERE channel_binding_id = :b AND channel_event_id = :e"
+            ),
+            {"b": binding_id, "e": event_id},
+        )
+        return found.scalar_one()
+
+
+async def _deliver(
+    client: TestClient, engine: AsyncEngine, binding_id: UUID, event_id: str = "om_1"
+) -> UUID:
+    """A message in over the webhook, and the Run the gather made of it.
+
+    The webhook no longer starts the Run — the Scheduler gathers a sender's
+    messages first (office-tasks design, 2026-10-26) — so the Run is read off
+    the delivery's row after one gather, not off the response.
+    """
     body = _encrypt(_message(event_id))
     posted = client.post(
         f"/api/v1/channels/feishu/{binding_id}/webhook",
@@ -274,9 +323,10 @@ def _deliver(client: TestClient, binding_id: UUID, event_id: str = "om_1") -> UU
         headers=_headers(body),
     )
     assert posted.status_code == 200, posted.text
-    run_id = posted.json()["run_id"]
+    await _gather(engine)
+    run_id = await _run_of(engine, binding_id, event_id)
     assert run_id is not None, posted.text
-    return UUID(run_id)
+    return run_id
 
 
 async def _finish(
@@ -363,7 +413,7 @@ async def test_a_finished_run_answers_the_person_who_sent_the_message(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    run_id = _deliver(client, binding_id)
+    run_id = await _deliver(client, engine, binding_id)
     await _finish(engine, run_id, said="上周有 12 单。")
 
     sender = _Sender()
@@ -443,7 +493,7 @@ async def test_a_redacted_answer_is_not_sent_as_the_reply(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    run_id = _deliver(client, binding_id)
+    run_id = await _deliver(client, engine, binding_id)
     await _finish(engine, run_id, said="the answer that stands")
     await _finish(engine, run_id, said="the answer about to be erased")
 
@@ -489,7 +539,7 @@ async def test_a_withdrawn_answer_is_not_sent_as_the_reply(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    run_id = _deliver(client, binding_id)
+    run_id = await _deliver(client, engine, binding_id)
     await _finish(engine, run_id, said="the earlier answer")
     await _finish(engine, run_id, said="the later answer, about to be withdrawn")
 
@@ -530,7 +580,7 @@ async def test_the_delivery_that_produced_the_run_records_which_run(
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
 
-    run_id = _deliver(client, binding_id)
+    run_id = await _deliver(client, engine, binding_id)
 
     async with engine.connect() as connection:
         recorded = await connection.execute(
@@ -552,7 +602,7 @@ async def test_a_reply_is_sent_once_however_often_the_dispatcher_runs(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    run_id = _deliver(client, binding_id)
+    run_id = await _deliver(client, engine, binding_id)
     await _finish(engine, run_id, said="做完了")
 
     sender = _Sender()
@@ -578,7 +628,7 @@ async def test_a_run_that_has_not_finished_is_left_alone(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    _deliver(client, binding_id)
+    await _deliver(client, engine, binding_id)
 
     sender = _Sender()
     await _dispatch(engine, sender)
@@ -601,7 +651,7 @@ async def test_a_receive_only_binding_sends_nothing_and_stops_asking(
     queue being retried every interval for seven days either."""
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     binding_id = await _binding(engine, workspace_id, published_agent, app_secret_ref=None)
-    run_id = _deliver(client, binding_id)
+    run_id = await _deliver(client, engine, binding_id)
     await _finish(engine, run_id, said="做完了")
 
     sender = _Sender()
@@ -629,7 +679,7 @@ async def test_a_disabled_binding_is_not_replied_through(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    run_id = _deliver(client, binding_id)
+    run_id = await _deliver(client, engine, binding_id)
     await _finish(engine, run_id, said="做完了")
     async with engine.begin() as connection:
         await connection.execute(
@@ -663,7 +713,7 @@ async def test_a_refused_send_is_retried_and_then_given_up_on(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    run_id = _deliver(client, binding_id)
+    run_id = await _deliver(client, engine, binding_id)
     await _finish(engine, run_id, said="做完了")
 
     sender = _Sender(refusing=FeishuApiRefused(230001, "bot is not in the chat"))
@@ -688,7 +738,7 @@ async def test_a_failed_run_reports_why_instead_of_going_quiet(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    run_id = _deliver(client, binding_id)
+    run_id = await _deliver(client, engine, binding_id)
     await _finish(engine, run_id, said="", status="failed")
     async with engine.begin() as connection:
         await connection.execute(
@@ -737,7 +787,7 @@ async def test_the_reply_leaves_under_its_own_workspace_scope(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    run_id = _deliver(client, binding_id)
+    run_id = await _deliver(client, engine, binding_id)
     await _finish(engine, run_id, said="做完了")
 
     sender = _Sender()
@@ -767,7 +817,7 @@ async def test_every_retry_of_one_reply_carries_the_same_deduplication_key(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    run_id = _deliver(client, binding_id)
+    run_id = await _deliver(client, engine, binding_id)
     await _finish(engine, run_id, said="做完了")
 
     sender = _Sender(refusing=FeishuApiRefused(0, "read failed after sending"))
@@ -810,10 +860,10 @@ async def test_a_queued_message_is_told_it_is_queued(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    first = _deliver(client, binding_id, event_id="om_head")
+    first = await _deliver(client, engine, binding_id, event_id="om_head")
     await _block_head(engine, first)
 
-    _deliver(client, binding_id, event_id="om_queued")
+    await _deliver(client, engine, binding_id, event_id="om_queued")
 
     sender = _Sender()
     await _dispatch(engine, sender)
@@ -835,9 +885,9 @@ async def test_the_queue_notice_is_sent_once(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    first = _deliver(client, binding_id, event_id="om_head")
+    first = await _deliver(client, engine, binding_id, event_id="om_head")
     await _block_head(engine, first)
-    _deliver(client, binding_id, event_id="om_queued")
+    await _deliver(client, engine, binding_id, event_id="om_queued")
 
     sender = _Sender()
     for _ in range(3):
@@ -863,7 +913,7 @@ async def test_a_message_that_was_never_queued_gets_no_notice(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    run_id = _deliver(client, binding_id)
+    run_id = await _deliver(client, engine, binding_id)
     await _finish(engine, run_id, said="做完了")
 
     sender = _Sender()
@@ -889,9 +939,9 @@ async def test_a_queued_message_still_gets_its_answer_afterwards(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    first = _deliver(client, binding_id, event_id="om_head")
+    first = await _deliver(client, engine, binding_id, event_id="om_head")
     await _block_head(engine, first)
-    queued = _deliver(client, binding_id, event_id="om_queued")
+    queued = await _deliver(client, engine, binding_id, event_id="om_queued")
 
     sender = _Sender()
     await _dispatch(engine, sender)
@@ -919,9 +969,9 @@ async def test_the_notice_and_the_reply_do_not_share_a_deduplication_key(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    first = _deliver(client, binding_id, event_id="om_head")
+    first = await _deliver(client, engine, binding_id, event_id="om_head")
     await _block_head(engine, first)
-    queued = _deliver(client, binding_id, event_id="om_queued")
+    queued = await _deliver(client, engine, binding_id, event_id="om_queued")
 
     sender = _Sender()
     await _dispatch(engine, sender)
@@ -1102,7 +1152,7 @@ async def test_a_slow_run_says_it_is_still_working(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    _deliver(client, binding_id)
+    await _deliver(client, engine, binding_id)
     await _age_delivery(engine, 60)
 
     sender = _Sender()
@@ -1132,7 +1182,7 @@ async def test_a_run_that_has_only_just_started_gets_no_progress_note(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    _deliver(client, binding_id)
+    await _deliver(client, engine, binding_id)
 
     sender = _Sender()
     await _dispatch(engine, sender)
@@ -1153,7 +1203,7 @@ async def test_a_run_that_already_finished_gets_its_answer_not_a_progress_note(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    run_id = _deliver(client, binding_id)
+    run_id = await _deliver(client, engine, binding_id)
     await _age_delivery(engine, 60)
     await _finish(engine, run_id, said="慢是慢,做完了")
 
@@ -1181,7 +1231,7 @@ async def test_the_progress_note_is_sent_once_however_long_it_runs(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    _deliver(client, binding_id)
+    await _deliver(client, engine, binding_id)
     await _age_delivery(engine, 60)
 
     sender = _Sender()
@@ -1203,9 +1253,9 @@ async def test_a_queued_message_gets_the_card_and_not_a_progress_note(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    first = _deliver(client, binding_id, event_id="om_head")
+    first = await _deliver(client, engine, binding_id, event_id="om_head")
     await _block_head(engine, first)
-    _deliver(client, binding_id, event_id="om_queued")
+    await _deliver(client, engine, binding_id, event_id="om_queued")
     await _age_delivery(engine, 60)
 
     sender = _Sender()
@@ -1233,7 +1283,7 @@ async def test_a_slow_run_still_delivers_its_answer_afterwards(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    run_id = _deliver(client, binding_id)
+    run_id = await _deliver(client, engine, binding_id)
     await _age_delivery(engine, 60)
 
     sender = _Sender()
@@ -1272,7 +1322,7 @@ async def test_a_run_of_a_dozen_seconds_is_slow_enough_to_mention(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    _deliver(client, binding_id)
+    await _deliver(client, engine, binding_id)
     await _age_delivery(engine, 12)
 
     sender = _Sender()
@@ -1296,7 +1346,7 @@ async def test_an_ordinary_five_second_run_is_still_left_alone(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    _deliver(client, binding_id)
+    await _deliver(client, engine, binding_id)
     await _age_delivery(engine, 5)
 
     sender = _Sender()
@@ -1331,7 +1381,7 @@ async def test_a_message_gets_a_card_before_anything_is_known(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    _deliver(client, binding_id)
+    await _deliver(client, engine, binding_id)
 
     sender = _Sender()
     await _dispatch(engine, sender)
@@ -1353,7 +1403,7 @@ async def test_the_card_id_is_remembered_so_it_can_be_rewritten(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    _deliver(client, binding_id)
+    await _deliver(client, engine, binding_id)
 
     await _dispatch(engine, _Sender())
 
@@ -1375,7 +1425,7 @@ async def test_the_answer_rewrites_the_card_instead_of_sending_a_new_message(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    run_id = _deliver(client, binding_id)
+    run_id = await _deliver(client, engine, binding_id)
 
     sender = _Sender()
     await _dispatch(engine, sender)
@@ -1402,7 +1452,7 @@ async def test_a_card_that_cannot_be_updated_falls_back_to_a_new_message(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    run_id = _deliver(client, binding_id)
+    run_id = await _deliver(client, engine, binding_id)
 
     sender = _Sender(card_id=None)
     await _dispatch(engine, sender)
@@ -1423,7 +1473,7 @@ async def test_a_slow_run_rewrites_the_card_rather_than_adding_a_message(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    _deliver(client, binding_id)
+    await _deliver(client, engine, binding_id)
 
     sender = _Sender()
     await _dispatch(engine, sender)
@@ -1446,9 +1496,9 @@ async def test_a_queued_message_opens_with_the_queue_card_directly(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    first = _deliver(client, binding_id, event_id="om_head")
+    first = await _deliver(client, engine, binding_id, event_id="om_head")
     await _block_head(engine, first)
-    _deliver(client, binding_id, event_id="om_queued")
+    await _deliver(client, engine, binding_id, event_id="om_queued")
 
     sender = _Sender()
     await _dispatch(engine, sender)
@@ -1468,7 +1518,7 @@ async def test_a_failed_run_rewrites_the_card_with_the_reason(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    run_id = _deliver(client, binding_id)
+    run_id = await _deliver(client, engine, binding_id)
 
     sender = _Sender()
     await _dispatch(engine, sender)
@@ -1505,7 +1555,7 @@ async def test_a_compaction_that_had_nothing_to_gain_says_so_to_the_person(
     monkeypatch.setenv("FEISHU_TEST_KEY", KEY)
     monkeypatch.setenv(SECRET_ENV, "s3cret")
     binding_id = await _binding(engine, workspace_id, published_agent)
-    run_id = _deliver(client, binding_id)
+    run_id = await _deliver(client, engine, binding_id)
 
     async with engine.begin() as connection:
         await connection.execute(

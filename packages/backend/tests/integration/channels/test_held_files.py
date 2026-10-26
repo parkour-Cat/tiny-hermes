@@ -31,6 +31,9 @@ from .test_reply_dispatch import (
     _deliver,
     _deliver_raw,
     _dispatch,
+    _finish,
+    _gather,
+    _run_of,
     _Sender,
 )
 
@@ -49,7 +52,7 @@ def _file(event_id: str, file_key: str, name: str) -> dict[str, Any]:
     }
 
 
-def _command(event_id: str, said: str) -> dict[str, Any]:
+def _text(event_id: str, said: str) -> dict[str, Any]:
     return {
         "header": {"event_id": event_id},
         "event": {
@@ -109,9 +112,9 @@ async def test_a_file_alone_starts_no_run(
     binding_id = await _setup(engine, workspace_id, published_agent, monkeypatch)
 
     posted = _deliver_raw(client, binding_id, _file("om_f1", "file_v3_1", "orders.xlsx"))
+    await _gather(engine)
 
     assert posted.status_code == 200, posted.text
-    assert posted.json()["run_id"] is None
     assert await _run_count(engine, workspace_id) == 0
 
 
@@ -125,7 +128,7 @@ async def test_the_next_message_carries_the_held_file(
     binding_id = await _setup(engine, workspace_id, published_agent, monkeypatch)
     _deliver_raw(client, binding_id, _file("om_f1", "file_v3_1", "orders.xlsx"))
 
-    run_id = _deliver(client, binding_id, "om_q1")
+    run_id = await _deliver(client, engine, binding_id, "om_q1")
 
     files = await _files_on(engine, run_id)
     assert [(part["reference"], part["name"]) for part in files] == [
@@ -142,9 +145,9 @@ async def test_a_held_file_goes_with_one_message_only(
 ) -> None:
     binding_id = await _setup(engine, workspace_id, published_agent, monkeypatch)
     _deliver_raw(client, binding_id, _file("om_f1", "file_v3_1", "orders.xlsx"))
-    _deliver(client, binding_id, "om_q1")
+    await _deliver(client, engine, binding_id, "om_q1")
 
-    second = _deliver(client, binding_id, "om_q2")
+    second = await _deliver(client, engine, binding_id, "om_q2")
 
     assert await _files_on(engine, second) == []
 
@@ -197,7 +200,7 @@ async def test_a_file_sent_with_its_question_is_not_asked_about(
 ) -> None:
     binding_id = await _setup(engine, workspace_id, published_agent, monkeypatch)
     _deliver_raw(client, binding_id, _file("om_f1", "file_v3_1", "orders.xlsx"))
-    _deliver(client, binding_id, "om_q1")
+    await _deliver(client, engine, binding_id, "om_q1")
     await _age_delivery(engine, 10)
 
     sender = _Sender()
@@ -240,9 +243,9 @@ async def test_new_drops_a_held_file(
     does not belong in the new one — nor does a question about it."""
     binding_id = await _setup(engine, workspace_id, published_agent, monkeypatch)
     _deliver_raw(client, binding_id, _file("om_f1", "file_v3_1", "orders.xlsx"))
-    _deliver_raw(client, binding_id, _command("om_new", "/new"))
+    _deliver_raw(client, binding_id, _text("om_new", "/new"))
 
-    run_id = _deliver(client, binding_id, "om_q1")
+    run_id = await _deliver(client, engine, binding_id, "om_q1")
     await _age_delivery(engine, 10)
     sender = _Sender()
     await _dispatch(engine, sender)
@@ -260,9 +263,134 @@ async def test_a_file_held_for_one_person_is_not_given_to_another(
 ) -> None:
     binding_id = await _setup(engine, workspace_id, published_agent, monkeypatch)
     _deliver_raw(client, binding_id, _file("om_f1", "file_v3_1", "orders.xlsx"))
-    someone_else = _command("om_li", "你好")
+    someone_else = _text("om_li", "你好")
     someone_else["event"]["sender"]["sender_id"]["open_id"] = "ou_li"
 
-    posted = _deliver_raw(client, binding_id, someone_else)
+    _deliver_raw(client, binding_id, someone_else)
+    await _gather(engine)
 
-    assert await _files_on(engine, UUID(posted.json()["run_id"])) == []
+    run_id = await _run_of(engine, binding_id, "om_li")
+    assert run_id is not None
+    assert await _files_on(engine, run_id) == []
+
+
+async def _said_on(engine: AsyncEngine, run_id: UUID) -> list[str]:
+    """The text parts of the user message this Run was started with."""
+    async with engine.connect() as connection:
+        found = await connection.execute(
+            text(
+                "SELECT content FROM session_messages"
+                " WHERE source_run_id = :r AND role = 'user'"
+            ),
+            {"r": run_id},
+        )
+        content = found.scalar_one()
+    document = cast(dict[str, Any], content if isinstance(content, dict) else json.loads(content))
+    parts = cast(list[dict[str, Any]], document["parts"])
+    return [str(part["text"]) for part in parts if part.get("type") == "text"]
+
+
+async def test_a_question_that_arrives_before_its_file_still_gets_it(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real chat, second time: the words landed 0.25 s before the file.
+
+    Feishu does not order the two. Whichever comes first, one Run has both.
+    """
+    binding_id = await _setup(engine, workspace_id, published_agent, monkeypatch)
+    _deliver_raw(client, binding_id, _text("om_q1", "这个文件讲了什么"))
+    _deliver_raw(client, binding_id, _file("om_f1", "file_v3_1", "notes.txt"))
+
+    await _gather(engine)
+
+    assert await _run_count(engine, workspace_id) == 1
+    run_id = await _run_of(engine, binding_id, "om_f1")
+    assert run_id is not None
+    assert [part["reference"] for part in await _files_on(engine, run_id)] == [
+        "feishu:om_f1:file_v3_1"
+    ]
+    assert "这个文件讲了什么" in await _said_on(engine, run_id)
+
+
+async def test_two_quick_lines_become_one_run_in_the_order_sent(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding_id = await _setup(engine, workspace_id, published_agent, monkeypatch)
+    _deliver_raw(client, binding_id, _text("om_a", "第一句"))
+    _deliver_raw(client, binding_id, _text("om_b", "第二句"))
+
+    await _gather(engine)
+
+    assert await _run_count(engine, workspace_id) == 1
+    run_id = await _run_of(engine, binding_id, "om_b")
+    assert run_id is not None
+    said = await _said_on(engine, run_id)
+    assert said[0].index("第一句") < said[0].index("第二句")
+
+
+async def test_a_message_still_inside_the_window_is_not_started(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window is what lets a file that is 0.25 s behind still make it."""
+    binding_id = await _setup(engine, workspace_id, published_agent, monkeypatch)
+    _deliver_raw(client, binding_id, _text("om_q1", "在吗"))
+
+    assert await _gather(engine, window_seconds=60) == 0
+    assert await _run_count(engine, workspace_id) == 0
+
+
+async def test_a_gathered_message_is_not_started_twice(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding_id = await _setup(engine, workspace_id, published_agent, monkeypatch)
+    _deliver_raw(client, binding_id, _text("om_q1", "在吗"))
+
+    await _gather(engine)
+    await _gather(engine)
+
+    assert await _run_count(engine, workspace_id) == 1
+
+
+async def test_a_gathered_batch_is_answered_once(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One Run, so one card and one answer — not one per message gathered,
+    and not a held-file question about a file the Run already has."""
+    binding_id = await _setup(engine, workspace_id, published_agent, monkeypatch)
+    _deliver_raw(client, binding_id, _text("om_q1", "这个文件讲了什么"))
+    _deliver_raw(client, binding_id, _file("om_f1", "file_v3_1", "notes.txt"))
+    await _gather(engine)
+    run_id = await _run_of(engine, binding_id, "om_f1")
+    assert run_id is not None
+    await _finish(engine, run_id, said="讲的是订单汇总。")
+    await _age_delivery(engine, 10)
+
+    sender = _Sender()
+    await _dispatch(engine, sender)
+    await _dispatch(engine, sender)
+
+    cards = [entry for entry in sender.sent if entry["delivery_key"].endswith(":c")]
+    assert len(cards) == 1
+    assert len(sender.after_opening()) == 1
+    assert "讲的是订单汇总。" in sender.after_opening()[0]["text"]
+    assert _asks(sender) == []

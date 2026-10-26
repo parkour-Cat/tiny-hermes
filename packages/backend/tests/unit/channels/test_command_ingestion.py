@@ -55,11 +55,10 @@ class FakeConversations:
     ) -> None:
         self.created.append((binding_id, external_user_id, session_id))
 
-    async def take_held_files(self, binding_id: UUID, external_user_id: str) -> list[Any]:
-        # Nothing held: these tests are about messages that are not files
-        # alone. `test_held_files.py` covers the hold, against the database.
+    async def drop_held(self, binding_id: UUID, external_user_id: str) -> None:
+        # Nothing is held in these fakes; `test_held_files.py` covers what
+        # `/new` drops, against the database.
         del binding_id, external_user_id
-        return []
 
 
 class FakeRuns:
@@ -501,3 +500,15 @@ async def test_compact_on_a_conversation_with_nothing_to_compact_says_nothing(
 
     assert delivered.receipt is not None
     assert delivered.receipt.outcome == "nothing"
+
+
+async def test_a_command_is_carried_out_on_arrival_not_held(
+    ingestion: ChannelIngestion, binding: ChannelBindingRecord, undo_event: ChannelEvent
+) -> None:
+    """Only ordinary messages wait to be gathered. A command changes the
+    conversation, and doing that a gather-window late would act on a
+    conversation the person has already moved past."""
+    delivered = await ingestion.accept(binding=binding, event=undo_event, request_id="r1")
+
+    assert delivered.held is None
+    assert delivered.receipt is not None
