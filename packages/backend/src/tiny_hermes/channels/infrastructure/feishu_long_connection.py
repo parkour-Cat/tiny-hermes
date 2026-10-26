@@ -37,6 +37,13 @@ from lark_oapi.channel import (  # pyright: ignore[reportMissingTypeStubs]
     Events,
     FeishuChannel,
 )
+from lark_oapi.channel.config import (  # pyright: ignore[reportMissingTypeStubs]
+    SafetyConfig,
+    TextBatchConfig,
+)
+from lark_oapi.channel.safety import (  # pyright: ignore[reportMissingTypeStubs]
+    MediaBatchConfig,
+)
 
 from tiny_hermes.channels.domain._json import object_at, string_at
 from tiny_hermes.channels.domain.liveness import HEARTBEAT_SECONDS
@@ -760,6 +767,31 @@ class FeishuLongConnection:
         with self._background_lock:
             self._closing = False
 
+    def channel(self) -> FeishuChannel:
+        """The SDK channel `run()` connects, with its batching turned off.
+
+        By default the SDK debounces a chat's messages for 600 ms and hands
+        on one merged message whose `raw` is the **last** one's, folding in
+        only the earlier messages' text. `_envelope_of` reads `raw`, so a
+        file sent with a question — two messages in the same instant — came
+        through as the question alone, and two quick lines as the second
+        alone. Every message is its own delivery here: the shared half
+        already claims, deduplicates and queues per Session, and a batch
+        would only decide for it which messages to lose.
+
+        Media batching is off by the SDK's default too, and is spelled out
+        so an SDK that changes that default cannot bring the same loss back
+        through the other door.
+        """
+        return FeishuChannel(
+            app_id=self._binding.app_id,
+            app_secret=self._binding.app_secret,
+            safety=SafetyConfig(
+                text_batch=TextBatchConfig(delay_ms=0),
+                media_batch=MediaBatchConfig(enabled=False),
+            ),
+        )
+
     async def run(
         self,
         stop: asyncio.Event,
@@ -808,9 +840,7 @@ class FeishuLongConnection:
         """
         self._reset_for_this_run()
         self._loop = asyncio.get_running_loop()
-        channel = FeishuChannel(
-            app_id=self._binding.app_id, app_secret=self._binding.app_secret
-        )
+        channel = self.channel()
         channel.on(Events.MESSAGE, self.on_frame)
         channel.on(Events.RECONNECTING, self._on_reconnecting)
         channel.on(Events.RECONNECTED, self._on_reconnected)

@@ -11,8 +11,8 @@ from datetime import datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, select, true, update
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import and_, delete, func, literal, select, true, update
+from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tiny_hermes.channels.application.ingestion import ChannelBindingRecord
@@ -21,6 +21,7 @@ from tiny_hermes.channels.domain.command_receipt import (
     CommandReceipt,
     receipt_from_document,
 )
+from tiny_hermes.channels.domain.events import ChannelEvent, ChannelFile, ChannelImage
 from tiny_hermes.channels.infrastructure.tables import (
     ChannelBindingRow,
     ChannelConversationRow,
@@ -74,6 +75,96 @@ class PendingRefusal:
     binding_id: UUID
     kind: str
     external_user_id: str
+
+
+@dataclass(frozen=True)
+class PendingHeldQuestion:
+    """A message that was only files, old enough that its sender could have
+    said what they are for by now.
+
+    `taken` is read by the dispatcher rather than filtered out here: a taken
+    row still has to be settled, or the scan meets it every pass forever.
+    """
+
+    event_row_id: UUID
+    binding_id: UUID
+    external_user_id: str
+    taken: bool
+
+
+@dataclass(frozen=True)
+class HeldDelivery:
+    """One delivery's files still waiting for the sender's next message."""
+
+    event_row_id: UUID
+    names: list[str]
+
+
+@dataclass(frozen=True)
+class HeldMessage:
+    """One waiting message, as the gather reads it back."""
+
+    event_row_id: UUID
+    event: ChannelEvent
+
+
+#: How `drop_held` settles what `/new` let go of.
+_DROPPED_BY_NEW = "dropped_by_new"
+
+#: A held message with no words and no pictures: files waiting for somebody
+#: to say what they are for.
+_FILES_ONLY = and_(
+    func.coalesce(ChannelEventRow.held_message["text"].astext, "") == "",
+    func.jsonb_array_length(
+        func.coalesce(ChannelEventRow.held_message["images"], literal("[]", JSONB))
+    )
+    == 0,
+)
+
+
+def _held_document(event: ChannelEvent) -> dict[str, Any]:
+    """The message as stored. The ids are kept rather than the references
+    the Run will carry, so the gather rebuilds the event the parser made and
+    `run_for` turns it into blocks exactly as it always has."""
+    return {
+        "channel": event.channel,
+        "text": event.text,
+        "images": [
+            {"message_id": image.message_id, "file_key": image.file_key}
+            for image in event.images
+        ],
+        "files": [
+            {
+                "message_id": attached.message_id,
+                "file_key": attached.file_key,
+                "name": attached.name,
+            }
+            for attached in event.files
+        ],
+    }
+
+
+def _held_event(
+    document: dict[str, Any], *, channel_event_id: str, external_user_id: str
+) -> ChannelEvent:
+    images = cast(list[dict[str, str]], document.get("images", []))
+    files = cast(list[dict[str, str]], document.get("files", []))
+    return ChannelEvent(
+        channel=str(document.get("channel", "feishu")),
+        channel_event_id=channel_event_id,
+        external_user_id=external_user_id,
+        text=str(document.get("text", "")),
+        images=tuple(
+            ChannelImage(message_id=entry["message_id"], file_key=entry["file_key"])
+            for entry in images
+        ),
+        files=tuple(
+            ChannelFile(
+                message_id=entry["message_id"], file_key=entry["file_key"], name=entry["name"]
+            )
+            for entry in files
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -343,8 +434,9 @@ class SqlChannelStore:
         """Deliveries that have a Run and no card yet.
 
         No age condition: this is the one stage that must not wait. It runs
-        on the very next scan after the delivery lands, which is what makes
-        the person see something about a second after they hit send.
+        on the very next scan after the gather attaches a Run — a few seconds
+        after the person hit send, since the message first waits out the
+        gather window.
         """
         rows = (
             await self._session.execute(
@@ -529,6 +621,207 @@ class SqlChannelStore:
             )
         )
         await self._session.flush()
+
+    async def record_held(self, event_row_id: UUID, event: ChannelEvent) -> None:
+        """Hold an arriving message on its own delivery row for the gather.
+
+        The sender is written beside it for `record_command_receipt`'s
+        reason: a first-ever message has no conversation row to find them by.
+        """
+        await self._session.execute(
+            update(ChannelEventRow)
+            .where(ChannelEventRow.id == event_row_id)
+            .values(
+                held_message=_held_document(event),
+                held_open_id=event.external_user_id[:120],
+            )
+        )
+        await self._session.flush()
+
+    async def drop_held(self, binding_id: UUID, external_user_id: str) -> None:
+        """`/new`: everything this person has waiting is let go, and settled
+        so no scan asks about a file from the conversation they left."""
+        await self._session.execute(
+            update(ChannelEventRow)
+            .where(
+                ChannelEventRow.channel_binding_id == binding_id,
+                ChannelEventRow.held_open_id == external_user_id[:120],
+                ChannelEventRow.held_message.is_not(None),
+                ChannelEventRow.held_taken_at.is_(None),
+            )
+            .values(
+                held_taken_at=func.now(),
+                replied_at=func.now(),
+                reply_note=_DROPPED_BY_NEW,
+            )
+        )
+        await self._session.flush()
+
+    def savepoint(self) -> Any:
+        """One sender's gather, so a failure undoes only that sender's."""
+        return self._session.begin_nested()
+
+    async def senders_ready(
+        self, older_than: datetime, limit: int = 50
+    ) -> list[tuple[UUID, str]]:
+        """People whose last waiting message is older than `older_than`, and
+        who have sent something besides files — a batch of files alone waits
+        for words, and the question scan is the one that deals with it."""
+        rows = (
+            await self._session.execute(
+                select(ChannelEventRow.channel_binding_id, ChannelEventRow.held_open_id)
+                .where(
+                    ChannelEventRow.held_message.is_not(None),
+                    ChannelEventRow.held_taken_at.is_(None),
+                )
+                .group_by(ChannelEventRow.channel_binding_id, ChannelEventRow.held_open_id)
+                .having(
+                    func.max(ChannelEventRow.received_at) <= older_than,
+                    func.bool_or(~_FILES_ONLY),
+                )
+                .limit(limit)
+            )
+        ).all()
+        return [
+            (row.channel_binding_id, row.held_open_id) for row in rows if row.held_open_id
+        ]
+
+    async def take_batch(
+        self, binding_id: UUID, external_user_id: str
+    ) -> list[HeldMessage]:
+        """Everything this person has waiting, oldest first, locked.
+
+        `SKIP LOCKED`, so a second Scheduler gathering the same person at the
+        same moment finds nothing instead of a second Run of the same words.
+        """
+        rows = (
+            await self._session.execute(
+                select(
+                    ChannelEventRow.id,
+                    ChannelEventRow.channel_event_id,
+                    ChannelEventRow.held_open_id,
+                    ChannelEventRow.held_message,
+                )
+                .where(
+                    ChannelEventRow.channel_binding_id == binding_id,
+                    ChannelEventRow.held_open_id == external_user_id[:120],
+                    ChannelEventRow.held_message.is_not(None),
+                    ChannelEventRow.held_taken_at.is_(None),
+                )
+                .order_by(ChannelEventRow.received_at, ChannelEventRow.id)
+                .with_for_update(skip_locked=True)
+            )
+        ).all()
+        return [
+            HeldMessage(
+                event_row_id=row.id,
+                event=_held_event(
+                    cast(dict[str, Any], row.held_message),
+                    channel_event_id=row.channel_event_id,
+                    external_user_id=row.held_open_id,
+                ),
+            )
+            for row in rows
+        ]
+
+    async def settle_if_open(self, event_row_id: UUID, note: str, now: datetime) -> None:
+        """`settle_reply`, for a row that may already have been settled.
+
+        A file sent alone is asked about and settled `held_asked`; when the
+        person's answer later gathers it, rewriting that row as `gathered`
+        erased the only record that they had been asked.
+        """
+        await self._session.execute(
+            update(ChannelEventRow)
+            .where(ChannelEventRow.id == event_row_id, ChannelEventRow.replied_at.is_(None))
+            .values(replied_at=now, reply_note=note[:200])
+        )
+        await self._session.flush()
+
+    async def mark_taken(self, event_row_ids: list[UUID]) -> None:
+        await self._session.execute(
+            update(ChannelEventRow)
+            .where(ChannelEventRow.id.in_(event_row_ids))
+            .values(held_taken_at=func.now())
+        )
+        await self._session.flush()
+
+    async def pending_held_questions(
+        self, older_than: datetime, limit: int = 50
+    ) -> list["PendingHeldQuestion"]:
+        """Messages that were only files, not yet settled, received before
+        `older_than`.
+
+        Only files, and no Run on the row: a row that carries a gathered
+        Run is waiting for that Run's answer, and settling it here would
+        stop the answer — which is the row a file that arrived after its
+        question becomes.
+
+        Oldest first, which the dispatcher relies on: of one person's several
+        waiting files, the earlier rows are settled as superseded before the
+        newest one asks about them all.
+        """
+        rows = (
+            await self._session.execute(
+                select(
+                    ChannelEventRow.id,
+                    ChannelEventRow.channel_binding_id,
+                    ChannelEventRow.held_open_id,
+                    ChannelEventRow.held_taken_at,
+                )
+                .where(
+                    ChannelEventRow.held_message.is_not(None),
+                    _FILES_ONLY,
+                    ChannelEventRow.run_id.is_(None),
+                    ChannelEventRow.replied_at.is_(None),
+                    ChannelEventRow.received_at <= older_than,
+                )
+                .order_by(ChannelEventRow.received_at, ChannelEventRow.id)
+                .limit(limit)
+            )
+        ).all()
+        return [
+            PendingHeldQuestion(
+                event_row_id=row.id,
+                binding_id=row.channel_binding_id,
+                external_user_id=row.held_open_id,
+                taken=row.held_taken_at is not None,
+            )
+            for row in rows
+            if row.held_open_id
+        ]
+
+    async def still_held(
+        self, binding_id: UUID, external_user_id: str
+    ) -> list["HeldDelivery"]:
+        """Every message of only files this person still has waiting, oldest
+        first — what a question about them has to name."""
+        rows = (
+            await self._session.execute(
+                select(ChannelEventRow.id, ChannelEventRow.held_message)
+                .where(
+                    ChannelEventRow.channel_binding_id == binding_id,
+                    ChannelEventRow.held_open_id == external_user_id[:120],
+                    ChannelEventRow.held_message.is_not(None),
+                    _FILES_ONLY,
+                    ChannelEventRow.held_taken_at.is_(None),
+                )
+                .order_by(ChannelEventRow.received_at, ChannelEventRow.id)
+            )
+        ).all()
+        return [
+            HeldDelivery(
+                event_row_id=row.id,
+                names=[
+                    str(entry["name"])
+                    for entry in cast(
+                        list[dict[str, Any]],
+                        cast(dict[str, Any], row.held_message).get("files", []),
+                    )
+                ],
+            )
+            for row in rows
+        ]
 
     async def pending_command_receipts(
         self, limit: int = 50

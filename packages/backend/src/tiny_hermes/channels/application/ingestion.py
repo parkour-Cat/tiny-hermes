@@ -85,6 +85,10 @@ class Conversations(Protocol):
         self, binding_id: UUID, external_user_id: str, session_id: UUID
     ) -> None: ...
 
+    async def drop_held(self, binding_id: UUID, external_user_id: str) -> None:
+        """Let go of everything this person has waiting to be gathered."""
+        ...
+
 
 class RunEntry(Protocol):
     """`create_end_user_session` and `submit_end_user_run` are the two calls
@@ -160,6 +164,11 @@ class Delivered:
     run: AcceptedRun | None
     blocked: BlockedNotice | None
     receipt: CommandReceipt | None = None
+    #: An ordinary message on arrival: no Run yet, held on its delivery for
+    #: the Scheduler to gather with whatever the same person sends next.
+    #: `run` is `None` here too, so this is the third shape a reader of
+    #: `run` meets.
+    held: ChannelEvent | None = None
 
 
 @dataclass(frozen=True)
@@ -168,6 +177,34 @@ class ChannelIngestion:
     conversations: Conversations
     runs: RunEntry
 
+    async def accept(
+        self,
+        *,
+        binding: ChannelBindingRecord,
+        event: ChannelEvent,
+        request_id: str,
+    ) -> Delivered:
+        """What a delivery becomes the moment it is claimed.
+
+        A command is carried out now: it changes the conversation, and doing
+        that a gather-window late would act on one the person has moved past.
+        Anything else is held. Feishu sends a file and the words typed beside
+        it as two messages, in either order — the real chat showed both — so
+        the Run waits for the Scheduler to gather what this person sent
+        together (office-tasks design, 2026-10-26).
+
+        The erased check runs here as well as in `run_for`: holding a message
+        must not become a way around §344 that answers 200 at the door.
+        """
+        subject = await self.subjects.upsert_external_identity(
+            binding.workspace_id, binding.channel, event.external_user_id
+        )
+        if subject.erased_at is not None:
+            raise ErasedSubjectRefused
+        if parse(event.text, has_images=bool(event.images or event.files)) is not None:
+            return await self.run_for(binding=binding, event=event, request_id=request_id)
+        return Delivered(run=None, blocked=None, held=event)
+
     async def run_for(
         self,
         *,
@@ -175,7 +212,7 @@ class ChannelIngestion:
         event: ChannelEvent,
         request_id: str,
     ) -> Delivered:
-        """The claimed delivery, turned into work.
+        """The claimed delivery — or a gathered batch of them — turned into work.
 
         The idempotency key is the `channel_event_id` (§569's own rule: the
         key belongs to the caller's own notion of a request). It is a second
@@ -204,6 +241,7 @@ class ChannelIngestion:
             return await self._command(
                 binding, event, command, subject.end_user_id, request_id
             )
+
 
         session_id = await self.conversations.session_for(
             binding.id, event.external_user_id
@@ -290,6 +328,12 @@ class ChannelIngestion:
         `remember_session` — the two calls the ordinary path above uses to
         make a conversation exist.
         """
+        if command.name is CommandName.NEW:
+            # Starting over: whatever is still waiting to be gathered belongs
+            # to the old conversation, not the new one. Dropped before the
+            # lookup below, because a held message can be all a person ever
+            # sent.
+            await self.conversations.drop_held(binding.id, event.external_user_id)
         session_id = await self.conversations.session_for(
             binding.id, event.external_user_id
         )

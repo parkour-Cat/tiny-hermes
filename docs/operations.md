@@ -873,3 +873,61 @@ pypdf、pdfminer（读 PDF），matplotlib（画图，默认中文字体是文�
 
   缺权限时，下载会记成 `attachment_failed`，发送会作为失败的工具结果交给模型，Run 本身不失败。
 - **下载和上传都走工作区的出网边界**，和取图片一样，所以出网策略要放行 `open.feishu.cn`。
+- **消息不是一到就开 Run**（2026-10-26）：飞书不保证文件和一起发的文字谁先到，所以同一个人的消息先存在入站记录上，最后一条之后 `CHANNEL_GATHER_SECONDS`（默认 1.5 秒）内没有新消息，调度器才把这一批合成一个 Run，回复挂在最后一条上。代价是每条消息慢 1.5 到 2.5 秒。命令（`/new` 等）不等，立刻执行。
+  - 一批里只有文件、没有文字时不开 Run，3 秒后平台问一句「需要我拿它做什么？」，对方回复后文件跟着那条消息进 Run。`/new` 丢掉还没合批的消息和文件。
+  - **这一步在调度器里**（`gather_channel_messages` 扫描）。调度器停了，飞书消息会被收下、但不会变成 Run，`channel_events` 里能看到 `held_message` 有值而 `held_taken_at` 为空的行在累积。
+  - `reply_note` 里新增的值：`gathered`（并入了同批最后一条）、`held_asked`（问过了）、`held_taken`（问之前已被后一条带走）、`held_superseded`（同一人有更新的文件，由那一条统一问）、`dropped_by_new`。
+
+### 19.2 接联网搜索（2026-10-26）
+
+平台没有专用的搜索工具。要让 Agent 能搜网页，把外部搜索服务的接口登记成 HTTP 工具，绑给 Agent。不用改代码，也不用重启。
+下面以 Tavily 为例，2026-10-26 在真飞书里走通过（[走查记录](superpowers/verification/2026-10-26-web-search.md)）。全部在控制台里操作。
+
+1. **先确认对方用 `Authorization: Bearer <key>` 认证。** 平台带凭据只有这一种方式。要求把 Key 放在请求体、查询参数或别的请求头里的服务，接不上。Tavily 两种都支持，用 curl 直接调一次就能确认。
+2. **把 Key 存成密钥**：工作空间设置 → 密钥。不要用环境变量：发请求的是 worker，用环境变量就得改 worker 的容器配置并重启。
+3. **出网白名单两层都加 `api.tavily.com`**：平台页一层，工作空间设置一层。工作空间层只能在平台层的范围里收窄，只加一层，请求会被出网代理拦下。
+4. **登记 HTTP 工具**：工具页 → HTTP 工具。服务地址填 `https://api.tavily.com`，凭据选第 2 步的密钥，文档粘贴下面这段（只收 JSON，不解析 YAML）：
+
+   ```json
+   {
+     "openapi": "3.0.3",
+     "info": {"title": "Tavily Search", "version": "1"},
+     "paths": {
+       "/search": {
+         "post": {
+           "operationId": "search",
+           "summary": "搜索互联网，返回相关网页的标题、链接和摘要。需要最新信息或材料里没有的事实时使用。",
+           "requestBody": {
+             "required": true,
+             "content": {
+               "application/json": {
+                 "schema": {
+                   "type": "object",
+                   "required": ["query"],
+                   "properties": {
+                     "query": {"type": "string", "description": "搜索词"},
+                     "max_results": {"type": "integer", "minimum": 1, "maximum": 10, "description": "返回几条结果，默认 5"},
+                     "topic": {"type": "string", "enum": ["general", "news"], "description": "news 只搜新闻"},
+                     "include_answer": {"type": "boolean", "description": "是否附带一段基于结果的简短回答"}
+                   }
+                 }
+               }
+             }
+           },
+           "responses": {"200": {"description": "搜索结果"}}
+         }
+       }
+     }
+   }
+   ```
+
+   模型看到的工具名是 `http.<登记的名称>.search`，比如名称填 `web-search`，就是 `http.web-search.search`。
+5. **绑给 Agent**：勾选 `search` 操作，**写入策略选「预先批准」**。平台只把 GET、HEAD、OPTIONS 当只读，搜索接口是 POST，所以必须选一个写入策略。「禁用」等于不能搜，「逐次审批」意味着每搜一次都要有人点批准。只有工作空间管理员能发布带「预先批准」的版本。
+6. **在 Agent 设定里加一句**，比如：「需要最新信息或材料里没有的事实时，先用 search 搜索；写进文档的事实要注明来源链接；搜不到就说搜不到，不要编。」然后发布新版本。
+
+**要注意的：**
+
+- **响应超过 64 KB 会被整条拒绝，不会截断**（`response_too_large`）。Tavily 每条结果都带摘要，走查时 5 条结果是 9 到 16 KB。不要在文档里放出 `include_raw_content`，它会带回整页正文，很容易超限。
+- **模型只拿到标题、链接和摘要**，读不到整页。摘要不够用时，可以再登记一个「网页转文本」的服务（比如 Jina Reader），步骤一样。没有试过。
+- **搜索结果会进入模型上下文和 Run 记录**，跟别的工具结果一样留存。
+- **Key 不要贴在聊天或工单里。** 换 Key 只需要在密钥页更新值，HTTP 工具和 Agent 都不用动。

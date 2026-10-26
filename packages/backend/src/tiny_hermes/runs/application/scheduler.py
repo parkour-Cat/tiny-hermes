@@ -54,6 +54,7 @@ RETENTION = "retention"
 UPLOADS = "workspace_uploads"
 ARTIFACTS = "artifact_retention"
 CHANNEL_REPLIES = "channel_replies"
+CHANNEL_GATHER = "channel_gather"
 
 _PLATFORM = RunCapabilities(can_control=True, can_retry=True)
 
@@ -116,6 +117,17 @@ class ReplyPass(Protocol):
     async def dispatch_once(self) -> int: ...
 
 
+class ChannelGather(Protocol):
+    """One pass of the channel gather, built per session, for
+    `ChannelReplies`'s reason: it writes inside this class's transaction."""
+
+    def __call__(self, session: AsyncSession, /) -> "GatherPass": ...
+
+
+class GatherPass(Protocol):
+    async def gather_once(self) -> int: ...
+
+
 class SchedulerRuntime:
     """Reclaims abandoned work and repairs invariants no request owns.
 
@@ -132,6 +144,7 @@ class SchedulerRuntime:
         sandbox: SandboxCleanup | None = None,
         objects: ObjectStore | None = None,
         replies: ChannelReplies | None = None,
+        gather: ChannelGather | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._sessions = session_factory
@@ -151,6 +164,10 @@ class SchedulerRuntime:
         # receives Feishu messages and runs them; the answers settle in the
         # queue unsent rather than the Scheduler pretending to deliver them.
         self._replies = replies
+        # Absent only where no channel is wired at all. Unlike `replies` it
+        # does not depend on egress: a message must become a Run whether or
+        # not its answer can be sent.
+        self._gather = gather
 
     async def run_once(self) -> None:
         """Every scan once, each on its own, all at once (2026-10-24).
@@ -199,6 +216,7 @@ class SchedulerRuntime:
                 if housekeeping
                 else ()
             ),
+            ("gather_channel_messages", self._gather_channel_messages),
             ("dispatch_channel_replies", self._dispatch_channel_replies),
         )
         failures: list[Exception] = []
@@ -606,6 +624,23 @@ class SchedulerRuntime:
             sent = await self._replies(session).dispatch_once()
             if sent:
                 logger.info("channel replies delivered", extra={"replies": sent})
+
+    async def _gather_channel_messages(self) -> None:
+        """Start a Run from what each person sent together.
+
+        Messages are held on arrival because Feishu does not order a file
+        and the words sent with it (office-tasks design, 2026-10-26). This is
+        where they stop waiting; without it no channel message would ever
+        become a Run.
+        """
+        if self._gather is None:
+            return
+        async with self._sessions.begin() as session:
+            if not await SqlRunStore(session).try_scan_lock(CHANNEL_GATHER):
+                return
+            started = await self._gather(session).gather_once()
+            if started:
+                logger.info("channel messages gathered", extra={"runs": started})
 
     async def _announce(self, run_id: UUID) -> None:
         async with self._sessions() as session:

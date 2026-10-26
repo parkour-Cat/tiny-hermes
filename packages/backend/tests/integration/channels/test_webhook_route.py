@@ -18,6 +18,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from .test_reply_dispatch import _gather, _run_of  # pyright: ignore[reportPrivateUsage]
+
 KEY = "tenant-encrypt-key"
 
 
@@ -102,7 +104,9 @@ async def test_a_signed_message_becomes_a_run_owned_by_its_sender(
     )
 
     assert posted.status_code == 200, posted.text
-    run_id = posted.json()["run_id"]
+    # The webhook claims; the Scheduler's gather starts the Run.
+    await _gather(engine)
+    run_id = await _run_of(engine, binding_id, "om_1")
     assert run_id is not None
 
     async with engine.connect() as connection:
@@ -111,7 +115,7 @@ async def test_a_signed_message_becomes_a_run_owned_by_its_sender(
                 "SELECT s.caller_type, s.caller_id FROM runs r"
                 " JOIN sessions s ON s.id = r.session_id WHERE r.id = :r"
             ),
-            {"r": UUID(run_id)},
+            {"r": run_id},
         )
         caller_type, caller_id = owner.one()
         mapped = await connection.execute(
@@ -202,14 +206,18 @@ async def test_the_same_delivery_twice_starts_one_run(
 
     assert first.status_code == 200, first.text
     assert second.status_code == 200, second.text
-    assert first.json()["run_id"] is not None
-    assert second.json()["run_id"] is None
+    await _gather(engine)
     async with engine.connect() as connection:
         rows = await connection.execute(
             text("SELECT count(*) FROM channel_events WHERE channel_binding_id = :b"),
             {"b": binding_id},
         )
+        runs = await connection.execute(
+            text("SELECT count(*) FROM runs WHERE workspace_id = :w"),
+            {"w": UUID(workspace_id)},
+        )
     assert rows.scalar_one() == 1
+    assert runs.scalar_one() == 1
 
 
 async def test_an_unknown_binding_looks_exactly_like_a_bad_signature(

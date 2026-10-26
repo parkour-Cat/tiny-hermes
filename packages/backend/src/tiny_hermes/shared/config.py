@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     run_interactive_promotion_seconds: int = Field(default=120, ge=1, le=86_400)
     worker_shutdown_grace_seconds: int = Field(default=20, ge=5, le=120)
     scheduler_interval_seconds: int = Field(default=1, ge=1, le=60)
+    #: How long one person's channel messages are held for a later one to
+    #: join them (office-tasks design, 2026-10-26). Every message pays it.
+    channel_gather_seconds: float = Field(default=1.5, ge=0, le=30)
     #: How often the scheduler's housekeeping scans run (2026-10-24). The
     #: `SchedulerHousekeepingStalled` alert allows four minutes.
     scheduler_housekeeping_seconds: int = Field(default=60, ge=1, le=180)

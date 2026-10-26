@@ -61,6 +61,7 @@ from tiny_hermes.secrets.infrastructure.sql_store import SqlSecretStore
 from tiny_hermes.shared.config import Settings
 
 from ..conftest import VALID_SPEC
+from .test_reply_dispatch import _gather  # pyright: ignore[reportPrivateUsage]
 
 #: Matches the `settings` fixture's `tiny_hermes_kek` in conftest.py
 #: ("AAAA...=", 32 zero bytes decoded) — the point of sealing a secret with
@@ -539,8 +540,13 @@ class _FakeChannels:
         self._built = 0
         self.channels: list[_FakeChannel] = []
 
-    def __call__(self, *, app_id: str, app_secret: str) -> _FakeChannel:
-        del app_id, app_secret
+    def __call__(
+        self, *, app_id: str, app_secret: str, safety: Any = None
+    ) -> _FakeChannel:
+        # `safety` is accepted and ignored: these tests are about the
+        # connection's lifecycle, and batching is pinned against the SDK's
+        # own pipeline in `test_long_connection_adapter.py`.
+        del app_id, app_secret, safety
         self._built += 1
         connect_error = self._connect_error
         if (
@@ -695,6 +701,8 @@ async def _claim_and_run(
     `channel_events` is ordered by `created_at` with no tiebreaker, so a
     positional read names a different row on a different run.
     """
+    # The frame is claimed on arrival; the Run is the Scheduler's gather's.
+    await _gather(engine)
     async with engine.connect() as connection:
         found = await connection.execute(
             text(
@@ -1659,6 +1667,8 @@ async def test_a_compact_frame_over_the_long_connection_becomes_a_compaction_run
     await _deliver_one_frame(
         scheduler_connections, sdk_channels, body="上周几单？", event_id="om_lc_c_0"
     )
+    # An ordinary message waits for the gather before it starts a Session.
+    await _gather(engine)
     async with engine.connect() as connection:
         found = await connection.execute(
             text(

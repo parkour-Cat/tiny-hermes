@@ -56,6 +56,11 @@ class FakeConversations:
     ) -> None:
         self.remembered.append((binding_id, external_user_id, session_id))
 
+    async def drop_held(self, binding_id: UUID, external_user_id: str) -> None:
+        # Nothing is held in these fakes; `test_held_files.py` covers what
+        # `/new` drops, against the database.
+        del binding_id, external_user_id
+
 
 class FakeRuns:
     def __init__(self, document: dict[str, Any] | None = None) -> None:
@@ -288,13 +293,42 @@ async def test_a_file_message_reaches_the_run_as_a_reference_with_a_safe_name() 
             channel="feishu",
             channel_event_id="om_1",
             external_user_id="ou_zhang",
-            text="",
+            text="看看这个",
             files=(ChannelFile(message_id="om_msg", file_key="file_k", name="../销售.xlsx"),),
         ),
         request_id="req-1",
     )
 
     assert runs.files == [FileBlock(reference="feishu:om_msg:file_k", name="销售.xlsx")]
+
+
+async def test_an_arriving_message_is_held_not_started() -> None:
+    """Office-tasks design, 2026-10-26: a message on arrival is held for the
+    Scheduler to gather with whatever the same person sends next — a file
+    and its question come in either order — so arriving starts nothing."""
+    runs = FakeRuns()
+    ingestion = ChannelIngestion(
+        subjects=FakeSubjects(), conversations=FakeConversations(), runs=runs
+    )
+
+    delivered = await ingestion.accept(binding=BINDING, event=EVENT, request_id="req-1")
+
+    assert delivered.run is None
+    assert delivered.held == EVENT
+    assert runs.submitted == []
+
+
+async def test_an_erased_subject_is_refused_on_arrival_too() -> None:
+    """Holding a message is not a way around §344: the refusal comes at the
+    door, as it did when arriving meant starting a Run."""
+    ingestion = ChannelIngestion(
+        subjects=FakeSubjects(erased_at=datetime(2026, 8, 1, tzinfo=UTC)),
+        conversations=FakeConversations(),
+        runs=FakeRuns(),
+    )
+
+    with pytest.raises(ErasedSubjectRefused):
+        await ingestion.accept(binding=BINDING, event=EVENT, request_id="req-1")
 
 
 async def test_a_text_message_carries_no_image_reference() -> None:

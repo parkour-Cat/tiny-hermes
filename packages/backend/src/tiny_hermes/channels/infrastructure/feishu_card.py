@@ -76,7 +76,8 @@ def _paragraph(content: str) -> dict[str, Any]:
 
 
 def working_card() -> dict[str, Any]:
-    """What a person sees about a second after they hit send.
+    """What a person sees a few seconds after they hit send — the gather
+    window, then the next scan.
 
     This card exists because a text message cannot be taken back. The
     platform used to stay silent until it knew what to say — 8 seconds for

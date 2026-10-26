@@ -145,6 +145,18 @@ class ChannelEventRow(IdMixin, Base):
                 "command_receipt IS NOT NULL AND replied_at IS NULL"
             ),
         ),
+        # A held message's readers — migration 0083.
+        Index(
+            "ix_channel_events_held_by_sender",
+            "channel_binding_id",
+            "held_open_id",
+            postgresql_where=text("held_message IS NOT NULL AND held_taken_at IS NULL"),
+        ),
+        Index(
+            "ix_channel_events_awaiting_held_question",
+            "received_at",
+            postgresql_where=text("held_message IS NOT NULL AND replied_at IS NULL"),
+        ),
     )
 
     channel_binding_id: Mapped[UUID] = mapped_column(
@@ -221,6 +233,20 @@ class ChannelEventRow(IdMixin, Base):
     #: a command does not create a `channel_conversations` row on its own,
     #: so the scan has nowhere else to find the sender.
     command_open_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    #: The message itself — words, images, files — held until the Scheduler
+    #: gathers it with whatever the same person sends within the window.
+    #: NULL for a command or an unreadable message, which are answered on
+    #: arrival. See migration 0083.
+    held_message: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True
+    )
+    #: Whose batch it belongs to. Here for `command_open_id`'s reason: a
+    #: first-ever message has no conversation row yet.
+    held_open_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    #: When a gather took it, or `/new` dropped it. NULL is still waiting.
+    held_taken_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class ChannelConversationRow(IdMixin, CreatedAtMixin, Base):

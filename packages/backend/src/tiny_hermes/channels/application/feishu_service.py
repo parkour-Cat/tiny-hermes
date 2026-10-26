@@ -28,6 +28,7 @@ from tiny_hermes.channels.application.webhook_service import (
 )
 from tiny_hermes.channels.domain.blocked import BlockedNotice
 from tiny_hermes.channels.domain.command_receipt import CommandReceipt
+from tiny_hermes.channels.domain.events import ChannelEvent
 from tiny_hermes.channels.domain.feishu import CHANNEL
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,8 @@ class BindingDirectory(Protocol):
     async def record_command_receipt(
         self, event_row_id: UUID, receipt: CommandReceipt, external_user_id: str
     ) -> None: ...
+
+    async def record_held(self, event_row_id: UUID, event: ChannelEvent) -> None: ...
 
 
 class UnknownChannelBinding(Exception):
@@ -180,13 +183,14 @@ class FeishuChannelService:
             # is what stops Feishu retrying it for six hours.
             return Accepted(delivered=None)
 
-        delivered = await self._ingestion.run_for(
+        delivered = await self._ingestion.accept(
             binding=binding, event=outcome.event, request_id=request_id
         )
         if delivered.run is None:
-            # A command took the claim instead of becoming a Run: there is
-            # no `run_id` to attach and nothing that can be blocked (a
-            # command that never queued cannot be queued behind). What it
+            # No Run yet — the ordinary case now, since a message is held
+            # for the gather — or a command that took the claim instead of
+            # becoming one. Either way there is no `run_id` to attach and
+            # nothing that can be blocked. What a command
             # does owe is the same thing `record_unsupported` owes above —
             # a sender who is not told anything reads silence as a lost
             # message. Recorded here rather than inside `run_for` because
@@ -197,6 +201,11 @@ class FeishuChannelService:
                 await self._bindings.record_command_receipt(
                     outcome.claim_id, delivered.receipt, outcome.event.external_user_id
                 )
+            if delivered.held is not None:
+                # Held on this delivery's row, in this transaction, for the
+                # Scheduler's gather to start a Run from — or, if it is only
+                # files, for the scan that asks what they are for.
+                await self._bindings.record_held(outcome.claim_id, delivered.held)
             return Accepted(delivered=delivered)
         # The claim and the Run, joined. This call was missing for a whole
         # milestone: a live deployment held two claims with `run_id` NULL

@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from tiny_hermes.audit.infrastructure.tables import AuditEventRow
 from tiny_hermes.channels.application.feishu_service import FeishuChannelService
+from tiny_hermes.channels.application.gather import ChannelGatherer
 from tiny_hermes.channels.application.ingestion import ChannelIngestion
 from tiny_hermes.channels.application.outbound import ChannelReplyDispatcher
 from tiny_hermes.channels.application.webhook_service import FeishuWebhookService
@@ -479,6 +480,7 @@ async def _scheduler() -> None:
         sandbox=_controller(settings, Role.SCHEDULER, sessions),
         objects=None if workspace is None else workspace.objects,
         replies=_channel_replies(settings, senders),
+        gather=_channel_gather(settings),
         settings=SchedulerSettings(
             max_recovery_attempts=settings.max_recovery_attempts,
             event_retention_hours=settings.event_retention_hours,
@@ -1139,6 +1141,28 @@ def _channel_replies(
             resolve_secret=CredentialResolver(SqlSecretStore(session), kek).resolve,
             senders=senders,
             console_url=settings.console_base_url or None,
+        )
+
+    return build
+
+
+def _channel_gather(settings: Settings) -> Callable[[AsyncSession], ChannelGatherer]:
+    """The gather that turns held channel messages into Runs.
+
+    Always wired, unlike `_channel_replies`: it needs no egress, and without
+    it no channel message would become a Run at all.
+    """
+
+    def build(session: AsyncSession) -> ChannelGatherer:
+        store = SqlChannelStore(session)
+        return ChannelGatherer(
+            store=store,
+            ingestion=ChannelIngestion(
+                subjects=SqlEndUserStore(session),
+                conversations=store,
+                runs=RunCoordination(SqlRunStore(session)),
+            ),
+            window_seconds=settings.channel_gather_seconds,
         )
 
     return build

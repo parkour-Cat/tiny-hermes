@@ -25,6 +25,7 @@ from uuid import UUID
 
 from tiny_hermes.channels.domain.feishu import CHANNEL
 from tiny_hermes.channels.domain.reply import (
+    held_files_question,
     progress_note,
     refusal_for,
     reply_for,
@@ -39,8 +40,10 @@ from tiny_hermes.channels.infrastructure.feishu_card import (
 )
 from tiny_hermes.channels.infrastructure.sql_channel_store import (
     DeliveryTarget,
+    HeldDelivery,
     PendingCard,
     PendingCommandReceipt,
+    PendingHeldQuestion,
     PendingNotice,
     PendingProgress,
     PendingRefusal,
@@ -84,6 +87,13 @@ _CARD_KEY_SUFFIX = ":c"
 #: rather than by this constant, so that raising it fails a test.
 DEFAULT_PROGRESS_AFTER_SECONDS = 8
 
+#: How long a file sent alone waits before its sender is asked what it is
+#: for. Feishu sends a file and the words typed beside it as two messages,
+#: the second arriving well under a second later in the real chat; waiting
+#: past that is what keeps a question from landing between a file and the
+#: request that came with it.
+DEFAULT_HELD_QUESTION_AFTER_SECONDS = 3
+
 
 class ReplyOutcome:
     """What `reply_note` records. Values are read by operators and by tests,
@@ -106,6 +116,12 @@ class ReplyOutcome:
     #: refused" and "it was refused because the bot is not in that chat" are
     #: different problems with different fixes.
     REFUSED = "refused"
+    #: A file sent alone, and the question about it sent.
+    HELD_ASKED = "held_asked"
+    #: A file sent alone that a later message carried before anybody asked.
+    HELD_TAKEN = "held_taken"
+    #: One of several files sent alone; the newest one's question named it.
+    HELD_SUPERSEDED = "held_superseded"
 
 
 @dataclass(frozen=True)
@@ -191,6 +207,14 @@ class ReplyQueue(Protocol):
         self, limit: int = 50
     ) -> list[PendingCommandReceipt]: ...
 
+    async def pending_held_questions(
+        self, older_than: datetime, limit: int = 50
+    ) -> list[PendingHeldQuestion]: ...
+
+    async def still_held(
+        self, binding_id: UUID, external_user_id: str
+    ) -> list[HeldDelivery]: ...
+
     async def pending_card_opens(self, limit: int = 50) -> list[PendingCard]: ...
 
     async def record_card(
@@ -235,6 +259,7 @@ class ChannelReplyDispatcher:
         batch_size: int = 50,
         console_url: str | None = None,
         progress_after_seconds: int = DEFAULT_PROGRESS_AFTER_SECONDS,
+        held_question_after_seconds: int = DEFAULT_HELD_QUESTION_AFTER_SECONDS,
     ) -> None:
         self._store = store
         self._resolve_secret = resolve_secret
@@ -246,6 +271,7 @@ class ChannelReplyDispatcher:
         # which would be a dead link in front of a user.
         self._console_url = console_url
         self._progress_after_seconds = progress_after_seconds
+        self._held_question_after_seconds = held_question_after_seconds
 
     async def dispatch_once(self) -> int:
         """One bounded pass. Returns how many messages were actually sent.
@@ -272,6 +298,13 @@ class ChannelReplyDispatcher:
         for command in await self._store.pending_command_receipts(self._batch_size):
             if await self._answer_command(command):
                 sent += 1
+        held = await self._store.pending_held_questions(
+            _now() - timedelta(seconds=self._held_question_after_seconds),
+            self._batch_size,
+        )
+        for waiting_file in held:
+            if await self._ask_about_held(waiting_file):
+                sent += 1
         for waiting in await self._store.pending_blocked_notices(self._batch_size):
             if await self._notify(waiting):
                 sent += 1
@@ -287,7 +320,11 @@ class ChannelReplyDispatcher:
         return sent
 
     async def _open_card(self, opening: PendingCard) -> bool:
-        """Put something on screen, about a second after the message landed.
+        """Put something on screen, on the first scan after the Run exists.
+
+        That is about a second after the gather starts it, so 2.5 to 3.5
+        seconds after the message landed: messages wait for the gather window
+        first (office-tasks design, 2026-10-26).
 
         A queued delivery opens with the queue card rather than 「正在处理」
         — nothing is processing it, and the queue card already carries the
@@ -495,6 +532,66 @@ class ChannelReplyDispatcher:
             return False
         await self._store.settle_reply(
             command.event_row_id, ReplyOutcome.SENT, _now()
+        )
+        return True
+
+    async def _ask_about_held(self, held: PendingHeldQuestion) -> bool:
+        """Ask somebody who sent files and nothing else what they are for.
+
+        Settled without a word when a later message already took the file —
+        the request arrived, and asking now would be a question about a
+        conversation that has moved on. Of one person's several waiting
+        files only the newest asks, naming them all; the scan's oldest-first
+        order settles the earlier ones as superseded before it gets there.
+
+        Credentials off the binding and no retry, `_answer_command`'s
+        reasoning: a file-only message has no conversation row to join
+        through, and a question repeated every scan is worse than one lost.
+        """
+        if held.taken:
+            await self._store.settle_reply(
+                held.event_row_id, ReplyOutcome.HELD_TAKEN, _now()
+            )
+            return False
+        waiting = await self._store.still_held(held.binding_id, held.external_user_id)
+        if not waiting or waiting[-1].event_row_id != held.event_row_id:
+            await self._store.settle_reply(
+                held.event_row_id, ReplyOutcome.HELD_SUPERSEDED, _now()
+            )
+            return False
+        target = await self._store.binding_target(held.binding_id)
+        recipient = self._sendable(target)
+        if isinstance(recipient, str):
+            logger.info(
+                "channel held-file question not sent: binding=%s reason=%s",
+                held.binding_id,
+                recipient,
+            )
+            await self._store.settle_reply(held.event_row_id, recipient, _now())
+            return False
+        try:
+            secret = await self._resolve_secret(recipient.app_secret_ref)
+            await self._senders(recipient.workspace_id).send_text(
+                app_id=recipient.app_id,
+                app_secret=secret,
+                open_id=held.external_user_id,
+                text=held_files_question(
+                    [name for delivery in waiting for name in delivery.names]
+                ),
+                delivery_key=str(held.event_row_id),
+            )
+        except Exception:
+            logger.warning(
+                "channel held-file question failed: binding=%s",
+                held.binding_id,
+                exc_info=True,
+            )
+            await self._store.settle_reply(
+                held.event_row_id, ReplyOutcome.REFUSED, _now()
+            )
+            return False
+        await self._store.settle_reply(
+            held.event_row_id, ReplyOutcome.HELD_ASKED, _now()
         )
         return True
 
