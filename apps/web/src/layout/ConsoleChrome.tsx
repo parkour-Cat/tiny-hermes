@@ -1,7 +1,8 @@
-import { Alert, Avatar, Button, Layout, Select, Typography } from "antd";
+import { Alert, Avatar, Dropdown, Layout } from "antd";
+import type { MenuProps } from "antd";
 import type { ReactNode } from "react";
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { useConsoleTheme } from "./ConsoleTheme";
 import { useAuth } from "../auth/AuthProvider";
@@ -12,24 +13,26 @@ export function BrandMark() {
   const { t } = useLocale();
   return (
     <Link to="/workspaces" className="th-brand">
-      <HermesMark size={44} />
+      <HermesMark size={36} />
       <span className="th-word">{t("appName")}</span>
     </Link>
   );
 }
 
 /**
- * Shared chrome: a sider for wayfinding, a thin top bar for the operator.
+ * Shared chrome: one dark sider for everything, no top bar.
  *
- * Navigation used to share the header with the workspace name, the locale
- * switch, the theme, the avatar and sign-out — two rows of it after the
- * entries came down to seven. A sider gives the seven their own column, and
- * the top bar is left with the things about the person, not the place.
+ * The top bar held the person — language, theme, avatar, sign-out — and
+ * cost every page 64 px above its content for things touched once a week.
+ * They sit at the foot of the sider now, behind one menu, so the column that
+ * says where you are also says who you are, and the content starts at the
+ * top of the window.
  */
 export function ConsoleChrome({ sidebar, children }: { sidebar: ReactNode; children: ReactNode }) {
   const auth = useAuth();
   const { t, locale, setLocale } = useLocale();
   const theme = useConsoleTheme();
+  const navigate = useNavigate();
   const [actionError, setActionError] = useState<string | null>(null);
 
   async function logout(): Promise<void> {
@@ -41,33 +44,50 @@ export function ConsoleChrome({ sidebar, children }: { sidebar: ReactNode; child
     }
   }
 
+  const items: MenuProps["items"] = [
+    { key: "zh-CN", label: t("localeZh") },
+    { key: "en-US", label: t("localeEn") },
+    { type: "divider" },
+    // Named for the theme it switches to, as the button it replaces was.
+    { key: "theme", label: theme.dark ? t("themeLight") : t("themeDark") },
+    { key: "workspaces", label: t("backToWorkspaces") },
+    { type: "divider" },
+    { key: "logout", label: t("logout") },
+  ];
+
+  function choose({ key }: { key: string }): void {
+    if (key === "zh-CN" || key === "en-US") setLocale(key);
+    else if (key === "theme") theme.toggle();
+    else if (key === "workspaces") navigate("/workspaces");
+    else if (key === "logout") void logout();
+  }
+
   return (
     <Layout className="th-shell">
-      <Layout.Sider className="th-sider" width={232} theme="light" trigger={null}>
+      <Layout.Sider className="th-sider" width={248} theme="dark" trigger={null}>
         {sidebar}
+        <div className="th-account">
+          <Avatar className="th-account-avatar">{auth.user?.display_name.slice(0, 1).toUpperCase()}</Avatar>
+          <div className="th-account-who">
+            <span className="th-account-name">{auth.user?.display_name}</span>
+            <span className="th-account-subject">{auth.user?.subject}</span>
+          </div>
+          <Dropdown
+            trigger={["click"]}
+            placement="topRight"
+            menu={{ items, onClick: choose, selectedKeys: [locale] }}
+          >
+            <button type="button" className="th-account-menu" aria-label={t("accountMenu")}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+                <circle cx="5" cy="12" r="1" />
+                <circle cx="12" cy="12" r="1" />
+                <circle cx="19" cy="12" r="1" />
+              </svg>
+            </button>
+          </Dropdown>
+        </div>
       </Layout.Sider>
       <Layout className="th-main">
-        <Layout.Header className="th-topbar">
-          <Select
-            aria-label={t("language")}
-            value={locale}
-            onChange={(next) => setLocale(next)}
-            options={[
-              { value: "zh-CN", label: t("localeZh") },
-              { value: "en-US", label: t("localeEn") },
-            ]}
-            popupMatchSelectWidth={false}
-          />
-          <Button onClick={() => theme.toggle()}>
-            {theme.dark ? t("themeLight") : t("themeDark")}
-          </Button>
-          <Avatar>{auth.user?.display_name.slice(0, 1).toUpperCase()}</Avatar>
-          <div className="user-summary">
-            <Typography.Text>{auth.user?.display_name}</Typography.Text>
-            <Typography.Text type="secondary">{auth.user?.subject}</Typography.Text>
-          </div>
-          <Button onClick={() => void logout()}>{t("logout")}</Button>
-        </Layout.Header>
         <Layout.Content className="th-content">
           {actionError === null ? null : (
             <Alert className="page-alert" type="error" title={actionError} showIcon />

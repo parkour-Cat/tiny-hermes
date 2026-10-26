@@ -3,7 +3,7 @@ import { Alert, Badge, Button, Select } from "antd";
 import { Link, NavLink, Outlet, useNavigate, useLocation } from "react-router-dom";
 
 import { BrandMark, ConsoleChrome } from "./ConsoleChrome";
-import { NAV_GROUPS, visibleSections } from "./navigation";
+import { NAV_CATEGORIES, NAV_GROUPS, visibleSections, type NavGroup } from "./navigation";
 import { useInboxCount } from "./useInboxCount";
 import { api } from "../api/client";
 import { useT } from "../i18n/locale";
@@ -71,28 +71,39 @@ export function ConsoleLayout() {
               navigate(`/workspaces/${id}/${section}${location.hash}`);
             }} />
           <nav className="th-nav console-nav" aria-label={t("workspaceTitle")}>
-            {/* 只有一段的入口（Agents、运行、渠道）直接指向那一段的路径，不经过
-                合并页——给一个只有一段的页面套一层分段外壳，只会多一层没有内容
-                的标题。 */}
-            {NAV_GROUPS.filter((group) => role !== null && visibleSections(group, role, user?.is_platform_admin === true).length > 0).map((group) => (
-              <NavLink
-                key={group.key}
-                className="th-nav-link"
-                to={`/workspaces/${workspaceId}/${
-                  group.sections.length === 1 ? group.sections[0]!.path : group.key
-                }`}
-                title={t(group.introKey)}
-              >
-                {t(group.labelKey)}
-                {group.key === "inbox" && inboxCount !== null ? (
-                  <Badge count={inboxCount} title={t(inboxCount === "?" ? "inboxCountUnknown" : "inboxCountHint")} className="nav-badge" />
-                ) : null}
-              </NavLink>
-            ))}
+            {NAV_CATEGORIES.map((category) => {
+              const groups = category.groups
+                .map((key) => NAV_GROUPS.find((group) => group.key === key))
+                .filter((group): group is NavGroup =>
+                  group !== undefined && role !== null &&
+                  visibleSections(group, role, user?.is_platform_admin === true).length > 0);
+              if (groups.length === 0) return null;
+              const label = category.labelKey === null ? null : t(category.labelKey);
+              return (
+                <div key={category.key} className="th-nav-group" role="group" aria-label={label ?? undefined}>
+                  {label === null ? null : <div className="th-nav-label" aria-hidden="true">{label}</div>}
+                  {/* 只有一段的入口（Agents、运行、渠道）直接指向那一段的路径，不经过
+                      合并页——给一个只有一段的页面套一层分段外壳，只会多一层没有内容
+                      的标题。 */}
+                  {groups.map((group) => (
+                    <NavLink
+                      key={group.key}
+                      className="th-nav-link"
+                      to={`/workspaces/${workspaceId}/${
+                        group.sections.length === 1 ? group.sections[0]!.path : group.key
+                      }`}
+                      title={t(group.introKey)}
+                    >
+                      {t(group.labelKey)}
+                      {group.key === "inbox" && inboxCount !== null ? (
+                        <Badge count={inboxCount} title={t(inboxCount === "?" ? "inboxCountUnknown" : "inboxCountHint")} className="nav-badge" />
+                      ) : null}
+                    </NavLink>
+                  ))}
+                </div>
+              );
+            })}
           </nav>
-          <Link to="/workspaces" className="th-nav-foot">
-            {t("backToWorkspaces")}
-          </Link>
         </>
       }
     >

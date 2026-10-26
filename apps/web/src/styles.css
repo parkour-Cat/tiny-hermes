@@ -150,86 +150,175 @@ h4,
   background: var(--th-paper);
 }
 
+/* 侧栏两种主题下都是深色：它是「我在哪」的那一栏，和内容区的纸色分开，
+   不靠一条细线。颜色只在这里用，所以不进 :root。 */
 .th-sider.ant-layout-sider {
-  background: var(--th-sider) !important;
-  border-right: 1px solid var(--th-line);
-  padding: 28px 18px 20px;
+  --side-ink: #e9e1d5;
+  --side-muted: #ada191;
+  --side-raised: #252019;
+  --side-line: #3a322b;
+  --side-active: #3a2a1f;
+  --side-accent: #e08a4f;
+  background: #1c1814 !important;
+  color: var(--side-ink);
+  padding: 20px 14px 14px;
   display: flex;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
 }
 
 .th-sider .ant-layout-sider-children {
   display: flex;
   flex-direction: column;
+  gap: 16px;
   min-height: 100%;
   width: 100%;
 }
 
-.th-workspace-chip {
-  margin: 28px 0 18px;
-  padding: 10px 12px;
-  border: 1px solid var(--th-line);
-  background: var(--th-paper-raised);
-  font-weight: 650;
-  line-height: 1.3;
-  overflow-wrap: anywhere;
+.th-sider .th-brand {
+  color: #f6efe6;
+  padding: 0 4px;
+}
+
+.th-workspace-chip.ant-select {
+  margin: 0;
+  height: 40px;
+}
+
+.th-workspace-chip.ant-select .ant-select-selector,
+.th-workspace-chip.ant-select.ant-select-outlined {
+  background: var(--side-raised) !important;
+  border-color: var(--side-line) !important;
+  color: #f6efe6;
+  font-weight: 500;
+}
+
+.th-workspace-chip.ant-select .ant-select-arrow,
+.th-workspace-chip.ant-select .ant-select-suffix {
+  color: var(--side-muted);
 }
 
 .th-nav {
   display: flex;
   flex-direction: column;
+  gap: 16px;
+}
+
+.th-nav-group {
+  display: flex;
+  flex-direction: column;
   gap: 2px;
+}
+
+.th-nav-label {
+  padding: 4px 12px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--side-muted);
 }
 
 .th-nav-link {
   display: flex;
   align-items: center;
-  padding: 8px 12px;
-  border-radius: 6px;
-  color: var(--th-ink-soft);
+  gap: 10px;
+  min-height: 36px;
+  padding: 0 12px;
+  border-radius: 8px;
+  color: var(--side-ink);
   text-decoration: none;
   /* A label is one word even when it is four characters of Chinese. */
   white-space: nowrap;
 }
 
 .th-nav-link:hover {
-  color: var(--th-ink);
-  background: rgb(196 92 38 / 8%);
+  color: #fff4ea;
+  background: var(--side-raised);
 }
 
 .th-nav-link.active {
-  color: var(--th-ink);
-  background: var(--th-paper-raised);
-  box-shadow: inset 3px 0 0 var(--th-copper);
-  font-weight: 650;
+  color: #fff4ea;
+  background: var(--side-active);
+  font-weight: 700;
 }
 
-.th-nav-foot {
+.th-nav-link.active::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin-left: -2px;
+  border-radius: 50%;
+  background: var(--side-accent);
+}
+
+.th-nav-link .nav-badge {
+  margin-left: auto;
+}
+
+.th-nav-link .nav-badge .ant-badge-count {
+  background: var(--side-accent);
+  color: #1c1814;
+  box-shadow: none;
+  font-weight: 700;
+}
+
+.th-account {
   margin-top: auto;
-  padding: 18px 12px 4px;
-  color: var(--th-ink-soft);
-  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 4px 0;
+  border-top: 1px solid var(--side-line);
+}
+
+.th-account-avatar.ant-avatar {
+  flex: none;
+  background: var(--side-line);
+  color: var(--side-ink);
+  font-weight: 700;
+}
+
+.th-account-who {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  line-height: 1.3;
+}
+
+.th-account-name {
+  font-weight: 500;
+}
+
+.th-account-subject {
+  font-size: 12px;
+  color: var(--side-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.th-account-menu {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--side-ink);
+  cursor: pointer;
+}
+
+.th-account-menu:hover,
+.th-account-menu:focus-visible {
+  background: var(--side-raised);
 }
 
 .th-main {
   background: transparent;
-}
-
-.th-topbar.ant-layout-header {
-  height: auto;
-  min-height: 64px;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 12px;
-  padding: 10px 28px;
-  background: rgb(251 247 240 / 86%) !important;
-  border-bottom: 1px solid var(--th-line);
-  line-height: 1.2;
-}
-
-.user-summary {
-  display: grid;
-  line-height: 1.3;
+  min-width: 0;
 }
 
 .th-content {
@@ -534,10 +623,6 @@ html[data-theme="dark"] .public-shell {
   background: linear-gradient(180deg, #161310 0%, #1a1612 100%);
 }
 
-html[data-theme="dark"] .th-topbar.ant-layout-header {
-  background: rgb(30 26 22 / 88%) !important;
-}
-
 html[data-theme="dark"] .th-tag.ant-tag {
   background: #2a241e;
   color: #f3ece3;
@@ -591,6 +676,8 @@ html[data-theme="dark"] .th-tag-interrupted {
     max-width: none !important;
     min-width: 0 !important;
     flex: none !important;
+    position: static;
+    height: auto;
   }
 
   .th-nav {
@@ -598,18 +685,18 @@ html[data-theme="dark"] .th-tag-interrupted {
     flex-wrap: wrap;
   }
 
-  .th-nav-foot {
-    margin-top: 12px;
-  }
-
-  .th-topbar.ant-layout-header,
-  .page-heading {
-    align-items: stretch;
+  .th-nav-group {
+    flex-direction: row;
     flex-wrap: wrap;
   }
 
-  .user-summary {
-    min-width: 0;
+  .th-nav-label {
+    display: none;
+  }
+
+  .page-heading {
+    align-items: stretch;
+    flex-wrap: wrap;
   }
 }
 

@@ -146,6 +146,18 @@ export const NAV_GROUPS: NavGroup[] = [
   },
 ];
 
+/**
+ * 侧栏里的分组。九个平铺入口时找不到东西：每天用的（任务、待办）和搭一次就
+ * 不常动的（Agent、能力、渠道）、偶尔去查的（记录、设置）混在一起。`labelKey`
+ * 为 `null` 的那组不画标题——首页自己就是一组。
+ */
+export const NAV_CATEGORIES: { key: string; labelKey: MessageKey | null; groups: string[] }[] = [
+  { key: "home", labelKey: null, groups: ["overview"] },
+  { key: "daily", labelKey: "navDaily", groups: ["runs", "inbox"] },
+  { key: "build", labelKey: "navBuild", groups: ["agents", "tooling", "channels"] },
+  { key: "manage", labelKey: "navManage", groups: ["records", "settings", "platform"] },
+];
+
 /** 这个人看得见的段。`platform_admin` 角色（不是成员的平台管理员）看得见一切；
  *  `platformAdminOnly` 的段只看 `isPlatformAdmin` 标志。 */
 export function visibleSections(

@@ -275,6 +275,8 @@ test("没有顶栏：账号、语言和主题都在侧栏底部", async () => {
   const menu = screen.getByRole("button", { name: "账号与偏好" });
   expect(screen.getByRole("complementary")).toContainElement(menu);
   await userEvent.click(menu);
-  expect(await screen.findByRole("menuitem", { name: "深色" })).toBeVisible();
-  expect(screen.getByRole("menuitem", { name: "English" })).toBeVisible();
+  // In the document, not toBeVisible: jsdom never finishes the dropdown's
+  // enter animation, so a visibility check here measures jsdom, not the menu.
+  expect(await screen.findByRole("menuitem", { name: "深色" })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: "English" })).toBeInTheDocument();
 });
