@@ -1,8 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { Alert, Badge, Button, Select } from "antd";
+import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useNavigate, useLocation } from "react-router-dom";
 
 import { BrandMark, ConsoleChrome } from "./ConsoleChrome";
+import { CommandPalette } from "./CommandPalette";
 import { NAV_CATEGORIES, NAV_GROUPS, visibleSections, type NavGroup } from "./navigation";
 import { useInboxCount } from "./useInboxCount";
 import { api } from "../api/client";
@@ -32,6 +34,17 @@ export function ConsoleLayout() {
   // its refusal shown, because a console that pre-filters is a console that can
   // disagree with the platform about who may see what.
   const inboxCount = useInboxCount();
+  const [searching, setSearching] = useState(false);
+  useEffect(() => {
+    function onKey(event: KeyboardEvent): void {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setSearching(true);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   const workspaces = useQuery({
     queryKey: WORKSPACES_QUERY,
     queryFn: () => api<WorkspaceSummary[]>("/api/v1/workspaces"),
@@ -70,6 +83,21 @@ export function ConsoleLayout() {
               const section = location.pathname.split("/")[3] ?? "agents";
               navigate(`/workspaces/${id}/${section}${location.hash}`);
             }} />
+          <button type="button" className="th-jump" onClick={() => setSearching(true)}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" />
+              <path d="M20 20l-3.5-3.5" />
+            </svg>
+            <span className="th-jump-label">{t("commandPalette")}</span>
+            <kbd aria-hidden="true">⌘K</kbd>
+          </button>
+          <CommandPalette
+            workspaceId={workspaceId}
+            role={role}
+            isPlatformAdmin={user?.is_platform_admin === true}
+            open={searching}
+            onClose={() => setSearching(false)}
+          />
           <nav className="th-nav console-nav" aria-label={t("workspaceTitle")}>
             {NAV_CATEGORIES.map((category) => {
               const groups = category.groups

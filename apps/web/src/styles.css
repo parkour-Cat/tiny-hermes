@@ -200,6 +200,104 @@ h4,
   color: var(--side-muted);
 }
 
+.th-jump {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--side-raised);
+  color: var(--side-muted);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.th-jump:hover,
+.th-jump:focus-visible {
+  color: var(--side-ink);
+}
+
+.th-jump-label {
+  flex: 1;
+}
+
+.th-jump kbd {
+  font: 11px/1.4 ui-monospace, monospace;
+  border: 1px solid var(--side-line);
+  border-radius: 4px;
+  padding: 0 5px;
+}
+
+/* 标题只给读屏用：搜索框自己就说明了这是什么。 */
+.th-palette .ant-modal-header {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+.th-palette .ant-modal-container,
+.th-palette .ant-modal-content {
+  padding: 0;
+  overflow: hidden;
+}
+
+.th-palette-input {
+  width: 100%;
+  height: 56px;
+  padding: 0 20px;
+  border: 0;
+  border-bottom: 1px solid var(--th-line);
+  outline: none;
+  background: transparent;
+  color: var(--th-ink);
+  font: inherit;
+  font-size: 16px;
+}
+
+.th-palette-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px 0;
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
+}
+
+.th-palette-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 20px;
+  cursor: pointer;
+}
+
+.th-palette-option[aria-selected="true"] {
+  background: rgb(196 92 38 / 12%);
+}
+
+.th-palette-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.th-palette-kind {
+  font-size: 12px;
+  color: var(--th-ink-soft);
+}
+
+.th-palette-empty {
+  margin: 0;
+  padding: 16px 20px 20px;
+  color: var(--th-ink-soft);
+}
+
 .th-nav {
   display: flex;
   flex-direction: column;

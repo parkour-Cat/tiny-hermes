@@ -15,6 +15,8 @@ export type NavSection = {
    *  角色，所以这一位和 `roles` 分开：一个兼任 workspace_admin 的平台管理员从
    *  `/members/me` 得到的是 `workspace_admin`，靠角色列表判不出他能看见这一段。 */
   platformAdminOnly?: boolean;
+  /** 人会用来搜它、却不在标签里的叫法。「凭据保管箱」被搜的时候叫「密钥」。 */
+  searchKey?: MessageKey;
 };
 
 export type NavGroup = {
@@ -81,7 +83,7 @@ export const NAV_GROUPS: NavGroup[] = [
       // 依据：skills/application/service.py 的 READERS（viewer 200）
       { key: "skills", labelKey: "skills", introKey: "skillsIntro", path: "skills", roles: null },
       // 依据：http_tools/application/service.py 的 READERS（viewer 200）
-      { key: "http-tools", labelKey: "httpTools", introKey: "httpToolsIntro", path: "http-tools", roles: null },
+      { key: "http-tools", labelKey: "httpTools", introKey: "httpToolsIntro", path: "http-tools", searchKey: "searchHttpTools", roles: null },
       // 依据：mcp/application/service.py 的 READERS（viewer 200）
       { key: "mcp-servers", labelKey: "mcpServers", introKey: "mcpServersIntro", path: "mcp-servers", roles: null },
     ],
@@ -113,13 +115,13 @@ export const NAV_GROUPS: NavGroup[] = [
       // 依据：tenancy/application/workspace_service.py 的 READERS（viewer 200）
       { key: "members", labelKey: "members", introKey: "membersIntro", path: "members", roles: null },
       // 依据：/api/v1/secrets 对 viewer 403、developer 200
-      { key: "secrets", labelKey: "secrets", introKey: "secretsIntro", path: "secrets", roles: ["workspace_admin", "developer"] },
+      { key: "secrets", labelKey: "secrets", introKey: "secretsIntro", path: "secrets", searchKey: "searchSecrets", roles: ["workspace_admin", "developer"] },
       // 依据：/api/v1/model-endpoints 对 viewer 200（列出可选端点是所有成员的事）
-      { key: "model-endpoints", labelKey: "modelEndpoints", introKey: "modelEndpointsIntro", path: "model-endpoints", roles: null },
+      { key: "model-endpoints", labelKey: "modelEndpoints", introKey: "modelEndpointsIntro", path: "model-endpoints", searchKey: "searchModelEndpoints", roles: null },
       // 依据：outbound/application/service.py 的 READERS（viewer 200）
-      { key: "outbound", labelKey: "outboundScopes", introKey: "outboundScopesIntro", path: "outbound", roles: null },
+      { key: "outbound", labelKey: "outboundScopes", introKey: "outboundScopesIntro", path: "outbound", searchKey: "searchOutbound", roles: null },
       // 依据：/api/v1/service-accounts 对 viewer 403、developer 200
-      { key: "api-keys", labelKey: "programAccess", introKey: "apiKeysIntro", path: "api-keys", roles: ["workspace_admin", "developer"] },
+      { key: "api-keys", labelKey: "programAccess", introKey: "apiKeysIntro", path: "api-keys", searchKey: "searchApiKeys", roles: ["workspace_admin", "developer"] },
       // 最后：不依赖上面任何一段，有了 Agent 和任务之后才会想去调。
       // 依据：/api/v1/workspaces/{id}/limits 对所有成员 200，只有管理员能改（v2.21 §1.21）
       { key: "limits", labelKey: "runLimits", introKey: "runLimitsIntro", path: "limits", roles: null },
@@ -129,9 +131,9 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     key: "platform", labelKey: "navPlatform", introKey: "navPlatformIntro",
     sections: [
-      { key: "model-endpoints", labelKey: "modelEndpoints", introKey: "modelEndpointsIntro", path: "model-endpoints", roles: null, platformAdminOnly: true },
-      { key: "secrets", labelKey: "secrets", introKey: "secretsIntro", path: "secrets", roles: null, platformAdminOnly: true },
-      { key: "outbound", labelKey: "outboundScopes", introKey: "outboundScopesIntro", path: "outbound", roles: null, platformAdminOnly: true },
+      { key: "model-endpoints", labelKey: "modelEndpoints", introKey: "modelEndpointsIntro", path: "model-endpoints", searchKey: "searchModelEndpoints", roles: null, platformAdminOnly: true },
+      { key: "secrets", labelKey: "secrets", introKey: "secretsIntro", path: "secrets", searchKey: "searchSecrets", roles: null, platformAdminOnly: true },
+      { key: "outbound", labelKey: "outboundScopes", introKey: "outboundScopesIntro", path: "outbound", searchKey: "searchOutbound", roles: null, platformAdminOnly: true },
       // 依据：identity/application/oidc_service.py 的 _require_admin 看的是
       // is_platform_admin：viewer 与 developer 都 403，这不是 workspace 角色能开的门
       {
