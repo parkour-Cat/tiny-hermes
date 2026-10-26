@@ -272,7 +272,7 @@ test("导航分成首页、日常、搭建、管理四组", async () => {
   expect(linksIn("日常")).toEqual(["任务", "待办"]);
   expect(linksIn("搭建")).toEqual(["Agent", "能力", "渠道"]);
   expect(linksIn("管理")).toEqual(["记录", "设置", "平台管理"]);
-  expect(within(nav).getByRole("link", { name: "空间概况" })).toBeVisible();
+  expect(within(nav).getByRole("link", { name: "首页" })).toBeVisible();
 });
 
 test("没有顶栏：账号、语言和主题都在侧栏底部", async () => {
