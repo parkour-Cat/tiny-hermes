@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { theme } from "antd";
 import { http, HttpResponse } from "msw";
 import type { ReactNode } from "react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, expect, test } from "vitest";
 
 import { ConsoleLayout } from "./ConsoleLayout";
@@ -38,6 +38,12 @@ function countingWorkspaces(hits: { count: number }) {
   });
 }
 
+/** Where the console went, for tests that follow a jump. */
+function WhereAmI() {
+  const location = useLocation();
+  return <p data-testid="where">{location.pathname + location.hash}</p>;
+}
+
 function renderShell(
   path: string,
   hits = { count: 0 },
@@ -65,6 +71,7 @@ function renderShell(
             <Routes>
               <Route path="/workspaces/:workspaceId" element={<ConsoleLayout />}>
                 <Route path="agents" element={<p>agent list</p>} />
+                <Route path="*" element={<WhereAmI />} />
               </Route>
             </Routes>
           </AuthProvider>
@@ -279,4 +286,63 @@ test("没有顶栏：账号、语言和主题都在侧栏底部", async () => {
   // enter animation, so a visibility check here measures jsdom, not the menu.
   expect(await screen.findByRole("menuitem", { name: "深色" })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: "English" })).toBeInTheDocument();
+});
+
+const RUN = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+
+function withAgents() {
+  return [
+    http.get("/api/v1/agents", () =>
+      HttpResponse.json([
+        { id: "agent-1", name: "Notes tidier", alias: "notes-tidier", status: "active", current_version_id: "v7", created_at: "2026-10-01T00:00:00Z" },
+      ]),
+    ),
+  ];
+}
+
+test("⌘K 打开全局搜索，按名字跳到设置里的一段", async () => {
+  // 原来要先知道「密钥」在「设置」下面才找得到；搜索按页面和分段的名字找。
+  renderShell(`/workspaces/${WORKSPACE}/agents`, { count: 0 }, withAgents());
+  await screen.findByRole("navigation");
+  await userEvent.keyboard("{Meta>}k{/Meta}");
+  const dialog = await screen.findByRole("dialog", { name: "搜索或跳转" });
+  await userEvent.type(within(dialog).getByRole("combobox"), "密钥");
+  expect(within(dialog).getByRole("option", { name: /设置.*密钥/ })).toBeInTheDocument();
+  await userEvent.keyboard("{Enter}");
+  expect(await screen.findByTestId("where")).toHaveTextContent(`/workspaces/${WORKSPACE}/settings#secrets`);
+});
+
+test("全局搜索能按名字找到 Agent", async () => {
+  renderShell(`/workspaces/${WORKSPACE}/agents`, { count: 0 }, withAgents());
+  await userEvent.click(await screen.findByRole("button", { name: /搜索或跳转/ }));
+  const dialog = await screen.findByRole("dialog", { name: "搜索或跳转" });
+  await userEvent.type(within(dialog).getByRole("combobox"), "notes");
+  await userEvent.click(await within(dialog).findByRole("option", { name: /Notes tidier/ }));
+  expect(await screen.findByTestId("where")).toHaveTextContent(`/workspaces/${WORKSPACE}/agents/agent-1`);
+});
+
+test("粘贴完整的任务 ID 可以直接打开那个任务", async () => {
+  renderShell(`/workspaces/${WORKSPACE}/agents`, { count: 0 }, withAgents());
+  await userEvent.click(await screen.findByRole("button", { name: /搜索或跳转/ }));
+  const dialog = await screen.findByRole("dialog", { name: "搜索或跳转" });
+  await userEvent.type(within(dialog).getByRole("combobox"), RUN);
+  await userEvent.keyboard("{Enter}");
+  expect(await screen.findByTestId("where")).toHaveTextContent(`/workspaces/${WORKSPACE}/runs/${RUN}`);
+});
+
+test("全局搜索不列这个角色看不见的分段", async () => {
+  // 和侧栏同一个判据：隐藏不是权限，但不邀请一次注定失败的点击。
+  renderShell(`/workspaces/${WORKSPACE}/agents`, { count: 0 }, withAgents());
+  // Added after renderShell so they win over its admin defaults: msw prefers
+  // the handler registered last, and the first request is still in flight.
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json({ ...ADMIN, is_platform_admin: false })),
+    http.get("/api/v1/workspaces/:id/members/me", () => HttpResponse.json({ role: "viewer" })),
+  );
+  await screen.findByRole("navigation");
+  await userEvent.click(await screen.findByRole("button", { name: /搜索或跳转/ }));
+  const dialog = await screen.findByRole("dialog", { name: "搜索或跳转" });
+  await userEvent.type(within(dialog).getByRole("combobox"), "密钥");
+  expect(within(dialog).queryByRole("option", { name: /密钥/ })).toBeNull();
+  expect(within(dialog).getByText("没有找到")).toBeInTheDocument();
 });
