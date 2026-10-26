@@ -94,7 +94,7 @@ test("both sections stay inside the workspace the address names", async () => {
   );
   for (const [label, group] of [
     ["待办", "inbox"],
-    ["工具与技能", "tooling"],
+    ["能力", "tooling"],
     ["记录", "records"],
     ["设置", "settings"],
   ] as const) {
@@ -133,7 +133,9 @@ test("the shell names the signed-in user and can sign them out", async () => {
   renderShell(`/workspaces/${WORKSPACE}/agents`);
 
   expect(await screen.findByText("admin@example.com")).toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button", { name: "退出" }));
+  // 退出是低频操作，收在侧栏底部的账号菜单里，不再占一条顶栏。
+  await userEvent.click(screen.getByRole("button", { name: "账号与偏好" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "退出" }));
 
   await waitFor(() => expect(signedOut).toBe(true));
 });
@@ -177,8 +179,8 @@ test("the locale switcher changes chrome into English", async () => {
   renderShell(`/workspaces/${WORKSPACE}/agents`);
 
   expect(await screen.findByRole("link", { name: "任务" })).toBeInTheDocument();
-  await userEvent.click(screen.getByLabelText("语言"));
-  await userEvent.click(await screen.findByTitle("English"));
+  await userEvent.click(screen.getByRole("button", { name: "账号与偏好" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "English" }));
 
   expect(await screen.findByRole("link", { name: "Runs" })).toBeInTheDocument();
   expect(screen.getByRole("link", { name: /Settings/ })).toBeInTheDocument();
@@ -252,4 +254,27 @@ test("有一个可处理队列读不到时显示未知", async () => {
   await screen.findByRole("navigation");
   expect(await screen.findByText("?")).toBeVisible();
   expect(screen.queryByText("2")).toBeNull();
+});
+
+test("导航分成首页、日常、搭建、管理四组", async () => {
+  // 九个平铺入口找不到东西：按「每天用的」和「搭一次就不常动的」分开。
+  renderShell(`/workspaces/${WORKSPACE}/agents`);
+  const nav = await screen.findByRole("navigation");
+  const linksIn = (name: string) =>
+    within(within(nav).getByRole("group", { name })).getAllByRole("link").map((link) => link.textContent);
+  expect(linksIn("日常")).toEqual(["任务", "待办"]);
+  expect(linksIn("搭建")).toEqual(["Agent", "能力", "渠道"]);
+  expect(linksIn("管理")).toEqual(["记录", "设置", "平台管理"]);
+  expect(within(nav).getByRole("link", { name: "空间概况" })).toBeVisible();
+});
+
+test("没有顶栏：账号、语言和主题都在侧栏底部", async () => {
+  renderShell(`/workspaces/${WORKSPACE}/agents`);
+  await screen.findByRole("navigation");
+  expect(screen.queryByRole("banner")).toBeNull();
+  const menu = screen.getByRole("button", { name: "账号与偏好" });
+  expect(screen.getByRole("complementary")).toContainElement(menu);
+  await userEvent.click(menu);
+  expect(await screen.findByRole("menuitem", { name: "深色" })).toBeVisible();
+  expect(screen.getByRole("menuitem", { name: "English" })).toBeVisible();
 });
