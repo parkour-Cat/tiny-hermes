@@ -40,6 +40,7 @@ import { specDiff } from "./specDiff";
 import { SharedMemoryButton } from "./SharedMemoryButton";
 import { FormSection } from "../forms/FormSection";
 import { PageHeading } from "../ui/PageHeading";
+import { fill } from "../runs/explain";
 import { useT } from "../i18n/locale";
 import type { MessageKey } from "../i18n/zh-CN";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
@@ -347,6 +348,13 @@ function exposureSummary(t: (key: MessageKey) => string, values: DraftValues): s
     values.delivery_enabled ? t("agentSummaryDeliveryOn") : t("agentSummaryDeliveryOff"),
   ].join(" · ");
 }
+
+const SECTION_ANCHORS: [string, MessageKey][] = [
+  ["agent-section-identity", "agentSectionIdentity"],
+  ["agent-section-model", "agentSectionModel"],
+  ["agent-section-capability", "agentSectionCapability"],
+  ["agent-section-exposure", "agentSectionExposure"],
+];
 
 export function AgentDetailPage() {
   const auth = useAuth();
@@ -740,12 +748,9 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
           </Space>
         }
       />
-      <Space wrap className="editor-actions page-alert">
-        <Button type="primary" loading={saving} disabled={!writer || recoveryConflict} onClick={() => form.submit()}>{t("saveDraft")}</Button>
-        <Button loading={saving} disabled={!writer || recoveryConflict} onClick={() => askToPublish(localDraft?.revision ?? loadedDraft.revision)}>{t("publish")}</Button>
-        <Button loading={draft.isFetching} onClick={reload}>{t("reloadDraft")}</Button>
-        {dirty && <Typography.Text type="warning">{t("draftUnsaved")}</Typography.Text>}
-      </Space>
+      <nav className="agent-jump page-alert" aria-label={t("agentSectionsNav")}>
+        {SECTION_ANCHORS.map(([anchor, label]) => <a key={anchor} href={`#${anchor}`}>{t(label)}</a>)}
+      </nav>
       <Card variant="borderless" className="page-alert">
         <Space size="large" wrap>
           <Typography.Text strong>
@@ -825,6 +830,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
         >
           <FormSection
             title={t("agentSectionIdentity")}
+            anchor="agent-section-identity"
             summary=""
             fields={["name", "alias", "personality"]}
             collapsible={false}
@@ -876,6 +882,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
           </FormSection>
           <FormSection
             title={t("agentSectionModel")}
+            anchor="agent-section-model"
             summary=""
             fields={[...(provider === "openai_compatible" ? ["endpoint_id", "fallback_endpoint_ids"] : ["scenario"]), ...limits.map((limit) => limit.name)]}
             collapsible={false}
@@ -973,6 +980,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
               两个字。 */}
           <FormSection
             title={t("agentSectionCapability")}
+            anchor="agent-section-capability"
             summary={capabilitySummary(t, draftValues)}
             fields={[]}
             collapsible
@@ -1106,6 +1114,7 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
           </FormSection>
           <FormSection
             title={t("agentSectionExposure")}
+            anchor="agent-section-exposure"
             summary={exposureSummary(t, draftValues)}
             fields={deliveryEnabled ? ["sync_timeout_seconds"] : []}
             collapsible
@@ -1136,6 +1145,16 @@ function AgentEditor({ storageKey }: { storageKey: string }) {
 
         </Form>
       </Card>
+      {/* At the foot rather than the top: the last section edited is the one
+          nearest the end, and saving it should not mean scrolling back up. */}
+      <div className="publish-bar" role="region" aria-label={t("agentPublishBar")}>
+        <span className="publish-bar-note">
+          {dirty ? t("draftUnsaved") : diffEntries.length > 0 ? fill(t("agentDraftDiffers"), { n: String(diffEntries.length) }) : t("agentDraftMatches")}
+        </span>
+        <Button loading={draft.isFetching} onClick={reload}>{t("reloadDraft")}</Button>
+        <Button loading={saving} disabled={!writer || recoveryConflict} onClick={() => askToPublish(localDraft?.revision ?? loadedDraft.revision)}>{t("publish")}</Button>
+        <Button type="primary" loading={saving} disabled={!writer || recoveryConflict} onClick={() => form.submit()}>{t("saveDraft")}</Button>
+      </div>
       {(versions.data ?? []).length === 0 ? null : (
         <Card title={t("currentVersion")} variant="borderless" className="page-alert">
           {(versions.data ?? []).map((version) => (
