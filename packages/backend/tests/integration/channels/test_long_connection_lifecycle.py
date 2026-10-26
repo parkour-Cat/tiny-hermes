@@ -60,9 +60,8 @@ from tiny_hermes.secrets.domain.envelope import seal
 from tiny_hermes.secrets.infrastructure.sql_store import SqlSecretStore
 from tiny_hermes.shared.config import Settings
 
-from .test_reply_dispatch import _gather  # pyright: ignore[reportPrivateUsage]
-
 from ..conftest import VALID_SPEC
+from .test_reply_dispatch import _gather  # pyright: ignore[reportPrivateUsage]
 
 #: Matches the `settings` fixture's `tiny_hermes_kek` in conftest.py
 #: ("AAAA...=", 32 zero bytes decoded) — the point of sealing a secret with
@@ -1668,6 +1667,8 @@ async def test_a_compact_frame_over_the_long_connection_becomes_a_compaction_run
     await _deliver_one_frame(
         scheduler_connections, sdk_channels, body="上周几单？", event_id="om_lc_c_0"
     )
+    # An ordinary message waits for the gather before it starts a Session.
+    await _gather(engine)
     async with engine.connect() as connection:
         found = await connection.execute(
             text(

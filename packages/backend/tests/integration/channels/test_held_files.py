@@ -21,7 +21,11 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from tiny_hermes.api.cli import _channel_gather
+from tiny_hermes.runs.application.scheduler import SchedulerRuntime, SchedulerSettings
+from tiny_hermes.runs.infrastructure.null_notifier import NullWakeUpNotifier
+from tiny_hermes.shared.config import Settings
 
 from .test_reply_dispatch import (
     KEY,
@@ -394,3 +398,30 @@ async def test_a_gathered_batch_is_answered_once(
     assert len(sender.after_opening()) == 1
     assert "讲的是订单汇总。" in sender.after_opening()[0]["text"]
     assert _asks(sender) == []
+
+
+async def test_the_scheduler_turns_a_held_message_into_a_run(
+    client: TestClient,
+    engine: AsyncEngine,
+    workspace_id: str,
+    published_agent: str,
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Settings,
+) -> None:
+    """The gather is only reachable if the Scheduler runs it. Built with the
+    factory the scheduler process itself uses, so a scan left out of the
+    pass, or a factory never handed to the runtime, fails here — every other
+    test in this file calls the gatherer directly and would stay green."""
+    binding_id = await _setup(engine, workspace_id, published_agent, monkeypatch)
+    _deliver_raw(client, binding_id, _text("om_q1", "在吗"))
+    runtime = SchedulerRuntime(
+        session_factory=async_sessionmaker(engine, expire_on_commit=False),
+        notifier=NullWakeUpNotifier(),
+        settings=SchedulerSettings(max_recovery_attempts=3, event_retention_hours=168),
+        gather=_channel_gather(settings.model_copy(update={"channel_gather_seconds": 0})),
+    )
+
+    await runtime.run_once()
+
+    assert await _run_count(engine, workspace_id) == 1
+    assert await _run_of(engine, binding_id, "om_q1") is not None
