@@ -487,6 +487,11 @@ test("plan §10: a run waiting on the end user's own confirmation shows it, and 
 
   expect(await screen.findByText("这次运行需要你确认才能继续")).toBeInTheDocument();
   expect(screen.getByText("http.orders.createOrder")).toBeInTheDocument();
+  // Waiting on the person is still an unfinished run: it says so in words,
+  // and the person can still stop it rather than only reject.
+  expect(screen.getByText("等待审批")).toBeInTheDocument();
+  expect(screen.queryByText("waiting_approval")).toBeNull();
+  expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument();
 
   await userEvent.click(screen.getByRole("button", { name: "同意" }));
 
