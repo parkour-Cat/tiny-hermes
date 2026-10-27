@@ -354,3 +354,18 @@ test("全局搜索不列这个角色看不见的分段", async () => {
   expect(within(dialog).queryByRole("option", { name: /凭据保管箱|程序访问/ })).toBeNull();
   expect(within(dialog).getByText("没有找到")).toBeInTheDocument();
 });
+
+test("手机上导航收在「菜单」后面，选了一项就收起", async () => {
+  // 窄屏下侧栏叠在内容上方，全展开要占掉近半屏，每一页都得先划过它。
+  // 收起只靠 CSS 在窄屏生效；这里能验的是开关状态和导航后自动收起。
+  renderShell(`/workspaces/${WORKSPACE}/agents`);
+  const toggle = await screen.findByRole("button", { name: "菜单" });
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  expect(document.getElementById(toggle.getAttribute("aria-controls")!)).toContainElement(
+    screen.getByRole("navigation"),
+  );
+  await userEvent.click(toggle);
+  expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await userEvent.click(screen.getByRole("link", { name: "任务" }));
+  await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "false"));
+});
