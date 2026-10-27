@@ -1,3 +1,6 @@
+import { ConfigProvider } from "antd";
+import antdEnUS from "antd/locale/en_US";
+import antdZhCN from "antd/locale/zh_CN";
 import { createContext, useContext, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 
@@ -18,6 +21,10 @@ type LocaleValue = {
   t: (key: MessageKey) => string;
   setLocale: (locale: Locale) => void;
 };
+
+// Ant Design has words of its own — a required field's message, a dialog's
+// Cancel, an empty list's "No data" — and they stay English unless told.
+const ANTD_LOCALES = { "zh-CN": antdZhCN, "en-US": antdEnUS } as const;
 
 const LocaleContext = createContext<LocaleValue | null>(null);
 
@@ -50,7 +57,11 @@ export function LocaleProvider({ children }: { children: ReactNode }) {
     }),
     [locale],
   );
-  return <LocaleContext.Provider value={value}>{children}</LocaleContext.Provider>;
+  return (
+    <LocaleContext.Provider value={value}>
+      <ConfigProvider locale={ANTD_LOCALES[locale]}>{children}</ConfigProvider>
+    </LocaleContext.Provider>
+  );
 }
 
 export function useLocale(): LocaleValue {

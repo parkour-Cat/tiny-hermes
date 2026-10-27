@@ -750,3 +750,22 @@ test("可回复是文字，不是彩色标签", async () => {
   await userEvent.click(screen.getByRole("link", { name: "网页聊天" }));
   expect(await screen.findByRole("button", { name: "配置网页登录验证" })).toBeVisible();
 });
+
+test("Ant Design's own words follow the console's language, not English", async () => {
+  // A required rule with no message of its own falls back to the library's
+  // text, which is English unless the console hands it a locale.
+  server.use(
+    http.get("/api/v1/channel-bindings", () => HttpResponse.json([])),
+    http.get("/api/v1/agents", () => HttpResponse.json(AGENTS)),
+    http.get("/api/v1/secrets", () =>
+      HttpResponse.json([{ id: "s1", name: "feishu-encrypt-key", scope: "workspace", status: "active" }]),
+    ),
+  );
+
+  renderChannels();
+  await userEvent.click(await screen.findByRole("button", { name: "接入飞书机器人" }));
+  await userEvent.click(screen.getByRole("button", { name: "绑定" }));
+
+  expect(await screen.findByText("请输入Agent")).toBeVisible();
+  expect(screen.queryByText(/Please enter/)).not.toBeInTheDocument();
+});
