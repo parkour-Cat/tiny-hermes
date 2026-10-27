@@ -100,7 +100,7 @@ const result = (id: string, output: string, failed = false) => ({
 
 function renderTurns(
   turns: Parameters<typeof Transcript>[0]["turns"],
-  { live = false, savedFiles = [] as { path: string; size_bytes: number }[], onSaveFile = (_: string) => undefined } = {},
+  { live = false, savedFiles = [] as { path: string; size_bytes: number }[], onSaveFile = (() => undefined) as (path: string) => void } = {},
 ): void {
   render(
     <LocaleProvider>

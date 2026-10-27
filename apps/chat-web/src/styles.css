@@ -941,23 +941,114 @@ button:disabled {
   margin-bottom: 0;
 }
 
-.tool-card {
+/* One reply's steps, folded to a line once it has finished. Status colours
+   are the console's run-step ones, so a failed step reads the same in both. */
+.work {
   border: 1px solid var(--th-line);
   border-radius: 10px;
-  padding: 7px 10px;
   background: var(--th-paper-raised);
   font-size: 13px;
 }
 
-.tool-card summary {
+.work > summary {
   cursor: pointer;
-  font-weight: 650;
+  padding: 7px 12px;
+  color: var(--th-ink-soft);
 }
 
-.tool-card pre {
-  margin: 8px 0 0;
+.work-failed {
+  color: #a3312a;
+}
+
+.work-steps {
+  margin: 0;
+  padding: 2px 12px 10px 32px;
+  display: grid;
+  gap: 6px;
+}
+
+.work-step::marker {
+  color: var(--th-copper);
+}
+
+.work-step-failed::marker,
+.work-step-failed .work-step-title {
+  color: #a3312a;
+}
+
+.work-step-pending::marker {
+  color: #255c99;
+}
+
+.work-step-detail {
+  display: block;
+  margin-top: 2px;
+  color: var(--th-ink-soft);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.work-step-output summary {
+  cursor: pointer;
+  color: var(--th-ink-soft);
+  font-size: 12px;
+}
+
+.work-step-output pre {
+  margin: 4px 0 0;
+  max-height: 240px;
+  overflow: auto;
   white-space: pre-wrap;
   color: var(--th-ink-soft);
+}
+
+.file-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 440px;
+  padding: 10px 12px;
+  border: 1px solid var(--th-line);
+  border-radius: 12px;
+  background: var(--th-paper-raised);
+}
+
+.file-card-kind {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: var(--th-user);
+  color: var(--th-copper-deep);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.file-card-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.file-card-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.file-card-meta {
+  color: var(--th-ink-soft);
+  font-size: 12px;
+}
+
+.file-card button {
+  flex: none;
+  border: 1px solid var(--th-line);
+  border-radius: 8px;
+  padding: 5px 12px;
+  background: var(--th-paper);
 }
 
 .msg-actions {
@@ -1012,20 +1103,6 @@ button:disabled {
   100% {
     content: "...";
   }
-}
-
-.thread-files {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding-left: 32px;
-}
-
-.thread-files button {
-  border: 1px solid var(--th-line);
-  border-radius: 999px;
-  padding: 5px 11px;
-  background: var(--th-paper-raised);
 }
 
 .composer {
@@ -1209,6 +1286,16 @@ html[data-theme="dark"] {
   --th-sider: #1a1612;
   --th-user: #5a4330;
   --th-shadow: 0 18px 50px rgb(0 0 0 / 35%);
+}
+
+html[data-theme="dark"] .work-failed,
+html[data-theme="dark"] .work-step-failed::marker,
+html[data-theme="dark"] .work-step-failed .work-step-title {
+  color: #f0a398;
+}
+
+html[data-theme="dark"] .work-step-pending::marker {
+  color: #9cc1ea;
 }
 
 html[data-theme="dark"] .rail-session:hover,
