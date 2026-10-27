@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
-import { selectAntOption, unfold } from "./session";
+import { confirm, selectAntOption, unfold } from "./session";
 import { expectReadableControl } from "./contrast";
 
 for (const appearance of ["浅色", "深色"]) {
@@ -79,7 +79,7 @@ test("quick model defaults can publish a new Agent without budget tuning", async
   await selectAntOption(page, "模型接入", endpointName);
   await bindTool(page, "file.read");
   await page.getByRole("button", { name: "发布", exact: true }).click();
-  await page.getByRole("button", { name: "确定", exact: true }).click();
+  await confirm(page);
   await expect(page.getByText("当前版本 v1", { exact: true })).toBeVisible();
   // Publishing is local validation. No request to the placeholder provider is made.
 });
@@ -180,7 +180,7 @@ test("failed draft saves preserve input and narrow dialogs return keyboard focus
   expect(size.scroll).toBeLessThanOrEqual(size.width);
   await page.screenshot({ path: ".superpowers/agent-draft-conflict-mobile.png", fullPage: true });
   await page.getByRole("button", { name: "重新载入草稿", exact: true }).click();
-  await page.getByRole("button", { name: "确定", exact: true }).click();
+  await confirm(page);
   await expect(page.getByRole("button", { name: "保存草稿", exact: true })).toBeEnabled();
 });
 
@@ -230,7 +230,7 @@ async function publishAgent(page: Page, scenario: string, tool?: string): Promis
   await expect(page.getByText("草稿修订 2")).toBeVisible();
 
   await page.getByRole("button", { name: "发布" }).click();
-  await page.getByRole("button", { name: "确定" }).click();
+  await confirm(page);
   // Read back rather than assumed: the version number is the platform's answer
   // to the publish, and it is the thing a later Run will execute.
   await expect(page.getByText("当前版本 v1")).toBeVisible();
@@ -317,7 +317,7 @@ test("draft, publish, submit, watch, retry, and be refused a foreign workspace",
   await expect(summary(page).getByText("失败", { exact: true }).first()).toBeVisible();
 
   await page.getByRole("button", { name: "重试任务" }).click();
-  await page.getByRole("button", { name: "确定" }).click();
+  await confirm(page);
   // A retry is a new Run under the same budget, so the page moves rather than
   // reporting something about the one that failed.
   await expect(page).not.toHaveURL(new RegExp(`${failedRun}$`));
@@ -395,7 +395,7 @@ test("the builder binds a tool, playground sends, and rollback restores v1", asy
   await page.getByRole("button", { name: "保存草稿" }).click();
   await expect(page.getByText("草稿修订 2")).toBeVisible();
   await page.getByRole("button", { name: "发布" }).click();
-  await page.getByRole("button", { name: "确定" }).click();
+  await confirm(page);
   await expect(page.getByText("当前版本 v1")).toBeVisible();
 
   await page.getByRole("button", { name: "打开调试台" }).click();
@@ -421,10 +421,10 @@ test("the builder binds a tool, playground sends, and rollback restores v1", asy
   await page.getByRole("button", { name: "保存草稿" }).click();
   await expect(page.getByText("草稿修订 3")).toBeVisible();
   await page.getByRole("button", { name: "发布" }).click();
-  await page.getByRole("button", { name: "确定" }).click();
+  await confirm(page);
   await expect(page.getByText("当前版本 v2")).toBeVisible();
   await page.getByRole("button", { name: "回滚到此版本" }).click();
-  await page.getByRole("button", { name: "确定" }).click();
+  await confirm(page);
   await expect(page.getByText("当前版本 v1")).toBeVisible();
 });
 

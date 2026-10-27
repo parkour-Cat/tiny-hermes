@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
-import { openSection, selectAntOption, unfold } from "./session";
+import { confirm, openSection, selectAntOption, unfold } from "./session";
 
 /**
  * An external tool's whole life, driven through the console against the real
@@ -133,7 +133,7 @@ async function publishAgent(page: Page, operation: string): Promise<string> {
   await page.getByRole("button", { name: "保存草稿" }).click();
   await expect(page.getByText("草稿修订 2")).toBeVisible();
   await page.getByRole("button", { name: "发布" }).click();
-  await page.getByRole("button", { name: "确定" }).click();
+  await confirm(page);
   await expect(page.getByText("当前版本 v1")).toBeVisible();
   return name;
 }
@@ -193,7 +193,7 @@ test("register an HTTP tool, call it, and let a person approve the write", async
   await governance.getByText("查看完整请求", { exact: true }).click();
   await expect(governance.getByText(TOOL_BASE, { exact: false }).first()).toBeVisible();
   await governance.getByRole("button", { name: "批准" }).click();
-  await page.getByRole("button", { name: "确定" }).click();
+  await confirm(page);
 
   // -- and the Run finishes the call it was stopped for -------------------
   await page.goto(writeRun);

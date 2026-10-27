@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { selectAntOption } from "./session";
+import { confirm, selectAntOption } from "./session";
 
 /**
  * A channel opened by a person, through the browser.
@@ -103,6 +103,6 @@ test("an administrator binds a channel, and the delivery path knows about it", a
   // Closing it is a state, not a deletion — `channel_events` is the record
   // of what this channel already delivered.
   await page.getByRole("button", { name: "停用" }).click();
-  await page.getByRole("button", { name: "确定", exact: true }).click();
+  await confirm(page);
   await expect(page.getByRole("cell", { name: "停用" })).toBeVisible();
 });
