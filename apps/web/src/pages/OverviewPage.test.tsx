@@ -145,6 +145,19 @@ test("最近的任务用对方说的第一句话当标题", async () => {
   expect(within(recent).getByText("1 分 4 秒")).toBeInTheDocument();
 });
 
+test("不是今天的任务带上日期，免得昨晚的任务看着像刚跑完", async () => {
+  stack({
+    recent: [
+      run("run-old", { input_preview: "昨晚的", created_at: "2026-10-25T21:13:00", finished_at: "2026-10-25T21:14:00" }),
+      run("run-new", { input_preview: "今天的", created_at: "2026-10-26T09:05:00", finished_at: "2026-10-26T09:06:00" }),
+    ],
+  });
+  renderHome();
+  const recent = await screen.findByRole("region", { name: "最近的任务" });
+  expect(await within(recent).findByText("10月25日 21:13")).toBeInTheDocument();
+  expect(within(recent).getByText("09:05")).toBeInTheDocument();
+});
+
 test("任务读不到时那一块给出重试，Agent 那一块照常", async () => {
   stack();
   server.use(http.get("/api/v1/runs", () => HttpResponse.json({ detail: "Tasks temporarily unavailable" }, { status: 503 })));
