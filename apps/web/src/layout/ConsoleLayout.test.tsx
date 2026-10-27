@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { theme } from "antd";
 import { http, HttpResponse } from "msw";
 import type { ReactNode } from "react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, expect, test } from "vitest";
 
 import { ConsoleLayout } from "./ConsoleLayout";
@@ -38,18 +38,24 @@ function countingWorkspaces(hits: { count: number }) {
   });
 }
 
+/** Where the console went, for tests that follow a jump. */
+function WhereAmI() {
+  const location = useLocation();
+  return <p data-testid="where">{location.pathname + location.hash}</p>;
+}
+
 function renderShell(
   path: string,
   hits = { count: 0 },
   handlers: ReturnType<typeof http.get>[] = [],
 ): { hits: { count: number } } {
   server.use(
+    // A test's own handlers come first: within one `use`, the earlier handler
+    // is the one that answers, so a test can replace the signed-in user, the
+    // role, or one of the inbox queues the shell counts.
+    ...handlers,
     http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
     countingWorkspaces(hits),
-    // The shell now counts the inbox. A test that cares passes its own queue
-    // handlers, listed *before* the empty ones: within one `use`, the earlier
-    // handler is the one that answers.
-    ...handlers,
     http.get("/api/v1/workspaces/:id/members/me", () => HttpResponse.json({ role: "workspace_admin" })),
     ...emptyQueues(),
   );
@@ -65,6 +71,7 @@ function renderShell(
             <Routes>
               <Route path="/workspaces/:workspaceId" element={<ConsoleLayout />}>
                 <Route path="agents" element={<p>agent list</p>} />
+                <Route path="*" element={<WhereAmI />} />
               </Route>
             </Routes>
           </AuthProvider>
@@ -94,7 +101,7 @@ test("both sections stay inside the workspace the address names", async () => {
   );
   for (const [label, group] of [
     ["待办", "inbox"],
-    ["工具与技能", "tooling"],
+    ["能力", "tooling"],
     ["记录", "records"],
     ["设置", "settings"],
   ] as const) {
@@ -133,7 +140,9 @@ test("the shell names the signed-in user and can sign them out", async () => {
   renderShell(`/workspaces/${WORKSPACE}/agents`);
 
   expect(await screen.findByText("admin@example.com")).toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button", { name: "退出" }));
+  // 退出是低频操作，收在侧栏底部的账号菜单里，不再占一条顶栏。
+  await userEvent.click(screen.getByRole("button", { name: "账号与偏好" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "退出" }));
 
   await waitFor(() => expect(signedOut).toBe(true));
 });
@@ -177,8 +186,8 @@ test("the locale switcher changes chrome into English", async () => {
   renderShell(`/workspaces/${WORKSPACE}/agents`);
 
   expect(await screen.findByRole("link", { name: "任务" })).toBeInTheDocument();
-  await userEvent.click(screen.getByLabelText("语言"));
-  await userEvent.click(await screen.findByTitle("English"));
+  await userEvent.click(screen.getByRole("button", { name: "账号与偏好" }));
+  await userEvent.click(await screen.findByRole("menuitem", { name: "English" }));
 
   expect(await screen.findByRole("link", { name: "Runs" })).toBeInTheDocument();
   expect(screen.getByRole("link", { name: /Settings/ })).toBeInTheDocument();
@@ -252,4 +261,111 @@ test("有一个可处理队列读不到时显示未知", async () => {
   await screen.findByRole("navigation");
   expect(await screen.findByText("?")).toBeVisible();
   expect(screen.queryByText("2")).toBeNull();
+});
+
+test("导航分成首页、日常、搭建、管理四组", async () => {
+  // 九个平铺入口找不到东西：按「每天用的」和「搭一次就不常动的」分开。
+  renderShell(`/workspaces/${WORKSPACE}/agents`);
+  const nav = await screen.findByRole("navigation");
+  const linksIn = (name: string) =>
+    within(within(nav).getByRole("group", { name })).getAllByRole("link").map((link) => link.textContent);
+  expect(linksIn("日常")).toEqual(["任务", "待办"]);
+  expect(linksIn("搭建")).toEqual(["Agent", "能力", "渠道"]);
+  expect(linksIn("管理")).toEqual(["记录", "设置", "平台管理"]);
+  expect(within(nav).getByRole("link", { name: "首页" })).toBeVisible();
+});
+
+test("没有顶栏：账号、语言和主题都在侧栏底部", async () => {
+  renderShell(`/workspaces/${WORKSPACE}/agents`);
+  await screen.findByRole("navigation");
+  expect(screen.queryByRole("banner")).toBeNull();
+  const menu = screen.getByRole("button", { name: "账号与偏好" });
+  expect(screen.getByRole("complementary")).toContainElement(menu);
+  await userEvent.click(menu);
+  // In the document, not toBeVisible: jsdom never finishes the dropdown's
+  // enter animation, so a visibility check here measures jsdom, not the menu.
+  expect(await screen.findByRole("menuitem", { name: "深色" })).toBeInTheDocument();
+  expect(screen.getByRole("menuitem", { name: "English" })).toBeInTheDocument();
+});
+
+const RUN = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+
+/** The palette, found by its search box rather than by the dialog's name:
+ *  under test antd gives every generated id the same value (`test-id`), so
+ *  the dialog's aria-labelledby resolves to whichever element came first. */
+async function openedPalette(): Promise<HTMLElement> {
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByRole("combobox", { name: "搜索或跳转" })).toBeInTheDocument();
+  return dialog;
+}
+
+function withAgents() {
+  return [
+    http.get("/api/v1/agents", () =>
+      HttpResponse.json([
+        { id: "agent-1", name: "Notes tidier", alias: "notes-tidier", status: "active", current_version_id: "v7", created_at: "2026-10-01T00:00:00Z" },
+      ]),
+    ),
+  ];
+}
+
+test("⌘K 打开全局搜索，按名字跳到设置里的一段", async () => {
+  // 原来要先知道「密钥」在「设置」下面才找得到；搜索按页面和分段的名字找。
+  renderShell(`/workspaces/${WORKSPACE}/agents`, { count: 0 }, withAgents());
+  await screen.findByRole("navigation");
+  await userEvent.keyboard("{Meta>}k{/Meta}");
+  const dialog = await openedPalette();
+  await userEvent.type(within(dialog).getByRole("combobox"), "密钥");
+  // 这一段叫「凭据保管箱」，人搜的是「密钥」：搜索也认它的常用叫法。
+  expect(within(dialog).getByRole("option", { name: /设置.*凭据保管箱/ })).toBeInTheDocument();
+  await userEvent.keyboard("{Enter}");
+  expect(await screen.findByTestId("where")).toHaveTextContent(`/workspaces/${WORKSPACE}/settings#secrets`);
+});
+
+test("全局搜索能按名字找到 Agent", async () => {
+  renderShell(`/workspaces/${WORKSPACE}/agents`, { count: 0 }, withAgents());
+  await userEvent.click(await screen.findByRole("button", { name: /搜索或跳转/ }));
+  const dialog = await openedPalette();
+  await userEvent.type(within(dialog).getByRole("combobox"), "notes");
+  await userEvent.click(await within(dialog).findByRole("option", { name: /Notes tidier/ }));
+  expect(await screen.findByTestId("where")).toHaveTextContent(`/workspaces/${WORKSPACE}/agents/agent-1`);
+});
+
+test("粘贴完整的任务 ID 可以直接打开那个任务", async () => {
+  renderShell(`/workspaces/${WORKSPACE}/agents`, { count: 0 }, withAgents());
+  await userEvent.click(await screen.findByRole("button", { name: /搜索或跳转/ }));
+  const dialog = await openedPalette();
+  await userEvent.type(within(dialog).getByRole("combobox"), RUN);
+  await userEvent.keyboard("{Enter}");
+  expect(await screen.findByTestId("where")).toHaveTextContent(`/workspaces/${WORKSPACE}/runs/${RUN}`);
+});
+
+test("全局搜索不列这个角色看不见的分段", async () => {
+  // 和侧栏同一个判据：隐藏不是权限，但不邀请一次注定失败的点击。
+  renderShell(`/workspaces/${WORKSPACE}/agents`, { count: 0 }, [
+    ...withAgents(),
+    http.get("/api/v1/auth/me", () => HttpResponse.json({ ...ADMIN, is_platform_admin: false })),
+    http.get("/api/v1/workspaces/:id/members/me", () => HttpResponse.json({ role: "viewer" })),
+  ]);
+  await screen.findByRole("navigation");
+  await userEvent.click(await screen.findByRole("button", { name: /搜索或跳转/ }));
+  const dialog = await openedPalette();
+  await userEvent.type(within(dialog).getByRole("combobox"), "密钥");
+  expect(within(dialog).queryByRole("option", { name: /凭据保管箱|程序访问/ })).toBeNull();
+  expect(within(dialog).getByText("没有找到")).toBeInTheDocument();
+});
+
+test("手机上导航收在「菜单」后面，选了一项就收起", async () => {
+  // 窄屏下侧栏叠在内容上方，全展开要占掉近半屏，每一页都得先划过它。
+  // 收起只靠 CSS 在窄屏生效；这里能验的是开关状态和导航后自动收起。
+  renderShell(`/workspaces/${WORKSPACE}/agents`);
+  const toggle = await screen.findByRole("button", { name: "菜单" });
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  expect(document.getElementById(toggle.getAttribute("aria-controls")!)).toContainElement(
+    screen.getByRole("navigation"),
+  );
+  await userEvent.click(toggle);
+  expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await userEvent.click(screen.getByRole("link", { name: "任务" }));
+  await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "false"));
 });

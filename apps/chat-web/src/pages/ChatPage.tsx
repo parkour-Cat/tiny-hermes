@@ -19,6 +19,7 @@ import { SessionRail } from "../chat/SessionRail";
 import { sessionTitle } from "../chat/sessionTitle";
 import { Transcript } from "../chat/Transcript";
 import { SavedFiles } from "../chat/SavedFiles";
+import { useSavedFiles } from "../chat/useSavedFiles";
 import { useEndUserAgents } from "../chat/useEndUserAgents";
 import { useT } from "../i18n/locale";
 import { cancelEndUserRun, steerEndUserRun, useEndUserRun } from "../runs/useEndUserRun";
@@ -127,6 +128,7 @@ function ChatConversation({ identity, onIdentityChanged }: {
 
   const activeRunId = runId ?? null;
   const snapshot = useEndUserRun(activeRunId);
+  const saved = useSavedFiles(activeSessionId, snapshot.data?.state_version);
   const approvals = useEndUserApprovals(snapshot.data?.status === "waiting_approval");
   const activeApproval =
     approvals.data?.find((item) => item.run_id === activeRunId) ?? null;
@@ -392,12 +394,13 @@ function ChatConversation({ identity, onIdentityChanged }: {
             turns={messages.data ?? []}
             optimistic={optimistic}
             live={Boolean(live)}
-            artifacts={[]}
+            savedFiles={saved.files.data?.items ?? []}
+            savingFile={saved.pending}
             canRetry={false}
-            onDownload={() => setError(t("artifactUnavailable"))}
+            onSaveFile={(path) => void saved.save(path)}
             onRetry={() => undefined}
           />
-          <SavedFiles key={activeSessionId} sessionId={activeSessionId} refreshToken={snapshot.data?.state_version} />
+          <SavedFiles saved={saved} />
         </div>
         <Composer
           key={`${draftKey}:${composerEpoch}`}

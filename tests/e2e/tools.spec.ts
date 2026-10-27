@@ -93,7 +93,7 @@ async function approveHost(page: Page): Promise<void> {
 }
 
 async function registerTool(page: Page): Promise<void> {
-  const tools = await openSection(page, "工具与技能", "HTTP 工具", "http-tools");
+  const tools = await openSection(page, "能力", "HTTP 工具", "http-tools");
   await tools.getByRole("button", { name: "添加 HTTP 工具" }).click();
   const registration = page.getByRole("dialog");
   await registration.getByLabel("名称").fill("health");

@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { ADMIN } from "./session";
+import { ADMIN, chooseFromAccountMenu } from "./session";
 
 test("login, create two workspaces and logout", async ({ page }) => {
   await page.goto("/login");
@@ -33,6 +33,6 @@ test("login, create two workspaces and logout", async ({ page }) => {
   await page.reload();
   await expect(page.getByText(firstName, { exact: true })).toBeVisible();
   await expect(page.getByText(secondName, { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "退出" }).click();
+  await chooseFromAccountMenu(page, "退出");
   await expect(page).toHaveURL(/\/login$/);
 });

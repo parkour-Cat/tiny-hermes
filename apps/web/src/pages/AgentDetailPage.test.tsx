@@ -1542,3 +1542,30 @@ test("a refused save is brought into view, where the author is looking", async (
     Element.prototype.scrollIntoView = original;
   }
 });
+
+test("保存和发布在页面底部常驻，改了没保存时说出来", async () => {
+  // 原来按钮在页首：改完最下面「对外」那一段，要滚回顶上才能保存。
+  loadedAgent();
+  renderDetail();
+  const bar = await screen.findByRole("region", { name: "草稿与发布" });
+  expect(within(bar).getByRole("button", { name: "保存草稿" })).toBeInTheDocument();
+  expect(within(bar).getByRole("button", { name: "发布" })).toBeInTheDocument();
+  // 在表单之后：读到最后一段时它就在手边。
+  const draft = screen.getByLabelText("人格");
+  expect(draft.compareDocumentPosition(bar) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  const user = userEvent.setup();
+  await user.type(draft, " More.");
+  expect(await within(bar).findByText("有未保存的修改")).toBeInTheDocument();
+});
+
+test("页内导航直接跳到身份、模型、能力、对外四段", async () => {
+  loadedAgent();
+  renderDetail();
+  const jump = await screen.findByRole("navigation", { name: "Agent 设置分段" });
+  const links = within(jump).getAllByRole("link");
+  expect(links.map((link) => link.textContent)).toEqual(["身份", "模型", "能力", "对外"]);
+  for (const link of links) {
+    const target = link.getAttribute("href")!.slice(1);
+    expect(document.getElementById(target)).not.toBeNull();
+  }
+});

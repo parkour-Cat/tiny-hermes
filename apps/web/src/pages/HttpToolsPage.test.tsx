@@ -174,6 +174,109 @@ test("withdrawing a version asks first and says what still works", async () => {
   await waitFor(() => expect(withdrawn).toEqual(["v1"]));
 });
 
+function scopes(platform: string[], workspace: string[]) {
+  const entry = (level: string) => (text: string, index: number) => ({
+    id: `${level}-${index}`, level, workspace_id: level === "workspace" ? WORKSPACE : null, entry: text, note: null, managed: false,
+  });
+  return [
+    http.get("/api/v1/outbound-scopes/platform", () => HttpResponse.json(platform.map(entry("platform")))),
+    http.get("/api/v1/outbound-scopes/workspace", () => HttpResponse.json(workspace.map(entry("workspace")))),
+  ];
+}
+
+async function typeBaseUrl(url: string): Promise<void> {
+  await userEvent.click(await screen.findByRole("button", { name: "添加 HTTP 工具" }));
+  await userEvent.type(await screen.findByLabelText("基础地址"), url);
+}
+
+test("a host the workspace has not approved is named while typing, with the way to approve it", async () => {
+  // Registration would refuse it; saying so before the form is filled saves
+  // the round trip and says where to go.
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
+    http.get("/api/v1/http-tools", () => HttpResponse.json([])),
+    ...scopes(["api.tavily.com"], []),
+  );
+  renderTools();
+  await typeBaseUrl("https://api.tavily.com");
+  expect(await screen.findByText(/工作空间还没放行 api\.tavily\.com/)).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "去工作空间的出站范围" })).toHaveAttribute(
+    "href",
+    `/workspaces/${WORKSPACE}/settings#outbound`,
+  );
+});
+
+test("a host only the workspace approved is flagged too: registering works, calling does not", async () => {
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
+    http.get("/api/v1/http-tools", () => HttpResponse.json([])),
+    ...scopes([], ["api.tavily.com"]),
+  );
+  renderTools();
+  await typeBaseUrl("https://api.tavily.com");
+  expect(await screen.findByText(/平台还没放行 api\.tavily\.com/)).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "去平台的出站范围" })).toHaveAttribute(
+    "href",
+    `/workspaces/${WORKSPACE}/platform#outbound`,
+  );
+});
+
+test("a host neither level approved says the platform goes first, without promising registration", async () => {
+  // A workspace entry may only narrow the platform's list, so the order is
+  // fixed — and with the workspace missing too, registration does not pass.
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
+    http.get("/api/v1/http-tools", () => HttpResponse.json([])),
+    ...scopes([], []),
+  );
+  renderTools();
+  await typeBaseUrl("https://api.tavily.com");
+  expect(await screen.findByText(/平台和工作空间都还没放行 api\.tavily\.com/)).toBeInTheDocument();
+  expect(screen.queryByText(/登记能过/)).toBeNull();
+  expect(screen.getByRole("link", { name: "去平台的出站范围" })).toBeInTheDocument();
+});
+
+test("a host both levels approve, by a wildcard, is said to be in range", async () => {
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
+    http.get("/api/v1/http-tools", () => HttpResponse.json([])),
+    ...scopes(["*.tavily.com"], ["API.tavily.com."]),
+  );
+  renderTools();
+  await typeBaseUrl("https://api.tavily.com/v1");
+  expect(await screen.findByText("api.tavily.com 已在出站范围内。")).toBeInTheDocument();
+});
+
+test("the form says up front how a credential is sent and how big an answer may be", async () => {
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
+    http.get("/api/v1/http-tools", () => HttpResponse.json([])),
+    ...scopes([], []),
+  );
+  renderTools();
+  await userEvent.click(await screen.findByRole("button", { name: "添加 HTTP 工具" }));
+  // Both were found by a person walking Tavily through, not by reading a form.
+  expect(await screen.findByText(/Authorization: Bearer/)).toBeInTheDocument();
+  expect(screen.getByText(/64 KB/)).toBeInTheDocument();
+});
+
+test("after registering, the page points at binding it to an Agent", async () => {
+  document.cookie = "tiny_hermes_csrf=token-value";
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
+    http.get("/api/v1/http-tools", () => HttpResponse.json([])),
+    http.post("/api/v1/http-tools", () => HttpResponse.json(tool({ name: "web-search" }), { status: 201 })),
+    ...scopes(["api.tavily.com"], ["api.tavily.com"]),
+  );
+  renderTools();
+  await typeBaseUrl("https://api.tavily.com");
+  await userEvent.type(screen.getByLabelText("名称"), "web-search");
+  await userEvent.type(screen.getByLabelText("OpenAPI 文档"), "{{}}");
+  await userEvent.click(screen.getByRole("button", { name: "登记" }));
+  expect(await screen.findByText(/已登记 web-search/)).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "去 Agent 绑定" })).toHaveAttribute("href", `/workspaces/${WORKSPACE}/agents`);
+});
+
 test("nothing registered says so", async () => {
   server.use(
     http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),

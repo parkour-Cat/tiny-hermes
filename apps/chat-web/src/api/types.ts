@@ -162,18 +162,6 @@ export type CanonicalMessage = {
   withdrawn_at?: string | null;
 };
 
-export type ArtifactResponse = {
-  id: string;
-  run_id: string;
-  session_id: string;
-  filename: string;
-  media_type: string;
-  size_bytes: number;
-  sha256: string;
-  truncated: boolean;
-  expires_at: string;
-};
-
 export type MemoryResponse = {
   id: string;
   workspace_id: string;

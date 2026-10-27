@@ -72,7 +72,7 @@ async function bindTool(page: Page, name: string): Promise<void> {
 
 /** Uploads one SKILL.md through the picker. No archive is ever built. */
 async function uploadSkill(page: Page, line: string): Promise<void> {
-  const skills = await openSection(page, "工具与技能", "技能", "skills");
+  const skills = await openSection(page, "能力", "技能", "skills");
   await skills.getByRole("button", { name: "上传技能目录" }).click();
   const upload = page.getByRole("dialog", { name: "上传技能目录" });
   const directory = await mkdtemp(path.join(tmpdir(), "tiny-hermes-skill-e2e-"));
@@ -174,7 +174,7 @@ test("upload a skill, bind it, load it in a Run, propose a change, approve it", 
   await expect(page.getByText(/已发布版本 2/)).toBeVisible();
 
   // -- and the Agent that proposed it did not change ----------------------
-  const published = await openSection(page, "工具与技能", "技能", "skills");
+  const published = await openSection(page, "能力", "技能", "skills");
   await expect(published.getByText("版本 2")).toBeVisible();
   await page.getByRole("link", { name: "Agent", exact: true }).click();
   await page.getByRole("link", { name: author }).click();

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Button, Card, Descriptions, Form, InputNumber, Modal, Space, Tag, Timeline, Typography } from "antd";
 import type { DescriptionsProps } from "antd";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { downloadArtifact } from "../api/artifacts";
@@ -23,7 +23,8 @@ import { PageHeading } from "../ui/PageHeading";
 import type { MessageKey } from "../i18n/zh-CN";
 import { RUN_ACTIONS } from "../runs/actions";
 import { eventNote, fill, outcomeLabel, statusNote } from "../runs/explain";
-import { artifactIdsIn, mergeArtifacts, toolsOf, transcriptLineOf } from "../runs/transcript";
+import { stepOf } from "../runs/steps";
+import { artifactIdsIn, mergeArtifacts, toolsOf, transcriptLineOf, type ToolRound } from "../runs/transcript";
 import { ToolOutput } from "../runs/ToolOutput";
 import { runQueryOptions, useRunEvents } from "../runs/useRunEvents";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
@@ -437,7 +438,9 @@ export function RunDetailPage() {
       {contextHolder}
       <PageHeading
         kicker={t("runs")}
-        title={t("runDetailTitle")}
+        // What was asked, not 任务详情: those four characters are the same on
+        // every run and say nothing about this one.
+        title={run.input_preview?.trim() || t("runDetailTitle")}
         intro={run.id}
         extra={
           <Space wrap>
@@ -473,10 +476,14 @@ export function RunDetailPage() {
         <Alert className="page-alert" type="info" title={t(situation)} showIcon />
       )}
       {messages.isError && <Alert type="error" className="page-alert" title={problemMessage(messages.error, t)} action={<Button onClick={() => void messages.refetch()}>{t("retry")}</Button>} />}
-      <Card title={t("taskResult")} variant="borderless" className="page-alert" loading={messages.isPending}>
-        {finalAnswer ? <Typography.Paragraph className="transcript-line">{finalAnswer.parts.filter((part) => part.type === "text").map((part) => part.text).join("\n")}</Typography.Paragraph> : <Typography.Paragraph type="secondary">{t("taskNoAnswer")}</Typography.Paragraph>}
-      </Card>
-      <Card title={t("filesSection")} variant="borderless" className="page-alert">
+      <div className="run-columns">
+        <div className="run-main">
+          <section aria-label={t("taskResult")}>
+            <Card title={t("taskResult")} variant="borderless" loading={messages.isPending}>
+              {finalAnswer ? <Typography.Paragraph className="transcript-line">{finalAnswer.parts.filter((part) => part.type === "text").map((part) => part.text).join("\n")}</Typography.Paragraph> : <Typography.Paragraph type="secondary">{t("taskNoAnswer")}</Typography.Paragraph>}
+            </Card>
+          </section>
+      <Card title={t("filesSection")} variant="borderless">
         <SavedFiles key={runId} workspaceId={workspaceId ?? ""} runId={runId} refreshToken={snapshot.data?.state_version} />
         {files.length > 0 && <Typography.Title level={5}>{t("toolAttachments")}</Typography.Title>}
         {files.length > 0 && (
@@ -496,6 +503,11 @@ export function RunDetailPage() {
           ))
         )}
       </Card>
+        </div>
+        <RunSteps rounds={rounds} loading={messages.isPending} onDownload={(id) =>
+          void downloadArtifact(id, id, workspaceId ?? "").catch((caught) => setActionError(problemMessage(caught, t)))
+        } />
+      </div>
       <Card title={t("summarySection")} variant="borderless" className="page-alert">
         <Descriptions column={{ xs: 1, sm: 2 }} size="small" items={facts} />
         <Typography.Title level={5}>{t("budgetSection")}</Typography.Title>
@@ -557,37 +569,6 @@ export function RunDetailPage() {
         )}
       </Card>
       </details>
-      <details className="page-alert"><summary>{t("toolsCallsSection")}</summary>
-      <Card title={t("toolsCallsSection")} variant="borderless" className="page-alert">
-        {rounds.length === 0 ? (
-          <EmptyState title={t("emptyTools")} />
-        ) : (
-          rounds.map((round) => (
-            <article className="workspace-row" key={round.callId || round.name}>
-              <Typography.Text strong>{round.name}</Typography.Text>
-              <div>
-                <Typography.Paragraph className="fact-note">
-                  {JSON.stringify(round.arguments)}
-                </Typography.Paragraph>
-                <ToolOutput round={round} />
-                {round.artifactIds.map((id) => (
-                  <Button
-                    key={id}
-                    onClick={() =>
-                      void downloadArtifact(id, id, workspaceId ?? "").catch((caught) =>
-                        setActionError(problemMessage(caught, t)),
-                      )
-                    }
-                  >
-                    {t("downloadArtifact")}
-                  </Button>
-                ))}
-              </div>
-            </article>
-          ))
-        )}
-      </Card>
-      </details>
       <Card title={t("timelineSection")} variant="borderless">
         {timeline.length === 0 ? (
           <EmptyState title={t("emptyTimeline")} />
@@ -641,5 +622,56 @@ export function RunDetailPage() {
         </Form>
       </Modal>
     </>
+  );
+}
+
+/**
+ * The run's tool calls as steps, beside its answer: what was done, in order,
+ * and the one argument that says what each call was about. The output of a
+ * step is folded — the answer is the thing read first, and a step's output
+ * is evidence for it, opened when the answer is in doubt.
+ */
+function RunSteps({ rounds, loading, onDownload }: { rounds: ToolRound[]; loading: boolean; onDownload: (artifactId: string) => void }) {
+  const t = useT();
+  const id = useId();
+  return (
+    <section className="run-steps" aria-labelledby={id}>
+      <Card title={<span id={id}>{t("stepsSection")}</span>} variant="borderless" loading={loading}>
+        {rounds.length === 0 ? (
+          <Typography.Paragraph type="secondary">{t("stepsEmpty")}</Typography.Paragraph>
+        ) : (
+          <ol className="run-steps-list">
+            {rounds.map((round) => {
+              const step = stepOf(round, t);
+              return (
+                <li key={round.callId || round.name} className={`run-step run-step-${round.status}`}>
+                  <span className="run-step-node" aria-hidden="true" />
+                  <div className="run-step-body">
+                    <div className="run-step-head">
+                      <span className="run-step-title">{step.title}</span>
+                      {round.status === "failed" ? <span className="run-step-flag">{t("stepFailed")}</span> : null}
+                      {round.status === "pending" ? <span className="run-step-flag run-step-flag-live">{t("stepPending")}</span> : null}
+                      <code className="run-step-tool">{round.name}</code>
+                    </div>
+                    {step.detail === "" ? null : <code className="run-step-detail">{step.detail}</code>}
+                    {round.status === "pending" ? null : (
+                      <details className="run-step-output">
+                        <summary>{t("stepOutput")}</summary>
+                        <ToolOutput round={round} />
+                      </details>
+                    )}
+                    {round.artifactIds.map((artifactId) => (
+                      <Button key={artifactId} size="small" onClick={() => onDownload(artifactId)}>
+                        {t("downloadArtifact")}
+                      </Button>
+                    ))}
+                  </div>
+                </li>
+              );
+            })}
+          </ol>
+        )}
+      </Card>
+    </section>
   );
 }

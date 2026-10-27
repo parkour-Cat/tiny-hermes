@@ -21,9 +21,12 @@ export function FormSection({
   summary,
   fields,
   collapsible,
+  anchor,
   children,
 }: {
   title: string;
+  /** 页内导航跳到这一段时用的 id。 */
+  anchor?: string;
   /** 折叠条上显示的当前值。必填：没有它，折叠就是把字段藏起来。 */
   summary: string;
   /** 决定这一段能不能折叠、校验失败时要不要展开的字段名——只放必填的。 */
@@ -37,6 +40,7 @@ export function FormSection({
     // 这样「出错字段所在的段自动展开」不必等下一次输入才发生。
     <Form.Item noStyle shouldUpdate>
       {(form) => (
+        <div id={anchor} className="form-section-anchor">
         <Section
           form={form as FormInstance}
           title={title}
@@ -46,6 +50,7 @@ export function FormSection({
         >
           {children}
         </Section>
+        </div>
       )}
     </Form.Item>
   );

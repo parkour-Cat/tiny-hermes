@@ -326,3 +326,25 @@ test("task lookup requests a bounded page and a next page from the server", asyn
   expect(await screen.findByText("Last page")).toBeVisible();
   expect(offsets).toEqual(["0", "20"]);
 });
+
+test("常用的几种状态是一排按钮：点「失败」只看失败的任务，再点「全部」回来", async () => {
+  // 状态原来藏在一个下拉框的十个选项里；最常看的那几种直接摆出来。
+  const asked: (string | null)[] = [];
+  listing([]);
+  server.use(
+    http.get("/api/v1/runs", ({ request }) => {
+      const status = new URL(request.url).searchParams.get("status");
+      asked.push(status);
+      return HttpResponse.json(status === "failed" ? [runRow({ status: "failed", input_preview: "Broken one" })] : [runRow({ input_preview: "Any one" })]);
+    }),
+  );
+  renderRuns();
+  const filters = await screen.findByRole("group", { name: "按状态筛选" });
+  expect(within(filters).getByRole("button", { name: "全部" })).toHaveAttribute("aria-pressed", "true");
+  await userEvent.click(within(filters).getByRole("button", { name: "失败" }));
+  expect(await screen.findByText("Broken one")).toBeVisible();
+  expect(within(filters).getByRole("button", { name: "失败" })).toHaveAttribute("aria-pressed", "true");
+  expect(asked).toContain("failed");
+  await userEvent.click(within(filters).getByRole("button", { name: "全部" }));
+  expect(await screen.findByText("Any one")).toBeVisible();
+});

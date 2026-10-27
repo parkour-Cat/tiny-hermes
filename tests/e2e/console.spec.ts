@@ -1,15 +1,14 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
-import { confirm, selectAntOption, unfold } from "./session";
+import { chooseFromAccountMenu, confirm, selectAntOption, unfold } from "./session";
 import { expectReadableControl } from "./contrast";
 
 for (const appearance of ["浅色", "深色"]) {
   test(`console primary action text is readable in ${appearance}`, async ({ page }) => {
     await page.goto("/workspaces");
     await expect(page.getByRole("button", { name: "新建工作空间", exact: true })).toBeVisible();
-    const toggle = page.getByRole("button", { name: appearance, exact: true });
-    if (await toggle.count()) await toggle.click();
+    await chooseFromAccountMenu(page, appearance);
     await expect(page.locator("html")).toHaveAttribute("data-theme", appearance === "深色" ? "dark" : "light");
     await expectReadableControl(page.getByRole("button", { name: "新建工作空间", exact: true }));
     await expectReadableControl(page.getByText("每个工作空间独立保存成员、Agent 与任务数据。", { exact: true }));
@@ -30,6 +29,9 @@ test("responsive workspace pages retain a usable content width", async ({ page }
   for (const width of [320, 390, 768, 1280]) {
     await page.setViewportSize({ width, height: 844 });
     for (const name of ["待办", "平台管理"]) {
+      // Below 900 px the navigation folds behind 菜单 and closes after each pick.
+      const menu = page.getByRole("button", { name: "菜单", exact: true });
+      if (await menu.isVisible()) await menu.click();
       await page.getByRole("link", { name, exact: true }).click();
       await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
       const dimensions = await page.locator("main").evaluate((element) => ({
@@ -444,18 +446,10 @@ test("the locale switcher changes the page, not only the chrome", async ({ page 
   await openWorkspace(page);
   await expect(page.getByRole("link", { name: "任务" })).toBeVisible();
   await expect(page.getByText("还没有 Agent")).toBeVisible();
-  await page.getByLabel("语言").click();
-  await page
-    .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
-    .locator('.ant-select-item-option[title="English"]')
-    .click();
+  await chooseFromAccountMenu(page, "English");
   await expect(page.getByRole("link", { name: "Runs" })).toBeVisible();
   await expect(page.getByText("No agents yet")).toBeVisible();
-  await page.getByLabel("Language").click();
-  await page
-    .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
-    .locator('.ant-select-item-option[title="中文"]')
-    .click();
+  await chooseFromAccountMenu(page, "中文");
   await expect(page.getByRole("link", { name: "任务" })).toBeVisible();
   await expect(page.getByText("还没有 Agent")).toBeVisible();
 });

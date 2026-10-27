@@ -1,20 +1,12 @@
-import type { ArtifactResponse, CanonicalMessage, CanonicalMessagePart } from "../api/types";
-
-const ARTIFACT_ID = /artifact_id=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi;
+import type { CanonicalMessage, CanonicalMessagePart } from "../api/types";
 
 export type ToolRound = {
   callId: string;
   name: string;
   arguments: Record<string, unknown>;
   output: string;
-  artifactIds: string[];
+  status: "pending" | "succeeded" | "failed" | "returned";
 };
-
-export function artifactIdsIn(text: string): string[] {
-  return [...text.matchAll(ARTIFACT_ID)].flatMap((match) =>
-    match[1] === undefined ? [] : [match[1]],
-  );
-}
 
 export function textOf(message: CanonicalMessage): string {
   return message.parts
@@ -23,6 +15,11 @@ export function textOf(message: CanonicalMessage): string {
     .join("");
 }
 
+/**
+ * Calls paired with their results across messages: the call is in an
+ * assistant message and its result in the `tool` message after it, so a
+ * reply's rounds only come together when its messages are read as one.
+ */
 export function toolsOf(messages: CanonicalMessage[]): ToolRound[] {
   const rounds: ToolRound[] = [];
   const byCall = new Map<string, ToolRound>();
@@ -42,9 +39,9 @@ export function toolsOf(messages: CanonicalMessage[]): ToolRound[] {
         existing.name = round.name;
         existing.arguments = round.arguments;
       }
-      if (round.output !== "") {
+      if (round.status !== "pending") {
         existing.output = round.output;
-        existing.artifactIds = round.artifactIds;
+        existing.status = round.status;
       }
     }
   }
@@ -58,41 +55,25 @@ function roundFrom(part: CanonicalMessagePart): ToolRound | null {
       name: part.name ?? "",
       arguments: part.arguments ?? {},
       output: "",
-      artifactIds: [],
+      status: "pending",
     };
   }
   if (part.type === "tool_result") {
-    const output = part.output ?? "";
     return {
       callId: part.call_id ?? "",
       name: "",
       arguments: {},
-      output,
-      artifactIds: artifactIdsIn(output),
+      output: part.output ?? "",
+      status: resultStatus(part),
     };
   }
   return null;
 }
 
-export function mergeArtifacts(
-  listed: ArtifactResponse[],
-  fromText: string[],
-): { id: string; filename: string }[] {
-  const seen = new Set<string>();
-  const rows: { id: string; filename: string }[] = [];
-  for (const item of listed) {
-    if (seen.has(item.id)) {
-      continue;
-    }
-    seen.add(item.id);
-    rows.push({ id: item.id, filename: item.filename });
-  }
-  for (const id of fromText) {
-    if (seen.has(id)) {
-      continue;
-    }
-    seen.add(id);
-    rows.push({ id, filename: id });
-  }
-  return rows;
+/** The console's reading (`apps/web/src/runs/transcript.ts`): only an
+ *  explicit flag or exit code earns a success or failure mark. */
+function resultStatus(part: CanonicalMessagePart): ToolRound["status"] {
+  if (part.failed === true || (part.exit_code !== undefined && part.exit_code !== 0)) return "failed";
+  if (part.failed === false || part.exit_code === 0) return "succeeded";
+  return "returned";
 }

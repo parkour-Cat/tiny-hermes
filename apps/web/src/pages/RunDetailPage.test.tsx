@@ -851,3 +851,59 @@ test("results belong to this task and platform instructions have a distinct auth
   expect(screen.queryByText("Earlier task result")).toBeNull();
   expect(screen.getByText("平台反馈")).toBeInTheDocument();
 });
+
+test("标题是对方说的那句话，任务 ID 仍在标题下面", async () => {
+  // 「任务详情」四个字在每个任务上都一样，等于没有标题。
+  stream();
+  server.use(http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run({ input_preview: "给我做一个有关 gemini 的 PPT" }))));
+  renderRun();
+  const heading = await screen.findByRole("heading", { level: 2, name: "给我做一个有关 gemini 的 PPT" });
+  // The id is also in 概要 further down; this one is the line under the title.
+  expect(within(heading.parentElement!).getByText(RUN)).toBeInTheDocument();
+});
+
+test("过程和回答并排：每一步按顺序说清做了什么，失败的那一步标出来", async () => {
+  stream();
+  server.use(
+    http.get(`/api/v1/runs/${RUN}`, () => HttpResponse.json(run({ status: "completed" }))),
+    http.get(`/api/v1/sessions/${SESSION}/messages`, () =>
+      HttpResponse.json([
+        { role: "user", source_run_id: RUN, parts: [{ type: "text", text: "做个 PPT" }] },
+        {
+          role: "assistant",
+          source_run_id: RUN,
+          parts: [
+            { type: "tool_call", call_id: "s1", name: "http.web-search.search", arguments: { body: { query: "Gemini Argon 模型" } } },
+          ],
+        },
+        { role: "tool", source_run_id: RUN, parts: [{ type: "tool_result", call_id: "s1", output: "HTTP 200 {}", failed: false }] },
+        {
+          role: "assistant",
+          source_run_id: RUN,
+          parts: [{ type: "tool_call", call_id: "s2", name: "shell.exec", arguments: { command: "python3 make_ppt.py" } }],
+        },
+        { role: "tool", source_run_id: RUN, parts: [{ type: "tool_result", call_id: "s2", output: "Traceback", failed: true }] },
+        {
+          role: "assistant",
+          source_run_id: RUN,
+          parts: [{ type: "tool_call", call_id: "s3", name: "file.send", arguments: { path: "out/a.pptx" } }],
+        },
+        { role: "tool", source_run_id: RUN, parts: [{ type: "tool_result", call_id: "s3", output: "Sent", failed: false }] },
+        { role: "assistant", source_run_id: RUN, parts: [{ type: "text", text: "PPT 做好了" }] },
+      ]),
+    ),
+  );
+  renderRun();
+  const steps = await screen.findByRole("region", { name: "过程" });
+  const items = await within(steps).findAllByRole("listitem");
+  expect(items.map((item) => item.querySelector(".run-step-title")?.textContent)).toEqual([
+    "调用 web-search · search",
+    "在沙箱里运行",
+    "把文件发回对话",
+  ]);
+  expect(within(items[0]!).getByText("Gemini Argon 模型")).toBeInTheDocument();
+  expect(within(items[1]!).getByText("失败")).toBeInTheDocument();
+  // 回答和过程在同一排：两块是同一个容器的两列。
+  const result = screen.getByRole("region", { name: "任务结果" });
+  expect(result.parentElement?.parentElement).toBe(steps.parentElement);
+});

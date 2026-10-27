@@ -1,13 +1,16 @@
 import { CapabilityUsage } from "./CapabilityUsage";
+import { HostScopeHint } from "./HostScopeHint";
 import { CredentialPicker } from "../forms/CredentialPicker";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Button, Card, Form, Input, Modal, Space, Tag, Typography } from "antd";
 import { useState } from "react";
+import { Link } from "react-router-dom";
 
 import { ApiError, api } from "../api/client";
 import { problemMessage } from "../api/messages";
 import type { HttpToolResponse, HttpToolVersionResponse } from "../api/types";
 import { useT } from "../i18n/locale";
+import { fill } from "../runs/explain";
 import { EmptyState } from "../ui/EmptyState";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 import { useWorkspacePermissions } from "../workspace/WorkspacePermissions";
@@ -43,6 +46,8 @@ export function HttpToolsPage() {
   const [adding, setAdding] = useState(false);
   const [search, setSearch] = useState("");
   const documentValue = Form.useWatch("document", form);
+  const baseUrlValue = Form.useWatch("base_url", form);
+  const [registered, setRegistered] = useState<string | null>(null);
   const [missingHost, setMissingHost] = useState<string | null>(null);
   const scope = { workspace: workspaceId ?? "" };
 
@@ -88,10 +93,13 @@ export function HttpToolsPage() {
           credential_ref: values.credential_ref?.trim() || null,
         }),
       }),
-    onSuccess: () => {
+    // Registering is the middle of the job, not its end: nothing calls the
+    // tool until an Agent binds it, so the page says where that happens.
+    onSuccess: (tool) => {
       form.resetFields();
       setAdding(false);
       refresh();
+      setRegistered(tool.name);
     },
     onError: (caught) => {
       setMissingHost(
@@ -146,7 +154,19 @@ export function HttpToolsPage() {
         />
       )}
 
-      <Button disabled={!writer} type="primary" className="page-alert" onClick={() => { setError(null); setMissingHost(null); setAdding(true); }}>{t("addHttpTool")}</Button>
+      {registered === null || adding ? null : (
+        <Alert
+          className="page-alert"
+          type="success"
+          showIcon
+          title={fill(t("httpToolRegistered"), { name: registered })}
+          action={<Link to={`/workspaces/${workspaceId ?? ""}/agents`}>{t("httpToolBindNext")}</Link>}
+          closable
+          onClose={() => setRegistered(null)}
+        />
+      )}
+
+      <Button disabled={!writer} type="primary" className="page-alert" onClick={() => { setError(null); setMissingHost(null); setRegistered(null); setAdding(true); }}>{t("addHttpTool")}</Button>
       <Modal title={t("addHttpTool")} open={adding} footer={null} onCancel={() => { if (!register.isPending) setAdding(false); }}>
         {error === null ? null : <Alert type="error" title={error} showIcon />}
         <Form<ToolValues>
@@ -171,6 +191,7 @@ export function HttpToolsPage() {
           >
             <Input />
           </Form.Item>
+          {workspaceId === null ? null : <HostScopeHint workspaceId={workspaceId} baseUrl={baseUrlValue} />}
           <Form.Item
             name="credential_ref"
             label={t("httpToolCredential")}

@@ -22,6 +22,19 @@ export const BOOTSTRAP_TOKEN =
 export const CONSOLE_STATE = path.join(__dirname, ".auth", "console.json");
 
 /**
+ * Opens the account menu at the foot of the console sidebar and picks one
+ * item. Language, theme and sign-out live there since the top bar went.
+ * Pressing Escape when the item is absent covers the theme toggle, which
+ * offers only the theme the console is not already in.
+ */
+export async function chooseFromAccountMenu(page: Page, item: string): Promise<void> {
+  await page.getByRole("button", { name: /账号与偏好|Account and preferences/ }).click();
+  const choice = page.getByRole("menuitem", { name: item, exact: true });
+  if (await choice.count()) await choice.click();
+  else await page.keyboard.press("Escape");
+}
+
+/**
  * Walks to one section of a grouped page the way a person does since the
  * console went from eighteen entries to seven: the group's entry in the
  * navigation, then the section tab. The accessible region remains stable
