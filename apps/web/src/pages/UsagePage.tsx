@@ -1,4 +1,3 @@
-import { useSearchParams } from "react-router-dom";
 import { TimeRangeFilter, timeBounds } from "../ui/TimeRangeFilter";
 import { useQuery } from "@tanstack/react-query";
 import { Alert, Button, Card, Space, Statistic, Table, Tag } from "antd";
@@ -10,6 +9,7 @@ import { useT } from "../i18n/locale";
 import { EmptyState } from "../ui/EmptyState";
 import type { MessageKey } from "../i18n/zh-CN";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
+import { useSectionParams } from "../layout/useSectionParams";
 
 /** The same three words a person already sees beside a single Run's cost
  * (`RunDetailPage`'s own `COST_QUALITY`) — one vocabulary for one idea. */
@@ -42,7 +42,7 @@ function costCell(bucket: UsageByQualityResponse, t: (key: MessageKey) => string
 export function UsagePage() {
   const t = useT();
   const workspaceId = useWorkspaceId();
-  const [params, setParams] = useSearchParams();
+  const [params, setParams] = useSectionParams();
   const from = params.get("from") ?? "";
   const through = params.get("through") ?? "";
   const query = new URLSearchParams(timeBounds(from, through)).toString();
@@ -69,7 +69,7 @@ export function UsagePage() {
         const next = new URLSearchParams(params);
         if (a) next.set("from", a); else next.delete("from");
         if (b) next.set("through", b); else next.delete("through");
-        setParams(next, { replace: true });
+        setParams(next);
       }} />
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
 

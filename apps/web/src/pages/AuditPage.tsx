@@ -1,6 +1,6 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { Alert, Button, Card, AutoComplete, Space, Table, Tag, Typography } from "antd";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { TimeRangeFilter, timeBounds } from "../ui/TimeRangeFilter";
 import { useState } from "react";
 
@@ -11,6 +11,7 @@ import { moment } from "../i18n/moment";
 import { useLocale, useT } from "../i18n/locale";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
 import { EmptyState } from "../ui/EmptyState";
+import { useSectionParams } from "../layout/useSectionParams";
 
 /**
  * The trail, and — just as importantly — how much of it this reader is
@@ -33,7 +34,7 @@ export function AuditPage() {
   const t = useT();
   const { locale } = useLocale();
   const workspaceId = useWorkspaceId();
-  const [params, setParams] = useSearchParams();
+  const [params, setParams] = useSectionParams();
   const action = params.get("action") ?? "";
   const resourceType = params.get("resource") ?? "";
   const from = params.get("from") ?? "";
@@ -41,7 +42,7 @@ export function AuditPage() {
   function filter(values: Record<string, string>) {
     const next = new URLSearchParams(params);
     for (const [key, value] of Object.entries(values)) { if (value) next.set(key, value); else next.delete(key); }
-    setParams(next, { replace: true });
+    setParams(next);
   }
   const actionLabels: Record<string, string> = {
     "run.paused": t("auditTaskPaused"), "run.completed": t("auditTaskCompleted"),
