@@ -11,9 +11,8 @@ export function useInboxCount(): number | string | null {
   const access = useProposalAccess();
   // `platform_admin` is the answer for a platform admin who is not a member.
   // Their proposal reads are audited (skill.read_by_platform_admin), so a poll
-  // would write an audit row
-  // every 30 seconds per open tab. Their count refreshes when a page mounts or
-  // the tab regains focus, which are reads someone actually made.
+  // would write an audit row every 30 seconds per open tab. Their count
+  // refreshes when a page mounts or the tab regains focus instead.
   const { role } = useMyRole();
   const poll = role === "platform_admin" ? false : 30_000;
   const queues = [
