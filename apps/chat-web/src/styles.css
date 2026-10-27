@@ -180,6 +180,16 @@ button:disabled {
   border-right: 1px solid var(--th-line);
 }
 
+/* Lays its children out as the rail's own on a wide screen; it exists so a
+   phone can fold them away together. */
+.rail-body {
+  display: contents;
+}
+
+.rail-toggle {
+  display: none;
+}
+
 .rail-brand {
   display: flex;
   align-items: center;
@@ -1314,16 +1324,32 @@ html[data-theme="dark"] .rail-agent {
 }
 
 @media (max-width: 800px) {
+  /* Kept at the screen's height so only the conversation scrolls and the
+     composer stays on screen; the rail folds to make the room. */
   .chat-app {
     grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr;
-    height: auto;
-    min-height: 100dvh;
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 100dvh;
   }
 
   .rail {
     border-right: 0;
     border-bottom: 1px solid var(--th-line);
+  }
+
+  .rail-toggle {
+    display: block;
+    margin-left: auto;
+    height: 32px;
+    padding: 0 12px;
+    border: 1px solid var(--th-line);
+    border-radius: 8px;
+    background: var(--th-paper-raised);
+    font-size: 14px;
+  }
+
+  .rail:not(.is-open) .rail-body {
+    display: none;
   }
 
   .rail-sessions {

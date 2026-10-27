@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useId, useState } from "react";
 
 import { SessionItem } from "./SessionItem";
 import { filterSessions, groupSessions, type GroupKey } from "./sessionGroups";
@@ -55,6 +55,11 @@ export function SessionRail({
 }) {
   const t = useT();
   const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const bodyId = useId();
+  // Choosing a conversation is what the rail was opened for on a phone;
+  // left open, it would keep sitting over the one just chosen.
+  useEffect(() => setOpen(false), [activeSessionId]);
   const arranged = arrangeSessions(filterSessions(sessions, query), prefs);
   // Pinned rows keep their own band at the top: a person pins a conversation
   // to stop it moving, and filing it under a date would move it every day.
@@ -83,11 +88,23 @@ export function SessionRail({
   }
 
   return (
-    <aside className="rail">
+    <aside className={`rail${open ? " is-open" : ""}`}>
       <div className="rail-brand">
         <HermesMark size={22} />
         <span className="th-word">{t("appName")}</span>
+        {/* Shown only on a narrow screen, where the rail stacks above the
+            conversation: stacked open it pushed the composer off the screen. */}
+        <button
+          type="button"
+          className="rail-toggle"
+          aria-expanded={open}
+          aria-controls={bodyId}
+          onClick={() => setOpen((was) => !was)}
+        >
+          {t("sessions")}
+        </button>
       </div>
+      <div className="rail-body" id={bodyId}>
       <button
         type="button"
         className="rail-new"
@@ -135,6 +152,7 @@ export function SessionRail({
       </nav>
       <div className="rail-foot">
         <UserMenu />
+      </div>
       </div>
     </aside>
   );
