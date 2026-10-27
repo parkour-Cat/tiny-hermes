@@ -29,6 +29,9 @@ test("responsive workspace pages retain a usable content width", async ({ page }
   for (const width of [320, 390, 768, 1280]) {
     await page.setViewportSize({ width, height: 844 });
     for (const name of ["待办", "平台管理"]) {
+      // Below 900 px the navigation folds behind 菜单 and closes after each pick.
+      const menu = page.getByRole("button", { name: "菜单", exact: true });
+      if (await menu.isVisible()) await menu.click();
       await page.getByRole("link", { name, exact: true }).click();
       await expect(page.getByRole("heading", { name, exact: true })).toBeVisible();
       const dimensions = await page.locator("main").evaluate((element) => ({
