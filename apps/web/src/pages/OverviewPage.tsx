@@ -77,8 +77,15 @@ export function OverviewPage() {
     return fill(t("durationMinutes"), { m: String(Math.floor(total / 60)), s: String(total % 60) });
   }
 
+  // A time alone reads as today, and this page's lists reach back further
+  // than that — last night's run at 21:13 would look like it just finished.
   function clock(value: string): string {
-    return new Date(value).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit", hour12: false });
+    const at = new Date(value);
+    const time = at.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit", hour12: false });
+    if (at.toDateString() === new Date().toDateString()) return time;
+    // Spelled from the catalogue rather than `toLocaleDateString`: ICU builds
+    // disagree on zh-CN (Chrome 10月25日, Node 10/25).
+    return `${fill(t("dateShort"), { m: String(at.getMonth() + 1), d: String(at.getDate()) })} ${time}`;
   }
 
   function titleOf(run: RunResponse): string {

@@ -72,6 +72,7 @@ export const enUS: Record<MessageKey, string> = {
   homeSetupAgent: "Publish a first Agent",
   homeSetupChannel: "Connect Feishu or web chat",
   homeSetupMembers: "Invite colleagues to the workspace",
+  dateShort: "{m}/{d}",
   durationSeconds: "{n} s",
   durationMinutes: "{m} min {s} s",
   stepShell: "Ran in the sandbox",

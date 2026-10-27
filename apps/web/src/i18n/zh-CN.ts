@@ -42,6 +42,7 @@ export const zhCN = {
   homeSetupAgent: "发布第一个 Agent",
   homeSetupChannel: "接入飞书或网页聊天",
   homeSetupMembers: "邀请同事加入工作空间",
+  dateShort: "{m}月{d}日",
   durationSeconds: "{n} 秒",
   durationMinutes: "{m} 分 {s} 秒",
   stepShell: "在沙箱里运行",
