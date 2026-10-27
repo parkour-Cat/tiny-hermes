@@ -182,6 +182,18 @@ h4,
   padding: 0 4px;
 }
 
+.th-sider-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+}
+
+.th-menu-toggle {
+  display: none;
+}
+
 .th-workspace-chip.ant-select {
   margin: 0;
   height: 40px;
@@ -774,6 +786,30 @@ html[data-theme="dark"] .th-tag-interrupted {
     flex: none !important;
     position: static;
     height: auto;
+  }
+
+  .th-sider .ant-layout-sider-children {
+    position: relative;
+  }
+
+  .th-menu-toggle {
+    display: block;
+    position: absolute;
+    top: 0;
+    right: 0;
+    height: 36px;
+    padding: 0 14px;
+    border: 1px solid var(--side-line);
+    border-radius: 8px;
+    background: var(--side-raised);
+    color: var(--side-ink);
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+  }
+
+  .th-sider:not(.is-open) .th-sider-body > :not(.th-brand) {
+    display: none;
   }
 
   .th-nav {

@@ -258,6 +258,7 @@ export const enUS: Record<MessageKey, string> = {
   navDaily: "Daily",
   navBuild: "Build",
   navManage: "Manage",
+  navMenu: "Menu",
   accountMenu: "Account and preferences",
   commandPalette: "Search or jump",
   palettePlaceholder: "Search pages and Agents, or paste a run ID",

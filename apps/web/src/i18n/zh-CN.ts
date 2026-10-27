@@ -228,6 +228,7 @@ export const zhCN = {
   navDaily: "日常",
   navBuild: "搭建",
   navManage: "管理",
+  navMenu: "菜单",
   accountMenu: "账号与偏好",
   commandPalette: "搜索或跳转",
   palettePlaceholder: "搜索页面、Agent，或粘贴任务 ID",

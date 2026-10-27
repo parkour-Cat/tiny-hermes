@@ -1,8 +1,8 @@
 import { Alert, Avatar, Dropdown, Layout } from "antd";
 import type { MenuProps } from "antd";
 import type { ReactNode } from "react";
-import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useEffect, useId, useState } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { useConsoleTheme } from "./ConsoleTheme";
 import { useAuth } from "../auth/AuthProvider";
@@ -34,6 +34,13 @@ export function ConsoleChrome({ sidebar, children }: { sidebar: ReactNode; child
   const theme = useConsoleTheme();
   const navigate = useNavigate();
   const [actionError, setActionError] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const bodyId = useId();
+  const { pathname } = useLocation();
+
+  // Choosing a page is what the menu was opened for; leaving it open would
+  // keep the page under it.
+  useEffect(() => setMenuOpen(false), [pathname]);
 
   async function logout(): Promise<void> {
     setActionError(null);
@@ -64,7 +71,20 @@ export function ConsoleChrome({ sidebar, children }: { sidebar: ReactNode; child
 
   return (
     <Layout className="th-shell">
-      <Layout.Sider className="th-sider" width={248} theme="dark" trigger={null}>
+      <Layout.Sider className={`th-sider${menuOpen ? " is-open" : ""}`} width={248} theme="dark" trigger={null}>
+        {/* Shown only on a narrow screen, where the sider stacks above the
+            page: there everything but the logo folds behind it, or the
+            navigation would take half the screen on every page. */}
+        <button
+          type="button"
+          className="th-menu-toggle"
+          aria-expanded={menuOpen}
+          aria-controls={bodyId}
+          onClick={() => setMenuOpen((open) => !open)}
+        >
+          {t("navMenu")}
+        </button>
+        <div className="th-sider-body" id={bodyId}>
         {sidebar}
         <div className="th-account">
           <Avatar className="th-account-avatar">{auth.user?.display_name.slice(0, 1).toUpperCase()}</Avatar>
@@ -85,6 +105,7 @@ export function ConsoleChrome({ sidebar, children }: { sidebar: ReactNode; child
               </svg>
             </button>
           </Dropdown>
+        </div>
         </div>
       </Layout.Sider>
       <Layout className="th-main">
