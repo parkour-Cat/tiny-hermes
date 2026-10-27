@@ -2,12 +2,20 @@ import { useQueries } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { ApprovalsPageResponse, ProposalResponse } from "../api/types";
 import { useWorkspaceId } from "../workspace/useWorkspaceId";
+import { useMyRole } from "../workspace/useMyRole";
 import { useProposalAccess } from "../workspace/useProposalAccess";
 
 /** Only queues this reader can act on count. A truncated result is a lower bound. */
 export function useInboxCount(): number | string | null {
   const workspaceId = useWorkspaceId();
   const access = useProposalAccess();
+  // `platform_admin` is the answer for a platform admin who is not a member.
+  // Their proposal reads are audited (skill.read_by_platform_admin), so a poll
+  // would write an audit row
+  // every 30 seconds per open tab. Their count refreshes when a page mounts or
+  // the tab regains focus, which are reads someone actually made.
+  const { role } = useMyRole();
+  const poll = role === "platform_admin" ? false : 30_000;
   const queues = [
     { enabled: access.admin, path: "/api/v1/approvals?approval_type=governance_approval&limit=100", read: (body: unknown) => {
       const page = body as ApprovalsPageResponse;
@@ -24,7 +32,7 @@ export function useInboxCount(): number | string | null {
     queryFn: () => api<unknown>(queue.path, { workspace: workspaceId ?? "" }),
     enabled: workspaceId !== null && queue.enabled,
     retry: false,
-    refetchInterval: 30_000,
+    refetchInterval: poll,
   })) });
   if (access.loading) return null;
   if (access.unknown) return "?";
