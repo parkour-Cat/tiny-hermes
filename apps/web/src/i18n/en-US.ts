@@ -922,9 +922,9 @@ export const enUS: Record<MessageKey, string> = {
   httpToolBaseUrl: "Base URL",
   httpToolBaseUrlHint: "Enter the service address. Its host must be allowed by the workspace.",
   httpToolDocument: "OpenAPI document",
-  httpToolDocumentHint: "Enter an OpenAPI document in JSON. Each operation needs an operationId.",
+  httpToolDocumentHint: "Enter an OpenAPI document in JSON. Each operation needs an operationId. A response over 64 KB is refused whole, not cut, so leave out parameters that return full page text.",
   httpToolCredential: "Credential",
-  httpToolCredentialHint: "Enter an environment variable name or credential ID, not a secret value.",
+  httpToolCredentialHint: "Sent as Authorization: Bearer, the only way the platform sends one; a service that wants the key elsewhere cannot be connected.",
   httpToolRegister: "Register",
   httpToolOperations: "Operations",
   httpToolWrites: "Changes data",
@@ -932,6 +932,14 @@ export const enUS: Record<MessageKey, string> = {
   httpToolWithdrawWarning:
     "New bindings stop. Agents already bound to this version keep working.",
   emptyHttpTools: "No HTTP tools registered.",
+  hostInScope: "{host} is within the outbound scope.",
+  hostNotInWorkspace: "The workspace has not approved {host}; registration will be refused.",
+  hostNotInPlatform: "The platform has not approved {host}; registration passes but every call is blocked by the egress proxy until a platform administrator approves it.",
+  hostNotInEither: "Neither the platform nor the workspace has approved {host}; registration will be refused. A workspace can only choose inside what the platform approved, so a platform administrator goes first.",
+  hostApproveWorkspace: "Open the workspace outbound scope",
+  hostApprovePlatform: "Open the platform outbound scope",
+  httpToolRegistered: "Registered {name}. Next, bind the operations an Agent should use; an operation that writes (including a search sent as POST) needs a write approval policy, then publish.",
+  httpToolBindNext: "Bind it in an Agent",
 
   // -- MCP --------------------------------------------------------------------
   mcpServers: "MCP servers",

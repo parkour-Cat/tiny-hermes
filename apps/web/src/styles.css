@@ -886,3 +886,8 @@ html[data-theme="dark"] .run-step-flag-live { background: #1c2a3b; color: #9cc1e
 .run-chip { height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--th-line); background: var(--th-paper-raised); color: var(--th-ink); font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; }
 .run-chip:hover { border-color: var(--th-ink-soft); }
 .run-chip[aria-pressed="true"] { background: var(--th-ink); border-color: var(--th-ink); color: var(--th-paper); }
+
+/* Sits under the base address it is about, before the next field. */
+.host-scope-hint {
+  margin: -8px 0 16px;
+}
