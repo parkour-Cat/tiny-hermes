@@ -5,7 +5,7 @@ import { TestTheme } from "../test/TestTheme";
 import { ApprovalsPage } from "../pages/ApprovalsPage";
 import { http, HttpResponse } from "msw";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { AuthProvider } from "../auth/AuthProvider";
 import { server } from "../test/server";
 import { useInboxCount } from "./useInboxCount";
@@ -64,4 +64,28 @@ test("deciding a real queue item refreshes the sidebar count immediately", async
   await userEvent.click(await screen.findByRole("button", { name: "批准" }));
   await userEvent.click(await screen.findByRole("button", { name: "确定" }));
   await waitFor(() => expect(screen.getByLabelText("count")).toHaveTextContent("2"));
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+test("a platform admin who is not a member reads the queues once, not every 30 seconds", async () => {
+  // Each read across a workspace by a non-member platform admin is audited,
+  // as the product design requires; a 30-second poll turned that into a
+  // heartbeat of audit rows burying what people actually did.
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const calls = setup("platform_admin");
+  await waitFor(() => expect(calls.length).toBeGreaterThan(0));
+  const first = calls.length;
+  await vi.advanceTimersByTimeAsync(95_000);
+  expect(calls).toHaveLength(first);
+});
+
+test("a member's count still keeps itself fresh", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const calls = setup("developer");
+  await waitFor(() => expect(calls).toEqual(["proposals"]));
+  await vi.advanceTimersByTimeAsync(31_000);
+  await waitFor(() => expect(calls).toEqual(["proposals", "proposals"]));
 });
