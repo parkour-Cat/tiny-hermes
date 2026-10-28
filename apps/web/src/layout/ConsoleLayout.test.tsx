@@ -369,3 +369,21 @@ test("手机上导航收在「菜单」后面，选了一项就收起", async ()
   await userEvent.click(screen.getByRole("link", { name: "任务" }));
   await waitFor(() => expect(toggle).toHaveAttribute("aria-expanded", "false"));
 });
+
+test("an address naming no workspace says so instead of opening a console", async () => {
+  // A platform admin passes every membership check, so the role is the first
+  // answer that can tell a mistyped id from a workspace nobody has used yet.
+  renderShell(`/workspaces/${WORKSPACE}/agents`, { count: 0 }, [
+    http.get("/api/v1/workspaces/:id/members/me", () =>
+      HttpResponse.json(
+        { code: "workspace_not_found", title: "Workspace not found", status: 404, detail: "No such workspace exists." },
+        { status: 404 },
+      ),
+    ),
+  ]);
+
+  expect(await screen.findByText("没有这个工作空间")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "返回工作空间列表" })).toHaveAttribute("href", "/workspaces");
+  expect(screen.queryByText("agent list")).toBeNull();
+  expect(screen.queryByRole("navigation")).toBeNull();
+});
