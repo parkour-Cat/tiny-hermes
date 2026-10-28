@@ -37,6 +37,9 @@ class MemoryWorkspaceStore:
     async def get_membership(self, workspace_id: UUID, user_id: UUID) -> Role | None:
         return self._memberships.get((workspace_id, user_id))
 
+    async def workspace_exists(self, workspace_id: UUID) -> bool:
+        return workspace_id in self._workspaces
+
     async def get_limits(self, workspace_id: UUID) -> WorkspaceLimits | None:
         return self.limits.get(workspace_id, WorkspaceLimits())
 

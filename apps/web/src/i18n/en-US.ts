@@ -283,6 +283,8 @@ export const enUS: Record<MessageKey, string> = {
   backToWorkspaces: "Back to workspaces",
   invalidWorkspace: "That address does not name a workspace",
   invalidWorkspaceDetail: "Check the workspace address or return to the workspace list.",
+  workspaceNotFound: "There is no such workspace",
+  workspaceNotFoundDetail: "No workspace has the id in this address. Check it or return to the workspace list.",
   agentsTitle: "Agents",
   agentsIntro: "Drafts and published versions are managed here.",
   newAgent: "New agent",

@@ -253,6 +253,8 @@ export const zhCN = {
   backToWorkspaces: "返回工作空间列表",
   invalidWorkspace: "工作空间地址无效",
   invalidWorkspaceDetail: "请检查工作空间地址，或返回工作空间列表。",
+  workspaceNotFound: "没有这个工作空间",
+  workspaceNotFoundDetail: "这个地址里的工作空间 id 不存在，请检查地址或返回工作空间列表。",
   agentsTitle: "Agent",
   agentsIntro: "在这里管理 Agent 的草稿与已发布版本。",
   newAgent: "新建 Agent",

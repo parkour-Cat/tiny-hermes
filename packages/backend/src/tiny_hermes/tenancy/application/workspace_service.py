@@ -229,6 +229,7 @@ class WorkspaceService:
         if role is not None:
             return role.value
         if actor.is_platform_admin:
+            await self._require_exists(workspace_id)
             return "platform_admin"
         raise Forbidden
 
@@ -240,6 +241,7 @@ class WorkspaceService:
             return False
         if not actor.is_platform_admin:
             raise Forbidden
+        await self._require_exists(workspace_id)
         return True
 
     async def _require_admin(self, actor: Actor, workspace_id: UUID) -> bool:
@@ -250,7 +252,16 @@ class WorkspaceService:
             return False
         if not actor.is_platform_admin:
             raise Forbidden
+        await self._require_exists(workspace_id)
         return True
+
+    async def _require_exists(self, workspace_id: UUID) -> None:
+        """Only on the platform admin's path: a member's row already proves
+        the workspace is there, and anyone else is refused before it matters.
+        Without it a mistyped id reads as an empty workspace the admin may
+        look around in."""
+        if not await self._store.workspace_exists(workspace_id):
+            raise UnknownWorkspace
 
     async def _refuse_last_admin(self, workspace_id: UUID) -> None:
         members = await self._store.list_members(workspace_id)

@@ -27,7 +27,7 @@ export function ConsoleLayout() {
   const t = useT();
   const navigate = useNavigate();
   const location = useLocation();
-  const { role } = useMyRole();
+  const { role, missing } = useMyRole();
   const { user } = useAuth();
   // Only to put a name on the sider. Membership is the server's answer, never
   // this list's: a Workspace missing from it still gets its requests sent and
@@ -51,13 +51,13 @@ export function ConsoleLayout() {
     enabled: workspaceId !== null,
   });
 
-  if (workspaceId === null) {
+  if (workspaceId === null || missing) {
     return (
       <main className="centered-state">
         <Alert
           type="error"
-          title={t("invalidWorkspace")}
-          description={t("invalidWorkspaceDetail")}
+          title={t(missing ? "workspaceNotFound" : "invalidWorkspace")}
+          description={t(missing ? "workspaceNotFoundDetail" : "invalidWorkspaceDetail")}
           action={
             <Link to="/workspaces">
               <Button>{t("backToWorkspaces")}</Button>
