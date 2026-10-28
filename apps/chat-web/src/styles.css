@@ -951,6 +951,63 @@ button:disabled {
   margin-bottom: 0;
 }
 
+/* Rendered Markdown. Sized to the chat column, not to a document: a reply's
+   heading is a section label, never larger than the agent's name above it. */
+/* .prose is a grid item of .turn-body, and a grid item grows to its widest
+   child: without this a wide table or code block pushes the reply past the
+   screen instead of scrolling inside it. */
+.prose { min-width: 0; }
+.prose > :first-child { margin-top: 0; }
+.prose > :last-child { margin-bottom: 0; }
+.prose h1, .prose h2, .prose h3, .prose h4, .prose h5, .prose h6 {
+  margin: 1.1em 0 0.45em;
+  font-size: 1.05em;
+  font-weight: 650;
+  line-height: 1.4;
+}
+.prose h1, .prose h2 { font-size: 1.15em; }
+.prose ul, .prose ol { margin: 0 0 0.7em; padding-left: 1.4em; line-height: 1.65; }
+.prose li + li { margin-top: 0.2em; }
+.prose li > p { margin: 0; }
+.prose a { color: var(--th-copper-deep); text-underline-offset: 2px; overflow-wrap: anywhere; }
+.prose strong { font-weight: 650; }
+.prose code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  padding: 0.1em 0.35em;
+  border-radius: 5px;
+  background: var(--th-paper-raised);
+  border: 1px solid var(--th-line);
+}
+.prose pre {
+  margin: 0 0 0.7em;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--th-line);
+  background: var(--th-paper-raised);
+  overflow-x: auto;
+  line-height: 1.5;
+}
+.prose pre code { padding: 0; border: 0; background: none; font-size: 0.85em; }
+.prose blockquote {
+  margin: 0 0 0.7em;
+  padding: 0 0 0 12px;
+  border-left: 3px solid var(--th-line);
+  color: var(--th-ink-soft);
+}
+.prose hr { border: 0; border-top: 1px solid var(--th-line); margin: 1em 0; }
+/* A wide table scrolls inside the reply instead of widening the page. */
+.prose table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 0 0 0.7em;
+  font-size: 0.92em;
+}
+.prose th, .prose td { border: 1px solid var(--th-line); padding: 6px 10px; text-align: left; vertical-align: top; }
+.prose th { background: var(--th-paper-raised); font-weight: 600; }
+
 /* One reply's steps, folded to a line once it has finished. Status colours
    are the console's run-step ones, so a failed step reads the same in both. */
 .work {
