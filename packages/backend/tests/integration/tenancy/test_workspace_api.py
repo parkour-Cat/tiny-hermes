@@ -89,3 +89,30 @@ async def test_workspace_header_and_cross_tenant_boundaries(
         )
         assert members.status_code == 200
         assert members.json()[0]["role"] == "workspace_admin"
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("GET", "members/me", None),
+        ("GET", "members", None),
+        ("GET", "limits", None),
+        ("PUT", "limits", {"max_running_runs": 5}),
+    ],
+)
+def test_a_platform_admin_is_told_a_workspace_does_not_exist(
+    client: TestClient, admin_csrf: str, method: str, path: str, body: dict[str, int] | None
+) -> None:
+    # A platform admin passes every membership check, so without this the
+    # console opened on a mistyped id: `members/me` answered "platform_admin"
+    # and the limits page fell over with a 500.
+    missing = "00000000-0000-4000-8000-000000000000"
+    answer = client.request(
+        method,
+        f"/api/v1/workspaces/{missing}/{path}",
+        headers={"X-Workspace-Id": missing, "X-CSRF-Token": admin_csrf},
+        json=body,
+    )
+
+    assert answer.status_code == 404, answer.text
+    assert answer.json()["code"] == "workspace_not_found"
