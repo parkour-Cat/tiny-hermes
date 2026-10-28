@@ -3,6 +3,7 @@ import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { copyText } from "./clipboard";
+import { sizeOf } from "./fileSize";
 import type { SavedFile } from "./useSavedFiles";
 import type { CanonicalMessage } from "../api/types";
 import { useT } from "../i18n/locale";
@@ -68,12 +69,6 @@ function textsOf(messages: CanonicalMessage[]): string[] {
 
 function fill(said: string, n: number): string {
   return said.replace("{n}", String(n));
-}
-
-function sizeOf(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /** The steps of one reply, folded to a line once it has finished. */

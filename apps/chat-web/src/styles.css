@@ -837,29 +837,94 @@ button:disabled {
   font-size: 14px;
 }
 
+/* Tokens rather than fixed colours, so the banners follow dark mode: the
+   fixed light fills used to sit under light text there. */
 .banner-info {
-  background: #efe8dc;
+  background: var(--th-sider);
+  border: 1px solid var(--th-line);
 }
 
 .banner-warn {
-  background: #f3e0d2;
+  background: rgb(196 92 38 / 10%);
+  border: 1px solid rgb(196 92 38 / 32%);
+}
+
+.approval-banner {
+  display: grid;
+  gap: 6px;
+  width: min(720px, calc(100% - 40px));
+  margin: 10px auto 0;
+  padding: 14px 16px;
+}
+
+.approval-banner > p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.approval-banner .approval-title {
+  font-weight: 650;
+  color: var(--th-copper-deep);
 }
 
 .approval-banner .approval-tool {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-weight: 600;
-  margin: 4px 0 8px;
+}
+
+.approval-banner .approval-label {
+  color: var(--th-ink-soft);
+  font-size: 13px;
 }
 
 .approval-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  margin-top: 8px;
+  margin-top: 4px;
+}
+
+.approval-actions button {
+  border: 1px solid var(--th-line);
+  border-radius: 999px;
+  padding: 7px 16px;
+  background: var(--th-paper-raised);
+  color: var(--th-ink);
+  font-weight: 600;
+}
+
+.approval-actions button.is-primary {
+  border-color: transparent;
+  background: var(--th-copper-deep);
+  color: var(--th-paper-raised);
+}
+
+.approval-actions button.is-danger {
+  border-color: #b4412f;
+  color: #b4412f;
+  background: transparent;
+}
+
+html[data-theme="dark"] .approval-actions button.is-danger {
+  border-color: #f08a78;
+  color: #f08a78;
+}
+
+.approval-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .approval-reject textarea {
   width: 100%;
-  min-height: 60px;
-  margin-top: 6px;
+  min-height: 72px;
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--th-line);
+  border-radius: 10px;
+  background: var(--th-paper-raised);
+  color: var(--th-ink);
+  font: inherit;
   resize: vertical;
 }
 
@@ -1443,14 +1508,41 @@ html[data-theme="dark"] .rail-agent {
   background: rgb(196 92 38 / 12%);
 }
 
-.saved-files { min-width: 0; margin-bottom: 20px; }
-.saved-files > p { color: var(--text-secondary, inherit); }
-.saved-files-list { list-style: none; padding: 0; margin: 12px 0 0; max-height: 320px; overflow-y: auto; }
-.saved-file-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; flex-wrap: wrap; border-bottom: 1px solid rgba(128, 128, 128, .18); }
-.saved-file-name { min-width: 0; flex: 1 1 180px; overflow-wrap: anywhere; }
-.saved-file-row button { flex-shrink: 0; }
+/* Under the conversation, in its column; rows are the reply's file cards. */
+.saved-files {
+  width: min(720px, calc(100% - 40px));
+  margin: 0 auto 20px;
+  padding-top: 14px;
+  border-top: 1px solid var(--th-line);
+}
+.saved-files-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.saved-files-head h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--th-ink-soft); }
+.saved-files-refresh {
+  border: 0;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--th-ink-soft);
+  font-size: 12px;
+}
+.saved-files-refresh:hover:not(:disabled) { color: var(--th-ink); }
+.saved-files-notice { margin: 8px 0 0; color: var(--th-copper-deep); font-size: 13px; }
+.saved-files-list { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 8px; max-height: 320px; overflow-y: auto; }
+.saved-files-list .file-card { max-width: none; }
+.file-card-meta { overflow-wrap: anywhere; }
 
-.approval-request-body { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow-y: auto; padding: 12px; background: rgba(128, 128, 128, .1); border-radius: 8px; }
-.approval-details { margin: 12px 0 16px; }
-.approval-details summary { cursor: pointer; }
-.approval-banner > p { overflow-wrap: anywhere; }
+.approval-request-body {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--th-line);
+  border-radius: 10px;
+  background: var(--th-paper-raised);
+  font-size: 12.5px;
+}
+.approval-details { margin: 2px 0 4px; font-size: 13px; }
+.approval-details summary { cursor: pointer; color: var(--th-ink-soft); }
+.approval-details[open] summary { margin-bottom: 6px; }
