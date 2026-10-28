@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import Markdown, { type Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import { copyText } from "./clipboard";
 import type { SavedFile } from "./useSavedFiles";
@@ -9,12 +11,24 @@ import { stepOf } from "../runs/steps";
 import { textOf, toolsOf, type ToolRound } from "../runs/transcript";
 import { HermesMark } from "../ui/HermesMark";
 
+// A reply is model output, and a prompt injection can shape it. Markdown
+// renders no raw HTML and drops `javascript:` URLs on its own; an image is
+// turned into a link because it would load — and could carry the
+// conversation in its URL — the moment it rendered, without anyone choosing to.
+const REPLY_COMPONENTS: Components = {
+  a: ({ href, children }) => (
+    <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+  ),
+  img: ({ src, alt }) => {
+    const href = typeof src === "string" ? src : undefined;
+    return <a href={href} target="_blank" rel="noopener noreferrer">{alt || href}</a>;
+  },
+};
+
 function Prose({ text }: { text: string }) {
   return (
     <div className="prose">
-      {text.split("\n").map((line, index) => (
-        <p key={`${index}-${line}`}>{line === "" ? " " : line}</p>
-      ))}
+      <Markdown remarkPlugins={[remarkGfm]} components={REPLY_COMPONENTS}>{text}</Markdown>
     </div>
   );
 }
