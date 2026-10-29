@@ -164,6 +164,26 @@ export const zhCN = {
   approvalExpired: "这条确认已经过期，运行已暂停",
   approvalAlreadyDecided: "这条确认已经处理过了",
   withdrawnTurn: "已撤回",
+  // 平台拒绝时的说法，按错误码；见 api/messages.ts。
+  requestInvalid: "提交的内容平台读不懂，请检查后再发送",
+  problemWithReason: "{headline}：{reason}",
+  errEndUserOriginNotAllowed: "这个页面没有登记为可以嵌入聊天的地址，请从原来的页面打开",
+  errUnauthenticated: "登录已失效，请回到原来的页面重新打开聊天",
+  errEndUserCredentialInvalid: "登录凭证无法验证，请回到原来的页面重新打开聊天",
+  errEndUserCredentialLifetime: "登录凭证的有效期超过了 15 分钟的上限，请让管理员检查签发方",
+  errEndUserAccessGateClosed: "这个助手还没有对终端用户开放",
+  errEndUserAgentNotFound: "没有可以使用的这个助手",
+  errMemoryNotFound: "没有找到这条记忆",
+  errApprovalNotFound: "没有找到这条待确认的操作",
+  errBudgetNotWidened: "新的上限没有高于当前生效的上限",
+  errEventSequenceConflict: "同时写入的事件没能排好顺序，请重试",
+  errIdempotencyKeyRequired: "请求缺少幂等键",
+  errRunRequestRejected: "这次请求没能完成",
+  errWorkspaceFileNotFound: "这个文件已不可用",
+  errWorkspaceFilesChanged: "文件有变化，请刷新列表后再下载",
+  errWorkspaceFilesUnavailable: "暂时读不到文件，请稍后再试",
+  errRunNotSteerable: "没有追加到当前任务，请作为新消息发送",
+  errInvalidMemoryBody: "记忆内容无效",
 } as const;
 
 export type MessageKey = keyof typeof zhCN;

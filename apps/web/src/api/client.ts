@@ -1,7 +1,7 @@
 
 type ProblemDetails = {
   code?: string;
-  detail?: string;
+  detail?: unknown;
   context?: Record<string, unknown>;
 };
 
@@ -157,7 +157,8 @@ export async function asApiError(response: Response): Promise<ApiError> {
     problem.code ?? "request_failed",
     // Empty rather than a sentence, for the reason above: an absent
     // `detail` is turned into words by whoever displays it.
-    problem.detail ?? "",
+    // FastAPI's validation refusal puts a list here, not a sentence.
+    typeof problem.detail === "string" ? problem.detail : "",
     problem.context ?? {},
   );
 }

@@ -1,8 +1,6 @@
-import { t } from "../i18n/zh-CN";
-
 type ProblemDetails = {
   code?: string;
-  detail?: string;
+  detail?: unknown;
   context?: Record<string, unknown>;
 };
 
@@ -58,7 +56,7 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
       headers,
     });
   } catch {
-    throw new ApiError(0, "network_failed", t("networkFailed"));
+    throw new ApiError(0, "network_failed", "");
   }
 
   if (!response.ok) {
@@ -77,7 +75,10 @@ export async function asApiError(response: Response): Promise<ApiError> {
   return new ApiError(
     response.status,
     problem.code ?? "request_failed",
-    problem.detail ?? t("requestFailed"),
+    // Empty rather than a sentence: this module has no locale, and
+    // `problemMessage` words an absent detail. FastAPI's validation refusal
+    // puts a list here, not a sentence.
+    typeof problem.detail === "string" ? problem.detail : "",
     problem.context ?? {},
   );
 }

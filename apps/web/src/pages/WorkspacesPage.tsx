@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../api/client";
+import { problemMessage } from "../api/messages";
 import { useT } from "../i18n/locale";
 import { EmptyState } from "../ui/EmptyState";
 import { PageHeading } from "../ui/PageHeading";
@@ -49,7 +50,7 @@ export function WorkspacesPage() {
       form.resetFields();
     },
     onError: (caught) => {
-      setActionError(caught instanceof Error ? caught.message : t("requestFailed"));
+      setActionError(problemMessage(caught, t));
     },
   });
 
@@ -84,7 +85,7 @@ export function WorkspacesPage() {
         {workspaces.isError ? (
           <Alert
             type="error"
-            title={workspaces.error.message}
+            title={problemMessage(workspaces.error, t)}
             action={<Button onClick={() => void workspaces.refetch()}>{t("retry")}</Button>}
             showIcon
           />
