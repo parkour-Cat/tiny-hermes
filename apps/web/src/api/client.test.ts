@@ -98,3 +98,18 @@ test("an unreachable platform is a network failure, not a request failure", asyn
   expect(caught.status).toBe(0);
   expect(caught.code).toBe("network_failed");
 });
+
+test("a validation refusal's list of problems does not become the message", async () => {
+  // FastAPI answers a body it cannot read with `detail` as a list. Read as a
+  // sentence it rendered as "[object Object]".
+  server.use(
+    http.post("/api/v1/thing", () =>
+      HttpResponse.json({ detail: [{ loc: ["body", "name"], msg: "Field required", type: "missing" }] }, { status: 422 }),
+    ),
+  );
+
+  const error = await api("/api/v1/thing", { method: "POST" }).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(ApiError);
+  expect((error as ApiError).code).toBe("request_failed");
+  expect((error as ApiError).message).toBe("");
+});
