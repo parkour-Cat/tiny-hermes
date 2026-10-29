@@ -325,13 +325,15 @@ test("draft, publish, submit, watch, retry, and be refused a foreign workspace",
   await expect(page).not.toHaveURL(new RegExp(`${failedRun}$`));
   await expect(page).toHaveURL(/\/runs\/[0-9a-f-]{36}$/);
 
-  // The same Run under a Workspace this session has no standing in. The console
-  // sends the header the address implies and shows what comes back; it does not
-  // check membership itself, and it does not quietly substitute a workspace it
-  // knows about.
+  // The same Run under a Workspace id that names nothing. The console sends the
+  // header the address implies and shows what comes back; it does not quietly
+  // substitute a workspace it knows about. This session is a platform admin, so
+  // the answer is not a refusal but that there is no such workspace — and it
+  // replaces the console, so the Run's own 404 must not be what is left on screen.
   const foreign = "00000000-0000-4000-8000-000000000000";
   await page.goto(`${workspaceUrl.origin}/workspaces/${foreign}/runs/${runId}`);
-  await expect(page.getByText("No such run exists in the selected workspace.")).toBeVisible();
+  await expect(page.getByText("没有这个工作空间")).toBeVisible();
+  await expect(page.getByText("No such run exists in the selected workspace.")).toHaveCount(0);
   await expect(summary(page)).toHaveCount(0);
 });
 

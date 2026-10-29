@@ -69,6 +69,9 @@ class SqlWorkspaceStore:
         )
         return Role(value) if value else None
 
+    async def workspace_exists(self, workspace_id: UUID) -> bool:
+        return await self._session.get(WorkspaceRow, workspace_id) is not None
+
     async def get_limits(self, workspace_id: UUID) -> WorkspaceLimits | None:
         row = await self._session.get(WorkspaceRow, workspace_id)
         if row is None:

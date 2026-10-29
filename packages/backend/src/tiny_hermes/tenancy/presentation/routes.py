@@ -24,6 +24,7 @@ from tiny_hermes.tenancy.application.workspace_service import (
     MemberAlreadyPresent,
     UnknownMember,
     UnknownUser,
+    UnknownWorkspace,
     WorkspaceService,
 )
 from tiny_hermes.tenancy.domain.models import (
@@ -162,6 +163,8 @@ def workspace_router(resources: ApplicationResources) -> APIRouter:
             )
         except Forbidden as error:
             raise forbidden() from error
+        except UnknownWorkspace as error:
+            raise _unknown_workspace() from error
         return [WorkspaceMemberResponse.from_domain(member) for member in members]
 
     # 在 `/{workspace_id}/members/{user_id}` 之前：`me` 否则会被当成一个
@@ -182,6 +185,8 @@ def workspace_router(resources: ApplicationResources) -> APIRouter:
             return MyRoleResponse(role=await workspaces.my_role(_actor(user), workspace_id))
         except Forbidden as error:
             raise forbidden() from error
+        except UnknownWorkspace as error:
+            raise _unknown_workspace() from error
 
     @router.post(
         "/{workspace_id}/members",
@@ -210,6 +215,8 @@ def workspace_router(resources: ApplicationResources) -> APIRouter:
             )
         except Forbidden as error:
             raise forbidden() from error
+        except UnknownWorkspace as error:
+            raise _unknown_workspace() from error
         except UnknownUser as error:
             raise AppError(
                 code="user_not_found",
@@ -260,6 +267,8 @@ def workspace_router(resources: ApplicationResources) -> APIRouter:
             )
         except Forbidden as error:
             raise forbidden() from error
+        except UnknownWorkspace as error:
+            raise _unknown_workspace() from error
         except UnknownMember as error:
             raise _unknown_member() from error
         except LastWorkspaceAdmin as error:
@@ -292,6 +301,8 @@ def workspace_router(resources: ApplicationResources) -> APIRouter:
             )
         except Forbidden as error:
             raise forbidden() from error
+        except UnknownWorkspace as error:
+            raise _unknown_workspace() from error
         except UnknownMember as error:
             raise _unknown_member() from error
         except LastWorkspaceAdmin as error:
@@ -311,6 +322,8 @@ def workspace_router(resources: ApplicationResources) -> APIRouter:
             limits = await workspaces.get_limits(_actor(user), workspace_id)
         except Forbidden as error:
             raise forbidden() from error
+        except UnknownWorkspace as error:
+            raise _unknown_workspace() from error
         return _limits_response(workspaces, limits)
 
     @router.put("/{workspace_id}/limits", response_model=WorkspaceLimitsResponse)
@@ -342,6 +355,8 @@ def workspace_router(resources: ApplicationResources) -> APIRouter:
             )
         except Forbidden as error:
             raise forbidden() from error
+        except UnknownWorkspace as error:
+            raise _unknown_workspace() from error
         except LimitOutOfRange as error:
             raise AppError(
                 code="limit_out_of_range",
@@ -368,6 +383,15 @@ def _require_path_matches_header(workspace_id: UUID, selected_workspace: str | N
             status=403,
             detail="The selected workspace does not match the requested resource.",
         )
+
+
+def _unknown_workspace() -> AppError:
+    return AppError(
+        code="workspace_not_found",
+        title="Workspace not found",
+        status=404,
+        detail="No such workspace exists.",
+    )
 
 
 def _unknown_member() -> AppError:
