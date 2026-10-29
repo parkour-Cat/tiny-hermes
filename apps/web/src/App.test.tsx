@@ -75,3 +75,36 @@ test("a session the platform has already ended returns the user to sign-in", asy
   // This crosses lazy route imports, the rejected request and the redirect.
   expect(await screen.findByRole("button", { name: "登录" }, { timeout: 4000 })).toBeInTheDocument();
 });
+
+test("the workspace list says why it failed, in the reader's language", async () => {
+  // It showed the raw message: empty when the network failed, the server's
+  // English otherwise.
+  window.history.replaceState({}, "", "/workspaces");
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
+    http.get("/api/v1/workspaces", () => HttpResponse.error()),
+  );
+
+  render(<App />);
+  expect(await screen.findByText("无法连接平台，请检查服务后重试")).toBeInTheDocument();
+});
+
+test("a workspace the platform will not create says why in the reader's language", async () => {
+  window.history.replaceState({}, "", "/workspaces");
+  server.use(
+    http.get("/api/v1/auth/me", () => HttpResponse.json(ADMIN)),
+    http.get("/api/v1/workspaces", () => HttpResponse.json([])),
+    http.post("/api/v1/workspaces", () =>
+      HttpResponse.json(
+        { code: "invalid_workspace_name", status: 422, detail: "The workspace name is invalid." },
+        { status: 422 },
+      ),
+    ),
+  );
+
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", { name: "新建工作空间" }));
+  await userEvent.type(screen.getByLabelText("名称"), "x");
+  await userEvent.click(screen.getByRole("button", { name: "创建" }));
+  expect(await screen.findByText("工作空间名称无效。")).toBeInTheDocument();
+});
