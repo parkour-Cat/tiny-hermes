@@ -36,9 +36,14 @@ test("a refreshed conversation restores its draft only after confirming the same
   const other = renderChat(`/${ALIAS}/${SESSION}`);
   expect(await screen.findByLabelText("写给智能体")).toHaveValue("");
   other.unmount();
-  server.use(http.get("/api/v1/end-user/me", () => HttpResponse.json({ detail: "Session expired" }, { status: 401 })));
+  // The platform's own refusal, as `end_user_dependencies.py` words it.
+  server.use(
+    http.get("/api/v1/end-user/me", () =>
+      HttpResponse.json({ code: "unauthenticated", detail: "A valid end-user session is required." }, { status: 401 }),
+    ),
+  );
   renderChat(`/${ALIAS}/${SESSION}`);
-  expect(await screen.findByText("Session expired")).toBeInTheDocument();
+  expect(await screen.findByText("登录已失效，请回到原来的页面重新打开聊天")).toBeInTheDocument();
   expect(screen.queryByLabelText("写给智能体")).toBeNull();
 });
 
@@ -327,7 +332,8 @@ test("a failed send keeps the draft and can be retried after the service recover
   const input = await screen.findByLabelText("写给智能体");
   await userEvent.type(input, "请保留这段输入");
   await userEvent.click(screen.getByRole("button", { name: "发送" }));
-  expect(await screen.findByText("Temporarily unavailable")).toBeInTheDocument();
+  // No code: a proxy's answer, not the platform's. Its English is not shown.
+  expect(await screen.findByText("请求失败，请稍后重试")).toBeInTheDocument();
   expect(input).toHaveValue("请保留这段输入");
   recovered = true;
   await userEvent.click(screen.getByRole("button", { name: "发送" }));

@@ -68,7 +68,9 @@ test("a refused credential explains itself instead of offering a form to retry i
 
   render(<App />);
 
-  expect(await screen.findByText("The credential could not be verified.")).toBeInTheDocument();
+  // Worded by the chat, in its reader's language; it used to be the server's
+  // English sentence, shown as it came.
+  expect(await screen.findByText("登录凭证无法验证，请回到原来的页面重新打开聊天")).toBeInTheDocument();
   expect(screen.queryByLabelText("邮箱")).toBeNull();
   expect(screen.queryByLabelText("密码")).toBeNull();
   // A refusal still involves a validly signed, unexpired credential — it

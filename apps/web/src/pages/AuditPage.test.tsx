@@ -176,7 +176,7 @@ test("a refused export says why, instead of handing over an error page as a file
   renderAudit();
   await userEvent.click(await screen.findByRole("button", { name: /导出|Export/i }));
 
-  expect(await screen.findByText(/Narrow the time window/)).toBeVisible();
+  expect(await screen.findByText(/缩小时间范围/)).toBeVisible();
 });
 
 

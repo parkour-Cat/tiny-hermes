@@ -1,7 +1,9 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
+import { problemMessage } from "../api/messages";
 import { exchangeEndUserSession } from "../api/session";
+import { useT } from "../i18n/locale";
 
 type AuthValue = {
   /** Exchanging the URL's credential for a session cookie, right now. */
@@ -23,6 +25,7 @@ type AuthValue = {
 const AuthContext = createContext<AuthValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const t = useT();
   const [params] = useSearchParams();
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
@@ -65,7 +68,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // `navigate`: there is nowhere past this screen to route to, only
         // history to clean up.
         window.history.replaceState(null, "", window.location.pathname);
-        setError(caught instanceof Error ? caught.message : String(caught));
+        setError(problemMessage(caught, t));
         setLoading(false);
       });
     // Intentionally runs once: the credential this load's URL carried is
